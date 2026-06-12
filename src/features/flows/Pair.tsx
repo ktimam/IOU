@@ -14,6 +14,7 @@ export function Pair() {
   const nav = useNavigate();
   const [pair, setPair] = useState<any | null>(null);
   const [activeSheetId, setActiveSheetId] = useState<string | null>(null);
+  const [archivedCount, setArchivedCount] = useState<number>(0);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
@@ -42,6 +43,7 @@ export function Pair() {
           if (sid && myKp) {
             registerPartnerKey(sid, myKp.publicKeyB64);
           }
+          setArchivedCount(Number(sum?.archived_sheet_count ?? 0));
         }
       } catch (e) {
         setError((e as Error).message);
@@ -88,6 +90,14 @@ export function Pair() {
             <button>+ New sheet</button>
           </Link>
         </div>
+      )}
+      {archivedCount > 0 && (
+        <p className="muted" style={{ marginTop: 8 }}>
+          <Link to={`/pair/${pairId}/archived`}>
+            📦 {archivedCount} archived sheet
+            {archivedCount === 1 ? "" : "s"}
+          </Link>
+        </p>
       )}
       <div className="card small">
         <p className="muted">Your public key (share with partner if needed)</p>

@@ -13,6 +13,7 @@ import { decryptEntryPayload, encryptEntryPayload } from "../crypto/devVetkd";
 import { decodeEntry, type EntryPayload } from "./types";
 import { computeBalances, formatMinor } from "./balance";
 import { EntryForm } from "./EntryForm";
+import { CloseSheetButton } from "./CloseSheetButton";
 import { useToasts } from "../ui/Toasts";
 
 type DecryptedEntry = {
@@ -203,6 +204,10 @@ export function SheetPage() {
           <button onClick={() => setModal({ initial: null, entryId: null })}>
             + Add entry
           </button>
+          <CloseSheetButton
+            sheetId={sheet.id}
+            entries={entries.map((e) => e.payload)}
+          />
         </div>
       )}
 

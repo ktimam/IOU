@@ -134,4 +134,7 @@ service : {
     edit_entry : (EditEntryReq) -> (Entry);
     get_entry : (text, nat64) -> (opt Entry) query;
     list_entries : (text, opt nat64, nat32) -> (ListEntriesResult) query;
+
+    // Phase 4
+    list_archived_sheets : (text) -> (vec Sheet) query;
 }

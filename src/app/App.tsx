@@ -10,6 +10,7 @@ import {Pair} from "../features/flows/Pair";
 import {NewSheet} from "../features/flows/NewSheet";
 import { SheetKeyProvider } from "../features/flows/SheetKeyContext";
 import { SheetPage } from "../features/entries/SheetPage";
+import { ArchivedSheetsPage } from "../features/entries/ArchivedSheetsPage";
 import { ToastProvider } from "../features/ui/Toasts";
 
 export function App() {
@@ -27,6 +28,10 @@ export function App() {
               <Route path="/pair/:pairId" element={<Pair />} />
               <Route path="/sheet/new" element={<NewSheet />} />
               <Route path="/sheet/:sheetId" element={<SheetPage />} />
+              <Route
+                path="/pair/:pairId/archived"
+                element={<ArchivedSheetsPage />}
+              />
               <Route path="*" element={<Navigate to="/" replace />} />
             </Routes>
           </Layout>

@@ -453,6 +453,29 @@ fn get_sheet(sheet_id: String) -> Option<Sheet> {
     SHEETS.with(|s| s.borrow().get(&sheet_id).cloned())
 }
 
+/// list_archived_sheets: returns all closed sheets for a pair the
+/// caller is a member of. Newest first by closed_at.
+#[ic_cdk::query]
+fn list_archived_sheets(pair_id: String) -> Vec<Sheet> {
+    let caller = ic_cdk::caller();
+    let allowed = PAIRS.with(|p| {
+        p.borrow()
+            .get(&pair_id)
+            .map(|pair| is_member_of(pair, caller))
+            .unwrap_or(false)
+    });
+    if !allowed { ic_cdk::trap("not a member of this pair"); }
+    let mut out: Vec<Sheet> = SHEETS.with(|s| {
+        s.borrow()
+            .values()
+            .filter(|sh| sh.pair_id == pair_id && matches!(sh.state, SheetState::Closed))
+            .cloned()
+            .collect()
+    });
+    out.sort_by(|a, b| b.closed_at.unwrap_or(0).cmp(&a.closed_at.unwrap_or(0)));
+    out
+}
+
 /// get_sheet_wrapped_key: returns the per-sheet K_sheet wrapped copy
 /// sealed to the caller's vetkd-derived pub key. Callers unwrap it
 /// client-side to get the symmetric key.

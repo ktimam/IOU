@@ -153,6 +153,8 @@ export const idlFactory = ({ IDL: idl }: { IDL: IDL }) => {
       [ListEntriesResult],
       ["query"],
     ),
+    // Phase 4
+    list_archived_sheets: idl.Func([idl.Text], [idl.Vec(Sheet)], ["query"]),
   });
 };
 

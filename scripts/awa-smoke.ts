@@ -1,5 +1,6 @@
-// Phase 2 + 3 smoke test: exercises the pair + sheet lifecycle, then
-// exercises the entry round-trip (encrypted add -> list -> decrypt).
+// Phase 2 + 3 + 4 smoke test: exercises the pair + sheet lifecycle,
+// the entry round-trip (encrypted add -> list -> decrypt), and the
+// list_archived_sheets endpoint.
 // Run with: pnpm smoke
 //
 // IMPORTANT: This test expects a clean canister. If state from a
@@ -385,6 +386,34 @@ async function main() {
   ok(newSheetId === newSheet.id, "active sheet is the new one");
   ok(finalPairs[0].archived_sheet_count === 1, "1 archived sheet");
 
+  // ─── 11b. list_archived_sheets ───
+  console.log("\n=== list_archived_sheets (tester) ===");
+  const archived = await (tester as any).list_archived_sheets(pairId);
+  console.log("archived count:", archived.length, "ids:",
+    archived.map((a: any) => a.id));
+  ok(Array.isArray(archived) && archived.length === 1, "1 archived sheet");
+  ok(archived[0].id === sheetId, "archived id is the original sheet");
+  ok(archived[0].state && "Closed" in archived[0].state,
+    "archived sheet is Closed");
+  ok(archived[0].closed_at != null && archived[0].closed_at !== undefined
+    && (!Array.isArray(archived[0].closed_at) || archived[0].closed_at.length > 0),
+    "archived sheet has closed_at");
+  ok(archived[0].closing_balances != null
+    && (!Array.isArray(archived[0].closing_balances) || archived[0].closing_balances.length >= 0),
+    "archived sheet has closing_balances array");
+
+  // Non-member cannot list archived sheets.
+  console.log("\n=== list_archived_sheets (default identity, should trap) ===");
+  const { actor: defaultActorForArchive } = await actorFor("default");
+  let archiveTrapped = false;
+  try {
+    await (defaultActorForArchive as any).list_archived_sheets(pairId);
+  } catch (e) {
+    archiveTrapped = true;
+    console.log("  trapped as expected:", (e as Error).message);
+  }
+  ok(archiveTrapped, "non-member list_archived_sheets traps");
+
   // ─── 12. invalid invite code ───
   console.log("\n=== invalid invite code (should trap) ===");
   let trapped = false;
@@ -412,8 +441,8 @@ async function main() {
 
   console.log(
     process.exitCode === 1
-      ? "\n❌ Phase 2+3 smoke FAILED"
-      : "\n✅ Phase 2+3 smoke PASSED",
+      ? "\n❌ Phase 2+3+4 smoke FAILED"
+      : "\n✅ Phase 2+3+4 smoke PASSED",
   );
 }
 
