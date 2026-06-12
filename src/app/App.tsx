@@ -8,22 +8,29 @@ import {Pairs} from "../features/flows/Pairs";
 import {NewPair} from "../features/flows/NewPair";
 import {Pair} from "../features/flows/Pair";
 import {NewSheet} from "../features/flows/NewSheet";
+import { SheetKeyProvider } from "../features/flows/SheetKeyContext";
+import { SheetPage } from "../features/entries/SheetPage";
+import { EditEntryPage } from "../features/entries/EditEntryPage";
 
 export function App() {
   return (
     <AuthProvider>
-      <Layout>
-        <Routes>
-          <Route path="/" element={<Hello />} />
-          <Route path="/sign-in" element={<SignIn />} />
-          <Route path="/set-name" element={<SetDisplayName />} />
-          <Route path="/pairs" element={<Pairs />} />
-          <Route path="/pair/new" element={<NewPair />} />
-          <Route path="/pair/:pairId" element={<Pair />} />
-          <Route path="/sheet/new" element={<NewSheet />} />
-          <Route path="*" element={<Navigate to="/" replace />} />
-        </Routes>
-      </Layout>
+      <SheetKeyProvider>
+        <Layout>
+          <Routes>
+            <Route path="/" element={<Hello />} />
+            <Route path="/sign-in" element={<SignIn />} />
+            <Route path="/set-name" element={<SetDisplayName />} />
+            <Route path="/pairs" element={<Pairs />} />
+            <Route path="/pair/new" element={<NewPair />} />
+            <Route path="/pair/:pairId" element={<Pair />} />
+            <Route path="/sheet/new" element={<NewSheet />} />
+            <Route path="/sheet/:sheetId" element={<SheetPage />} />
+            <Route path="/sheet/:sheetId/edit/:entryId" element={<EditEntryPage />} />
+            <Route path="*" element={<Navigate to="/" replace />} />
+          </Routes>
+        </Layout>
+      </SheetKeyProvider>
     </AuthProvider>
   );
 }

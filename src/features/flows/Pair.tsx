@@ -2,13 +2,18 @@ import { useEffect, useState } from "react";
 import { Link, useNavigate, useParams } from "react-router-dom";
 import { useAuth } from "../auth/AuthProvider";
 import { useActor, unwrap } from "./useActor";
+import { useMyKeypair } from "./useMyKeypair";
+import { useSheetKey } from "./SheetKeyContext";
 
 export function Pair() {
   const { pairId } = useParams<{ pairId: string }>();
   const { state } = useAuth();
   const { actor } = useActor();
+  const { keypair: myKp } = useMyKeypair();
+  const { registerPartnerKey } = useSheetKey();
   const nav = useNavigate();
   const [pair, setPair] = useState<any | null>(null);
+  const [activeSheetId, setActiveSheetId] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
@@ -27,6 +32,16 @@ export function Pair() {
           setPair(null);
         } else {
           setPair(p);
+          // Find the active sheet for this pair (if any).
+          const summaries = await actor.get_my_pairs();
+          const sum = (summaries as any[]).find((s) => s.id === pairId);
+          const sid = sum ? unwrap(sum.active_sheet_id) : null;
+          setActiveSheetId(sid);
+          // Register my own public key under the active sheet so the
+          // partner can use it as the wrap-sender.
+          if (sid && myKp) {
+            registerPartnerKey(sid, myKp.publicKeyB64);
+          }
         }
       } catch (e) {
         setError((e as Error).message);
@@ -34,7 +49,8 @@ export function Pair() {
         setLoading(false);
       }
     })();
-  }, [actor, state, nav, pairId]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [actor, state, nav, pairId, myKp?.publicKeyB64]);
 
   if (loading) return <p className="muted">Loading…</p>;
   if (error) {
@@ -60,14 +76,25 @@ export function Pair() {
           Created {new Date(Number(pair.created_at) / 1_000_000).toLocaleString()}
         </p>
       </div>
-      <div className="cta">
-        <Link to={`/sheet/new?pairId=${pairId}`}>
-          <button>+ New sheet</button>
-        </Link>
+      {activeSheetId ? (
+        <div className="cta">
+          <Link to={`/sheet/${activeSheetId}`}>
+            <button>Open active sheet →</button>
+          </Link>
+        </div>
+      ) : (
+        <div className="cta">
+          <Link to={`/sheet/new?pairId=${pairId}`}>
+            <button>+ New sheet</button>
+          </Link>
+        </div>
+      )}
+      <div className="card small">
+        <p className="muted">Your public key (share with partner if needed)</p>
+        <code style={{ wordBreak: "break-all", fontSize: "0.75rem" }}>
+          {myKp?.publicKeyB64 ?? "(loading…)"}
+        </code>
       </div>
-      <p className="muted" style={{ marginTop: 16 }}>
-        Sheet view is coming in Phase 3.
-      </p>
     </div>
   );
 }
