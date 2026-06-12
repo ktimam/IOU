@@ -1,20 +1,19 @@
 // /sheet/:sheetId — the main IOU page.
 //
 // Loads the sheet, decrypts all entries with K_sheet, shows balance
-// cards and the history list. The "Add entry" button opens the form
-// in a modal. Editing an entry navigates to /sheet/:sheetId/edit/:id.
+// cards and the history list. "Add entry" and "edit" both open the
+// same form in a modal.
 
-import { useEffect, useState } from "react";
-import { useParams, useNavigate, Link } from "react-router-dom";
-import { Principal } from "@dfinity/principal";
+import { useEffect, useMemo, useState } from "react";
+import { useParams, Link } from "react-router-dom";
 import { unwrap, isActive, isClosed, useActor } from "../flows/useActor";
 import { useSheetKey } from "../flows/SheetKeyContext";
 import { useAuth } from "../auth/AuthProvider";
-import { decryptEntryPayload } from "../crypto/devVetkd";
+import { decryptEntryPayload, encryptEntryPayload } from "../crypto/devVetkd";
 import { decodeEntry, type EntryPayload } from "./types";
 import { computeBalances, formatMinor } from "./balance";
 import { EntryForm } from "./EntryForm";
-import { encryptEntryPayload } from "../crypto/devVetkd";
+import { useToasts } from "../ui/Toasts";
 
 type DecryptedEntry = {
   id: number;
@@ -24,18 +23,32 @@ type DecryptedEntry = {
   payload: EntryPayload;
 };
 
+type SortKey = "newest" | "oldest" | "amount-desc" | "amount-asc";
+
+const SORT_OPTIONS: { value: SortKey; label: string }[] = [
+  { value: "newest", label: "Newest first" },
+  { value: "oldest", label: "Oldest first" },
+  { value: "amount-desc", label: "Largest amount" },
+  { value: "amount-asc", label: "Smallest amount" },
+];
+
 export function SheetPage() {
   const { sheetId = "" } = useParams();
-  const navigate = useNavigate();
   const { state } = useAuth();
   const { actor } = useActor();
   const { get, unwrapFor } = useSheetKey();
+  const toasts = useToasts();
 
   const [sheet, setSheet] = useState<any>(null);
   const [entries, setEntries] = useState<DecryptedEntry[]>([]);
   const [loading, setLoading] = useState(true);
   const [err, setErr] = useState<string | null>(null);
-  const [adding, setAdding] = useState(false);
+
+  const [modal, setModal] = useState<null | {
+    initial: EntryPayload | null;
+    entryId: number | null;
+  }>(null);
+  const [sortKey, setSortKey] = useState<SortKey>("newest");
 
   const myPrincipal = state.kind === "authenticated"
     ? state.identity.getPrincipal().toText()
@@ -76,11 +89,10 @@ export function SheetPage() {
           payload: decodeEntry(pt),
         });
       }
-      // Newest first.
-      dec.sort((a, b) => b.payload.ts - a.payload.ts);
       setEntries(dec);
     } catch (e) {
       setErr((e as Error).message);
+      toasts.show({ kind: "error", text: (e as Error).message });
     } finally {
       setLoading(false);
     }
@@ -91,20 +103,50 @@ export function SheetPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [actor, sheetId]);
 
-  async function onAdd(p: EntryPayload) {
+  const sorted = useMemo(() => {
+    const arr = entries.slice();
+    switch (sortKey) {
+      case "newest":
+        return arr.sort((a, b) => b.payload.ts - a.payload.ts);
+      case "oldest":
+        return arr.sort((a, b) => a.payload.ts - b.payload.ts);
+      case "amount-desc":
+        return arr.sort(
+          (a, b) => b.payload.amount_minor - a.payload.amount_minor,
+        );
+      case "amount-asc":
+        return arr.sort(
+          (a, b) => a.payload.amount_minor - b.payload.amount_minor,
+        );
+    }
+  }, [entries, sortKey]);
+
+  async function onSubmit(p: EntryPayload) {
     if (!actor) return;
     const K_sheet = get(sheetId) ?? (await unwrapFor(sheetId));
     const enc = await encryptEntryPayload(
       new TextEncoder().encode(JSON.stringify(p)),
       K_sheet,
     );
-    await (actor as any).add_entry({
-      sheet_id: sheetId,
-      entry_key: Array.from(enc.entryKey),
-      ciphertext: Array.from(enc.ciphertext),
-      iv: Array.from(enc.iv),
-    });
-    setAdding(false);
+    if (modal?.entryId != null) {
+      await (actor as any).edit_entry({
+        sheet_id: sheetId,
+        entry_id: BigInt(modal.entryId),
+        entry_key: Array.from(enc.entryKey),
+        ciphertext: Array.from(enc.ciphertext),
+        iv: Array.from(enc.iv),
+      });
+      toasts.show({ kind: "success", text: "Entry updated" });
+    } else {
+      await (actor as any).add_entry({
+        sheet_id: sheetId,
+        entry_key: Array.from(enc.entryKey),
+        ciphertext: Array.from(enc.ciphertext),
+        iv: Array.from(enc.iv),
+      });
+      toasts.show({ kind: "success", text: "Entry added" });
+    }
+    setModal(null);
     await reload();
   }
 
@@ -134,7 +176,9 @@ export function SheetPage() {
       <section className="balances">
         <h2>Balances</h2>
         {balances.length === 0 ? (
-          <p className="muted">All settled. Add an entry to get started.</p>
+          <p className="muted">
+            🎉 All settled. Add an entry to get started.
+          </p>
         ) : (
           <ul>
             {balances.map((b) => {
@@ -154,34 +198,43 @@ export function SheetPage() {
         )}
       </section>
 
-      {isActive(sheet.state) && !adding && (
+      {isActive(sheet.state) && !modal && (
         <div className="row">
-          <button onClick={() => setAdding(true)}>+ Add entry</button>
+          <button onClick={() => setModal({ initial: null, entryId: null })}>
+            + Add entry
+          </button>
         </div>
       )}
 
-      {adding && (
-        <EntryForm
-          enabledCurrencies={sheet.enabled_currencies}
-          myPrincipal={me}
-          partnerPrincipal={them}
-          onCancel={() => setAdding(false)}
-          onSubmit={onAdd}
-        />
-      )}
-
       <section className="history">
-        <h2>History</h2>
+        <div className="history-head">
+          <h2>History</h2>
+          {entries.length > 1 && (
+            <label className="sort">
+              <span className="muted small">Sort:</span>
+              <select
+                value={sortKey}
+                onChange={(e) => setSortKey(e.target.value as SortKey)}
+              >
+                {SORT_OPTIONS.map((o) => (
+                  <option key={o.value} value={o.value}>
+                    {o.label}
+                  </option>
+                ))}
+              </select>
+            </label>
+          )}
+        </div>
         {entries.length === 0 ? (
-          <p className="muted">No entries yet.</p>
+          <p className="muted">📝 No entries yet. Add one above.</p>
         ) : (
           <ul>
-            {entries.map((e) => {
+            {sorted.map((e) => {
               const mine = e.created_by === me;
               const sign = e.payload.direction === "credit" ? "+" : "−";
               return (
                 <li key={e.id}>
-                  <div>
+                  <div className="row-1">
                     <strong>{e.payload.note || "(no note)"}</strong>
                     <span className="muted small">
                       {" · "}
@@ -191,7 +244,7 @@ export function SheetPage() {
                       {e.updated_at_server ? " (edited)" : ""}
                     </span>
                   </div>
-                  <div>
+                  <div className="row-2">
                     {sign}
                     {formatMinor(e.payload.amount_minor, e.payload.currency)}
                   </div>
@@ -206,7 +259,9 @@ export function SheetPage() {
                   {mine && isActive(sheet.state) && (
                     <button
                       className="small"
-                      onClick={() => navigate(`/sheet/${sheetId}/edit/${e.id}`)}
+                      onClick={() =>
+                        setModal({ initial: e.payload, entryId: e.id })
+                      }
                     >
                       edit
                     </button>
@@ -217,6 +272,27 @@ export function SheetPage() {
           </ul>
         )}
       </section>
+
+      {modal && (
+        <div className="modal-backdrop" onClick={() => setModal(null)}>
+          <div
+            className="modal"
+            onClick={(e) => e.stopPropagation()}
+            role="dialog"
+            aria-modal="true"
+          >
+            <h3>{modal.entryId != null ? "Edit entry" : "Add entry"}</h3>
+            <EntryForm
+              enabledCurrencies={sheet.enabled_currencies}
+              myPrincipal={me}
+              partnerPrincipal={them}
+              initial={modal.initial ?? undefined}
+              onCancel={() => setModal(null)}
+              onSubmit={onSubmit}
+            />
+          </div>
+        </div>
+      )}
     </div>
   );
 }
