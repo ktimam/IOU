@@ -1,4 +1,5 @@
-// Phase 2 smoke test: exercises the pair + sheet lifecycle end-to-end.
+// Phase 2 + 3 smoke test: exercises the pair + sheet lifecycle, then
+// exercises the entry round-trip (encrypted add -> list -> decrypt).
 // Run with: pnpm smoke
 //
 // IMPORTANT: This test expects a clean canister. If state from a
@@ -13,7 +14,9 @@ import { webcrypto } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { idlFactory } from "../src/backend/declarations";
 import {
+  decryptEntryPayload,
   deriveUserKeypair,
+  encryptEntryPayload,
   newSheetKey,
   unwrapSheetKey,
   wrapSheetKey,
@@ -58,6 +61,15 @@ function isActive(state: any): boolean {
 }
 function isClosed(state: any): boolean {
   return state && typeof state === "object" && "Closed" in state;
+}
+
+// Is this opt<T> value empty (None)? Handles null, undefined, and
+// Candid None shapes (empty array for opt<T>).
+function isEmptyOpt(v: unknown): boolean {
+  if (v == null) return true;
+  if (Array.isArray(v) && v.length === 0) return true;
+  if (Array.isArray(v) && v.length === 1) return false; // Some
+  return false;
 }
 
 function bytesToHex(b: Uint8Array): string {
@@ -193,6 +205,150 @@ async function main() {
     );
   }
 
+  // ─── 7c. PHASE 3: entry round-trip ───
+  // The partner posts an encrypted entry. The tester fetches the
+  // list, decrypts, and confirms the plaintext matches.
+  console.log("\n=== add_entry (partner) — encrypted round-trip ===");
+  const entryPayload = new TextEncoder().encode(JSON.stringify({
+    kind: "expense",
+    currency: "USD",
+    amount_minor: 1250,        // $12.50
+    direction: "debt",         // partner owes tester
+    note: "lunch",
+    ts: 1718000000000,
+  }));
+  const enc = await encryptEntryPayload(entryPayload, K_sheet);
+  const entry = await (partner as any).add_entry({
+    sheet_id: sheetId,
+    entry_key: Array.from(enc.entryKey),
+    ciphertext: Array.from(enc.ciphertext),
+    iv: Array.from(enc.iv),
+  });
+  console.log("entry id:", entry.id, "by", entry.created_by.toText());
+  ok(typeof entry.id === "bigint" || typeof entry.id === "number",
+    "entry has numeric id");
+  ok(entry.created_by.toText() === partnerIdentity.getPrincipal().toText(),
+    "entry created_by is the partner");
+  ok(entry.sheet_id === sheetId, "entry.sheet_id matches");
+  ok(entry.pair_id === pairId, "entry.pair_id matches");
+  ok(isEmptyOpt(entry.updated_at_server), "updated_at_server is empty on creation");
+  ok(entry.entry_key.length === 32, "entry_key is 32 bytes");
+  ok(entry.iv.length === 12, "iv is 12 bytes");
+  ok(entry.ciphertext.length > 0, "ciphertext is non-empty");
+
+  // list_entries as tester (should see the partner's entry).
+  console.log("\n=== list_entries (tester) ===");
+  const listRes = await (tester as any).list_entries(sheetId, [], 50);
+  console.log("page size:", listRes.entries.length, "cursor:", listRes.next_cursor);
+  ok(listRes.entries.length === 1, "tester sees 1 entry");
+  ok(isEmptyOpt(listRes.next_cursor), "no next cursor on single page");
+
+  // Tester decrypts using K_sheet and the entry_key.
+  const fetched = listRes.entries[0];
+  const decBytes = await decryptEntryPayload(
+    new Uint8Array(fetched.entry_key),
+    new Uint8Array(fetched.iv),
+    new Uint8Array(fetched.ciphertext),
+    K_sheet,
+  );
+  const dec = JSON.parse(new TextDecoder().decode(decBytes));
+  console.log("decrypted:", dec);
+  ok(dec.kind === "expense" && dec.currency === "USD" && dec.amount_minor === 1250,
+    "decrypted payload matches");
+  ok(dec.note === "lunch", "decrypted note matches");
+
+  // get_entry convenience.
+  console.log("\n=== get_entry (tester) ===");
+  const oneEntry = unwrap(await (tester as any).get_entry(sheetId, entry.id));
+  ok(oneEntry !== null, "get_entry returns the entry");
+  ok(oneEntry.id === entry.id, "get_entry id matches");
+
+  // edit_entry as partner (replace ciphertext).
+  console.log("\n=== edit_entry (partner) ===");
+  const updated = new TextEncoder().encode(JSON.stringify({
+    kind: "expense",
+    currency: "USD",
+    amount_minor: 2000,
+    direction: "debt",
+    note: "lunch + coffee",
+    ts: 1718000000000,
+  }));
+  const enc2 = await encryptEntryPayload(updated, K_sheet);
+  const edited = await (partner as any).edit_entry({
+    sheet_id: sheetId,
+    entry_id: entry.id,
+    entry_key: Array.from(enc2.entryKey),
+    ciphertext: Array.from(enc2.ciphertext),
+    iv: Array.from(enc2.iv),
+  });
+  ok(!isEmptyOpt(edited.updated_at_server), "updated_at_server is set after edit");
+  const dec2Bytes = await decryptEntryPayload(
+    new Uint8Array(edited.entry_key),
+    new Uint8Array(edited.iv),
+    new Uint8Array(edited.ciphertext),
+    K_sheet,
+  );
+  const dec2 = JSON.parse(new TextDecoder().decode(dec2Bytes));
+  ok(dec2.amount_minor === 2000 && dec2.note === "lunch + coffee",
+    "decrypted edit matches the new payload");
+
+  // edit_entry as tester (should be denied — tester is not the creator).
+  console.log("\n=== edit_entry (tester, should trap) ===");
+  let editDenied = false;
+  try {
+    const encT = await encryptEntryPayload(
+      new TextEncoder().encode("evil edit"),
+      K_sheet,
+    );
+    await (tester as any).edit_entry({
+      sheet_id: sheetId,
+      entry_id: entry.id,
+      entry_key: Array.from(encT.entryKey),
+      ciphertext: Array.from(encT.ciphertext),
+      iv: Array.from(encT.iv),
+    });
+  } catch (e) {
+    editDenied = true;
+    console.log("  trapped as expected:", (e as Error).message);
+  }
+  ok(editDenied, "tester cannot edit partner's entry");
+
+  // add_entry as tester (should succeed — tester is a member).
+  console.log("\n=== add_entry (tester) ===");
+  const tEnc = await encryptEntryPayload(
+    new TextEncoder().encode(JSON.stringify({
+      kind: "expense", currency: "EGP", amount_minor: 50000,
+      direction: "credit", note: "taxi", ts: 1718000001000,
+    })),
+    K_sheet,
+  );
+  const testerEntry = await (tester as any).add_entry({
+    sheet_id: sheetId,
+    entry_key: Array.from(tEnc.entryKey),
+    ciphertext: Array.from(tEnc.ciphertext),
+    iv: Array.from(tEnc.iv),
+  });
+  ok(testerEntry.id !== entry.id, "tester's entry has a different id");
+
+  // Final list: should be 2 entries.
+  const finalList = await (tester as any).list_entries(sheetId, [], 50);
+  ok(finalList.entries.length === 2, "tester now sees 2 entries");
+  // Newest first.
+  ok(finalList.entries[0].id === testerEntry.id,
+    "newest entry first");
+
+  // Non-member cannot list.
+  console.log("\n=== list_entries (default identity, should trap) ===");
+  const { actor: defaultActor } = await actorFor("default");
+  let nonMemberTrapped = false;
+  try {
+    await (defaultActor as any).list_entries(sheetId, [], 10);
+  } catch (e) {
+    nonMemberTrapped = true;
+    console.log("  trapped as expected:", (e as Error).message);
+  }
+  ok(nonMemberTrapped, "non-member list_entries traps");
+
   // ─── 8. add_currency as tester ───
   console.log("\n=== add_currency (tester) ===");
   await (tester as any).add_currency(sheetId, "EUR");
@@ -206,8 +362,7 @@ async function main() {
   const closedSheet = unwrap(await (tester as any).get_sheet(sheetId));
   console.log("state:", closedSheet.state);
   ok(isClosed(closedSheet.state), "sheet is Closed");
-  ok(closedSheet.closed_at !== null && closedSheet.closed_at !== undefined,
-    "closed_at is set");
+  ok(!isEmptyOpt(closedSheet.closed_at), "closed_at is set");
 
   // ─── 10. start_new_sheet ───
   console.log("\n=== start_new_sheet (tester) ===");
@@ -257,8 +412,8 @@ async function main() {
 
   console.log(
     process.exitCode === 1
-      ? "\n❌ Phase 2 smoke FAILED"
-      : "\n✅ Phase 2 smoke PASSED",
+      ? "\n❌ Phase 2+3 smoke FAILED"
+      : "\n✅ Phase 2+3 smoke PASSED",
   );
 }
 

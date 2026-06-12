@@ -77,6 +77,38 @@ type CreateSheetReq = record {
     wrapped_key_b : vec nat8;
 };
 
+type Entry = record {
+    id : nat64;
+    pair_id : text;
+    sheet_id : text;
+    created_by : principal;
+    created_at_server : nat64;
+    updated_at_server : opt nat64;
+    entry_key : vec nat8;   // 32 random bytes (per-entry salt)
+    ciphertext : vec nat8;  // AES-GCM(per_entry_key, K_sheet, payload)
+    iv : vec nat8;
+};
+
+type AddEntryReq = record {
+    sheet_id : text;
+    entry_key : vec nat8;
+    ciphertext : vec nat8;
+    iv : vec nat8;
+};
+
+type EditEntryReq = record {
+    sheet_id : text;
+    entry_id : nat64;
+    entry_key : vec nat8;
+    ciphertext : vec nat8;
+    iv : vec nat8;
+};
+
+type ListEntriesResult = record {
+    entries : vec Entry;
+    next_cursor : opt nat64;
+};
+
 service : {
     // Phase 1
     whoami : () -> (opt text) query;
@@ -96,4 +128,10 @@ service : {
     add_currency : (text, text) -> ();
     close_sheet : (text, vec ClosingBalance) -> ();
     start_new_sheet : (CreateSheetReq) -> (Sheet);
+
+    // Phase 3
+    add_entry : (AddEntryReq) -> (Entry);
+    edit_entry : (EditEntryReq) -> (Entry);
+    get_entry : (text, nat64) -> (opt Entry) query;
+    list_entries : (text, opt nat64, nat32) -> (ListEntriesResult) query;
 }

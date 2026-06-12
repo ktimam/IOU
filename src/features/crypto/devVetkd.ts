@@ -22,6 +22,8 @@
 
 const LS_KEYPAIR_KEY = "iou.dev.userKeypair.v1";
 const HKDF_SALT = "iou-wrapping-v1";
+const ENTRY_SALT = "iou-entry-aes-v1";
+const ENTRY_CONTEXT = "iou-per-entry-key-v1";
 
 /** Public so tests/tooling can reference it. */
 export const VETKD_CONTEXT = "iou-per-sheet-key-v1";
@@ -258,6 +260,77 @@ export async function unwrapSheetKey(
     { name: "AES-GCM", iv: toBuf(iv), tagLength: 128 },
     aesKey,
     toBuf(ct),
+  );
+  return new Uint8Array(pt);
+}
+
+// ─────────────── entry-level encryption ───────────────
+//
+// Each entry is encrypted with a per-entry AES key, derived as
+// HKDF(K_sheet, salt=ENTRY_SALT, info=ENTRY_CONTEXT + entry_key).
+// The (entry_key, ciphertext, iv) triple is what we ship to the
+// canister; K_sheet never leaves the device.
+
+async function deriveEntryAesKey(
+  K_sheet: Uint8Array,
+  entryKey: Uint8Array,
+): Promise<CryptoKey> {
+  const subtle = getSubtle();
+  const baseKey = await subtle.importKey("raw", toBuf(K_sheet), "HKDF", false, ["deriveKey"]);
+  // Concat ENTRY_CONTEXT || entry_key as the info.
+  const info = concatBytes(
+    new TextEncoder().encode(ENTRY_CONTEXT),
+    entryKey,
+  );
+  return subtle.deriveKey(
+    {
+      name: "HKDF",
+      hash: "SHA-256",
+      salt: toBuf(new TextEncoder().encode(ENTRY_SALT)),
+      info: toBuf(info),
+    },
+    baseKey,
+    { name: "AES-GCM", length: 256 },
+    false,
+    ["encrypt", "decrypt"],
+  );
+}
+
+/**
+ * Encrypt an entry payload with K_sheet + a per-entry random key.
+ * Returns the (entry_key, iv, ciphertext) triple ready to be stored.
+ */
+export async function encryptEntryPayload(
+  plaintext: Uint8Array,
+  K_sheet: Uint8Array,
+): Promise<{ entryKey: Uint8Array; iv: Uint8Array; ciphertext: Uint8Array }> {
+  const subtle = getSubtle();
+  const entryKey = randomBytes(32);
+  const aesKey = await deriveEntryAesKey(K_sheet, entryKey);
+  const iv = randomBytes(12);
+  const ct = await subtle.encrypt(
+    { name: "AES-GCM", iv: toBuf(iv), tagLength: 128 },
+    aesKey,
+    toBuf(plaintext),
+  );
+  return { entryKey, iv, ciphertext: new Uint8Array(ct) };
+}
+
+/**
+ * Decrypt an entry payload using K_sheet + the entry_key.
+ */
+export async function decryptEntryPayload(
+  entryKey: Uint8Array,
+  iv: Uint8Array,
+  ciphertext: Uint8Array,
+  K_sheet: Uint8Array,
+): Promise<Uint8Array> {
+  const subtle = getSubtle();
+  const aesKey = await deriveEntryAesKey(K_sheet, entryKey);
+  const pt = await subtle.decrypt(
+    { name: "AES-GCM", iv: toBuf(iv), tagLength: 128 },
+    aesKey,
+    toBuf(ciphertext),
   );
   return new Uint8Array(pt);
 }

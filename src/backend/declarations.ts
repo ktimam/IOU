@@ -90,6 +90,34 @@ export const idlFactory = ({ IDL: idl }: { IDL: IDL }) => {
     wrapped_key_a: idl.Vec(idl.Nat8),
     wrapped_key_b: idl.Vec(idl.Nat8),
   });
+  const Entry = idl.Record({
+    id: idl.Nat64,
+    pair_id: idl.Text,
+    sheet_id: idl.Text,
+    created_by: idl.Principal,
+    created_at_server: idl.Nat64,
+    updated_at_server: idl.Opt(idl.Nat64),
+    entry_key: idl.Vec(idl.Nat8),
+    ciphertext: idl.Vec(idl.Nat8),
+    iv: idl.Vec(idl.Nat8),
+  });
+  const AddEntryReq = idl.Record({
+    sheet_id: idl.Text,
+    entry_key: idl.Vec(idl.Nat8),
+    ciphertext: idl.Vec(idl.Nat8),
+    iv: idl.Vec(idl.Nat8),
+  });
+  const EditEntryReq = idl.Record({
+    sheet_id: idl.Text,
+    entry_id: idl.Nat64,
+    entry_key: idl.Vec(idl.Nat8),
+    ciphertext: idl.Vec(idl.Nat8),
+    iv: idl.Vec(idl.Nat8),
+  });
+  const ListEntriesResult = idl.Record({
+    entries: idl.Vec(Entry),
+    next_cursor: idl.Opt(idl.Nat64),
+  });
   return idl.Service({
     // Phase 1
     whoami: idl.Func([], [idl.Opt(idl.Text)], ["query"]),
@@ -116,6 +144,15 @@ export const idlFactory = ({ IDL: idl }: { IDL: IDL }) => {
     add_currency: idl.Func([idl.Text, idl.Text], [], []),
     close_sheet: idl.Func([idl.Text, idl.Vec(ClosingBalance)], [], []),
     start_new_sheet: idl.Func([CreateSheetReq], [Sheet], []),
+    // Phase 3
+    add_entry: idl.Func([AddEntryReq], [Entry], []),
+    edit_entry: idl.Func([EditEntryReq], [Entry], []),
+    get_entry: idl.Func([idl.Text, idl.Nat64], [idl.Opt(Entry)], ["query"]),
+    list_entries: idl.Func(
+      [idl.Text, idl.Opt(idl.Nat64), idl.Nat32],
+      [ListEntriesResult],
+      ["query"],
+    ),
   });
 };
 

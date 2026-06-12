@@ -537,3 +537,246 @@ fn start_new_sheet(req: CreateSheetReq) -> Sheet {
     // (Phase 3). For now, the new sheet starts empty.
     create_sheet(req)
 }
+
+// ───────────────────────── Phase 3 endpoints (entries) ─────────────────────────
+//
+// Entries are encrypted client-side with the sheet's K_sheet. The
+// canister never sees plaintext, so it stores:
+//   * ciphertext  — AES-GCM(per_entry_key, K_sheet) of the entry
+//                   payload
+//   * iv          — random per encryption
+// The per-entry_key is sent with the entry (32 random bytes) so
+// the decryptor can reproduce the AES key by HKDF(K_sheet, entry_key).
+
+#[derive(Clone, CandidType, Deserialize)]
+pub struct Entry {
+    pub id: u64,
+    pub pair_id: String,
+    pub sheet_id: String,
+    pub created_by: Principal,
+    pub created_at_server: u64,
+    pub updated_at_server: Option<u64>,
+    pub entry_key: Vec<u8>,   // 32 random bytes (per-entry salt)
+    pub ciphertext: Vec<u8>,  // AES-GCM(per_entry_key, K_sheet, payload)
+    pub iv: Vec<u8>,
+}
+
+#[derive(Clone, CandidType, Deserialize)]
+pub struct AddEntryReq {
+    pub sheet_id: String,
+    pub entry_key: Vec<u8>,
+    pub ciphertext: Vec<u8>,
+    pub iv: Vec<u8>,
+}
+
+#[derive(Clone, CandidType, Deserialize)]
+pub struct ListEntriesResult {
+    pub entries: Vec<Entry>,
+    pub next_cursor: Option<u64>,
+}
+
+// Sheets gain a per-sheet entry counter for monotonic ids.
+thread_local! {
+    static ENTRY_COUNTERS: RefCell<BTreeMap<String, u64>> =
+        RefCell::new(BTreeMap::new());
+    static ENTRIES: RefCell<BTreeMap<String, Vec<Entry>>> =
+        RefCell::new(BTreeMap::new());
+    // We also keep a secondary index: pair_id -> Vec<sheet_id> for
+    // bulk operations. (Currently unused but cheap.)
+}
+
+fn next_entry_id(sheet_id: &str) -> u64 {
+    ENTRY_COUNTERS.with(|c| {
+        let mut map = c.borrow_mut();
+        let cur = map.get(sheet_id).copied().unwrap_or(0);
+        let next = cur + 1;
+        map.insert(sheet_id.to_string(), next);
+        next
+    })
+}
+
+fn caller_is_pair_member(sheet_id: &str) -> bool {
+    let caller = ic_cdk::caller();
+    SHEETS.with(|s| {
+        let pair_id = match s.borrow().get(sheet_id).map(|sh| sh.pair_id.clone()) {
+            Some(p) => p,
+            None => return false,
+        };
+        PAIRS.with(|p| {
+            p.borrow()
+                .get(&pair_id)
+                .map(|pair| is_member_of(pair, caller))
+                .unwrap_or(false)
+        })
+    })
+}
+
+fn sheet_is_active(sheet_id: &str) -> bool {
+    SHEETS.with(|s| {
+        s.borrow()
+            .get(sheet_id)
+            .map(|sh| matches!(sh.state, SheetState::Active))
+            .unwrap_or(false)
+    })
+}
+
+fn record_entry_timestamp(sheet_id: &str, now: u64) {
+    SHEETS.with(|s| {
+        let mut map = s.borrow_mut();
+        if let Some(sh) = map.get_mut(sheet_id) {
+            sh.last_entry_at = Some(now);
+        }
+    });
+}
+
+/// add_entry: store an encrypted entry on an active sheet. Caller
+/// must be a member of the parent pair.
+#[ic_cdk::update]
+fn add_entry(req: AddEntryReq) -> Entry {
+    let caller = ic_cdk::caller();
+    require_authed();
+    if req.entry_key.len() != 32 {
+        ic_cdk::trap("entry_key must be 32 bytes");
+    }
+    if req.ciphertext.is_empty() {
+        ic_cdk::trap("ciphertext is empty");
+    }
+    if req.iv.is_empty() {
+        ic_cdk::trap("iv is empty");
+    }
+    if !caller_is_pair_member(&req.sheet_id) {
+        ic_cdk::trap("not a member of this sheet's pair");
+    }
+    if !sheet_is_active(&req.sheet_id) {
+        ic_cdk::trap("sheet is not active");
+    }
+    let sheet = SHEETS.with(|s| s.borrow().get(&req.sheet_id).cloned());
+    let sheet = match sheet {
+        Some(s) => s,
+        None => ic_cdk::trap("sheet not found"),
+    };
+    let now = ic_cdk::api::time();
+    let id = next_entry_id(&req.sheet_id);
+    let entry = Entry {
+        id,
+        pair_id: sheet.pair_id.clone(),
+        sheet_id: sheet.id.clone(),
+        created_by: caller,
+        created_at_server: now,
+        updated_at_server: None,
+        entry_key: req.entry_key,
+        ciphertext: req.ciphertext,
+        iv: req.iv,
+    };
+    ENTRIES.with(|e| {
+        let mut map = e.borrow_mut();
+        let list = map.entry(req.sheet_id.clone()).or_default();
+        list.push(entry.clone());
+    });
+    record_entry_timestamp(&req.sheet_id, now_secs());
+    entry
+}
+
+/// edit_entry: replace the ciphertext + iv of an existing entry.
+/// Only the original creator can edit. id is the (sheet_id, entry_id)
+/// pair; the wire format bundles them.
+#[derive(Clone, CandidType, Deserialize)]
+pub struct EditEntryReq {
+    pub sheet_id: String,
+    pub entry_id: u64,
+    pub entry_key: Vec<u8>,
+    pub ciphertext: Vec<u8>,
+    pub iv: Vec<u8>,
+}
+
+#[ic_cdk::update]
+fn edit_entry(req: EditEntryReq) -> Entry {
+    let caller = ic_cdk::caller();
+    require_authed();
+    if req.entry_key.len() != 32 {
+        ic_cdk::trap("entry_key must be 32 bytes");
+    }
+    if req.ciphertext.is_empty() {
+        ic_cdk::trap("ciphertext is empty");
+    }
+    if req.iv.is_empty() {
+        ic_cdk::trap("iv is empty");
+    }
+    if !caller_is_pair_member(&req.sheet_id) {
+        ic_cdk::trap("not a member of this sheet's pair");
+    }
+    if !sheet_is_active(&req.sheet_id) {
+        ic_cdk::trap("sheet is not active");
+    }
+    let now = ic_cdk::api::time();
+    ENTRIES.with(|e| {
+        let mut map = e.borrow_mut();
+        let list = map.get_mut(&req.sheet_id);
+        let list = match list {
+            Some(l) => l,
+            None => ic_cdk::trap("entry not found"),
+        };
+        let entry = list
+            .iter_mut()
+            .find(|e| e.id == req.entry_id)
+            .ok_or_else(|| "entry not found")
+            .unwrap(/* panic trap */);
+        if entry.created_by != caller {
+            ic_cdk::trap("only the original creator can edit this entry");
+        }
+        entry.entry_key = req.entry_key;
+        entry.ciphertext = req.ciphertext;
+        entry.iv = req.iv;
+        entry.updated_at_server = Some(now);
+        entry.clone()
+    })
+}
+
+/// get_entry: fetch a single entry by (sheet_id, id).
+#[ic_cdk::query]
+fn get_entry(sheet_id: String, entry_id: u64) -> Option<Entry> {
+    if !caller_is_pair_member(&sheet_id) {
+        return None;
+    }
+    ENTRIES.with(|e| {
+        e.borrow()
+            .get(&sheet_id)
+            .and_then(|list| list.iter().find(|x| x.id == entry_id).cloned())
+    })
+}
+
+/// list_entries: paginated by `limit` (newest first). `cursor` is
+/// the smallest `id` already seen (exclusive).
+#[ic_cdk::query]
+fn list_entries(
+    sheet_id: String,
+    cursor: Option<u64>,
+    limit: u32,
+) -> ListEntriesResult {
+    if !caller_is_pair_member(&sheet_id) {
+        ic_cdk::trap("not a member of this sheet's pair");
+    }
+    let limit = limit.min(200) as usize;
+    let mut all: Vec<Entry> = ENTRIES.with(|e| {
+        e.borrow()
+            .get(&sheet_id)
+            .cloned()
+            .unwrap_or_default()
+    });
+    // Sort newest first.
+    all.sort_by(|a, b| b.id.cmp(&a.id));
+    let start = match cursor {
+        Some(c) => all.iter().position(|e| e.id < c).unwrap_or(all.len()),
+        None => 0,
+    };
+    let page: Vec<Entry> = all.into_iter().skip(start).take(limit).collect();
+    let next_cursor = if page.len() == limit {
+        page.last().map(|e| e.id)
+    } else {
+        None
+    };
+    ListEntriesResult {
+        entries: page,
+        next_cursor,
+    }
+}
