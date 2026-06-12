@@ -86,6 +86,13 @@ async function importPublicKeyRaw(raw: Uint8Array): Promise<CryptoKey> {
   );
 }
 
+// TS 5.5 + Node 20: Uint8Array<ArrayBufferLike> is not assignable
+// to BufferSource in strict mode. Cast through `as BufferSource`
+// (a no-op at runtime) so the call sites compile.
+function toBuf(b: Uint8Array): BufferSource {
+  return b as unknown as BufferSource;
+}
+
 function lsGet(key: string): string | null {
   try {
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -186,13 +193,13 @@ async function deriveAesKey(
     myPrivateKey,
     256,
   );
-  const hkdfKey = await subtle.importKey("raw", shared, "HKDF", false, ["deriveKey"]);
+  const hkdfKey = await subtle.importKey("raw", toBuf(shared), "HKDF", false, ["deriveKey"]);
   return subtle.deriveKey(
     {
       name: "HKDF",
       hash: "SHA-256",
-      salt: new TextEncoder().encode(HKDF_SALT),
-      info,
+      salt: toBuf(new TextEncoder().encode(HKDF_SALT)),
+      info: toBuf(info),
     },
     hkdfKey,
     { name: "AES-GCM", length: 256 },
@@ -219,10 +226,12 @@ export async function wrapSheetKey(
   const subtle = getSubtle();
   const aesKey = await deriveAesKey(senderPrivateKey, recipientPublicKey, info);
   const iv = randomBytes(12);
+  // TS 5.5: Uint8Array<ArrayBufferLike> is not assignable to BufferSource.
+  // Cast through `as BufferSource` to make the call happy.
   const ct = await subtle.encrypt(
-    { name: "AES-GCM", iv, tagLength: 128 },
+    { name: "AES-GCM", iv: toBuf(iv), tagLength: 128 },
     aesKey,
-    K_sheet,
+    toBuf(K_sheet),
   );
   return concatBytes(iv, new Uint8Array(ct));
 }
@@ -246,9 +255,9 @@ export async function unwrapSheetKey(
   const subtle = getSubtle();
   const aesKey = await deriveAesKey(recipientPrivateKey, senderPublicKey, info);
   const pt = await subtle.decrypt(
-    { name: "AES-GCM", iv, tagLength: 128 },
+    { name: "AES-GCM", iv: toBuf(iv), tagLength: 128 },
     aesKey,
-    ct,
+    toBuf(ct),
   );
   return new Uint8Array(pt);
 }

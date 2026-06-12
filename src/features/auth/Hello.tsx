@@ -1,6 +1,6 @@
 import { useAuth } from "./AuthProvider";
 import { useEffect, useState } from "react";
-import { useNavigate } from "react-router-dom";
+import { Link, useNavigate } from "react-router-dom";
 
 type WhoAmIResult = string | null;
 
@@ -54,16 +54,14 @@ export function Hello() {
       <div className="card">
         <h3>What's next?</h3>
         <p className="muted">
-          Phase 1 lands you on this "hello" page after sign-in. Phase 2
-          adds pair setup, Phase 3 adds the entries, Phase 4 adds the
-          rest of the v1.0 product.
+          Set up a pair with someone, then create a sheet to start tracking
+          IOUs in your chosen currencies.
         </p>
-        <button
-          onClick={() => void signIn()}
-          style={{ marginTop: 12 }}
-        >
-          Re-authenticate (test)
-        </button>
+        <div className="cta-row">
+          <Link to="/pairs">
+            <button>Go to my pairs</button>
+          </Link>
+        </div>
       </div>
     </div>
   );
