@@ -13,7 +13,8 @@
     "deploy:local": "dfx deploy iou_backend && pnpm build && dfx deploy iou_assets",
     "deploy:ic": "dfx deploy --network ic",
     "smoke": "pnpm exec tsx scripts/awa-smoke.ts",
-    "smoke:reset": "bash scripts/smoke-reset.sh"
+    "smoke:reset": "bash scripts/smoke-reset.sh",
+    "test:unit": "vitest run"
   },
   "dependencies": {
     "@dfinity/agent": "^2.1.0",

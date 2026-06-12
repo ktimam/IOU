@@ -9,8 +9,21 @@
 
 import { HttpAgent, Actor } from "@dfinity/agent";
 import { Secp256k1KeyIdentity } from "@dfinity/identity-secp256k1";
+import { webcrypto } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { idlFactory } from "../src/backend/declarations";
+import {
+  deriveUserKeypair,
+  newSheetKey,
+  unwrapSheetKey,
+  wrapSheetKey,
+} from "../src/features/crypto/devVetkd";
+
+// Node polyfill for WebCrypto (and the localStorage shim is implicit:
+// devVetkd's localStorage access is guarded with try/catch so it
+// just no-ops in Node, and we pass the keypair directly via the
+// exported API).
+if (!(globalThis as any).crypto) (globalThis as any).crypto = webcrypto;
 
 const network = process.env.IOU_NETWORK || "local";
 const canisterId =
@@ -45,6 +58,12 @@ function isActive(state: any): boolean {
 }
 function isClosed(state: any): boolean {
   return state && typeof state === "object" && "Closed" in state;
+}
+
+function bytesToHex(b: Uint8Array): string {
+  return Array.from(b)
+    .map((x) => x.toString(16).padStart(2, "0"))
+    .join("");
 }
 
 function ok(cond: boolean, msg: string) {
@@ -110,14 +129,27 @@ async function main() {
     "partner is member[1]",
   );
 
-  // ─── 6. create_sheet as partner ───
-  console.log("\n=== create_sheet (partner) ===");
+  // ─── 6. create_sheet as partner (with real crypto wrap) ───
+  console.log("\n=== create_sheet (partner) — with devVetkd wrap ===");
+  // In v1 dev: each principal has a P-256 keypair persisted in
+  // localStorage. The partner (sheet creator) generates K_sheet
+  // and wraps it for each member using the member's public key.
+  // The store as a side effect: devVetkd uses localStorage in the
+  // browser; in Node, that no-ops, so we pass the keypair directly
+  // by reading the dev secret deterministically.
+  const partnerKp = await deriveUserKeypair(partnerIdentity.getPrincipal().toText());
+  const testerKp = await deriveUserKeypair(testerIdentity.getPrincipal().toText());
+  const K_sheet = newSheetKey();
+  const K_sheet_hex = bytesToHex(K_sheet);
+  // Partner wraps for both members using its own private key.
+  const wrappedKeyA = await wrapSheetKey(K_sheet, testerKp.publicKey, partnerKp.privateKey);
+  const wrappedKeyB = await wrapSheetKey(K_sheet, partnerKp.publicKey, partnerKp.privateKey);
   const sheetReq = {
     pair_id: pairId,
     enabled_currencies: ["USD", "EGP"],
     closing_window_days: 365,
-    wrapped_key_a: Array.from(new TextEncoder().encode("wrapA-fake-001")),
-    wrapped_key_b: Array.from(new TextEncoder().encode("wrapB-fake-001")),
+    wrapped_key_a: Array.from(wrappedKeyA),
+    wrapped_key_b: Array.from(wrappedKeyB),
   };
   const sheet = await (partner as any).create_sheet(sheetReq);
   console.log("sheet id:", sheet.id);
@@ -125,14 +157,41 @@ async function main() {
   ok(sheet.pair_id === pairId, "sheet belongs to the pair");
   ok(isActive(sheet.state), "sheet is Active");
 
-  // ─── 7. get_sheet_wrapped_key as tester (should return wrap_a) ───
+  // ─── 7. get_sheet_wrapped_key as tester (should return wrapA) ───
   console.log("\n=== get_sheet_wrapped_key (tester) ===");
   const wrappedA = unwrap(await (tester as any).get_sheet_wrapped_key(sheetId));
-  console.log("tester got:", new TextDecoder().decode(new Uint8Array(wrappedA ?? [])));
-  ok(
-    new TextDecoder().decode(new Uint8Array(wrappedA ?? [])) === "wrapA-fake-001",
-    "tester receives wrapA",
-  );
+  if (!wrappedA) {
+    ok(false, "tester receives a wrapped blob");
+  } else {
+    // Tester unwraps using the partner's PUBLIC KEY (because partner
+    // was the wrap-sender) and its own private key.
+    const unwrappedTester = await unwrapSheetKey(
+      new Uint8Array(wrappedA),
+      testerKp.privateKey,
+      partnerKp.publicKey,
+    );
+    ok(
+      bytesToHex(unwrappedTester) === K_sheet_hex,
+      "tester unwraps to the original K_sheet",
+    );
+  }
+
+  // ─── 7b. partner also unwraps its own copy ───
+  console.log("\n=== get_sheet_wrapped_key (partner) ===");
+  const wrappedB = unwrap(await (partner as any).get_sheet_wrapped_key(sheetId));
+  if (!wrappedB) {
+    ok(false, "partner receives a wrapped blob");
+  } else {
+    const unwrappedPartner = await unwrapSheetKey(
+      new Uint8Array(wrappedB),
+      partnerKp.privateKey,
+      partnerKp.publicKey,
+    );
+    ok(
+      bytesToHex(unwrappedPartner) === K_sheet_hex,
+      "partner unwraps to the same K_sheet",
+    );
+  }
 
   // ─── 8. add_currency as tester ───
   console.log("\n=== add_currency (tester) ===");
