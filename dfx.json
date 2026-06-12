@@ -4,7 +4,7 @@
       "type": "custom",
       "candid": "src/iou_backend.did",
       "wasm": "target/wasm32-unknown-unknown/release/iou_backend.wasm",
-      "build": "cargo build --target wasm32-unknown-unknown --release"
+      "build": "scripts/build-backend.sh"
     },
     "iou_assets": {
       "type": "assets",

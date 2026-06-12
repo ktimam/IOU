@@ -1,11 +1,7 @@
 import { useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
-import { useAuth } from "./AuthProvider";
-
-// The actual encryption happens client-side using the user's principal
-// (or, on the local dev fallback, a deterministic key). For Phase 1 we
-// just store the raw string encoded as bytes; the crypto glue is in
-// Phase 1.2 (see plan §Phase 1.2 in docs/03-plan.md).
+import { useAuth, buildAgent } from "./AuthProvider";
+import { createActor } from "../../backend/declarations";
 
 function utf8ToBlob(s: string): Uint8Array {
   return new TextEncoder().encode(s);
@@ -31,20 +27,27 @@ export function SetDisplayName() {
       setErr("Name must be 1..=32 characters");
       return;
     }
+    // The useEffect above redirects anonymous users, but TS doesn't
+    // narrow state across the early return. Re-check at call time.
+    if (state.kind !== "authenticated") {
+      setErr("Please sign in first");
+      return;
+    }
     setBusy(true);
     setErr(null);
     try {
-      // Phase 1: store the name as a raw byte blob. In Phase 1.2 this
-      // is replaced with the encrypted-by-vetkd version.
+      // Build an authenticated agent + actor and call the canister.
+      // The display name is currently stored as raw UTF-8 bytes; in
+      // Phase 1.2 it gets wrapped with vetkd before being sent.
+      const agent = await buildAgent(state.identity);
+      const actor = createActor(agent);
       const wrapped = utf8ToBlob(name.trim());
       const iv = utf8ToBlob("v1-dev-iv-not-secure");
-      // Until the backend canister is actually deployed and the real
-      // declarations are generated, we just log the call. Once the
-      // canister is up, this becomes:
-      //
-      //   const actor = createActor(state.identity);
-      //   await actor.setDisplayName(Array.from(wrapped), Array.from(iv));
-      console.warn("setDisplayName stub called", { wrapped: Array.from(wrapped), iv: Array.from(iv) });
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      await (actor as any).set_display_name(
+        Array.from(wrapped),
+        Array.from(iv),
+      );
       nav("/", { replace: true });
     } catch (e) {
       setErr((e as Error).message ?? "Failed to save");
