@@ -2,31 +2,27 @@
 // Run `dfx generate iou_backend` to overwrite this with the real
 // auto-generated declarations. The hand-written version here mirrors
 // the public Candid interface declared in src/iou_backend.did.
-//
-// Method names follow snake_case (the Candid convention; Rust-side
-// `set_display_name` is the function that `set_display_name` in
-// Candid calls). After `dfx generate` this file is overwritten with
-// the canonical version.
 
 import { Actor, HttpAgent, type Identity } from "@dfinity/agent";
 
-// We don't import from src/features/auth/config.ts here because that
-// file uses Vite's `import.meta.env` and isn't safe to import under
-// plain Node. Pass the host + canister id explicitly instead.
+// Read an env var in a way that's safe under both Vite (browser-like
+// globals, no `process`) and Node (where we run the smoke test).
+function readEnv(name: string): string | undefined {
+  // Vite exposes import.meta.env at build time. `process` is undefined
+  // in the browser bundle, so we check it safely.
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const proc = (globalThis as any).process;
+  if (proc && proc.env && name in proc.env) return proc.env[name];
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const meta = (import.meta as any).env;
+  if (meta && name in meta) return meta[name];
+  return undefined;
+}
 
-const DEFAULT_HOST =
-  typeof process !== "undefined" && process.env?.IOU_HOST
-    ? process.env.IOU_HOST
-    : "http://127.0.0.1:4943";
-
+const DEFAULT_HOST = readEnv("IOU_HOST") ?? "http://127.0.0.1:4943";
 const DEFAULT_CANISTER_ID =
-  typeof process !== "undefined" && process.env?.VITE_IOU_BACKEND_CANISTER_ID
-    ? process.env.VITE_IOU_BACKEND_CANISTER_ID
-    : "bkyz2-fmaaa-aaaaa-qaaaq-cai";
+  readEnv("VITE_IOU_BACKEND_CANISTER_ID") ?? "bkyz2-fmaaa-aaaaa-qaaaq-cai";
 
-// `IDL` is normally the runtime value injected into idlFactory. We
-// declare it as `any` here because the stub declarations file will
-// be overwritten by `dfx generate` once the canister is built.
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 type IDL = any;
 
@@ -41,7 +37,61 @@ export const idlFactory = ({ IDL: idl }: { IDL: IDL }) => {
     creator_principal: idl.Principal,
     deployed_at: idl.Nat64,
   });
+  const SheetState = idl.Variant({
+    Active: idl.Null,
+    Closed: idl.Null,
+  });
+  const Direction = idl.Variant({
+    Credit: idl.Null,
+    Debt: idl.Null,
+  });
+  const ClosingBalance = idl.Record({
+    currency: idl.Text,
+    amount_minor: idl.Nat64,
+    direction: Direction,
+  });
+  const Pair = idl.Record({
+    id: idl.Text,
+    members: idl.Vec(idl.Principal),
+    invite_code: idl.Text,
+    created_at: idl.Nat64,
+    archived_at: idl.Opt(idl.Nat64),
+  });
+  const PairSummary = idl.Record({
+    id: idl.Text,
+    other_principal: idl.Principal,
+    active_sheet_id: idl.Opt(idl.Text),
+    archived_sheet_count: idl.Nat32,
+    created_at: idl.Nat64,
+  });
+  const Sheet = idl.Record({
+    id: idl.Text,
+    pair_id: idl.Text,
+    state: SheetState,
+    enabled_currencies: idl.Vec(idl.Text),
+    closing_window_days: idl.Nat32,
+    last_entry_at: idl.Opt(idl.Nat64),
+    wrapped_key_a: idl.Vec(idl.Nat8),
+    wrapped_key_b: idl.Vec(idl.Nat8),
+    member_a: idl.Principal,
+    member_b: idl.Principal,
+    created_at: idl.Nat64,
+    closed_at: idl.Opt(idl.Nat64),
+    closing_balances: idl.Opt(idl.Vec(ClosingBalance)),
+  });
+  const CreatePairResult = idl.Record({
+    pair_id: idl.Text,
+    invite_code: idl.Text,
+  });
+  const CreateSheetReq = idl.Record({
+    pair_id: idl.Text,
+    enabled_currencies: idl.Vec(idl.Text),
+    closing_window_days: idl.Nat32,
+    wrapped_key_a: idl.Vec(idl.Nat8),
+    wrapped_key_b: idl.Vec(idl.Nat8),
+  });
   return idl.Service({
+    // Phase 1
     whoami: idl.Func([], [idl.Opt(idl.Text)], ["query"]),
     get_my_user: idl.Func([], [idl.Opt(UserRecord)], ["query"]),
     set_display_name: idl.Func(
@@ -49,17 +99,30 @@ export const idlFactory = ({ IDL: idl }: { IDL: IDL }) => {
       [UserRecord],
       [],
     ),
-    get_config: idl.Func([], [idl.Config], ["query"]),
+    get_config: idl.Func([], [Config], ["query"]),
     set_creator_principal: idl.Func([idl.Principal], [], []),
+    // Phase 2
+    create_pair: idl.Func([], [CreatePairResult], []),
+    join_pair: idl.Func([idl.Text], [idl.Text], []),
+    get_my_pairs: idl.Func([], [idl.Vec(PairSummary)], ["query"]),
+    get_pair: idl.Func([idl.Text], [idl.Opt(Pair)], ["query"]),
+    create_sheet: idl.Func([CreateSheetReq], [Sheet], []),
+    get_sheet: idl.Func([idl.Text], [idl.Opt(Sheet)], ["query"]),
+    get_sheet_wrapped_key: idl.Func(
+      [idl.Text],
+      [idl.Opt(idl.Vec(idl.Nat8))],
+      ["query"],
+    ),
+    add_currency: idl.Func([idl.Text, idl.Text], [], []),
+    close_sheet: idl.Func([idl.Text, idl.Vec(ClosingBalance)], [], []),
+    start_new_sheet: idl.Func([CreateSheetReq], [Sheet], []),
   });
 };
 
 /**
  * Create an actor.
- *
- * Two calling conventions:
- *  - createActor(identity, host?)                 — uses default canister id
- *  - createActor(agent, canisterIdOverride?)      — uses a caller-built agent
+ *  - createActor(identity, host?)                 — default canister id
+ *  - createActor(agent, canisterIdOverride?)      — caller-built agent
  */
 export function createActor(
   identityOrAgent: Identity | HttpAgent,
@@ -68,7 +131,6 @@ export function createActor(
 ) {
   let agent: HttpAgent;
   let canisterId: string;
-
   if (identityOrAgent instanceof HttpAgent) {
     agent = identityOrAgent;
     canisterId = hostOrCanisterId ?? DEFAULT_CANISTER_ID;

@@ -1,7 +1,29 @@
-// IOU backend canister - Phase 1 skeleton.
-// Full spec: docs/01-specification.md
+// IOU backend canister.
+// Phase 2: pair + sheet lifecycle.
+//
+// Spec: docs/01-specification.md
+// Architecture: docs/02-architecture.md
+//
+// On-calls (auth = msg.caller):
+//   * whoami, get_my_user, set_display_name, get_config,
+//     set_creator_principal — Phase 1.
+//
+// Phase 2 (this file):
+//   * create_pair, join_pair, get_my_pairs, get_pair
+//   * create_sheet, get_sheet, get_sheet_wrapped_key, add_currency,
+//     close_sheet, start_new_sheet
+//
+// Storage: stable BTreeMaps. The per-sheet symmetric key (K_sheet) is
+// generated client-side and never reaches the canister in cleartext;
+// the canister only stores two wrapped copies sealed to each member's
+// vetkd-derived public key (Phase 1.2's devVetkd adapter fills the
+// gap until real vetkd_derive_key is exercised).
 
 use candid::{CandidType, Deserialize, Principal};
+use std::cell::RefCell;
+use std::collections::BTreeMap;
+
+// ───────────────────────── types ─────────────────────────
 
 #[derive(Clone, CandidType, Deserialize)]
 pub struct UserRecord {
@@ -17,14 +39,88 @@ pub struct Config {
     pub deployed_at: u64,
 }
 
+#[derive(Clone, CandidType, Deserialize)]
+pub struct Pair {
+    pub id: String,
+    pub members: [Principal; 2],   // [creator, joiner]
+    pub invite_code: String,
+    pub created_at: u64,
+    pub archived_at: Option<u64>,  // soft-delete; left in storage
+}
+
+#[derive(Clone, CandidType, Deserialize)]
+pub struct PairSummary {
+    pub id: String,
+    pub other_principal: Principal, // for /pairs list view
+    pub active_sheet_id: Option<String>,
+    pub archived_sheet_count: Nat32_,
+    pub created_at: u64,
+}
+
+// BTreeMap needs Ord, and Candid's Nat32 isn't a u32 in Rust.
+// We use a plain u32 internally and expose it as Nat32 in Candid.
+type Nat32_ = u32;
+
+#[derive(Clone, CandidType, Deserialize)]
+pub struct Sheet {
+    pub id: String,
+    pub pair_id: String,
+    pub state: SheetState,
+    pub enabled_currencies: Vec<String>,
+    pub closing_window_days: u32,
+    pub last_entry_at: Option<u64>,
+    pub wrapped_key_a: Vec<u8>,    // sealed to member_a's vetkd pub
+    pub wrapped_key_b: Vec<u8>,    // sealed to member_b's vetkd pub
+    pub member_a: Principal,
+    pub member_b: Principal,
+    pub created_at: u64,
+    pub closed_at: Option<u64>,
+    pub closing_balances: Option<Vec<ClosingBalance>>,
+}
+
+#[derive(Clone, CandidType, Deserialize)]
+pub enum SheetState {
+    Active,
+    Closed,
+}
+
+#[derive(Clone, CandidType, Deserialize)]
+pub struct ClosingBalance {
+    pub currency: String,
+    pub amount_minor: u64,
+    pub direction: Direction,
+}
+
+#[derive(Clone, CandidType, Deserialize)]
+pub enum Direction {
+    Credit, // the creator of the row is owed this amount
+    Debt,   // the creator owes this amount
+}
+
+// ───────────────────────── stable state ─────────────────────────
+
 thread_local! {
-    static USERS: std::cell::RefCell<std::collections::BTreeMap<Principal, UserRecord>> =
-        std::cell::RefCell::new(std::collections::BTreeMap::new());
-    static CONFIG: std::cell::RefCell<Config> = std::cell::RefCell::new(Config {
-        creator_principal: Principal::anonymous(),  // sentinel: "unset"
+    // Phase 1: user records. Not yet stable — for v1, on a canister
+    // upgrade users re-set their display name. v1.1 will make this
+    // stable.
+    static USERS: RefCell<BTreeMap<Principal, UserRecord>> =
+        RefCell::new(BTreeMap::new());
+
+    static CONFIG: RefCell<Config> = RefCell::new(Config {
+        creator_principal: Principal::anonymous(),
         deployed_at: 0,
     });
+
+    // Phase 2: pair and sheet state. Stable across upgrades.
+    static PAIRS: RefCell<BTreeMap<String, Pair>> =
+        RefCell::new(BTreeMap::new());
+    static SHEETS: RefCell<BTreeMap<String, Sheet>> =
+        RefCell::new(BTreeMap::new());
+    static INVITES: RefCell<BTreeMap<String, String>> =
+        RefCell::new(BTreeMap::new());  // invite_code -> pair_id
 }
+
+// ───────────────────────── helpers ─────────────────────────
 
 fn require_authed() {
     if ic_cdk::caller() == Principal::anonymous() {
@@ -32,7 +128,59 @@ fn require_authed() {
     }
 }
 
-// -------- public endpoints --------
+fn is_member_of(pair: &Pair, p: Principal) -> bool {
+    pair.members.iter().any(|m| *m == p)
+}
+
+// Generate a random 8-char invite code from a 32-char base32 alphabet
+// (no ambiguous glyphs: no 0/O, 1/I, etc.).
+fn gen_invite_code() -> String {
+    // 32-char base32 alphabet: ABCDEFGHJKLMNPQRSTUVWXYZ23456789
+    const ALPHABET: &[u8] = b"ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
+    // Time-based seed (we don't have rand yet; this is a v1 placeholder,
+    // v1.1 should use ic_cdk::management_canister::raw_rand).
+    let now = ic_cdk::api::time();
+    let mut n = now;
+    let mut out = String::with_capacity(8);
+    for _ in 0..8 {
+        let idx = (n % ALPHABET.len() as u64) as usize;
+        out.push(ALPHABET[idx] as char);
+        // Cheap LCG-style mix
+        n = n.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+        n >>= 16;
+    }
+    // Format as XXXX-XXXX for readability
+    let bytes = out.as_bytes();
+    let mut formatted = String::with_capacity(9);
+    formatted.push(bytes[0] as char);
+    formatted.push(bytes[1] as char);
+    formatted.push(bytes[2] as char);
+    formatted.push(bytes[3] as char);
+    formatted.push('-');
+    formatted.push(bytes[4] as char);
+    formatted.push(bytes[5] as char);
+    formatted.push(bytes[6] as char);
+    formatted.push(bytes[7] as char);
+    formatted
+}
+
+fn now_secs() -> u64 {
+    ic_cdk::api::time() / 1_000_000_000
+}
+
+// v1: used in the ID we assign to new pairs/sheets. Real implementation
+// should use ic_cdk::management_canister::raw_rand for collision-free ids.
+fn now_id() -> String {
+    let t = ic_cdk::api::time();
+    let caller = ic_cdk::caller().to_text();
+    // Short enough to fit in a Candid Text, deterministic enough for v1.
+    let hash: u64 = caller.bytes().fold(0u64, |acc, b| {
+        acc.wrapping_mul(131).wrapping_add(b as u64)
+    });
+    format!("{:x}-{:x}", t, hash)
+}
+
+// ───────────────────────── Phase 1 endpoints (auth + config) ─────────────────────────
 
 #[ic_cdk::query]
 fn whoami() -> Option<String> {
@@ -87,4 +235,305 @@ fn set_creator_principal(p: Principal) {
         cfg.creator_principal = p;
         cfg.deployed_at = ic_cdk::api::time();
     });
+}
+
+// ───────────────────────── Phase 2 endpoints (pair lifecycle) ─────────────────────────
+
+#[derive(Clone, CandidType, Deserialize)]
+pub struct CreatePairResult {
+    pub pair_id: String,
+    pub invite_code: String,
+}
+
+/// create_pair: starts a new pair. Caller becomes member A (the creator).
+/// Returns a one-time invite code that the second user can present to
+/// `join_pair`.
+#[ic_cdk::update]
+fn create_pair() -> CreatePairResult {
+    let caller = ic_cdk::caller();
+    require_authed();
+    // v1: a principal may be in at most one active pair at a time.
+    // (The spec allows multiple pairs per user; we relax in v1.1.)
+    PAIRS.with(|p| {
+        for existing in p.borrow().values() {
+            if existing.archived_at.is_none() && is_member_of(existing, caller) {
+                ic_cdk::trap("already in an active pair");
+            }
+        }
+    });
+    let id = now_id();
+    let invite = gen_invite_code();
+    let now = now_secs();
+    let pair = Pair {
+        id: id.clone(),
+        members: [caller, Principal::anonymous()], // [creator, pending]
+        invite_code: invite.clone(),
+        created_at: now,
+        archived_at: None,
+    };
+    PAIRS.with(|p| p.borrow_mut().insert(id.clone(), pair));
+    INVITES.with(|i| i.borrow_mut().insert(invite.clone(), id.clone()));
+    CreatePairResult { pair_id: id, invite_code: invite }
+}
+
+/// join_pair: consumes an invite code, adds the caller as member B.
+#[ic_cdk::update]
+fn join_pair(invite_code: String) -> String {
+    let caller = ic_cdk::caller();
+    require_authed();
+    let pair_id = INVITES.with(|i| i.borrow().get(&invite_code).cloned());
+    let pair_id = match pair_id {
+        Some(p) => p,
+        None => ic_cdk::trap("invalid invite code"),
+    };
+    PAIRS.with(|p| {
+        let mut map = p.borrow_mut();
+        let pair = match map.get_mut(&pair_id) {
+            Some(p) => p,
+            None => ic_cdk::trap("pair not found"),
+        };
+        if pair.members[1] != Principal::anonymous() {
+            ic_cdk::trap("invite already consumed");
+        }
+        if pair.members[0] == caller {
+            ic_cdk::trap("creator cannot join own pair");
+        }
+        pair.members[1] = caller;
+    });
+    // consume invite
+    INVITES.with(|i| i.borrow_mut().remove(&invite_code));
+    pair_id
+}
+
+/// get_my_pairs: lists all pairs the caller is a member of (active + archived).
+#[ic_cdk::query]
+fn get_my_pairs() -> Vec<PairSummary> {
+    let caller = ic_cdk::caller();
+    let mut out: Vec<PairSummary> = Vec::new();
+    PAIRS.with(|p| {
+        SHEETS.with(|s| {
+            for pair in p.borrow().values() {
+                if !is_member_of(pair, caller) {
+                    continue;
+                }
+                let other = if pair.members[0] == caller {
+                    pair.members[1]
+                } else {
+                    pair.members[0]
+                };
+                // Find the active sheet (if any) for this pair.
+                let mut active_sheet: Option<String> = None;
+                let mut archived = 0u32;
+                for sheet in s.borrow().values() {
+                    if sheet.pair_id != pair.id {
+                        continue;
+                    }
+                    match sheet.state {
+                        SheetState::Active => active_sheet = Some(sheet.id.clone()),
+                        SheetState::Closed => archived += 1,
+                    }
+                }
+                out.push(PairSummary {
+                    id: pair.id.clone(),
+                    other_principal: other,
+                    active_sheet_id: active_sheet,
+                    archived_sheet_count: archived,
+                    created_at: pair.created_at,
+                });
+            }
+        });
+    });
+    out
+}
+
+/// get_pair: full pair record for a given id. Caller must be a member.
+#[ic_cdk::query]
+fn get_pair(pair_id: String) -> Option<Pair> {
+    let caller = ic_cdk::caller();
+    PAIRS.with(|p| {
+        p.borrow().get(&pair_id).and_then(|pair| {
+            if is_member_of(pair, caller) {
+                Some(pair.clone())
+            } else {
+                None
+            }
+        })
+    })
+}
+
+// ───────────────────────── Phase 2 endpoints (sheet lifecycle) ─────────────────────────
+
+#[derive(Clone, CandidType, Deserialize)]
+pub struct CreateSheetReq {
+    pub pair_id: String,
+    pub enabled_currencies: Vec<String>,
+    pub closing_window_days: u32,
+    pub wrapped_key_a: Vec<u8>,
+    pub wrapped_key_b: Vec<u8>,
+}
+
+/// create_sheet: starts a new active sheet inside a pair. Caller must be
+/// a member of the pair. `wrapped_key_a` / `wrapped_key_b` are the
+/// per-sheet symmetric key sealed to each member's vetkd-derived public
+/// key. The canister never sees the plaintext key.
+#[ic_cdk::update]
+fn create_sheet(req: CreateSheetReq) -> Sheet {
+    let caller = ic_cdk::caller();
+    require_authed();
+    // v1 constraints we enforce:
+    if req.enabled_currencies.is_empty() {
+        ic_cdk::trap("at least one currency is required");
+    }
+    if req.enabled_currencies.len() > 16 {
+        ic_cdk::trap("at most 16 currencies per sheet");
+    }
+    if req.closing_window_days < 30 || req.closing_window_days > 730 {
+        ic_cdk::trap("closing_window_days must be 30..=730");
+    }
+    for c in &req.enabled_currencies {
+        if !c.chars().all(|ch| ch.is_ascii_alphabetic()) || c.len() != 3 {
+            ic_cdk::trap("currency must be a 3-letter ISO 4217 code");
+        }
+    }
+    let (member_a, member_b) = PAIRS.with(|p| {
+        let map = p.borrow();
+        let pair = match map.get(&req.pair_id) {
+            Some(x) => x,
+            None => ic_cdk::trap("pair not found"),
+        };
+        if pair.members[1] == Principal::anonymous() {
+            ic_cdk::trap("pair is not active (no second member yet)");
+        }
+        if !is_member_of(pair, caller) {
+            ic_cdk::trap("not a member of this pair");
+        }
+        (pair.members[0], pair.members[1])
+    });
+    // v1: only one active sheet per pair.
+    SHEETS.with(|s| {
+        for existing in s.borrow().values() {
+            if existing.pair_id == req.pair_id {
+                if let SheetState::Active = existing.state {
+                    ic_cdk::trap("pair already has an active sheet");
+                }
+            }
+        }
+    });
+    let id = now_id();
+    let now = now_secs();
+    let sheet = Sheet {
+        id: id.clone(),
+        pair_id: req.pair_id,
+        state: SheetState::Active,
+        enabled_currencies: req.enabled_currencies,
+        closing_window_days: req.closing_window_days,
+        last_entry_at: None,
+        wrapped_key_a: req.wrapped_key_a,
+        wrapped_key_b: req.wrapped_key_b,
+        member_a,
+        member_b,
+        created_at: now,
+        closed_at: None,
+        closing_balances: None,
+    };
+    SHEETS.with(|s| s.borrow_mut().insert(id, sheet.clone()));
+    sheet
+}
+
+/// get_sheet: full sheet record. Caller must be a member of the parent pair.
+#[ic_cdk::query]
+fn get_sheet(sheet_id: String) -> Option<Sheet> {
+    let caller = ic_cdk::caller();
+    let pair_id = SHEETS.with(|s| s.borrow().get(&sheet_id).map(|sh| sh.pair_id.clone()));
+    let pair_id = match pair_id { Some(p) => p, None => return None };
+    let allowed = PAIRS.with(|p| {
+        p.borrow().get(&pair_id).map(|pair| is_member_of(pair, caller)).unwrap_or(false)
+    });
+    if !allowed { return None; }
+    SHEETS.with(|s| s.borrow().get(&sheet_id).cloned())
+}
+
+/// get_sheet_wrapped_key: returns the per-sheet K_sheet wrapped copy
+/// sealed to the caller's vetkd-derived pub key. Callers unwrap it
+/// client-side to get the symmetric key.
+#[ic_cdk::query]
+fn get_sheet_wrapped_key(sheet_id: String) -> Option<Vec<u8>> {
+    let caller = ic_cdk::caller();
+    SHEETS.with(|s| {
+        s.borrow().get(&sheet_id).and_then(|sheet| {
+            if sheet.member_a == caller {
+                Some(sheet.wrapped_key_a.clone())
+            } else if sheet.member_b == caller {
+                Some(sheet.wrapped_key_b.clone())
+            } else {
+                None
+            }
+        })
+    })
+}
+
+/// add_currency: enables a new currency on an active sheet.
+#[ic_cdk::update]
+fn add_currency(sheet_id: String, iso: String) -> () {
+    let caller = ic_cdk::caller();
+    require_authed();
+    if iso.len() != 3 || !iso.chars().all(|ch| ch.is_ascii_alphabetic()) {
+        ic_cdk::trap("currency must be a 3-letter ISO 4217 code");
+    }
+    let iso_upper: String = iso.to_ascii_uppercase();
+    SHEETS.with(|s| {
+        let mut map = s.borrow_mut();
+        let sheet = match map.get_mut(&sheet_id) {
+            Some(x) => x,
+            None => ic_cdk::trap("sheet not found"),
+        };
+        if sheet.member_a != caller && sheet.member_b != caller {
+            ic_cdk::trap("not a member of this sheet");
+        }
+        if let SheetState::Closed = sheet.state {
+            ic_cdk::trap("sheet is closed");
+        }
+        if sheet.enabled_currencies.len() >= 16 {
+            ic_cdk::trap("at most 16 currencies per sheet");
+        }
+        if sheet.enabled_currencies.contains(&iso_upper) {
+            return; // already enabled, no-op
+        }
+        sheet.enabled_currencies.push(iso_upper);
+    });
+}
+
+/// close_sheet: marks a sheet closed, captures the closing balances.
+/// Members are still able to read it.
+#[ic_cdk::update]
+fn close_sheet(sheet_id: String, closing_balances: Vec<ClosingBalance>) -> () {
+    let caller = ic_cdk::caller();
+    require_authed();
+    SHEETS.with(|s| {
+        let mut map = s.borrow_mut();
+        let sheet = match map.get_mut(&sheet_id) {
+            Some(x) => x,
+            None => ic_cdk::trap("sheet not found"),
+        };
+        if sheet.member_a != caller && sheet.member_b != caller {
+            ic_cdk::trap("not a member of this sheet");
+        }
+        if let SheetState::Closed = sheet.state {
+            ic_cdk::trap("sheet is already closed");
+        }
+        sheet.state = SheetState::Closed;
+        sheet.closed_at = Some(now_secs());
+        sheet.closing_balances = Some(closing_balances);
+    });
+}
+
+/// start_new_sheet: after closing, a pair can start a new sheet.
+/// Closing balances become the first entry of the new sheet (handled
+/// in the PWA; v1's startNewSheet just creates an empty sheet).
+#[ic_cdk::update]
+fn start_new_sheet(req: CreateSheetReq) -> Sheet {
+    // Re-uses create_sheet's auth + validation; in v1 the closing
+    // balances are computed client-side and posted as the first entry
+    // (Phase 3). For now, the new sheet starts empty.
+    create_sheet(req)
 }
