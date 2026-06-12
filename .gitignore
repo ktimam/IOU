@@ -1,0 +1,40 @@
+node_modules/
+dist/
+.DS_Store
+.env
+.env.local
+.env.*.local
+
+# dfx
+.dfx/
+.wallet/
+dfx.json.bak
+*.mo.bak
+
+# editor
+.vscode/
+.idea/
+
+# build artifacts
+*.wasm
+target/
+
+# TypeScript / Vite build output
+*.tsbuildinfo
+vite.config.d.ts
+vite.config.js
+
+# logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# tests
+coverage/
+playwright-report/
+test-results/
+
+# OS
+Thumbs.db

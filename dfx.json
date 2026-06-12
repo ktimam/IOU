@@ -1,0 +1,16 @@
+{
+  "canisters": {
+    "iou_backend": {
+      "type": "custom",
+      "candid": "src/iou_backend.did",
+      "wasm": "target/wasm32-unknown-unknown/release/iou_backend.wasm",
+      "build": "cargo build --target wasm32-unknown-unknown --release"
+    },
+    "iou_assets": {
+      "type": "assets",
+      "source": ["dist"],
+      "build": "pnpm build"
+    }
+  },
+  "version": 1
+}

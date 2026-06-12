@@ -1,0 +1,23 @@
+// IOU backend Candid interface.
+// Hand-written to match lib.rs.
+// Re-generate with `dfx generate iou_backend` once the canister builds.
+
+type UserRecord = record {
+    user_principal : principal;
+    wrapped_display_name : vec nat8;
+    display_name_iv : vec nat8;
+    created_at : nat64;
+};
+
+type Config = record {
+    creator_principal : principal;
+    deployed_at : nat64;
+};
+
+service : {
+    whoami : () -> (opt text) query;
+    get_my_user : () -> (opt UserRecord) query;
+    set_display_name : (vec nat8, vec nat8) -> (UserRecord);
+    get_config : () -> (Config) query;
+    set_creator_principal : (principal) -> ();
+}
