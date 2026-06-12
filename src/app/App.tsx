@@ -11,6 +11,7 @@ import {NewSheet} from "../features/flows/NewSheet";
 import { SheetKeyProvider } from "../features/flows/SheetKeyContext";
 import { SheetPage } from "../features/entries/SheetPage";
 import { ArchivedSheetsPage } from "../features/entries/ArchivedSheetsPage";
+import { RecoveryKeyPage } from "../features/recovery/RecoveryKeyPage";
 import { ToastProvider } from "../features/ui/Toasts";
 
 export function App() {
@@ -32,6 +33,7 @@ export function App() {
                 path="/pair/:pairId/archived"
                 element={<ArchivedSheetsPage />}
               />
+              <Route path="/recovery-key" element={<RecoveryKeyPage />} />
               <Route path="*" element={<Navigate to="/" replace />} />
             </Routes>
           </Layout>

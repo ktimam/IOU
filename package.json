@@ -12,7 +12,7 @@
     "test:watch": "vitest",
     "e2e": "playwright test",
     "deploy:local": "dfx deploy iou_backend && pnpm build && dfx deploy iou_assets",
-    "deploy:ic": "dfx deploy --network ic",
+    "deploy:ic": "bash scripts/deploy-prod.sh",
     "smoke": "pnpm exec tsx scripts/awa-smoke.ts",
     "smoke:reset": "bash scripts/smoke-reset.sh",
     "test:unit": "vitest run"
@@ -23,6 +23,7 @@
     "@dfinity/candid": "^2.1.0",
     "@dfinity/identity-secp256k1": "^2.1.0",
     "@dfinity/principal": "^2.1.0",
+    "@scure/bip39": "^2.2.0",
     "react": "^18.3.1",
     "react-dom": "^18.3.1",
     "react-router-dom": "^6.26.0"

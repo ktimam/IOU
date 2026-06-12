@@ -175,11 +175,12 @@ export function newSheetKey(): Uint8Array {
 }
 
 export function isDevVetkd(): boolean {
-  return true;
+  return !isProdVetkd();
 }
 
 export function isProdVetkd(): boolean {
-  return false; // not implemented in v1
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  return (import.meta as any).env?.VITE_IOU_PROD_VETKD === "1";
 }
 
 // ─────────────── wrap / unwrap ───────────────

@@ -315,3 +315,47 @@ h3 { font-size: 1rem; font-weight: 600; }
 }
 
 .small { font-size: 0.8125rem; }
+
+/* ─── recovery key page ─── */
+
+.recovery-page h1 { font-size: 1.5rem; }
+.recovery-page .card {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-card);
+  padding: 16px;
+  box-shadow: var(--shadow);
+  margin: 16px 0;
+}
+.mnemonic {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 6px 12px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+.mnemonic .word {
+  display: flex;
+  gap: 6px;
+  align-items: baseline;
+  background: var(--bg);
+  padding: 6px 8px;
+  border-radius: 6px;
+  font-size: 0.9375rem;
+}
+.mnemonic .idx {
+  font-size: 0.6875rem;
+  color: var(--text-dim);
+  min-width: 1.5em;
+  text-align: right;
+}
+.recovery-page .confirm {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 0.9375rem;
+  margin: 16px 0;
+}
+.recovery-page .actions {
+  display: flex;
+  justify-content: flex-end;
+}

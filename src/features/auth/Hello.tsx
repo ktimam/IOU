@@ -1,21 +1,26 @@
 import { useAuth } from "./AuthProvider";
 import { useEffect, useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
+import { loadRecoveryMnemonic } from "../recovery/mnemonic";
 
 type WhoAmIResult = string | null;
 
 export function Hello() {
-  const { state, signIn, signOut } = useAuth();
+  const { state, signOut } = useAuth();
   const nav = useNavigate();
   const [who, setWho] = useState<WhoAmIResult>(null);
+  const [hasRecovery, setHasRecovery] = useState<boolean | null>(null);
 
   useEffect(() => {
-    // Stub: whoami would be called via the actor. Until Candid types
-    // are generated, we just show the principal from the auth state.
     if (state.kind === "authenticated") {
       setWho(state.principal);
+      // Check whether the user has saved a recovery key. If not,
+      // route them to /recovery-key as part of the first-sign-in
+      // onboarding.
+      loadRecoveryMnemonic().then((m) => setHasRecovery(m != null));
     } else {
       setWho(null);
+      setHasRecovery(null);
     }
   }, [state]);
 
@@ -33,6 +38,11 @@ export function Hello() {
         </div>
       </div>
     );
+  }
+
+  // Authenticated: if no recovery key, send to the onboarding page.
+  if (hasRecovery === false) {
+    return <NavigateToRecovery />;
   }
 
   return (
@@ -65,4 +75,12 @@ export function Hello() {
       </div>
     </div>
   );
+}
+
+function NavigateToRecovery() {
+  const nav = useNavigate();
+  useEffect(() => {
+    nav("/recovery-key", { replace: true });
+  }, [nav]);
+  return <p className="muted">Setting up your recovery key…</p>;
 }
