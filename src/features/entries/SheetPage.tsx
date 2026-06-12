@@ -14,6 +14,7 @@ import { decodeEntry, type EntryPayload } from "./types";
 import { computeBalances, formatMinor } from "./balance";
 import { EntryForm } from "./EntryForm";
 import { CloseSheetButton } from "./CloseSheetButton";
+import { downloadCsv, entriesToCsv } from "./csvExport";
 import { useToasts } from "../ui/Toasts";
 
 type DecryptedEntry = {
@@ -151,6 +152,27 @@ export function SheetPage() {
     await reload();
   }
 
+  function onExportCsv() {
+    if (entries.length === 0) return;
+    const me = state.kind === "authenticated"
+      ? state.identity.getPrincipal().toText()
+      : "";
+    const rows = entries.map((e) => ({
+      payload: e.payload,
+      created_by_me: e.created_by === me,
+      edited: e.updated_at_server != null,
+    }));
+    const csv = entriesToCsv(rows);
+    const date = new Date().toISOString().slice(0, 10);
+    const filename = `iou-${sheetId.slice(0, 8)}-${date}.csv`;
+    try {
+      downloadCsv(filename, csv);
+      toasts.show({ kind: "success", text: `Exported ${rows.length} entries` });
+    } catch (e) {
+      toasts.show({ kind: "error", text: (e as Error).message });
+    }
+  }
+
   if (!state.kind || state.kind !== "authenticated") {
     return <p>Please sign in.</p>;
   }
@@ -199,17 +221,28 @@ export function SheetPage() {
         )}
       </section>
 
-      {isActive(sheet.state) && !modal && (
-        <div className="row">
-          <button onClick={() => setModal({ initial: null, entryId: null })}>
-            + Add entry
+      <div className="row">
+        {isActive(sheet.state) && !modal && (
+          <>
+            <button onClick={() => setModal({ initial: null, entryId: null })}>
+              + Add entry
+            </button>
+            <CloseSheetButton
+              sheetId={sheet.id}
+              entries={entries.map((e) => e.payload)}
+            />
+          </>
+        )}
+        {entries.length > 0 && (
+          <button
+            className="secondary"
+            onClick={() => onExportCsv()}
+            title="Download as CSV for Google Sheets"
+          >
+            ⤓ Export CSV
           </button>
-          <CloseSheetButton
-            sheetId={sheet.id}
-            entries={entries.map((e) => e.payload)}
-          />
-        </div>
-      )}
+        )}
+      </div>
 
       <section className="history">
         <div className="history-head">
