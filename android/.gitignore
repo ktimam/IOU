@@ -1,0 +1,11 @@
+# Android build artifacts (don't commit; we re-run gradle locally)
+build/
+.gradle/
+*.iml
+*.keystore
+*.jks
+local.properties
+.kotlin/
+captures/
+.externalNativeBuild
+.cxx

@@ -1,0 +1,13 @@
+{
+	"appId": "com.iou.app",
+	"appName": "IOU",
+	"webDir": "dist",
+	"server": {
+		"androidScheme": "https"
+	},
+	"plugins": {
+		"SplashScreen": {
+			"launchShowDuration": 0
+		}
+	}
+}

@@ -1,0 +1,7 @@
+<?xml version='1.0' encoding='utf-8'?>
+<resources>
+    <string name="app_name">IOU</string>
+    <string name="title_activity_main">IOU</string>
+    <string name="package_name">com.iou.app</string>
+    <string name="custom_url_scheme">com.iou.app</string>
+</resources>
