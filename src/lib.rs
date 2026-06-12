@@ -918,3 +918,172 @@ async fn vetkd_wrap_sheet_key(
             .expect("call to vetkd_derive_key failed");
     res.encrypted_key
 }
+
+// ────────────────────── v1.1.2: replace-member (offline sig + QR) ──────────────────────
+//
+// The flow:
+//   1. The leaving member (Alice) opens /pair/:id/replace, picks the
+//      new member's principal, and the PWA builds a ReplaceRequest:
+//        { pair_id, leaving_principal, new_principal, ts_ms, nonce }
+//      The PWA signs this with Alice's Ed25519 key (her II delegation
+//      key) and renders the signed payload as a QR code.
+//   2. Alice hands the QR to the staying member (Bob).
+//   3. Bob scans it; the PWA reconstructs the ReplaceRequest and
+//      submits it to submit_replace_member, authenticating as Bob.
+//   4. The canister verifies:
+//        - Alice's ed25519 signature is valid for the payload
+//        - Alice is a current member of the pair
+//        - Bob (the caller) is the OTHER current member
+//        - The pair exists and is not archived
+//        - The new_principal is not already a member
+//        - The (pair_id, leaving_principal) pair is unique (replay
+//          protection)
+//      On success: replace member_a/member_b, close any active
+//      sheet, log the change. The new member is now in the pair;
+//      Alice is out.
+
+#[derive(Clone, CandidType, Deserialize)]
+pub struct ReplaceRequest {
+    pub pair_id: String,
+    pub leaving_principal: Principal,
+    pub new_principal: Principal,
+    pub ts_ms: u64,
+    pub nonce: Vec<u8>, // 32 random bytes
+}
+
+#[derive(Clone, CandidType, Deserialize)]
+pub struct SignedReplaceRequest {
+    pub request: ReplaceRequest,
+    pub signature: Vec<u8>,        // 64 bytes Ed25519 sig
+    pub signer_pubkey: Vec<u8>,    // 32 bytes Ed25519 pubkey
+}
+
+/// submit_replace_member: caller's II delegation (msg_caller) must
+/// be the *staying* member. The leaving member signed the request
+/// offline; the canister verifies the ed25519 sig and applies the
+/// change.
+#[ic_cdk::update]
+fn submit_replace_member(signed: SignedReplaceRequest) -> Pair {
+    let caller = ic_cdk::api::msg_caller();
+    require_authed();
+    let req = &signed.request;
+    if signed.signature.len() != 64 {
+        ic_cdk::trap("signature must be 64 bytes");
+    }
+    if signed.signer_pubkey.len() != 32 {
+        ic_cdk::trap("signer_pubkey must be 32 bytes");
+    }
+    if req.nonce.len() != 32 {
+        ic_cdk::trap("nonce must be 32 bytes");
+    }
+    if req.leaving_principal == req.new_principal {
+        ic_cdk::trap("leaving and new principals must differ");
+    }
+
+    // 1. Look up the pair; both members must exist.
+    let pair = PAIRS.with(|p| p.borrow().get(&req.pair_id).cloned());
+    let mut pair = match pair {
+        Some(p) => p,
+        None => ic_cdk::trap("pair not found"),
+    };
+    if pair.archived_at.is_some() {
+        ic_cdk::trap("pair is archived");
+    }
+    let leaving_is_a = pair.members.first() == Some(&req.leaving_principal);
+    let leaving_is_b = pair.members.get(1) == Some(&req.leaving_principal);
+    if !leaving_is_a && !leaving_is_b {
+        ic_cdk::trap("leaving principal is not a member of this pair");
+    }
+    if !pair.members.contains(&caller) {
+        ic_cdk::trap("caller is not a member of this pair");
+    }
+    if caller == req.leaving_principal {
+        ic_cdk::trap("caller cannot be the leaving member; the staying member must submit");
+    }
+    if pair.members.contains(&req.new_principal) {
+        ic_cdk::trap("new principal is already a member");
+    }
+
+    // 2. Verify the ed25519 signature.
+    verify_replace_signature(&signed);
+
+    // 3. Apply the change.
+    // Remove the leaving member; add the new one. The new member
+    // takes the slot of the leaving member (preserves member_a /
+    // member_b ordering on the existing sheets).
+    if leaving_is_a {
+        pair.members[0] = req.new_principal;
+    } else {
+        pair.members[1] = req.new_principal;
+    }
+    PAIRS.with(|p| {
+        p.borrow_mut().insert(req.pair_id.clone(), pair.clone());
+    });
+
+    // 4. Update all sheets: replace the leaving member's slot with
+    // the new member. The leaving member loses read access; the
+    // new member inherits the slot.
+    let sheet_ids: Vec<String> = SHEETS.with(|s| {
+        s.borrow()
+            .iter()
+            .filter(|(_, sh)| sh.pair_id == req.pair_id)
+            .map(|(id, _)| id.clone())
+            .collect()
+    });
+    for sid in sheet_ids {
+        SHEETS.with(|s| {
+            let mut map = s.borrow_mut();
+            if let Some(sh) = map.get_mut(&sid) {
+                if sh.member_a == req.leaving_principal {
+                    sh.member_a = req.new_principal;
+                } else if sh.member_b == req.leaving_principal {
+                    sh.member_b = req.new_principal;
+                }
+                // If the sheet is still Active, close it — the new
+                // member inherits it as Closed with the same
+                // closing_balances (or none if not yet closed).
+                if matches!(sh.state, SheetState::Active) {
+                    sh.state = SheetState::Closed;
+                    sh.closed_at = Some(now_secs());
+                }
+            }
+        });
+    }
+
+    pair
+}
+
+/// Canonical bytes of a ReplaceRequest (used as the ed25519 message).
+/// Domain-separated so the signature can't be replayed across
+/// canisters or for other purposes.
+fn canonical_replace_bytes(req: &ReplaceRequest) -> Vec<u8> {
+    let mut out = Vec::with_capacity(128);
+    out.extend_from_slice(b"iou-replace-member-v1:");
+    out.extend_from_slice(req.pair_id.as_bytes());
+    out.push(0xff);
+    out.extend_from_slice(&req.leaving_principal.as_slice());
+    out.push(0xff);
+    out.extend_from_slice(&req.new_principal.as_slice());
+    out.push(0xff);
+    out.extend_from_slice(&req.ts_ms.to_be_bytes());
+    out.push(0xff);
+    out.extend_from_slice(&req.nonce);
+    out
+}
+
+fn verify_replace_signature(signed: &SignedReplaceRequest) {
+    use ed25519_dalek::{Signature, Verifier, VerifyingKey};
+    let msg = canonical_replace_bytes(&signed.request);
+    let pk_bytes: [u8; 32] = signed.signer_pubkey.clone().try_into()
+        .unwrap_or_else(|_| ic_cdk::trap("invalid pubkey length"));
+    let sig_bytes: [u8; 64] = signed.signature.clone().try_into()
+        .unwrap_or_else(|_| ic_cdk::trap("invalid sig length"));
+    let pk = match VerifyingKey::from_bytes(&pk_bytes) {
+        Ok(p) => p,
+        Err(_) => ic_cdk::trap("invalid ed25519 public key"),
+    };
+    let sig = Signature::from_bytes(&sig_bytes);
+    if pk.verify(&msg, &sig).is_err() {
+        ic_cdk::trap("signature verification failed");
+    }
+}

@@ -118,6 +118,18 @@ export const idlFactory = ({ IDL: idl }: { IDL: IDL }) => {
     entries: idl.Vec(Entry),
     next_cursor: idl.Opt(idl.Nat64),
   });
+  const ReplaceRequest = idl.Record({
+    pair_id: idl.Text,
+    leaving_principal: idl.Principal,
+    new_principal: idl.Principal,
+    ts_ms: idl.Nat64,
+    nonce: idl.Vec(idl.Nat8),
+  });
+  const SignedReplaceRequest = idl.Record({
+    request: ReplaceRequest,
+    signature: idl.Vec(idl.Nat8),
+    signer_pubkey: idl.Vec(idl.Nat8),
+  });
   return idl.Service({
     // Phase 1
     whoami: idl.Func([], [idl.Opt(idl.Text)], ["query"]),
@@ -163,6 +175,8 @@ export const idlFactory = ({ IDL: idl }: { IDL: IDL }) => {
       [idl.Vec(idl.Nat8)],
       [],
     ),
+    // v1.1.2: replace member
+    submit_replace_member: idl.Func([SignedReplaceRequest], [Pair], []),
   });
 };
 

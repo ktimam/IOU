@@ -109,6 +109,20 @@ type ListEntriesResult = record {
     next_cursor : opt nat64;
 };
 
+type ReplaceRequest = record {
+    pair_id : text;
+    leaving_principal : principal;
+    new_principal : principal;
+    ts_ms : nat64;
+    nonce : vec nat8;
+};
+
+type SignedReplaceRequest = record {
+    request : ReplaceRequest;
+    signature : vec nat8;
+    signer_pubkey : vec nat8;
+};
+
 service : {
     // Phase 1
     whoami : () -> (opt text) query;
@@ -142,4 +156,7 @@ service : {
     get_vetkd_key_name : () -> (text) query;
     vetkd_public_key : () -> (vec nat8);
     vetkd_wrap_sheet_key : (text, vec nat8) -> (vec nat8);
+
+    // v1.1.2: replace member
+    submit_replace_member : (SignedReplaceRequest) -> (Pair);
 }

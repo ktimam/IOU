@@ -105,6 +105,14 @@ export function Pair() {
           {myKp?.publicKeyB64 ?? "(loading…)"}
         </code>
       </div>
+      <div className="cta-row">
+        <Link to={`/pair/${pairId}/replace`}>
+          <button className="secondary">Replace member (leaving)</button>
+        </Link>
+        <Link to={`/pair/${pairId}/accept-replace`}>
+          <button className="secondary">Accept replacement (staying)</button>
+        </Link>
+      </div>
     </div>
   );
 }

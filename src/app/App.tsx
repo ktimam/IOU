@@ -13,6 +13,8 @@ import { SheetPage } from "../features/entries/SheetPage";
 import { ArchivedSheetsPage } from "../features/entries/ArchivedSheetsPage";
 import { RecoveryKeyPage } from "../features/recovery/RecoveryKeyPage";
 import { ToastProvider } from "../features/ui/Toasts";
+import { ReplaceMemberPage } from "../features/replaceMember/ReplaceMemberPage";
+import { AcceptReplacePage } from "../features/replaceMember/AcceptReplacePage";
 
 export function App() {
   return (
@@ -32,6 +34,14 @@ export function App() {
               <Route
                 path="/pair/:pairId/archived"
                 element={<ArchivedSheetsPage />}
+              />
+              <Route
+                path="/pair/:pairId/replace"
+                element={<ReplaceMemberPage />}
+              />
+              <Route
+                path="/pair/:pairId/accept-replace"
+                element={<AcceptReplacePage />}
               />
               <Route
                 path="/settings/recovery-key"

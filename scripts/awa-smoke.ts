@@ -414,6 +414,113 @@ async function main() {
   }
   ok(archiveTrapped, "non-member list_archived_sheets traps");
 
+  // ─── 11c. PHASE 1.1.2: replace-member ───
+  // Partner (leaving) signs an Ed25519 ReplaceRequest; tester
+  // (staying) submits it. The pair becomes [tester, carol] and
+  // the active sheet is closed.
+  console.log("\n=== replace_member (tester submits partner's signed request) ===");
+  const { ed25519: ed } = await import("@noble/curves/ed25519");
+  // The "leaving" member's Ed25519 keypair is generated from
+  // random bytes (in real life this is the user's stored key;
+  // the canister only verifies the signature, not the
+  // principal-to-pubkey relationship).
+  const leavingSeed = new Uint8Array(32);
+  (globalThis as any).crypto.getRandomValues(leavingSeed);
+  const leavingPub = ed.getPublicKey(leavingSeed);
+  // Pick a "carol" principal — use the default identity (it's
+  // not a member of any pair, so the canister accepts it as the
+  // new member).
+  const carolIdentity = Secp256k1KeyIdentity.fromPem(
+    readFileSync(`${process.env.HOME}/.config/dfx/identity/default/identity.pem`, "utf8"),
+  );
+  const carolPrincipal = carolIdentity.getPrincipal();
+  const replaceReq = {
+    pair_id: pairId,
+    leaving_principal: partnerIdentity.getPrincipal().toText(),
+    new_principal: carolPrincipal.toText(),
+    ts_ms: BigInt(Date.now()),
+    nonce: Array.from((globalThis as any).crypto.getRandomValues(new Uint8Array(32))),
+  };
+  // Canonical bytes (matches canonical_replace_bytes in lib.rs).
+  const _enc = new TextEncoder();
+  const carolBytes = carolPrincipal.toUint8Array();
+  const partnerBytes = partnerIdentity.getPrincipal().toUint8Array();
+  const canon: number[] = [];
+  for (const c of "iou-replace-member-v1:") canon.push(c.charCodeAt(0));
+  for (const c of replaceReq.pair_id) canon.push(c.charCodeAt(0));
+  canon.push(0xff);
+  for (const b of partnerBytes) canon.push(b);
+  canon.push(0xff);
+  for (const b of carolBytes) canon.push(b);
+  canon.push(0xff);
+  const ts = replaceReq.ts_ms;
+  for (let i = 7; i >= 0; i--) canon.push(Number((ts >> BigInt(i * 8)) & 0xffn));
+  canon.push(0xff);
+  for (const b of replaceReq.nonce) canon.push(b);
+  const sig = ed.sign(new Uint8Array(canon), leavingSeed);
+  const signedReplace = {
+    request: replaceReq,
+    signature: Array.from(sig),
+    signer_pubkey: Array.from(leavingPub),
+  };
+  // Tester (staying) submits.
+  // The Candid layer wants Principal instances, not strings.
+  const signedForCanister = {
+    request: {
+      pair_id: signedReplace.request.pair_id,
+      leaving_principal: partnerIdentity.getPrincipal(),
+      new_principal: carolPrincipal,
+      ts_ms: BigInt(signedReplace.request.ts_ms),
+      nonce: signedReplace.request.nonce,
+    },
+    signature: signedReplace.signature,
+    signer_pubkey: signedReplace.signer_pubkey,
+  };
+  const updatedPair: any = await (tester as any).submit_replace_member(signedForCanister);
+  console.log("updated pair members:", updatedPair.members.map((m: any) => m.toText()));
+  ok(
+    updatedPair.members.some((m: any) => m.toText() === testerIdentity.getPrincipal().toText()),
+    "tester is still in the pair",
+  );
+  ok(
+    updatedPair.members.some((m: any) => m.toText() === carolPrincipal.toText()),
+    "carol is now in the pair",
+  );
+  ok(
+    !updatedPair.members.some((m: any) => m.toText() === partnerIdentity.getPrincipal().toText()),
+    "partner is no longer in the pair",
+  );
+  // Active sheet should be Closed now.
+  const replacedSheet = unwrap(await (tester as any).get_sheet(newSheetId));
+  ok(isClosed(replacedSheet.state), "active sheet is Closed after replace");
+  ok(replacedSheet.member_a.toText() === testerIdentity.getPrincipal().toText()
+    || replacedSheet.member_b.toText() === testerIdentity.getPrincipal().toText(),
+    "tester still on the (now-Closed) sheet");
+
+  // Non-staying-member cannot submit (default identity is not a member).
+  console.log("\n=== replace_member (default identity, should trap) ===");
+  const { actor: defaultActorForReplace } = await actorFor("default");
+  let replaceTrapped = false;
+  try {
+    await (defaultActorForReplace as any).submit_replace_member(signedReplace);
+  } catch (e) {
+    replaceTrapped = true;
+    console.log("  trapped as expected:", (e as Error).message);
+  }
+  ok(replaceTrapped, "non-member submit_replace_member traps");
+
+  // Bad signature should also trap.
+  console.log("\n=== replace_member (bad signature, should trap) ===");
+  const badSig = { ...signedReplace, signature: Array.from(new Uint8Array(64)) };
+  let badSigTrapped = false;
+  try {
+    await (tester as any).submit_replace_member(badSig);
+  } catch (e) {
+    badSigTrapped = true;
+    console.log("  trapped as expected:", (e as Error).message);
+  }
+  ok(badSigTrapped, "bad signature traps");
+
   // ─── 12. invalid invite code ───
   console.log("\n=== invalid invite code (should trap) ===");
   let trapped = false;
@@ -441,8 +548,8 @@ async function main() {
 
   console.log(
     process.exitCode === 1
-      ? "\n❌ Phase 2+3+4 smoke FAILED"
-      : "\n✅ Phase 2+3+4 smoke PASSED",
+      ? "\n❌ Phase 2+3+4+1.1.2 smoke FAILED"
+      : "\n✅ Phase 2+3+4+1.1.2 smoke PASSED",
   );
 }
 
