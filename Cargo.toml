@@ -8,17 +8,13 @@ crate-type = ["cdylib"]
 
 [dependencies]
 candid = "0.10"
-ic-cdk = "0.17"
-ic-cdk-macros = "0.17"
+ic-cdk = "0.20"
+ic-cdk-macros = "0.20"
+ic-cdk-management-canister = "0.1"
 serde = { version = "1", features = ["derive"] }
 
 [features]
 default = []
-# Enable the real vetkd canister endpoints (requires ic-cdk 0.20+ and
-# a replica that exports the cost_call system API — i.e. dfx 0.27+
-# or `ic` mainnet). Off by default because the local replica
-# (dfx 0.24.3) does not export cost_call. See docs/07-v1.1-plan.md.
-prod-vetkd = []
 
 [profile.release]
 opt-level = "z"

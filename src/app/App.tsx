@@ -33,7 +33,10 @@ export function App() {
                 path="/pair/:pairId/archived"
                 element={<ArchivedSheetsPage />}
               />
-              <Route path="/recovery-key" element={<RecoveryKeyPage />} />
+              <Route
+                path="/settings/recovery-key"
+                element={<RecoveryKeyPage />}
+              />
               <Route path="*" element={<Navigate to="/" replace />} />
             </Routes>
           </Layout>

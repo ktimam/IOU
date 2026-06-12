@@ -123,7 +123,7 @@ thread_local! {
 // ───────────────────────── helpers ─────────────────────────
 
 fn require_authed() {
-    if ic_cdk::caller() == Principal::anonymous() {
+    if ic_cdk::api::msg_caller() == Principal::anonymous() {
         ic_cdk::trap("anonymous call rejected");
     }
 }
@@ -172,7 +172,7 @@ fn now_secs() -> u64 {
 // should use ic_cdk::management_canister::raw_rand for collision-free ids.
 fn now_id() -> String {
     let t = ic_cdk::api::time();
-    let caller = ic_cdk::caller().to_text();
+    let caller = ic_cdk::api::msg_caller().to_text();
     // Short enough to fit in a Candid Text, deterministic enough for v1.
     let hash: u64 = caller.bytes().fold(0u64, |acc, b| {
         acc.wrapping_mul(131).wrapping_add(b as u64)
@@ -184,7 +184,7 @@ fn now_id() -> String {
 
 #[ic_cdk::query]
 fn whoami() -> Option<String> {
-    let caller = ic_cdk::caller();
+    let caller = ic_cdk::api::msg_caller();
     if caller == Principal::anonymous() {
         None
     } else {
@@ -194,7 +194,7 @@ fn whoami() -> Option<String> {
 
 #[ic_cdk::query]
 fn get_my_user() -> Option<UserRecord> {
-    USERS.with(|u| u.borrow().get(&ic_cdk::caller()).cloned())
+    USERS.with(|u| u.borrow().get(&ic_cdk::api::msg_caller()).cloned())
 }
 
 #[ic_cdk::update]
@@ -208,7 +208,7 @@ fn set_display_name(wrapped_display_name: Vec<u8>, display_name_iv: Vec<u8>) -> 
     }
     let now = ic_cdk::api::time();
     let rec = UserRecord {
-        user_principal: ic_cdk::caller(),
+        user_principal: ic_cdk::api::msg_caller(),
         wrapped_display_name,
         display_name_iv,
         created_at: now,
@@ -225,7 +225,7 @@ fn get_config() -> Config {
 #[ic_cdk::update]
 fn set_creator_principal(p: Principal) {
     require_authed();
-    let caller = ic_cdk::caller();
+    let caller = ic_cdk::api::msg_caller();
     CONFIG.with(|c| {
         let mut cfg = c.borrow_mut();
         let is_unset = cfg.creator_principal == Principal::anonymous();
@@ -250,7 +250,7 @@ pub struct CreatePairResult {
 /// `join_pair`.
 #[ic_cdk::update]
 fn create_pair() -> CreatePairResult {
-    let caller = ic_cdk::caller();
+    let caller = ic_cdk::api::msg_caller();
     require_authed();
     // v1: a principal may be in at most one active pair at a time.
     // (The spec allows multiple pairs per user; we relax in v1.1.)
@@ -279,7 +279,7 @@ fn create_pair() -> CreatePairResult {
 /// join_pair: consumes an invite code, adds the caller as member B.
 #[ic_cdk::update]
 fn join_pair(invite_code: String) -> String {
-    let caller = ic_cdk::caller();
+    let caller = ic_cdk::api::msg_caller();
     require_authed();
     let pair_id = INVITES.with(|i| i.borrow().get(&invite_code).cloned());
     let pair_id = match pair_id {
@@ -308,7 +308,7 @@ fn join_pair(invite_code: String) -> String {
 /// get_my_pairs: lists all pairs the caller is a member of (active + archived).
 #[ic_cdk::query]
 fn get_my_pairs() -> Vec<PairSummary> {
-    let caller = ic_cdk::caller();
+    let caller = ic_cdk::api::msg_caller();
     let mut out: Vec<PairSummary> = Vec::new();
     PAIRS.with(|p| {
         SHEETS.with(|s| {
@@ -349,7 +349,7 @@ fn get_my_pairs() -> Vec<PairSummary> {
 /// get_pair: full pair record for a given id. Caller must be a member.
 #[ic_cdk::query]
 fn get_pair(pair_id: String) -> Option<Pair> {
-    let caller = ic_cdk::caller();
+    let caller = ic_cdk::api::msg_caller();
     PAIRS.with(|p| {
         p.borrow().get(&pair_id).and_then(|pair| {
             if is_member_of(pair, caller) {
@@ -378,7 +378,7 @@ pub struct CreateSheetReq {
 /// key. The canister never sees the plaintext key.
 #[ic_cdk::update]
 fn create_sheet(req: CreateSheetReq) -> Sheet {
-    let caller = ic_cdk::caller();
+    let caller = ic_cdk::api::msg_caller();
     require_authed();
     // v1 constraints we enforce:
     if req.enabled_currencies.is_empty() {
@@ -443,7 +443,7 @@ fn create_sheet(req: CreateSheetReq) -> Sheet {
 /// get_sheet: full sheet record. Caller must be a member of the parent pair.
 #[ic_cdk::query]
 fn get_sheet(sheet_id: String) -> Option<Sheet> {
-    let caller = ic_cdk::caller();
+    let caller = ic_cdk::api::msg_caller();
     let pair_id = SHEETS.with(|s| s.borrow().get(&sheet_id).map(|sh| sh.pair_id.clone()));
     let pair_id = match pair_id { Some(p) => p, None => return None };
     let allowed = PAIRS.with(|p| {
@@ -457,7 +457,7 @@ fn get_sheet(sheet_id: String) -> Option<Sheet> {
 /// caller is a member of. Newest first by closed_at.
 #[ic_cdk::query]
 fn list_archived_sheets(pair_id: String) -> Vec<Sheet> {
-    let caller = ic_cdk::caller();
+    let caller = ic_cdk::api::msg_caller();
     let allowed = PAIRS.with(|p| {
         p.borrow()
             .get(&pair_id)
@@ -481,7 +481,7 @@ fn list_archived_sheets(pair_id: String) -> Vec<Sheet> {
 /// client-side to get the symmetric key.
 #[ic_cdk::query]
 fn get_sheet_wrapped_key(sheet_id: String) -> Option<Vec<u8>> {
-    let caller = ic_cdk::caller();
+    let caller = ic_cdk::api::msg_caller();
     SHEETS.with(|s| {
         s.borrow().get(&sheet_id).and_then(|sheet| {
             if sheet.member_a == caller {
@@ -498,7 +498,7 @@ fn get_sheet_wrapped_key(sheet_id: String) -> Option<Vec<u8>> {
 /// add_currency: enables a new currency on an active sheet.
 #[ic_cdk::update]
 fn add_currency(sheet_id: String, iso: String) -> () {
-    let caller = ic_cdk::caller();
+    let caller = ic_cdk::api::msg_caller();
     require_authed();
     if iso.len() != 3 || !iso.chars().all(|ch| ch.is_ascii_alphabetic()) {
         ic_cdk::trap("currency must be a 3-letter ISO 4217 code");
@@ -530,7 +530,7 @@ fn add_currency(sheet_id: String, iso: String) -> () {
 /// Members are still able to read it.
 #[ic_cdk::update]
 fn close_sheet(sheet_id: String, closing_balances: Vec<ClosingBalance>) -> () {
-    let caller = ic_cdk::caller();
+    let caller = ic_cdk::api::msg_caller();
     require_authed();
     SHEETS.with(|s| {
         let mut map = s.borrow_mut();
@@ -619,7 +619,7 @@ fn next_entry_id(sheet_id: &str) -> u64 {
 }
 
 fn caller_is_pair_member(sheet_id: &str) -> bool {
-    let caller = ic_cdk::caller();
+    let caller = ic_cdk::api::msg_caller();
     SHEETS.with(|s| {
         let pair_id = match s.borrow().get(sheet_id).map(|sh| sh.pair_id.clone()) {
             Some(p) => p,
@@ -656,7 +656,7 @@ fn record_entry_timestamp(sheet_id: &str, now: u64) {
 /// must be a member of the parent pair.
 #[ic_cdk::update]
 fn add_entry(req: AddEntryReq) -> Entry {
-    let caller = ic_cdk::caller();
+    let caller = ic_cdk::api::msg_caller();
     require_authed();
     if req.entry_key.len() != 32 {
         ic_cdk::trap("entry_key must be 32 bytes");
@@ -714,7 +714,7 @@ pub struct EditEntryReq {
 
 #[ic_cdk::update]
 fn edit_entry(req: EditEntryReq) -> Entry {
-    let caller = ic_cdk::caller();
+    let caller = ic_cdk::api::msg_caller();
     require_authed();
     if req.entry_key.len() != 32 {
         ic_cdk::trap("entry_key must be 32 bytes");
@@ -802,4 +802,119 @@ fn list_entries(
         entries: page,
         next_cursor,
     }
+}
+
+// ────────────────────── v1.1.1: real vetkd endpoints ──────────────────────
+//
+// The PWA holds a BLS12-381 G2 transport key pair (the same scheme
+// the IC's vetkd system uses for IBE encryption). To derive K_sheet
+// for a given (caller_principal, sheet_id), the canister calls
+// ic_cdk_management_canister::vetkd_derive_key(...) with:
+//
+//   input:       b"iou-sheet:" + sheet_id    (per-sheet scope)
+//   context:     b"iou-vetkd-symmetric-v1"   (per-canister scope)
+//   key_id:      { curve: Bls12_381_G2, name: VETKD_KEY_NAME }
+//   transport:   the PWA's transport public key
+//
+// The returned `encrypted_key` is an IBE ciphertext that only the
+// holder of the matching transport secret key can decrypt. The PWA
+// then HKDFs the resulting symmetric key to get K_sheet (32 bytes).
+//
+// Requires dfx 0.27+ on local (which exports the cost_call system
+// API that ic-cdk 0.20 needs). On the IC mainnet, vetkd_test_key
+// is enabled by default on system subnets.
+
+use ic_cdk_management_canister::{
+    VetKDCurve, VetKDDeriveKeyArgs, VetKDDeriveKeyResult, VetKDKeyId,
+    VetKDPublicKeyArgs, VetKDPublicKeyResult,
+};
+
+fn vetkd_key_id() -> VetKDKeyId {
+    VetKDKeyId {
+        curve: VetKDCurve::Bls12_381_G2,
+        name: VETKD_KEY_NAME.with(|k| k.borrow().clone()),
+    }
+}
+
+thread_local! {
+    // v1.1.1: vetkd key name. Defaults to "dfx_test_key" on local
+    // replica; can be overridden at init time. On the IC mainnet,
+    // set the IOU_VETKD_KEY_NAME env var to "key_1" (or whatever
+    // your canister's derivation-key id is).
+    static VETKD_KEY_NAME: RefCell<String> = RefCell::new(
+        "dfx_test_key".to_string()
+    );
+}
+
+/// get_vetkd_key_name: returns the vetkd key name configured for this
+/// canister. The PWA uses it to surface a useful error when prod
+/// vetkd is requested but the canister is on a replica that doesn't
+/// have the key enabled.
+#[ic_cdk::query]
+fn get_vetkd_key_name() -> String {
+    VETKD_KEY_NAME.with(|k| k.borrow().clone())
+}
+
+/// vetkd_public_key: returns the canister's master vetkd public key
+/// for the configured IBE context. Useful for the PWA to verify the
+/// key id matches before deriving encrypted keys.
+#[ic_cdk::update]
+async fn vetkd_public_key() -> Vec<u8> {
+    let request = VetKDPublicKeyArgs {
+        canister_id: None,
+        context: b"iou-vetkd-symmetric-v1".to_vec(),
+        key_id: vetkd_key_id(),
+    };
+    let res: VetKDPublicKeyResult =
+        ic_cdk_management_canister::vetkd_public_key(&request)
+            .await
+            .expect("call to vetkd_public_key failed");
+    res.public_key
+}
+
+/// vetkd_wrap_sheet_key: returns the IBE encrypted_key for the
+/// (caller, sheet_id) pair. The PWA is the only entity that can
+/// decrypt this (it holds the matching transport secret key). On
+/// unwrap, the PWA HKDFs the resulting symmetric key to get
+/// K_sheet. Only members of the parent pair can call this.
+///
+/// IBE input is b"iou-sheet:" + sheet_id; the context is
+/// b"iou-vetkd-symmetric-v1". The IBE ciphertext is bound to
+/// (this_canister, sheet_id) and cannot be replayed across sheets
+/// or canisters.
+#[ic_cdk::update]
+async fn vetkd_wrap_sheet_key(
+    sheet_id: String,
+    transport_public_key: Vec<u8>,
+) -> Vec<u8> {
+    let caller = ic_cdk::api::msg_caller();
+    require_authed();
+    if transport_public_key.is_empty() {
+        ic_cdk::trap("transport_public_key must not be empty");
+    }
+    // The IC's vetkd IBE uses BLS12-381 G1 for the transport key
+    // (48 bytes compressed). The master public key is G2 (96 bytes).
+    if transport_public_key.len() != 48 {
+        ic_cdk::trap("transport_public_key must be 48 bytes (BLS12-381 G1, compressed)");
+    }
+    if !caller_is_pair_member(&sheet_id) {
+        ic_cdk::trap("not a member of this sheet's pair");
+    }
+    if !sheet_is_active(&sheet_id) {
+        ic_cdk::trap("sheet is not active");
+    }
+    let mut input = Vec::with_capacity(10 + sheet_id.len());
+    input.extend_from_slice(b"iou-sheet:");
+    input.extend_from_slice(sheet_id.as_bytes());
+    let request = VetKDDeriveKeyArgs {
+        input,
+        context: b"iou-vetkd-symmetric-v1".to_vec(),
+        key_id: vetkd_key_id(),
+        transport_public_key,
+    };
+    let res: VetKDDeriveKeyResult =
+        ic_cdk_management_canister::vetkd_derive_key(&request)
+            .await
+            .expect("call to vetkd_derive_key failed");
+    res.encrypted_key
 }

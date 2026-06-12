@@ -137,4 +137,9 @@ service : {
 
     // Phase 4
     list_archived_sheets : (text) -> (vec Sheet) query;
+
+    // v1.1.1: real vetkd
+    get_vetkd_key_name : () -> (text) query;
+    vetkd_public_key : () -> (vec nat8);
+    vetkd_wrap_sheet_key : (text, vec nat8) -> (vec nat8);
 }

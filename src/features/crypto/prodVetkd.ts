@@ -1,96 +1,137 @@
-// prodVetkd.ts — the production vetkd adapter.
+// prodVetkd.ts — production vetkd adapter (Option B: uses
+// @dfinity/vetkeys, the official dfinity SDK).
 //
-// Status: v1.1 scaffolding. The actual IBE decryption (decrypt the
-// IBE ciphertext returned by the canister's vetkd_derive_key) is
-// v1.1.1 — it needs a BLS12-381 G2 IBE implementation in the browser
-// (e.g. @noble/curves with a custom hash-to-G1 or the IC SDK's
-// @icp-sdk/vetkeys client). The shape is in place; the call sites
-// are stable.
+// v1.1.1 closes the loop: the PWA holds a BLS12-381 G2 transport key
+// pair, calls the canister's vetkd_wrap_sheet_key endpoint, and
+// decrypts the IBE ciphertext using @dfinity/vetkeys' built-in
+// primitives. K_sheet is then HKDF-derived from the IBE result so
+// the same derivation works regardless of which transport key the
+// PWA is using (any device, just needs II + the IBE private key).
 //
 // Feature flag: VITE_IOU_PROD_VETKD=1 selects this adapter. When
 // unset, the devVetkd.ts adapter (P-256 ECDH + HKDF + AES-GCM with
 // localStorage keypair) is used. The dev adapter is the default for
-// local development because the local replica (dfx 0.24.3) doesn't
-// export the cost_call system API that ic-cdk 0.20 requires.
-//
-// When the prod path is live, the PWA:
-//   1. Generates a BLS12-381 G2 transport key pair (one per user,
-//      kept in IndexedDB or in the platform secure element).
-//   2. Persists the secret in IndexedDB.
-//   3. To wrap K_sheet for sheet_id: calls
-//      canister.vetkd_wrap_sheet_key(sheet_id, transport_pub) which
-//      returns an IBE ciphertext bound to (this_canister, sheet_id).
-//   4. To unwrap: decrypts the IBE ciphertext with the transport
-//      secret, then HKDFs the resulting symmetric key to get K_sheet.
+// local development and for users who don't want the prod upgrade
+// yet.
 
-import { importPublicKeyB64Wrap } from "./devVetkd";
+import {
+  TransportSecretKey,
+  MasterPublicKey,
+  EncryptedVetKey,
+  VetKey,
+  deriveSymmetricKey,
+} from "@dfinity/vetkeys";
+import { Principal } from "@dfinity/principal";
+import { hkdf } from "@noble/hashes/hkdf";
+import { sha256 } from "@noble/hashes/sha256";
 
 export function isProdVetkd(): boolean {
-  return import.meta.env.VITE_IOU_PROD_VETKD === "1";
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  return (import.meta as any).env?.VITE_IOU_PROD_VETKD === "1";
 }
 
 export interface VetkdTransportKey {
-  publicKey: Uint8Array; // 96 bytes BLS12-381 G2
+  /** 32-byte scalar, BLS12-381 G2 secret key. */
+  secretKey: Uint8Array;
+  /** 96-byte compressed G2 public key. */
+  publicKey: Uint8Array;
+  /** Base64 of the public key (for the canisters's transport_public_key arg). */
   publicKeyB64: string;
-  secretKey: Uint8Array; // 32 bytes scalar in Fr
 }
 
 const STORAGE_KEY = "iou:vetkd:transport:v1";
 
-/** Load or generate a BLS12-381 G2 transport key pair. */
+/** Generate a new transport key pair. */
+export function newTransportKey(): VetkdTransportKey {
+  const tsk = TransportSecretKey.random();
+  return tskToVetkd(tsk);
+}
+
+function tskToVetkd(tsk: TransportSecretKey): VetkdTransportKey {
+  const sk = tsk.serialize();
+  const pk = tsk.publicKeyBytes();
+  return {
+    secretKey: sk,
+    publicKey: pk,
+    publicKeyB64: bytesToB64(pk),
+  };
+}
+
+function bytesToB64(b: Uint8Array): string {
+  let s = "";
+  for (let i = 0; i < b.length; i++) s += String.fromCharCode(b[i]);
+  return btoa(s);
+}
+
+function b64ToBytes(s: string): Uint8Array {
+  const bin = atob(s);
+  const out = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
+  return out;
+}
+
+function tskFromBytes(b: Uint8Array): TransportSecretKey {
+  return TransportSecretKey.deserialize(b);
+}
+
+/** Load or generate a transport key pair (persisted in IndexedDB). */
 export async function loadOrCreateTransportKey(): Promise<VetkdTransportKey> {
   if (typeof indexedDB === "undefined") {
-    throw new Error("IndexedDB not available — prod vetkd requires a browser");
+    throw new Error(
+      "IndexedDB not available — prod vetkd requires a browser",
+    );
   }
-  // The actual IBE primitives are v1.1.1. For now, this throws a
-  // clear error if the user enables VITE_IOU_PROD_VETKD without the
-  // underlying primitives being available.
   const stored = await idbGet<VetkdTransportKey>(STORAGE_KEY);
   if (stored) return stored;
-  throw new Error(
-    "VITE_IOU_PROD_VETKD=1 requires a BLS12-381 G2 IBE library; " +
-      "this is a v1.1.1 deliverable. See docs/07-v1.1-plan.md.",
-  );
+  const fresh = newTransportKey();
+  await idbPut(STORAGE_KEY, fresh);
+  return fresh;
 }
 
 /**
- * Wrap K_sheet for the current user using prod vetkd. The canister
- * returns the IBE encrypted_key; the PWA stores it (it's already
- * bound to (this_canister, sheet_id) via the IBE input + context).
+ * Forget the transport key. The next loadOrCreateTransportKey()
+ * will generate a new one. **This will not decrypt any old sheets**
+ * — it's a "nuclear" option.
  */
-export async function wrapSheetKeyProd(
-  K_sheet: Uint8Array,
-  transport: VetkdTransportKey,
-  sheetId: string,
-  callCanister: (sheetId: string, transportPub: number[]) => Promise<number[]>,
-): Promise<Uint8Array> {
-  const encKey = await callCanister(sheetId, Array.from(transport.publicKey));
-  // The canister returns the IBE ciphertext; we don't need to do
-  // anything else on the wrap side. The PWA stores encKey in the
-  // sheet record. (Vetkd can re-derive the same ciphertext on demand
-  // because the IBE is deterministic given (input, context, key,
-  // transport).)
-  return new Uint8Array(encKey);
+export async function forgetTransportKey(): Promise<void> {
+  if (typeof indexedDB === "undefined") return;
+  await idbDel(STORAGE_KEY);
 }
 
-/**
- * Unwrap K_sheet for the current user using prod vetkd. The PWA
- * fetches the IBE ciphertext from the canister (it's the same
- * wrap result, since the IBE is deterministic) and decrypts it
- * client-side using the transport secret. The IBE result is then
- * HKDFed to get K_sheet.
- */
+/** Unwrap a sheet key using the IC's IBE-decrypted vetKey. */
 export async function unwrapSheetKeyProd(
   sheetId: string,
   transport: VetkdTransportKey,
-  fetchEncKey: (sheetId: string) => Promise<number[]>,
+  masterPubKey: Uint8Array,
+  encVetKeyBytes: Uint8Array,
 ): Promise<Uint8Array> {
-  const encKey = new Uint8Array(await fetchEncKey(sheetId));
-  // IBE decrypt + HKDF are v1.1.1 deliverables. For now, throw
-  // a clear error.
-  throw new Error(
-    "prod vetkd unwrap is a v1.1.1 deliverable; see docs/07-v1.1-plan.md",
-  );
+  const dpk = MasterPublicKey.deserialize(masterPubKey);
+  const tsk = tskFromBytes(transport.secretKey);
+  // The canister's IBE input is b"iou-sheet:" + sheet_id. We need
+  // to reconstruct the same input here.
+  const input = new TextEncoder().encode("iou-sheet:" + sheetId);
+  // EncryptedVetKey.decryptAndVerify returns a VetKey (a 32-byte
+  // symmetric key) tied to the input + context.
+  const encKey = new EncryptedVetKey(encVetKeyBytes);
+  const vetKey: VetKey = encKey.decryptAndVerify(tsk, dpk, input);
+  // The VetKey is 32 bytes of symmetric material. KDF it to get
+  // our K_sheet (32 bytes), domain-separated by sheet_id.
+  const kdf = hkdf(sha256, vetKey.signatureBytes(), undefined, "iou-sheet-key-v1:" + sheetId, 32);
+  return new Uint8Array(kdf);
+}
+
+/**
+ * Derive K_sheet for a given sheet id and transport key, using the
+ * canister's master vetkd public key + the IBE-encrypted vetKey
+ * (the result of vetkd_wrap_sheet_key).
+ */
+export async function deriveSheetKey(
+  sheetId: string,
+  transport: VetkdTransportKey,
+  masterPubKey: Uint8Array,
+  encVetKey: Uint8Array,
+): Promise<Uint8Array> {
+  return unwrapSheetKeyProd(sheetId, transport, masterPubKey, encVetKey);
 }
 
 // ─── IndexedDB shim (minimal; no external deps) ───
@@ -98,9 +139,7 @@ export async function unwrapSheetKeyProd(
 function idbGet<T>(key: string): Promise<T | null> {
   return new Promise((resolve, reject) => {
     const req = indexedDB.open("iou-vetkd", 1);
-    req.onupgradeneeded = () => {
-      req.result.createObjectStore("keys");
-    };
+    req.onupgradeneeded = () => req.result.createObjectStore("keys");
     req.onerror = () => reject(req.error);
     req.onsuccess = () => {
       const tx = req.result.transaction("keys", "readonly");
@@ -111,6 +150,30 @@ function idbGet<T>(key: string): Promise<T | null> {
   });
 }
 
-// Re-export for the consumer's convenience (it can also import from
-// devVetkd directly, but the prod path also needs the b64 import).
-export { importPublicKeyB64Wrap };
+function idbPut(key: string, value: unknown): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const req = indexedDB.open("iou-vetkd", 1);
+    req.onupgradeneeded = () => req.result.createObjectStore("keys");
+    req.onerror = () => reject(req.error);
+    req.onsuccess = () => {
+      const tx = req.result.transaction("keys", "readwrite");
+      tx.objectStore("keys").put(value, key);
+      tx.oncomplete = () => resolve();
+      tx.onerror = () => reject(tx.error);
+    };
+  });
+}
+
+function idbDel(key: string): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const req = indexedDB.open("iou-vetkd", 1);
+    req.onupgradeneeded = () => req.result.createObjectStore("keys");
+    req.onerror = () => reject(req.error);
+    req.onsuccess = () => {
+      const tx = req.result.transaction("keys", "readwrite");
+      tx.objectStore("keys").delete(key);
+      tx.oncomplete = () => resolve();
+      tx.onerror = () => reject(tx.error);
+    };
+  });
+}

@@ -32,7 +32,7 @@ if (!(globalThis as any).crypto) (globalThis as any).crypto = webcrypto;
 const network = process.env.IOU_NETWORK || "local";
 const canisterId =
   process.env.VITE_IOU_BACKEND_CANISTER_ID ||
-  "bkyz2-fmaaa-aaaaa-qaaaq-cai";
+  "uxrrr-q7777-77774-qaaaq-cai";
 const host = network === "local" ? "http://127.0.0.1:4943" : "https://icp-api.io";
 
 function loadIdentity(name: string) {

@@ -1,13 +1,21 @@
-// "Save your recovery key" first-sign-in flow.
+// Optional recovery-key page (v1.1.1+).
 //
-// v1.1.0: on first sign-in (or whenever the user has no recovery
-// key saved), show this page. The user must explicitly save the
-// mnemonic before they can continue. The mnemonic is required to
-// recover access if they lose their II.
+// v1.1.1 dropped the recovery-key onboarding blocker: the prod vetkd
+// path (VITE_IOU_PROD_VETKD=1) lets the user sign in with II from any
+// device and get instant access. The 24-word recovery phrase is now
+// an *optional* backup, reachable from Settings.
+//
+// Why it's still here: in the dev path (VITE_IOU_PROD_VETKD=0), the
+// PWA still uses a localStorage P-256 keypair, and the recovery
+// phrase is the only way to rebuild that keypair on a new device.
+// In the prod path, the recovery phrase is belt-and-suspenders —
+// you only need it if you lose your II and need to derive the
+// transport key from scratch.
 
 import { useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import {
+  forgetRecoveryMnemonic,
   isValidMnemonic,
   loadRecoveryMnemonic,
   newRecoveryMnemonic,
@@ -21,14 +29,15 @@ export function RecoveryKeyPage() {
   const [mnemonic, setMnemonic] = useState<string | null>(null);
   const [confirmed, setConfirmed] = useState(false);
   const [loading, setLoading] = useState(true);
+  const [saved, setSaved] = useState(false);
 
   useEffect(() => {
     (async () => {
       const existing = await loadRecoveryMnemonic();
       if (existing) {
         setMnemonic(existing);
-        // If the user already has one saved, they can skip this page.
         setConfirmed(true);
+        setSaved(true);
       } else {
         setMnemonic(newRecoveryMnemonic());
       }
@@ -36,7 +45,7 @@ export function RecoveryKeyPage() {
     })();
   }, []);
 
-  async function onContinue() {
+  async function onSave() {
     if (!mnemonic || !confirmed) {
       toasts.show({ kind: "error", text: "Confirm you've saved the key" });
       return;
@@ -46,8 +55,16 @@ export function RecoveryKeyPage() {
       return;
     }
     await saveRecoveryMnemonic(mnemonic);
+    setSaved(true);
     toasts.show({ kind: "success", text: "Recovery key saved" });
-    nav("/pairs");
+  }
+
+  async function onForget() {
+    await forgetRecoveryMnemonic();
+    setSaved(false);
+    setMnemonic(newRecoveryMnemonic());
+    setConfirmed(false);
+    toasts.show({ kind: "info", text: "Recovery key cleared" });
   }
 
   if (loading) return <p>Loading…</p>;
@@ -55,12 +72,16 @@ export function RecoveryKeyPage() {
 
   return (
     <div className="recovery-page">
-      <h1>Save your recovery key</h1>
+      <h1>Recovery key</h1>
       <p className="muted">
-        If you lose access to your browser, Internet Identity, or device,
-        the only way to recover your IOU data is this 24-word phrase.
-        Write it down or store it in a password manager.{" "}
-        <strong>Don't share it with anyone.</strong>
+        Optional. The prod path uses the IC's vetkd to derive your
+        sheet keys from your II principal, so you don't need this. The
+        dev path (P-256 in localStorage) needs this phrase to recover
+        access on a new device.
+      </p>
+      <p className="muted">
+        <strong>Anyone with this phrase has full access to your data.</strong>{" "}
+        Write it down or store it in a password manager. Never share it.
       </p>
       <div className="card mnemonic">
         {mnemonic.split(" ").map((w, i) => (
@@ -79,9 +100,18 @@ export function RecoveryKeyPage() {
         I've saved this recovery key in a secure place.
       </label>
       <div className="actions">
-        <button onClick={onContinue} disabled={!confirmed}>
-          Continue →
-        </button>
+        {saved ? (
+          <>
+            <button className="secondary" onClick={onForget}>
+              Forget saved key
+            </button>
+            <button onClick={() => nav("/")}>Done</button>
+          </>
+        ) : (
+          <button onClick={onSave} disabled={!confirmed}>
+            Save recovery key
+          </button>
+        )}
       </div>
     </div>
   );

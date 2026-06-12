@@ -1,7 +1,6 @@
 import { useAuth } from "./AuthProvider";
 import { useEffect, useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
-import { loadRecoveryMnemonic } from "../recovery/mnemonic";
 
 type WhoAmIResult = string | null;
 
@@ -9,18 +8,12 @@ export function Hello() {
   const { state, signOut } = useAuth();
   const nav = useNavigate();
   const [who, setWho] = useState<WhoAmIResult>(null);
-  const [hasRecovery, setHasRecovery] = useState<boolean | null>(null);
 
   useEffect(() => {
     if (state.kind === "authenticated") {
       setWho(state.principal);
-      // Check whether the user has saved a recovery key. If not,
-      // route them to /recovery-key as part of the first-sign-in
-      // onboarding.
-      loadRecoveryMnemonic().then((m) => setHasRecovery(m != null));
     } else {
       setWho(null);
-      setHasRecovery(null);
     }
   }, [state]);
 
@@ -40,11 +33,6 @@ export function Hello() {
     );
   }
 
-  // Authenticated: if no recovery key, send to the onboarding page.
-  if (hasRecovery === false) {
-    return <NavigateToRecovery />;
-  }
-
   return (
     <div>
       <div className="row" style={{ justifyContent: "space-between", marginBottom: 24 }}>
@@ -59,6 +47,11 @@ export function Hello() {
         <p className="muted" style={{ wordBreak: "break-all", fontFamily: "monospace" }}>
           {who}
         </p>
+        <div className="cta-row" style={{ marginTop: 12 }}>
+          <Link to="/settings/recovery-key">
+            <button className="secondary">Recovery key (optional)</button>
+          </Link>
+        </div>
       </div>
 
       <div className="card">
@@ -75,12 +68,4 @@ export function Hello() {
       </div>
     </div>
   );
-}
-
-function NavigateToRecovery() {
-  const nav = useNavigate();
-  useEffect(() => {
-    nav("/recovery-key", { replace: true });
-  }, [nav]);
-  return <p className="muted">Setting up your recovery key…</p>;
 }

@@ -21,7 +21,7 @@ function readEnv(name: string): string | undefined {
 
 const DEFAULT_HOST = readEnv("IOU_HOST") ?? "http://127.0.0.1:4943";
 const DEFAULT_CANISTER_ID =
-  readEnv("VITE_IOU_BACKEND_CANISTER_ID") ?? "bkyz2-fmaaa-aaaaa-qaaaq-cai";
+  readEnv("VITE_IOU_BACKEND_CANISTER_ID") ?? "uxrrr-q7777-77774-qaaaq-cai";
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 type IDL = any;
@@ -155,6 +155,14 @@ export const idlFactory = ({ IDL: idl }: { IDL: IDL }) => {
     ),
     // Phase 4
     list_archived_sheets: idl.Func([idl.Text], [idl.Vec(Sheet)], ["query"]),
+    // v1.1.1: real vetkd
+    get_vetkd_key_name: idl.Func([], [idl.Text], ["query"]),
+    vetkd_public_key: idl.Func([], [idl.Vec(idl.Nat8)], []),
+    vetkd_wrap_sheet_key: idl.Func(
+      [idl.Text, idl.Vec(idl.Nat8)],
+      [idl.Vec(idl.Nat8)],
+      [],
+    ),
   });
 };
 
