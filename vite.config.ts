@@ -3,6 +3,12 @@ import react from "@vitejs/plugin-react";
 import { VitePWA } from "vite-plugin-pwa";
 
 // https://vitejs.dev/config/
+//
+// The production PWA is served by the iou_assets canister via
+// `pnpm build && dfx deploy iou_assets`. The dev server (this
+// config) is only used for hot-reload while developing the UI —
+// canister calls during dev go to the local dfx replica at
+// http://127.0.0.1:4943 directly, so no proxy is needed.
 export default defineConfig({
   plugins: [
     react(),
