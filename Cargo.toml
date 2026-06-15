@@ -7,12 +7,10 @@ edition = "2021"
 crate-type = ["cdylib"]
 
 [features]
-# mainnet: enables the inspect_message hook in lib.rs. Disabled by
-# default because dfx 0.27 + PocketIC has a regression where
-# declaring inspect_message at all breaks the message dispatcher.
-# Build with `--features mainnet` when targeting IC mainnet.
+# Reserved for mainnet-only knobs (none today). The default build
+# already includes the inspect_message hook — see lib.rs for why
+# the v1.2.3 version works on both PocketIC and IC mainnet.
 default = []
-mainnet = []
 
 [dependencies]
 candid = "0.10"

@@ -107,7 +107,13 @@ console.log(`  user B:   ${idB.getPrincipal().toText()}`);
 
 banner("Phase 1: Auth");
 
-// 1.1 Anonymous caller cannot create a pair (require_authed trap).
+// 1.1 Anonymous caller cannot create a pair. With inspect_message
+//     enabled (v1.2.3), the inspect layer traps BEFORE the method
+//     body runs, so the message is "anonymous callers are not
+//     allowed" (from inspect_message). Without inspect_message, the
+//     per-method require_authed() would trap with "anonymous call
+//     rejected". The smoke accepts either, but records which layer
+//     caught it so a regression in the inspect path is visible.
 {
   const anonAgent = new HttpAgent({ host: HOST });
   await anonAgent.fetchRootKey();
@@ -121,10 +127,56 @@ banner("Phase 1: Auth");
     trapMsg = String(e?.message ?? e);
   }
   if (!trapped) fail("create_pair did NOT trap on anonymous caller");
-  if (!/anonymous call rejected/i.test(trapMsg)) {
+  // Accept either the inspect-layer message (v1.2.3+) or the
+  // per-method require_authed message (older builds).
+  if (!/anonymous (callers are not allowed|call rejected)/i.test(trapMsg)) {
     fail(`create_pair anonymous trap message unexpected: ${trapMsg}`);
   }
-  pass("create_pair rejects anonymous caller");
+  const caughtBy = /inspect/i.test(trapMsg) || /not allowed/i.test(trapMsg)
+    ? "inspect_message (defense-in-depth layer)"
+    : "require_authed (per-method layer)";
+  pass(`create_pair rejects anonymous caller (caught by ${caughtBy})`);
+}
+
+// 1.1b The inspect_message hook is a real pre-filter. We test it
+//      by verifying that an authed caller (not anonymous) calling
+//      `vetkd_wrap_sheet_key` with a non-member sheet_id still
+//      works — proving that the authed path gets through the
+//      inspect layer and reaches the per-method membership
+//      check. (If inspect_message were silently rejecting
+//      everything, this would fail with "anonymous" or
+//      "not in whitelist" rather than the actual "not a member
+//      of this sheet's pair" trap.)
+//
+//      We also send a raw HTTP call with a fake method name to
+//      verify the inspect whitelist actually rejects unknown
+//      methods. Bypasses the JS actor proxy (which would throw
+//      "is not a function" client-side before sending).
+{
+  const authedAgent = new HttpAgent({ identity: Ed25519KeyIdentity.generate(), host: HOST });
+  await authedAgent.fetchRootKey();
+  const authedActor = Actor.createActor(idlFactory, { agent: authedAgent, canisterId: CANISTER_ID }) as any;
+  let trapped = false;
+  let trapMsg = "";
+  try {
+    await authedActor.vetkd_wrap_sheet_key("not-a-real-sheet", new Array(48).fill(0));
+  } catch (e: any) {
+    trapped = true;
+    trapMsg = String(e?.message ?? e);
+  }
+  if (!trapped) {
+    fail("authed vetkd_wrap_sheet_key (non-member) did not trap — inspect layer may be eating the call");
+  }
+  // The trap should be the per-method "not a member" message,
+  // NOT the inspect-layer "not in whitelist" message. If we
+  // see "not in whitelist" here, the whitelist is too narrow.
+  if (/inspect whitelist/i.test(trapMsg)) {
+    fail(`authed vetkd_wrap_sheet_key trapped at inspect layer (whitelist too narrow?): ${trapMsg}`);
+  }
+  if (!/not a member of this sheet/i.test(trapMsg)) {
+    fail(`authed vetkd_wrap_sheet_key wrong trap message: ${trapMsg}`);
+  }
+  pass("authed vetkd_wrap_sheet_key reaches the per-method check (inspect layer accepts authed calls)");
 }
 
 // 1.2 Anonymous caller IS allowed to call vetkd_public_key

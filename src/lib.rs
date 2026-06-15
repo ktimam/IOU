@@ -180,20 +180,32 @@ fn now_id() -> String {
     format!("{:x}-{:x}", t, hash)
 }
 
-// ───────────────────────── inspect_message (gated by the `mainnet` cargo feature) ─────────────────────────
+// ───────────────────────── inspect_message ─────────────────────────
 //
-// Same pattern as ktimam/ICTemplate/src/lib.rs. See that file
-// for the full rationale. The short version:
+// Defense-in-depth hook that runs in query context before each
+// update call. Per the IC spec, the hook MUST call
+// `ic_cdk::api::accept_message()` to let the call proceed; if it
+// returns without calling accept_message (or traps), the message
+// is rejected. The previous PocketIC-only `mainnet` feature gate
+// was a workaround for a v1.x bug where we forgot to call
+// accept_message — every method ended up rejected with IC0406.
+// This v1.2.3 version calls accept_message explicitly, so it
+// works on both PocketIC and IC mainnet.
 //
-//   - Default build (no feature) compiles the function out, so
-//     PocketIC + dfx 0.27+ is happy.
-//   - Build with `--features mainnet` for IC mainnet deploys.
-//   - Per-method `require_authed()` is the canonical identity
-//     gate and works on both targets.
-//   - inspect_message here is best-effort defense in depth
-//     (method whitelist + anonymous trap on mainnet only).
+// Two checks:
+//   1. Method whitelist: anything not in `allowed` is rejected
+//      via `ic_cdk::trap` (a trap inside inspect_message =
+//      reject).
+//   2. Anonymous trap for write methods: `require_auth_methods`
+//      lists the methods that require an authenticated caller.
+//      Anything else is allowed to be called anonymously (today
+//      just `vetkd_public_key` and a few queries that are
+//      public-by-design). The per-method `require_authed()`
+//      remains the primary identity gate.
+//
+// `accept_message()` is the last call so it only runs if both
+// checks pass; calling it twice would trap.
 
-#[cfg(feature = "mainnet")]
 #[ic_cdk::inspect_message]
 fn inspect_message() {
     let method_name = ic_cdk::api::msg_method_name();
@@ -240,11 +252,36 @@ fn inspect_message() {
         ));
     }
 
-    // On mainnet (the only place this function compiles), also
-    // trap on anonymous callers as a defense-in-depth check.
-    if caller == candid::Principal::anonymous() {
+    // Defense in depth: trap on anonymous callers for methods
+    // that require authentication. The per-method
+    // `require_authed()` is the primary gate; this just rejects
+    // at the inspect layer (cheaper, no stable memory reads).
+    // Public-by-design methods (vetkd_public_key) are NOT in
+    // this list and remain callable by anonymous callers.
+    let require_auth_methods: &[&str] = &[
+        "set_display_name",
+        "set_creator_principal",
+        "create_pair",
+        "join_pair",
+        "create_sheet",
+        "add_currency",
+        "close_sheet",
+        "start_new_sheet",
+        "add_entry",
+        "edit_entry",
+        "vetkd_wrap_sheet_key",
+        "submit_replace_member",
+    ];
+    if require_auth_methods.contains(&method_name.as_str())
+        && caller == candid::Principal::anonymous()
+    {
         ic_cdk::trap("anonymous callers are not allowed");
     }
+
+    // Accept the message. Per the IC spec this MUST be called
+    // explicitly to let the update proceed; omitting it (or
+    // returning without calling it) is a silent reject.
+    ic_cdk::api::accept_message();
 }
 
 // ───────────────────────── Phase 1 endpoints (auth + config) ─────────────────────────
@@ -954,7 +991,6 @@ async fn vetkd_wrap_sheet_key(
     sheet_id: String,
     transport_public_key: Vec<u8>,
 ) -> Vec<u8> {
-    let caller = ic_cdk::api::msg_caller();
     require_authed();
     if transport_public_key.is_empty() {
         ic_cdk::trap("transport_public_key must not be empty");
