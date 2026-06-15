@@ -1,12 +1,11 @@
 #!/usr/bin/env bash
 # scripts/deploy-prod.sh — build + deploy the IOU canister to IC mainnet.
 #
-# This script is the v1.1.0 production deployment. It does the
-# following:
+# Flow:
 #   1. Verifies prerequisites: dfx >= 0.27 (for ic-cdk 0.20 support),
 #      an active cycles wallet, and the VITE_IOU_PROD_VETKD flag.
-#   2. Builds the canister with the prod-vetkd feature (which pulls
-#      in ic-cdk-management-canister 0.1 and the real vetkd endpoints).
+#   2. Builds the canister. The vetkd IBE endpoints are always
+#      compiled in (v1.1.1+); no cargo feature gate needed.
 #   3. Builds the PWA with VITE_IOU_PROD_VETKD=1 (uses the prod
 #      adapter for sheet key wrap/unwrap).
 #   4. Deploys the backend canister to the IC mainnet, then the
@@ -15,11 +14,6 @@
 #
 # Usage:
 #   IOU_WALLET=xxxxx-cycles-wallet-principal pnpm deploy:ic
-#
-# In v1.1.0 this is a v1.1.x deliverable (the actual prod-vetkd
-# canister build is gated on dfx >= 0.27). This script is the
-# operational scaffolding; the real build is wired in v1.1.1 once
-# the IBE primitives are available.
 
 set -euo pipefail
 
@@ -50,9 +44,12 @@ if [ -z "${IOU_WALLET:-}" ]; then
 fi
 echo "✓ cycles wallet: $IOU_WALLET"
 
-# ─── 2. build canister (prod-vetkd feature) ───
-echo "→ building canister (feature: prod-vetkd)..."
-cargo build --target wasm32-unknown-unknown --release --features prod-vetkd
+# ─── 2. build canister ───
+# No --features flag needed: vetkd endpoints are always compiled in
+# (v1.1.1+), inspect_message is always active (v1.2.3+). The same
+# build works on PocketIC and IC mainnet.
+echo "→ building canister..."
+cargo build --target wasm32-unknown-unknown --release
 
 # ─── 3. build PWA (with VITE_IOU_PROD_VETKD=1) ───
 echo "→ building PWA (VITE_IOU_PROD_VETKD=1)..."
