@@ -104,20 +104,20 @@ thread_local! {
     // upgrade users re-set their display name. v1.1 will make this
     // stable.
     static USERS: RefCell<BTreeMap<Principal, UserRecord>> =
-        RefCell::new(BTreeMap::new());
+        const { RefCell::new(BTreeMap::new()) };
 
-    static CONFIG: RefCell<Config> = RefCell::new(Config {
+    static CONFIG: RefCell<Config> = const { RefCell::new(Config {
         creator_principal: Principal::anonymous(),
         deployed_at: 0,
-    });
+    }) };
 
     // Phase 2: pair and sheet state. Stable across upgrades.
     static PAIRS: RefCell<BTreeMap<String, Pair>> =
-        RefCell::new(BTreeMap::new());
+        const { RefCell::new(BTreeMap::new()) };
     static SHEETS: RefCell<BTreeMap<String, Sheet>> =
-        RefCell::new(BTreeMap::new());
+        const { RefCell::new(BTreeMap::new()) };
     static INVITES: RefCell<BTreeMap<String, String>> =
-        RefCell::new(BTreeMap::new());  // invite_code -> pair_id
+        const { RefCell::new(BTreeMap::new()) };  // invite_code -> pair_id
 }
 
 // ───────────────────────── helpers ─────────────────────────
@@ -129,7 +129,7 @@ fn require_authed() {
 }
 
 fn is_member_of(pair: &Pair, p: Principal) -> bool {
-    pair.members.iter().any(|m| *m == p)
+    pair.members.contains(&p)
 }
 
 // Generate a random 8-char invite code from a 32-char base32 alphabet
@@ -549,7 +549,7 @@ fn create_sheet(req: CreateSheetReq) -> Sheet {
 fn get_sheet(sheet_id: String) -> Option<Sheet> {
     let caller = ic_cdk::api::msg_caller();
     let pair_id = SHEETS.with(|s| s.borrow().get(&sheet_id).map(|sh| sh.pair_id.clone()));
-    let pair_id = match pair_id { Some(p) => p, None => return None };
+    let pair_id = pair_id?;
     let allowed = PAIRS.with(|p| {
         p.borrow().get(&pair_id).map(|pair| is_member_of(pair, caller)).unwrap_or(false)
     });
@@ -576,7 +576,7 @@ fn list_archived_sheets(pair_id: String) -> Vec<Sheet> {
             .cloned()
             .collect()
     });
-    out.sort_by(|a, b| b.closed_at.unwrap_or(0).cmp(&a.closed_at.unwrap_or(0)));
+    out.sort_by_key(|b| std::cmp::Reverse(b.closed_at.unwrap_or(0)));
     out
 }
 
@@ -601,7 +601,7 @@ fn get_sheet_wrapped_key(sheet_id: String) -> Option<Vec<u8>> {
 
 /// add_currency: enables a new currency on an active sheet.
 #[ic_cdk::update]
-fn add_currency(sheet_id: String, iso: String) -> () {
+fn add_currency(sheet_id: String, iso: String) {
     let caller = ic_cdk::api::msg_caller();
     require_authed();
     if iso.len() != 3 || !iso.chars().all(|ch| ch.is_ascii_alphabetic()) {
@@ -633,7 +633,7 @@ fn add_currency(sheet_id: String, iso: String) -> () {
 /// close_sheet: marks a sheet closed, captures the closing balances.
 /// Members are still able to read it.
 #[ic_cdk::update]
-fn close_sheet(sheet_id: String, closing_balances: Vec<ClosingBalance>) -> () {
+fn close_sheet(sheet_id: String, closing_balances: Vec<ClosingBalance>) {
     let caller = ic_cdk::api::msg_caller();
     require_authed();
     SHEETS.with(|s| {
@@ -705,9 +705,9 @@ pub struct ListEntriesResult {
 // Sheets gain a per-sheet entry counter for monotonic ids.
 thread_local! {
     static ENTRY_COUNTERS: RefCell<BTreeMap<String, u64>> =
-        RefCell::new(BTreeMap::new());
+        const { RefCell::new(BTreeMap::new()) };
     static ENTRIES: RefCell<BTreeMap<String, Vec<Entry>>> =
-        RefCell::new(BTreeMap::new());
+        const { RefCell::new(BTreeMap::new()) };
     // We also keep a secondary index: pair_id -> Vec<sheet_id> for
     // bulk operations. (Currently unused but cheap.)
 }
@@ -846,7 +846,7 @@ fn edit_entry(req: EditEntryReq) -> Entry {
         let entry = list
             .iter_mut()
             .find(|e| e.id == req.entry_id)
-            .ok_or_else(|| "entry not found")
+            .ok_or("entry not found")
             .unwrap(/* panic trap */);
         if entry.created_by != caller {
             ic_cdk::trap("only the original creator can edit this entry");
@@ -891,7 +891,7 @@ fn list_entries(
             .unwrap_or_default()
     });
     // Sort newest first.
-    all.sort_by(|a, b| b.id.cmp(&a.id));
+    all.sort_by_key(|b| std::cmp::Reverse(b.id));
     let start = match cursor {
         Some(c) => all.iter().position(|e| e.id < c).unwrap_or(all.len()),
         None => 0,
@@ -1164,9 +1164,9 @@ fn canonical_replace_bytes(req: &ReplaceRequest) -> Vec<u8> {
     out.extend_from_slice(b"iou-replace-member-v1:");
     out.extend_from_slice(req.pair_id.as_bytes());
     out.push(0xff);
-    out.extend_from_slice(&req.leaving_principal.as_slice());
+    out.extend_from_slice(req.leaving_principal.as_slice());
     out.push(0xff);
-    out.extend_from_slice(&req.new_principal.as_slice());
+    out.extend_from_slice(req.new_principal.as_slice());
     out.push(0xff);
     out.extend_from_slice(&req.ts_ms.to_be_bytes());
     out.push(0xff);

@@ -7,6 +7,11 @@
 > never leaves your device; the canister only stores ciphertexts
 > and the IC's `vetkd` derives per-sheet keys from your identity.
 
+> **Status (v1.2.x):** prod-vetkd IBE round-trip works on the
+> local replica. The canister's `inspect_message` hook is on by
+> default — same build works on PocketIC and IC mainnet, no cargo
+> feature flags. See the [changelog](#changelog) below.
+
 ## What it does
 
 You and one other person create a "pair". Inside the pair, you
@@ -358,9 +363,59 @@ sides. To enable:
   handoff blob, or QR via paste)
 - [x] v1.1.3 — Google-Sheets CSV export
 - [x] v1.1.4 — Capacitor Android scaffold
+- [x] v1.2.x — prod-vetkd IBE works end-to-end on the local
+  replica, inspect_message hook on by default (no cargo
+  feature flag), deploy script fixed. See [Changelog](#changelog)
+  below.
 - [ ] v1.1.5 — signed Android release, iOS, deep links, app
   icon + splash
 - [ ] v2 — real production deploy to IC mainnet
+
+## Changelog
+
+### v1.2.x (2026-06) — prod-vetkd IBE + inspect_message
+
+Four fixes that close the gap between "compiles" and "works
+end-to-end on the local replica":
+
+- **v1.2.2 — fix prod-vetkd IBE decrypt.** The v1.1.5 fix called
+  `MasterPublicKey.deserialize(...).deriveCanisterKey(canisterId)`,
+  but the IC management canister's `vetkd_public_key` already
+  does the full two-stage derivation (canister key + context
+  subkey) server-side, so the PWA was double-deriving and the
+  BLS pairing check in `decryptAndVerify` rejected the IBE
+  ciphertext with "Invalid VetKey". Correct API: just
+  `DerivedPublicKey.deserialize(bytes)` — no re-derivation.
+  The 5th `canisterId` arg is now a no-op (kept for source
+  compat). Phase 3 of the vetkd smoke now exercises a real
+  IBE round-trip (A and B both derive the same 32-byte K_sheet).
+
+- **v1.2.3 — re-enable inspect_message on PocketIC.** The
+  v1.2.1 `mainnet` cargo feature was a workaround for a bug
+  where the hook forgot to call `ic_cdk::api::accept_message()`.
+  Per the IC spec, a hook that returns without accepting is a
+  silent reject. The fix: call `accept_message()` at the end
+  of the hook. No feature flag needed — same build works on
+  PocketIC and IC mainnet. Also added a `require_auth_methods`
+  allowlist so `vetkd_public_key` (intentionally unauth) isn't
+  blocked at the inspect layer.
+
+- **v1.2.4 — fix deploy-prod.sh.** The script had referenced
+  `--features prod-vetkd` since v1.1.0, but that feature was
+  never declared in `Cargo.toml`. Mainnet deploys would have
+  failed with `unknown feature`. Dropped the flag — the
+  canonical mainnet build is just
+  `cargo build --target wasm32-unknown-unknown --release`.
+
+- **Tooling: clippy in the smoke flow.** The WSL smoke scripts
+  now run `cargo clippy --all-targets -- -D warnings` before
+  the build, so dead code, unused vars, and a bunch of other
+  correctness lints get caught at smoke time instead of
+  silently rotting. Also added `LANG=C.UTF-8` so the smoke's
+  `✓/✗/═══` characters render properly under PowerShell + WSL.
+
+25/25 unit tests + 12/12 smoke assertions + 0 clippy warnings
+on the canister crate.
 
 ## License
 

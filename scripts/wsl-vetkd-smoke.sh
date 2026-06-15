@@ -12,6 +12,11 @@
 #   5. dfx deploy iou_assets (PWA).
 #   6. Runs scripts/awa-smoke-vetkd.ts.
 set -uo pipefail
+# UTF-8 so the smoke's ✓/✗/═══ characters render properly when
+# the script runs under PowerShell + WSL (the default LANG=C
+# emits ????? for non-ASCII bytes).
+export LANG=C.UTF-8
+export LC_ALL=C.UTF-8
 export PATH="/home/kiko/.local/node20/bin:/home/kiko/.cargo/bin:/home/kiko/.local/share/dfx/bin:$PATH"
 cd /mnt/c/Kiko/MyProjects/IOU
 
@@ -32,6 +37,14 @@ dfx canister uninstall-code iou_backend 2>&1 | tail -3 || true
 # Build + deploy.
 echo "=== cargo build ==="
 cargo build --target wasm32-unknown-unknown --release 2>&1 | tail -3
+
+# Clippy on the canister crate (host target — clippy lints don't
+# need wasm). Treats warnings as errors.
+echo "=== cargo clippy (--all-targets -- -D warnings) ==="
+cargo clippy --all-targets -- -D warnings 2>&1 | tail -10 || {
+  echo "❌ cargo clippy reported warnings. Fix them before merging." >&2
+  exit 1
+}
 
 echo "=== dfx deploy iou_backend ==="
 dfx deploy iou_backend 2>&1 | tail -5
