@@ -180,6 +180,73 @@ fn now_id() -> String {
     format!("{:x}-{:x}", t, hash)
 }
 
+// ───────────────────────── inspect_message (gated by the `mainnet` cargo feature) ─────────────────────────
+//
+// Same pattern as ktimam/ICTemplate/src/lib.rs. See that file
+// for the full rationale. The short version:
+//
+//   - Default build (no feature) compiles the function out, so
+//     PocketIC + dfx 0.27+ is happy.
+//   - Build with `--features mainnet` for IC mainnet deploys.
+//   - Per-method `require_authed()` is the canonical identity
+//     gate and works on both targets.
+//   - inspect_message here is best-effort defense in depth
+//     (method whitelist + anonymous trap on mainnet only).
+
+#[cfg(feature = "mainnet")]
+#[ic_cdk::inspect_message]
+fn inspect_message() {
+    let method_name = ic_cdk::api::msg_method_name();
+    let caller = ic_cdk::api::msg_caller();
+
+    let allowed: &[&str] = &[
+        "init",
+        "post_upgrade",
+        // Phase 1: auth + config
+        "whoami",
+        "get_my_user",
+        "set_display_name",
+        "get_config",
+        "set_creator_principal",
+        // Phase 2: pair lifecycle
+        "create_pair",
+        "join_pair",
+        "get_my_pairs",
+        "get_pair",
+        // Phase 3: sheet lifecycle
+        "create_sheet",
+        "get_sheet",
+        "list_archived_sheets",
+        "get_sheet_wrapped_key",
+        "add_currency",
+        "close_sheet",
+        "start_new_sheet",
+        // Phase 4: entries
+        "add_entry",
+        "edit_entry",
+        "get_entry",
+        "list_entries",
+        // v1.1.1: real vetkd
+        "get_vetkd_key_name",
+        "vetkd_public_key",
+        "vetkd_wrap_sheet_key",
+        // v1.1.2: replace member
+        "submit_replace_member",
+    ];
+    if !allowed.contains(&method_name.as_str()) {
+        ic_cdk::trap(format!(
+            "method '{}' is not in the inspect whitelist",
+            method_name
+        ));
+    }
+
+    // On mainnet (the only place this function compiles), also
+    // trap on anonymous callers as a defense-in-depth check.
+    if caller == candid::Principal::anonymous() {
+        ic_cdk::trap("anonymous callers are not allowed");
+    }
+}
+
 // ───────────────────────── Phase 1 endpoints (auth + config) ─────────────────────────
 
 #[ic_cdk::query]

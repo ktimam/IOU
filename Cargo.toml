@@ -6,6 +6,14 @@ edition = "2021"
 [lib]
 crate-type = ["cdylib"]
 
+[features]
+# mainnet: enables the inspect_message hook in lib.rs. Disabled by
+# default because dfx 0.27 + PocketIC has a regression where
+# declaring inspect_message at all breaks the message dispatcher.
+# Build with `--features mainnet` when targeting IC mainnet.
+default = []
+mainnet = []
+
 [dependencies]
 candid = "0.10"
 ic-cdk = "0.20"
@@ -13,9 +21,6 @@ ic-cdk-macros = "0.20"
 ic-cdk-management-canister = "0.1"
 ed25519-dalek = { version = "2", features = ["std"] }
 serde = { version = "1", features = ["derive"] }
-
-[features]
-default = []
 
 [profile.release]
 opt-level = "z"
