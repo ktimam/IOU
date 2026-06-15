@@ -1,3 +1,13 @@
+# pnpm-workspace.yaml — see ICTemplate/../pnpm-workspace.yaml for the
+# full explanation. Same dual-version shim (pnpm 9 wants `packages: []`,
+# pnpm 11 wants `allowBuilds` / `onlyBuiltDependencies`).
+
+packages: []
+
+onlyBuiltDependencies:
+  - esbuild
+  - rollup
+
 allowBuilds:
   esbuild: true
   rollup: true

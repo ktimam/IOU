@@ -20,7 +20,8 @@
     "android:install": "adb install -r android/app/build/outputs/apk/debug/app-debug.apk",
     "smoke": "pnpm exec tsx scripts/awa-smoke.ts",
     "smoke:reset": "bash scripts/smoke-reset.sh",
-    "test:unit": "vitest run"
+    "test:unit": "vitest run",
+    "postinstall": "node scripts/patch-vetkeys-esm.mjs"
   },
   "dependencies": {
     "@dfinity/agent": "^3.4.3",
