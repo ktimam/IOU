@@ -28,14 +28,29 @@
 // master pubkey as returned by the canister is 96 bytes G2.
 //
 // v1.1.5: EncryptedVetKey's constructor is private in @dfinity/
-// vetkeys 0.4.x; use the static `deserialize` factory. decryptAndVerify
-// also requires a `DerivedPublicKey` (canister-specific), not the
-// master key. The PWA must pass the canister id (bytes) so we can do
-// the deriveCanisterKey() step here.
+// vetkeys 0.4.x; use the static `deserialize` factory.
+//
+// v1.2.2: Use DerivedPublicKey.deserialize directly on the bytes
+// returned by the canister's `vetkd_public_key`. The IC management
+// canister ALREADY does the two-stage derivation (canister key +
+// context subkey) server-side when it returns the public key, so the
+// PWA must NOT re-derive. v1.1.5 incorrectly called
+// `MasterPublicKey.deserialize(...).deriveCanisterKey(canisterId)`,
+// which double-derived the key and caused the BLS pairing check in
+// `decryptAndVerify` to reject the IBE ciphertext with "Invalid VetKey".
+//
+// The v1.1.5 fix was based on a misreading of the @dfinity/vetkeys
+// API: the official example in the 0.4.0 README uses
+// `DerivedPublicKey.deserialize(dpkBytes)` directly — no further
+// derivation. The `canisterId` argument is therefore no longer
+// needed (it's still accepted by `unwrapSheetKeyProd` for source
+// compatibility, but is unused).
+//
+// See: @dfinity/vetkeys 0.4.0 dist/types/index.d.ts Usage Example.
 
 import {
   TransportSecretKey,
-  MasterPublicKey,
+  DerivedPublicKey,
   EncryptedVetKey,
   VetKey,
 } from "@dfinity/vetkeys";
@@ -115,19 +130,15 @@ export async function unwrapSheetKeyProd(
   masterPubKey: Uint8Array,
   encVetKeyBytes: Uint8Array,
   /**
-   * The 32-byte principal bytes of the calling canister. Required:
-   * `decryptAndVerify` expects a `DerivedPublicKey` (bound to a
-   * specific canister), not the raw master key. If you call with the
-   * master key directly, the IBE verification will reject the
-   * derived key with a generic "verification failed" error.
+   * The principal bytes of the calling canister. **Unused** as of
+   * v1.2.2 — the IC management canister's `vetkd_public_key` already
+   * does the two-stage derivation (canister key + context subkey)
+   * server-side, so the PWA does not need to re-derive. Accepted
+   * for source compatibility with v1.1.5 callers.
    */
-  canisterId: Uint8Array,
+  _canisterId: Uint8Array,
 ): Promise<Uint8Array> {
-  const mpk = MasterPublicKey.deserialize(masterPubKey);
-  // Canister-specific derived key. Required for `decryptAndVerify`:
-  // the IBE ciphertext is bound to (this_canister, input, context),
-  // and the verification checks the derived key matches.
-  const dpk = mpk.deriveCanisterKey(canisterId);
+  const dpk = DerivedPublicKey.deserialize(masterPubKey);
   const tsk = tskFromBytes(transport.secretKey);
   // The canister's IBE input is b"iou-sheet:" + sheet_id. We need
   // to reconstruct the same input here.

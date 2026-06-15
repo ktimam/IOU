@@ -1,6 +1,6 @@
 // scripts/awa-smoke-vetkd.ts
 //
-// End-to-end smoke for the v1.1.5 vetkd IBE fixes. Runs against a
+// End-to-end smoke for the vetkd IBE round-trip. Runs against a
 // fresh local replica and exercises:
 //
 //   Phase 1: Auth
@@ -10,7 +10,7 @@
 //   Phase 2: vetkd public key
 //     - get_vetkd_key_name returns "dfx_test_key" (or whatever the
 //       canister is configured for).
-//     - vetkd_public_key returns a 96-byte G2 master key.
+//     - vetkd_public_key returns a 96-byte G2 key.
 //   Phase 3: vetkd IBE decrypt round-trip
 //     - Create a pair + sheet as user A. Add user B. Both are
 //       signed with generated Ed25519 identities (no dfx
@@ -19,9 +19,9 @@
 //       BLS12-381 G1 transport pub key.
 //     - On the client side, call prodVetkd.deriveSheetKey() to
 //       unwrap the IBE ciphertext using the same transport
-//       keypair and the canister id. Verify that both users
-//       derive the same K_sheet (the IBE ciphertext is the same
-//       for both; the transport key is the only secret).
+//       keypair. Verify that both users derive the same K_sheet
+//       (the IBE ciphertext is the same for both; the transport
+//       key is the only secret).
 //
 // Run with: SMOKE_CANISTER_ID=... SMOKE_HOST=... tsx scripts/awa-smoke-vetkd.ts
 // Or via the WSL helper: scripts/wsl-vetkd-smoke.sh (calls
@@ -33,19 +33,14 @@
 //   dfx canister uninstall-code iou_backend
 //   dfx deploy iou_backend
 //
-// KNOWN ISSUE: As of v1.1.5 + this smoke, Phase 3's deriveSheetKey
-// call on the iou_backend canister throws "Invalid VetKey" from
-// @dfinity/vetkeys 0.4.0's decryptAndVerify (the Fp12 pairing
-// equality check). The same code path verified end-to-end against
-// ktimam/ICTemplate's canister (the only difference between the
-// two vetkd_derive_key implementations is the IBE context/input
-// string; the math is identical). This is a real cryptographic
-// mismatch on the local replica's vetkd_test_key that does NOT
-// appear on IC mainnet. Phases 1 and 2 are unaffected. Phase 3
-// detects the error and continues, printing a clear diagnostic.
-// To investigate further: try changing the IBE input to a
-// fixed-length string (e.g. hash of sheet_id) and see if the
-// pairing validates.
+// v1.2.2: Phase 3 now passes end-to-end. The previous "Invalid VetKey"
+// failure was a TS-side bug — the PWA was calling
+// `MasterPublicKey.deserialize(...).deriveCanisterKey(canisterId)`,
+// but the IC management canister's `vetkd_public_key` already does
+// the full two-stage derivation (canister key + context subkey)
+// server-side, so the TS was double-deriving. The fix is to use
+// `DerivedPublicKey.deserialize(bytes)` directly — no re-derivation.
+// See prodVetkd.ts for the v1.2.2 comment.
 
 import { Actor, HttpAgent } from "@dfinity/agent";
 import { Ed25519KeyIdentity } from "@dfinity/identity";
@@ -270,35 +265,30 @@ const encVetKeyA = new Uint8Array(
 if (encVetKeyA.length === 0) fail("vetkd_wrap_sheet_key(A) returned empty");
 pass(`A vetkd_wrap_sheet_key -> ${encVetKeyA.length} bytes encrypted`);
 
-// 3.6 A unwraps the IBE ciphertext. The v1.1.5 fix in prodVetkd.ts
-//     (EncryptedVetKey.deserialize + mpk.deriveCanisterKey) makes
-//     this call use the correct API. On a real IC mainnet the IBE
-//     math validates and we get K_sheet; on dfx 0.27 + PocketIC
-//     with the local replica's vetkd_test_key, the pairing check
-//     in @dfinity/vetkeys 0.4.0's decryptAndVerify sometimes
-//     throws "Invalid VetKey" — an open issue tracked separately.
-//     We treat it as a known-fail with a clear diagnostic.
+// 3.5 A asks for IBE-wrapped K_sheet, then unwraps with transport A.
+//     As of v1.2.2 the IBE round-trip works end-to-end on the local
+//     replica: A and B both derive the same K_sheet from their own
+//     transport keys. If this ever throws "Invalid VetKey" again,
+//     fail loudly — that's a real regression, not a known issue.
 let K_sheet_A: Uint8Array | null = null;
-try {
-  K_sheet_A = await deriveSheetKey(
-    sheetId,
-    transportA,
-    masterPubKey,
-    encVetKeyA,
-    canisterIdBytes,
-  );
-  pass(`A deriveSheetKey -> ${K_sheet_A.length}-byte K_sheet (${bytesToHex(K_sheet_A).slice(0, 16)}...)`);
-} catch (e: any) {
-  if (/Invalid VetKey/i.test(String(e?.message ?? e))) {
-    console.log(`  ! KNOWN ISSUE: A deriveSheetKey failed with "Invalid VetKey"`);
-    console.log(`    The v1.1.5 IBE-decrypt fix is in place (EncryptedVetKey.deserialize + deriveCanisterKey).`);
-    console.log(`    On the local replica, the pairing check inside @dfinity/vetkeys 0.4.0's`);
-    console.log(`    decryptAndVerify sometimes rejects the IBE ciphertext.`);
-    console.log(`    Same code path verified to work against ICTemplate's canister.`);
-    console.log(`    See notes at top of file. Continuing with B's call.`);
-  } else {
-    throw e;
+{
+  let err: any = null;
+  try {
+    K_sheet_A = await deriveSheetKey(
+      sheetId,
+      transportA,
+      masterPubKey,
+      encVetKeyA,
+      canisterIdBytes,
+    );
+  } catch (e) {
+    err = e;
   }
+  if (err) fail("A deriveSheetKey threw", err);
+  if (!K_sheet_A || K_sheet_A.length !== 32) {
+    fail(`A deriveSheetKey wrong size: ${K_sheet_A?.length}, expected 32`);
+  }
+  pass(`A deriveSheetKey -> ${K_sheet_A.length}-byte K_sheet (${bytesToHex(K_sheet_A).slice(0, 16)}...)`);
 }
 
 // 3.6 B does the same with transport B. Should get the SAME K_sheet.
@@ -308,36 +298,35 @@ const encVetKeyB = new Uint8Array(
 if (encVetKeyB.length === 0) fail("vetkd_wrap_sheet_key(B) returned empty");
 pass(`B vetkd_wrap_sheet_key -> ${encVetKeyB.length} bytes encrypted`);
 let K_sheet_B: Uint8Array | null = null;
-try {
-  K_sheet_B = await deriveSheetKey(
-    sheetId,
-    transportB,
-    masterPubKey,
-    encVetKeyB,
-    canisterIdBytes,
-  );
-  pass(`B deriveSheetKey -> ${K_sheet_B.length}-byte K_sheet (${bytesToHex(K_sheet_B).slice(0, 16)}...)`);
-} catch (e: any) {
-  if (/Invalid VetKey/i.test(String(e?.message ?? e))) {
-    console.log(`  ! KNOWN ISSUE: B deriveSheetKey failed with "Invalid VetKey" (see A above)`);
-  } else {
-    throw e;
+{
+  let err: any = null;
+  try {
+    K_sheet_B = await deriveSheetKey(
+      sheetId,
+      transportB,
+      masterPubKey,
+      encVetKeyB,
+      canisterIdBytes,
+    );
+  } catch (e) {
+    err = e;
   }
+  if (err) fail("B deriveSheetKey threw", err);
+  if (!K_sheet_B || K_sheet_B.length !== 32) {
+    fail(`B deriveSheetKey wrong size: ${K_sheet_B?.length}, expected 32`);
+  }
+  pass(`B deriveSheetKey -> ${K_sheet_B.length}-byte K_sheet (${bytesToHex(K_sheet_B).slice(0, 16)}...)`);
 }
 
-// 3.7 Compare: if both derivations succeeded, they must yield the
-//     same K_sheet (the IBE material is bound to (canister, sheet_id),
-//     transport keys are independent). If either failed, skip.
-if (K_sheet_A && K_sheet_B) {
-  if (bytesToHex(K_sheet_A) !== bytesToHex(K_sheet_B)) {
-    fail(
-      `K_sheet mismatch: A=${bytesToHex(K_sheet_A)} B=${bytesToHex(K_sheet_B)}`,
-    );
-  }
-  pass(`K_sheet_A == K_sheet_B (IBE decrypt round-trip works)`);
-} else {
-  console.log(`  ! SKIPPED: K_sheet equality check (one or both derives failed with Invalid VetKey)`);
+// 3.7 Compare: both derivations succeeded; they must yield the same
+//     K_sheet (the IBE material is bound to (canister, sheet_id),
+//     transport keys are independent).
+if (bytesToHex(K_sheet_A!) !== bytesToHex(K_sheet_B!)) {
+  fail(
+    `K_sheet mismatch: A=${bytesToHex(K_sheet_A!)} B=${bytesToHex(K_sheet_B!)}`,
+  );
 }
+pass(`K_sheet_A == K_sheet_B (IBE decrypt round-trip works)`);
 
 // 3.8 Bad-input: 32-byte transport key should be rejected.
 //     IOU's vetkd_wrap_sheet_key uses `ic_cdk::trap(...)` for

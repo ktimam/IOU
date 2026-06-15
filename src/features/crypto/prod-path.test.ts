@@ -42,11 +42,15 @@ describe("prod-path guard", () => {
     expect(t.publicKey.length).toBe(48);
   });
 
-  it("deriveSheetKey signature requires a canisterId (5-arg form)", () => {
-    // v1.1.5: added canisterId param. We assert the function's
-    // .length so a future refactor that drops the arg fails CI.
-    // (TypeScript can't pin a parameter count at the type level;
-    // .length is the only runtime check available without invoking.)
+  it("deriveSheetKey signature is the 5-arg form (canisterId is now a no-op)", () => {
+    // v1.1.5 added a 5th `canisterId` arg. v1.2.2 made it a no-op
+    // (the IC already does the canister+context derivation server-
+    // side; the PWA just deserializes the result). We keep the
+    // 5-arg signature for source compatibility with existing
+    // callers — this test pins the count so a future refactor that
+    // drops the arg fails CI. (TypeScript can't pin a parameter
+    // count at the type level; .length is the only runtime check
+    // available without invoking.)
     expect(deriveSheetKey.length).toBe(5);
   });
 });
