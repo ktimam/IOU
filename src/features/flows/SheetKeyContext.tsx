@@ -17,6 +17,7 @@
 // Either way, K_sheet is held in memory only — never on disk.
 
 import { createContext, useContext, useState, useCallback } from "react";
+import { Principal } from "@dfinity/principal";
 import { createActor } from "../../backend/declarations";
 import {
   unwrapSheetKey,
@@ -27,9 +28,9 @@ import {
   isProdVetkd,
   loadOrCreateTransportKey,
   deriveSheetKey as deriveSheetKeyProd,
-  type VetkdTransportKey,
 } from "../crypto/prodVetkd";
 import { useAuth } from "../auth/AuthProvider";
+import { canisterId as canisterIdString } from "../auth/config";
 import { unwrap } from "./useActor";
 
 type SheetKeyMap = Record<string, Uint8Array>;
@@ -74,11 +75,16 @@ export function SheetKeyProvider({ children }: { children: React.ReactNode }) {
         sheetId,
         Array.from(transport.publicKey),
       );
+      // `decryptAndVerify` requires a DerivedPublicKey bound to a
+      // specific canister; the canister id (as principal bytes) is
+      // the "audience" of the IBE ciphertext.
+      const canisterIdBytes = Principal.fromText(canisterIdString).toUint8Array();
       const K_sheet = await deriveSheetKeyProd(
         sheetId,
         transport,
         new Uint8Array(masterPubKey),
         new Uint8Array(encVetKey),
+        canisterIdBytes,
       );
       setKeys((prev) => ({ ...prev, [sheetId]: K_sheet }));
       return K_sheet;

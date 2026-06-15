@@ -6,7 +6,11 @@
 
 import { describe, it, expect } from "vitest";
 import { isDevVetkd, isProdVetkd } from "./devVetkd";
-import { isProdVetkd as isProdVetkdFromProd, newTransportKey } from "./prodVetkd";
+import {
+  isProdVetkd as isProdVetkdFromProd,
+  newTransportKey,
+  deriveSheetKey,
+} from "./prodVetkd";
 
 describe("prod-path guard", () => {
   it("the dev adapter is the default", () => {
@@ -36,5 +40,13 @@ describe("prod-path guard", () => {
     const t = newTransportKey();
     expect(t.secretKey.length).toBe(32);
     expect(t.publicKey.length).toBe(48);
+  });
+
+  it("deriveSheetKey signature requires a canisterId (5-arg form)", () => {
+    // v1.1.5: added canisterId param. We assert the function's
+    // .length so a future refactor that drops the arg fails CI.
+    // (TypeScript can't pin a parameter count at the type level;
+    // .length is the only runtime check available without invoking.)
+    expect(deriveSheetKey.length).toBe(5);
   });
 });

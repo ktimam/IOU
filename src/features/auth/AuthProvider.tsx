@@ -11,6 +11,15 @@ type AuthState =
 
 type AuthCtx = {
   state: AuthState;
+  /**
+   * Convenience accessor for the current identity. Defined iff
+   * `state.kind === "authenticated"`; undefined otherwise. v1.1.5:
+   * SheetKeyContext needs this to wire the actor for the prod
+   * vetkd path. Previously the consumer would do
+   * `state.kind === 'authenticated' ? state.identity : null`
+   * inline; this avoids the boilerplate.
+   */
+  identity?: Identity;
   signIn: () => Promise<void>;
   signInDev: () => Promise<void>;
   signOut: () => Promise<void>;
@@ -108,7 +117,15 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   }
 
   return (
-    <AuthContext.Provider value={{ state, signIn, signInDev, signOut }}>
+    <AuthContext.Provider
+      value={{
+        state,
+        identity: state.kind === "authenticated" ? state.identity : undefined,
+        signIn,
+        signInDev,
+        signOut,
+      }}
+    >
       {children}
     </AuthContext.Provider>
   );

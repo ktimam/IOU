@@ -3,7 +3,7 @@
 
 import { useEffect, useState } from "react";
 import { useParams, Link } from "react-router-dom";
-import { unwrap, isClosed, useActor } from "../flows/useActor";
+import { useActor } from "../flows/useActor";
 import { useSheetKey } from "../flows/SheetKeyContext";
 import { useAuth } from "../auth/AuthProvider";
 import { decryptEntryPayload } from "../crypto/devVetkd";

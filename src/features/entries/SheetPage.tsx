@@ -6,7 +6,7 @@
 
 import { useEffect, useMemo, useState } from "react";
 import { useParams, Link } from "react-router-dom";
-import { unwrap, isActive, isClosed, useActor } from "../flows/useActor";
+import { unwrap, isActive, useActor } from "../flows/useActor";
 import { useSheetKey } from "../flows/SheetKeyContext";
 import { useAuth } from "../auth/AuthProvider";
 import { decryptEntryPayload, encryptEntryPayload } from "../crypto/devVetkd";
