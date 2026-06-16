@@ -1566,19 +1566,28 @@ fn submit_replace_member(signed: SignedReplaceRequest) -> Pair {
 /// Canonical bytes of a ReplaceRequest (used as the ed25519 message).
 /// Domain-separated so the signature can't be replayed across
 /// canisters or for other purposes.
+///
+/// V7 fix (v1.3.1): every variable-length field is now prefixed
+/// with a big-endian u32 length. The previous 0xff delimiter was
+/// safe only because pair_id was ASCII; length-prefixed encoding
+/// makes the canonical form safe to reuse for any field type
+/// (binary blobs, multi-byte UTF-8, …) without colliding on a
+/// delimiter byte.
 fn canonical_replace_bytes(req: &ReplaceRequest) -> Vec<u8> {
     let mut out = Vec::with_capacity(128);
     out.extend_from_slice(b"iou-replace-member-v1:");
-    out.extend_from_slice(req.pair_id.as_bytes());
-    out.push(0xff);
-    out.extend_from_slice(req.leaving_principal.as_slice());
-    out.push(0xff);
-    out.extend_from_slice(req.new_principal.as_slice());
-    out.push(0xff);
-    out.extend_from_slice(&req.ts_ms.to_be_bytes());
-    out.push(0xff);
-    out.extend_from_slice(&req.nonce);
+    push_with_len(&mut out, req.pair_id.as_bytes());
+    push_with_len(&mut out, req.leaving_principal.as_slice());
+    push_with_len(&mut out, req.new_principal.as_slice());
+    push_with_len(&mut out, &req.ts_ms.to_be_bytes());
+    push_with_len(&mut out, &req.nonce);
     out
+}
+
+fn push_with_len(out: &mut Vec<u8>, bytes: &[u8]) {
+    let len = bytes.len() as u32;
+    out.extend_from_slice(&len.to_be_bytes());
+    out.extend_from_slice(bytes);
 }
 
 fn verify_replace_signature(signed: &SignedReplaceRequest, leaving_principal: &Principal) {

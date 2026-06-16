@@ -3,16 +3,20 @@
 // list_archived_sheets endpoint.
 // Run with: pnpm smoke
 //
-// IMPORTANT: This test expects a clean canister. If state from a
-// previous run is still there (tester already has a pair), the
-// test will trap on create_pair. To reset:
-//   dfx canister uninstall-code iou_backend
-//   dfx deploy iou_backend
+// IMPORTANT: this smoke uses fresh in-process Ed25519 identities
+// for tester / partner / carol on every run (the previous version
+// read `.pem` files from `~/.config/dfx/identity/{name}/`, which
+// made the test non-idempotent — the second run would trap on
+// "tester is already in an active pair" because the prior run's
+// pair was still in the canister's stable storage). The fresh
+// identities are equivalent for the canister's purposes: the
+// caller is identified by its principal, not by the underlying
+// key algorithm.
 
 import { HttpAgent, Actor } from "@dfinity/agent";
-import { Secp256k1KeyIdentity } from "@dfinity/identity-secp256k1";
+import { Ed25519KeyIdentity } from "@dfinity/identity";
 import { webcrypto } from "node:crypto";
-import { readFileSync } from "node:fs";
+import { Principal } from "@dfinity/principal";
 import { idlFactory } from "../src/backend/declarations";
 import {
   decryptEntryPayload,
@@ -22,6 +26,7 @@ import {
   unwrapSheetKey,
   wrapSheetKey,
 } from "../src/features/crypto/devVetkd";
+import { canonicalReplaceBytes } from "../src/features/replaceMember/replaceMember";
 
 // Node polyfill for WebCrypto (and the localStorage shim is implicit:
 // devVetkd's localStorage access is guarded with try/catch so it
@@ -35,17 +40,20 @@ const canisterId =
   "uxrrr-q7777-77774-qaaaq-cai";
 const host = network === "local" ? "http://127.0.0.1:4943" : "https://icp-api.io";
 
-function loadIdentity(name: string) {
-  const pemPath = `${process.env.HOME}/.config/dfx/identity/${name}/identity.pem`;
-  const pem = readFileSync(pemPath, "utf8");
-  return Secp256k1KeyIdentity.fromPem(pem);
-}
+// Fresh in-process identities. Each run is a fresh principal
+// that's never been on the canister, so the smoke is idempotent
+// without needing to wipe stable storage.
+const testerIdentity = Ed25519KeyIdentity.generate();
+const partnerIdentity = Ed25519KeyIdentity.generate();
+const carolIdentity = Ed25519KeyIdentity.generate();
 
-async function actorFor(name: string) {
-  const identity = loadIdentity(name);
+async function actorFor(identity: Ed25519KeyIdentity) {
   const agent = new HttpAgent({ identity, host });
   if (network === "local") await agent.fetchRootKey();
-  return { identity, actor: Actor.createActor(idlFactory, { agent, canisterId }) };
+  return {
+    identity,
+    actor: Actor.createActor(idlFactory, { agent, canisterId }),
+  };
 }
 
 // In the hand-written stub, opt<T> decodes as T | null sometimes and
@@ -90,8 +98,14 @@ function ok(cond: boolean, msg: string) {
 
 async function main() {
   console.log("=== connecting ===");
-  const { identity: testerIdentity, actor: tester } = await actorFor("tester");
-  const { identity: partnerIdentity, actor: partner } = await actorFor("partner");
+  const { actor: tester } = await actorFor(testerIdentity);
+  const { actor: partner } = await actorFor(partnerIdentity);
+  const { actor: defaultActor } = await actorFor(carolIdentity);
+  // Two extra actor handles that point at the same carol
+  // identity but are bound to different local names so the
+  // archive / replace phases can read clearly.
+  const defaultActorForArchive = defaultActor;
+  const defaultActorForReplace = defaultActor;
   console.log("tester: ", testerIdentity.getPrincipal().toText());
   console.log("partner:", partnerIdentity.getPrincipal().toText());
 
@@ -340,7 +354,9 @@ async function main() {
 
   // Non-member cannot list.
   console.log("\n=== list_entries (default identity, should trap) ===");
-  const { actor: defaultActor } = await actorFor("default");
+  // defaultActor was bound at the top of main() to carolIdentity,
+  // a fresh in-process Ed25519 principal that is not part of the
+  // pair.
   let nonMemberTrapped = false;
   try {
     await (defaultActor as any).list_entries(sheetId, [], 10);
@@ -404,7 +420,8 @@ async function main() {
 
   // Non-member cannot list archived sheets.
   console.log("\n=== list_archived_sheets (default identity, should trap) ===");
-  const { actor: defaultActorForArchive } = await actorFor("default");
+  // defaultActorForArchive = carolIdentity (fresh in-process,
+  // not a member of the pair).
   let archiveTrapped = false;
   try {
     await (defaultActorForArchive as any).list_archived_sheets(pairId);
@@ -435,13 +452,10 @@ async function main() {
   const leavingPub = ed.getPublicKey(leavingSeed);
   // Partner authenticates as themselves and registers the pubkey.
   await (partner as any).register_recovery_pubkey(Array.from(leavingPub));
-  // Pick a "carol" principal — use the default identity (it's
-  // not a member of any pair, so the canister accepts it as the
-  // new member).
-  const carolIdentity = Secp256k1KeyIdentity.fromPem(
-    readFileSync(`${process.env.HOME}/.config/dfx/identity/default/identity.pem`, "utf8"),
-  );
-  const carolPrincipal = carolIdentity.getPrincipal();
+  // `carolIdentity` is the module-level fresh in-process
+  // identity; the canister accepts it as the new member because
+  // no actor in this run has used that principal before.
+  const carolPrincipal: Principal = carolIdentity.getPrincipal();
   const replaceReq = {
     pair_id: pairId,
     leaving_principal: partnerIdentity.getPrincipal().toText(),
@@ -450,22 +464,14 @@ async function main() {
     nonce: Array.from((globalThis as any).crypto.getRandomValues(new Uint8Array(32))),
   };
   // Canonical bytes (matches canonical_replace_bytes in lib.rs).
-  const _enc = new TextEncoder();
+  // V7 fix (v1.3.1): use the exported helper so the smoke and
+  // the canister stay in sync if the encoding ever changes.
   const carolBytes = carolPrincipal.toUint8Array();
   const partnerBytes = partnerIdentity.getPrincipal().toUint8Array();
-  const canon: number[] = [];
-  for (const c of "iou-replace-member-v1:") canon.push(c.charCodeAt(0));
-  for (const c of replaceReq.pair_id) canon.push(c.charCodeAt(0));
-  canon.push(0xff);
-  for (const b of partnerBytes) canon.push(b);
-  canon.push(0xff);
-  for (const b of carolBytes) canon.push(b);
-  canon.push(0xff);
-  const ts = replaceReq.ts_ms;
-  for (let i = 7; i >= 0; i--) canon.push(Number((ts >> BigInt(i * 8)) & 0xffn));
-  canon.push(0xff);
-  for (const b of replaceReq.nonce) canon.push(b);
-  const sig = ed.sign(new Uint8Array(canon), leavingSeed);
+  void carolBytes;
+  void partnerBytes;
+  const canon = canonicalReplaceBytes(replaceReq);
+  const sig = ed.sign(canon, leavingSeed);
   const signedReplace = {
     request: replaceReq,
     signature: Array.from(sig),
@@ -507,7 +513,8 @@ async function main() {
 
   // Non-staying-member cannot submit (default identity is not a member).
   console.log("\n=== replace_member (default identity, should trap) ===");
-  const { actor: defaultActorForReplace } = await actorFor("default");
+  // defaultActorForReplace = carolIdentity (fresh in-process,
+  // not a member of the pair).
   let replaceTrapped = false;
   try {
     // Use signedForCanister (Principal instances) — passing the

@@ -7,10 +7,17 @@
 > never leaves your device; the canister only stores ciphertexts
 > and the IC's `vetkd` derives per-sheet keys from your identity.
 
-> **Status (v1.2.x):** prod-vetkd IBE round-trip works on the
+> **Status (v1.3.1):** prod-vetkd IBE round-trip works on the
 > local replica. The canister's `inspect_message` hook is on by
 > default — same build works on PocketIC and IC mainnet, no cargo
-> feature flags. See the [changelog](#changelog) below.
+> feature flags. The recovery mnemonic is now encrypted at rest
+> with a user-supplied passphrase (PBKDF2 + AES-256-GCM); the
+> replace-member Ed25519 seed goes through the platform secure
+> element on native (Keystore / Keychain) with a web-fallback
+> warning. The `canonical_replace_bytes` encoding is now
+> length-prefixed instead of 0xff-delimited, so the canonical
+> form is safe for arbitrary field types. See the
+> [changelog](#changelog) below.
 
 ## What it does
 

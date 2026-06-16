@@ -37,10 +37,22 @@ export function randomNonce(): Uint8Array {
 
 /**
  * Derive an Ed25519 keypair from a 32-byte seed. The seed is
- * generated from WebCrypto and persisted in localStorage so the
- * PWA can sign/verify across sessions.
+ * generated from WebCrypto and persisted in `mobileSecureStorage`
+ * so the PWA can sign/verify across sessions.
+ *
+ * V9a fix (v1.3.1): the seed now goes through
+ * `mobileSecureStorage` (Android Keystore / iOS Keychain on
+ * native, `localStorage` on web). The web fallback stores
+ * the seed in plaintext `localStorage` with a clear
+ * dev-grade warning — the SecureStorage plugin can't
+ * encrypt on a plain browser, and a browser compromise
+ * would already give an attacker the user's localStorage
+ * anyway. The improvement on web is uniformity with the
+ * prod-vetkd transport key, not new security.
  */
-const ED25519_KEY_STORAGE = "iou:replace:ed25519:v1";
+import { secureGet, secureSet, secureDel } from "../crypto/mobileSecureStorage";
+
+const ED25519_KEY_STORAGE = "iou:replace:ed25519:v2";
 
 export type Ed25519Keypair = {
   publicKey: Uint8Array; // 32 bytes
@@ -51,7 +63,7 @@ export async function loadOrCreateEd25519Keypair(): Promise<Ed25519Keypair> {
   if (typeof localStorage === "undefined") {
     throw new Error("localStorage required");
   }
-  const stored = localStorage.getItem(ED25519_KEY_STORAGE);
+  const stored = await secureGet(ED25519_KEY_STORAGE);
   if (stored) {
     const parsed = JSON.parse(stored);
     return {
@@ -64,7 +76,7 @@ export async function loadOrCreateEd25519Keypair(): Promise<Ed25519Keypair> {
   // @noble/curves ed25519: from secret seed → public key
   const publicKey = ed25519.getPublicKey(seed);
   const kp = { publicKey, secretKey: seed };
-  localStorage.setItem(
+  await secureSet(
     ED25519_KEY_STORAGE,
     JSON.stringify({
       publicKey: Array.from(publicKey),
@@ -74,24 +86,48 @@ export async function loadOrCreateEd25519Keypair(): Promise<Ed25519Keypair> {
   return kp;
 }
 
+export async function forgetEd25519Keypair(): Promise<void> {
+  await secureDel(ED25519_KEY_STORAGE);
+}
+
 /** Canonical bytes of a ReplaceRequest. Must match the canister. */
 export function canonicalReplaceBytes(req: ReplaceRequest): Uint8Array {
   // principal.as_slice() doesn't exist in the JS principal; we
   // canonicalize by serializing the principal to its self-auth
   // bytes (32 bytes for an Ed25519-derived II principal). For
   // arbitrary principals this is the "raw" form.
+  //
+  // V7 fix (v1.3.1): length-prefix every variable-length field
+  // with a 4-byte big-endian u32 length. The previous 0xff
+  // delimiter was safe only because pair_id was ASCII; using
+  // length-prefixed encoding makes the canonical form safe to
+  // reuse for any field type (binary blobs, multi-byte UTF-8,
+  // …) without colliding on a delimiter byte.
   const out: number[] = [];
   push(out, "iou-replace-member-v1:");
-  push(out, req.pair_id);
-  out.push(0xff);
-  push(out, principalToBytes(req.leaving_principal));
-  out.push(0xff);
-  push(out, principalToBytes(req.new_principal));
-  out.push(0xff);
-  push(out, bigintToBytes(req.ts_ms, 8));
-  out.push(0xff);
-  push(out, req.nonce);
+  pushLen(out, textToBytes(req.pair_id));
+  pushLen(out, principalToBytes(req.leaving_principal));
+  pushLen(out, principalToBytes(req.new_principal));
+  pushLen(out, bigintToBytes(req.ts_ms, 8));
+  pushLen(out, Uint8Array.from(req.nonce));
   return new Uint8Array(out);
+}
+
+function textToBytes(s: string): Uint8Array {
+  // The principal is base32 ASCII so the bytes are 1:1 with
+  // charCodeAt. The pair_id is plain ASCII text in current use;
+  // using a TextEncoder keeps the encoding correct if it ever
+  // becomes non-ASCII.
+  return new TextEncoder().encode(s);
+}
+
+function pushLen(out: number[], bytes: Uint8Array) {
+  // big-endian u32 length prefix
+  out.push((bytes.length >>> 24) & 0xff);
+  out.push((bytes.length >>> 16) & 0xff);
+  out.push((bytes.length >>> 8) & 0xff);
+  out.push(bytes.length & 0xff);
+  for (let i = 0; i < bytes.length; i++) out.push(bytes[i]);
 }
 
 function push(out: number[], v: string | number[] | Uint8Array) {
