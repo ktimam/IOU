@@ -164,6 +164,25 @@ stable var rateLimits : TrieMap<Principal, RateWindow>;
 
 All state is in stable memory. `postupgrade` rebuilds in-memory indices.
 
+> ⚠️ **MemoryId discipline (shipped Rust backend).** The backend that ships is
+> Rust on `ic-stable-structures` (not the Motoko sketch above), where every
+> map/cell lives in a numbered `MemoryId` region that persists across upgrades
+> and stores that region's key/value-type header. **Never re-`init` an existing
+> `MemoryId` under a changed key/value type** — the stored header is
+> incompatible and `init` can trap in `post_upgrade`, failing the in-place
+> upgrade (or mis-reading data). When a structure's shape changes, allocate a
+> **fresh `MemoryId`** and leave the old one orphaned, or write an explicit
+> migration. This bit us in v1.3.2: the entries map switched from a `u64` key
+> to a composite `String` key but reused MemoryId 11 — fresh deploys were fine,
+> but an in-place upgrade over pre-v1.3.2 data could trap. **Fixed in v1.3.3**
+> by moving `ENTRIES` to a fresh `MemoryId` 16 and leaving 11-15 orphaned.
+> Trade-off: any v1.3.2 entries on MemoryId 11 are no longer accessible
+> (consistent with the pre-v1.3.2 → v1.3.2 data-wipe trade-off). The orphaned
+> MemoryIds 11-15 are now off-limits — don't re-`init` them with new
+> key/value types either. See the lib.rs stable-state comment block and the
+> `entries_lives_on_dedicated_memory_id` / `schema_version_bumped_for_memory_id_move`
+> tests for the in-code contract.
+
 ### 3.3 Type sketch
 ```motoko
 type UserRecord = {

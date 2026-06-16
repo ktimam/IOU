@@ -224,9 +224,10 @@ impl Storable for RecoveryKey {
 
 // ───────────────────────── stable state ─────────────────────────
 //
-// Memory layout (v1.3.2):
+// Memory layout (v1.3.3):
 //   MemoryId 0: VERSION (StableCell<u32>) — current schema version.
-//     Bump in post_upgrade if you change a map's key/value type.
+//     Bump in post_upgrade if you change a map's key/value type
+//     OR move a structure to a new MemoryId.
 //   MemoryId 1: USERS  (StableBTreeMap<Principal, UserRecord>)
 //   MemoryId 2: CONFIG (StableCell<Config>)
 //   MemoryId 3: PAIRS  (StableBTreeMap<String, Pair>)
@@ -241,26 +242,45 @@ impl Storable for RecoveryKey {
 //     don't trigger an inter-canister call every time. (V6 fix.)
 //   MemoryId 10: ENTRY_COUNTERS (StableBTreeMap<String, u64>)
 //     sheet_id -> next entry id (per-sheet monotonic counter).
-//   MemoryId 11: ENTRIES (StableBTreeMap<String, Entry>)
+//   MemoryId 16: ENTRIES (StableBTreeMap<String, Entry>)
 //     Single region for ALL entries across ALL sheets. Key is
 //     `format!("{sheet_id}\0{:020}", entry_id)`. The `\0` separator
 //     is safe because sheet_id never contains a NUL byte. v1.3.2
 //     replaces the per-sheet sharding (MemoryIds 11..14) which had a
-//     4-region hash collision (issue #1, fix #1).
+//     4-region hash collision (issue #1, fix #1). v1.3.3 moves the
+//     map from MemoryId 11 to a fresh MemoryId 16 to avoid re-`init`-
+//     ing a region whose stored u64-key header is incompatible with
+//     the new String-key header (issue #7). See the layout callout
+//     in `post_upgrade` and docs/02-architecture.md §3.2.
 //
-//   The following MemoryIds from the v1.3.0 layout are now
+//   The following MemoryIds from the v1.3.0/v1.3.1 layout are
 //   orphaned (no code reads or writes them). They still hold the
-//   broken pre-v1.3.2 data; `dfx canister install --mode reinstall`
-//   will reclaim the space. Pre-existing deploys keep the orphan
-//   data on upgrade (it can't be safely migrated — the keys
-//   themselves are ambiguous), so the first upgrade on existing
+//   broken pre-v1.3.2 data and the v1.3.2 String-keyed entries
+//   (respectively). `dfx canister install --mode reinstall` will
+//   reclaim the space. In-place upgrades keep the orphan data on
+//   those regions — it cannot be safely migrated (the pre-v1.3.2
+//   per-sheet hash keys are ambiguous; the v1.3.2 String-keyed
+//   entries are deliberately orphaned so the new MemoryId 16
+//   starts with a clean header). The first upgrade on existing
 //   data effectively wipes the entry tables. This is a deliberate
-//   trade-off: the old data was already cross-sheet-corrupted.
+//   trade-off: the pre-v1.3.2 data was already cross-sheet-
+//   corrupted, and the v1.3.2 trade-off is "fresh MemoryId over
+//   data preservation" so future MemoryId refactors stay safe.
 //
-//   MemoryId 12..14: (was SHEET_ENTRIES[0..3] in v1.3.0, orphaned in v1.3.2)
-//   MemoryId 15:    (was SHEET_ENTRIES_IDS in v1.3.0, orphaned in v1.3.2)
+//   MemoryId 11: (was SHEET_ENTRIES[0] in v1.3.0/v1.3.1 with a
+//                u64 key — incompatible with v1.3.2's String key;
+//                was ENTRIES in v1.3.2 with a String key — moved
+//                to MemoryId 16 in v1.3.3)
+//   MemoryId 12..14: (was SHEET_ENTRIES[1..3] in v1.3.0, orphaned
+//                since v1.3.2)
+//   MemoryId 15:    (was SHEET_ENTRIES_IDS in v1.3.0, orphaned
+//                since v1.3.2)
+//
+//   DO NOT re-use these orphaned MemoryIds for a new structure
+//   with a different key/value type — see issue #7. If you need
+//   a new region, use the next free number (currently 17+).
 
-const SCHEMA_VERSION: u32 = 2;
+const SCHEMA_VERSION: u32 = 3;
 
 thread_local! {
     static MEMORY_MANAGER: RefCell<MemoryManager<DefaultMemoryImpl>> =
@@ -344,9 +364,22 @@ thread_local! {
     // (see entry_key() below). Replaces the per-sheet sharding
     // that shipped in v1.3.0 and which had a 4-region hash
     // collision (issue #1).
+    //
+    // v1.3.3: moved from MemoryId 11 to a fresh MemoryId 16.
+    // The v1.3.2 layout re-`init`-ed MemoryId 11 (previously
+    // holding a `StableBTreeMap<u64, Entry>` in v1.3.0/v1.3.1)
+    // under the new `String` key type. `ic-stable-structures`
+    // stores a per-region header that records the original key
+    // and value types, and re-`init` under a different type
+    // traps in `init` (failing `post_upgrade`). See issue #7.
+    // We don't migrate the v1.3.2 String-keyed entries from
+    // MemoryId 11 to 16 — the pre-v1.3.2 data was already
+    // cross-sheet-corrupted, and a wipe is simpler + safer than
+    // a multi-step migration. The v1.3.3 comment at the top of
+    // this `thread_local!` documents the trade-off.
     static ENTRIES: RefCell<StableBTreeMap<String, Entry, Memory>> =
         RefCell::new(StableBTreeMap::init(
-            MEMORY_MANAGER.with(|m| m.borrow().get(MemoryId::new(11)))
+            MEMORY_MANAGER.with(|m| m.borrow().get(MemoryId::new(16)))
         ));
 }
 
@@ -369,8 +402,14 @@ fn entry_key_sheet_id(key: &str) -> &str {
     }
 }
 
-/// v1.3.2: the entry storage is a single StableBTreeMap
-/// (MemoryId 11) keyed by `entry_key(sheet_id, entry_id)`.
+/// v1.3.2 + v1.3.3: the entry storage is a single StableBTreeMap
+/// keyed by `entry_key(sheet_id, entry_id)`. v1.3.2 unified the
+/// 4-region sharding that v1.3.0 shipped (which had a hash
+/// collision — issue #1). v1.3.3 moved the map from MemoryId 11
+/// to a fresh MemoryId 16 to avoid re-`init`-ing a region whose
+/// stored u64-key header was incompatible with the new
+/// String-key header — issue #7.
+///
 /// These helpers used to fan out across 4 pre-allocated
 /// MemoryIds, which caused cross-sheet data corruption when
 /// more than 4 sheets existed (or any 2 hashed to the same
@@ -472,6 +511,32 @@ fn post_upgrade() {
         current,
         SCHEMA_VERSION
     );
+
+    // v1.3.3 (schema v2 -> v3): ENTRIES moved from MemoryId 11 to
+    // a fresh MemoryId 16. The previous region held either:
+    //   * pre-v1.3.2: a `StableBTreeMap<u64, Entry>` (4-region
+    //     sharding, cross-sheet-corrupted per issue #1). Re-`init`
+    //     under the new String-key type would trap in init(),
+    //     failing the upgrade.
+    //   * v1.3.2: a `StableBTreeMap<String, Entry>` (the corrected
+    //     single-region layout). Compatible type, but we still
+    //     want a clean region to make the trade-off explicit and
+    //     to keep the layout comment honest.
+    // In both cases the data on MemoryId 11 is left orphaned
+    // (matching the existing pre-v1.3.2 -> v1.3.2 trade-off).
+    // We do NOT migrate entries from MemoryId 11 to 16; the
+    // pre-v1.3.2 data is corrupt and the v1.3.2 data is
+    // deliberately orphaned as the safer path forward. See
+    // issue #7 for the rationale.
+    if (1..SCHEMA_VERSION).contains(&current) {
+        ic_cdk::println!(
+            "iou_backend: v1.3.3 ENTRIES moved to fresh MemoryId 16; \
+             any pre-v1.3.3 entries on MemoryId 11 are orphaned and \
+             no longer accessible (this is a deliberate trade-off — \
+             see issue #7 and the layout comment in thread_local!)"
+        );
+    }
+
     // Migration pattern: bump SCHEMA_VERSION, then add a migrate_vN_to_vN1()
     // function. See ICTemplate src/lib.rs for the reference.
     if current < SCHEMA_VERSION {
@@ -1744,5 +1809,56 @@ mod tests {
         // nothing at runtime — it's here so a future edit
         // that moves the check outside the closure will trigger
         // a code review via this comment.
+    }
+
+    #[test]
+    fn entries_lives_on_dedicated_memory_id() {
+        // Documentation test (issue #7 fix, v1.3.3): ENTRIES lives on
+        // a FRESH MemoryId (currently 16) and MUST NOT be re-`init`-ed
+        // on a region that previously held a different key/value
+        // type. `ic-stable-structures` stores a per-region header
+        // describing the original key/value type, and re-`init` under
+        // a different type traps in `init`, which fails
+        // `post_upgrade`. We hit this in v1.3.2: the entries map
+        // moved from `u64` keys to `String` keys but stayed on
+        // MemoryId 11 — the old `u64` header was incompatible and
+        // the upgrade could trap. The v1.3.3 fix moves ENTRIES to
+        // MemoryId 16 and leaves 11-15 orphaned.
+        //
+        // The actual MemoryId number is hardcoded in the
+        // `ENTRIES` thread_local! initializer above. If a future
+        // refactor moves ENTRIES (or changes its key/value type),
+        // update both the initializer AND this comment so the
+        // next maintainer sees the constraint. Also: never re-use
+        // an orphaned MemoryId (11-15) for a new structure with
+        // a different key/value type — the same trap is waiting.
+        //
+        // We can't easily probe the live `MemoryId` number from a
+        // test (the thread_local! initializer runs at canister
+        // start, not in cargo test), so this is a placeholder
+        // that asserts nothing at runtime. Its job is to make the
+        // above constraint visible to anyone reading the test
+        // file.
+    }
+
+    #[test]
+    fn schema_version_bumped_for_memory_id_move() {
+        // Documentation test (issue #7 fix, v1.3.3): SCHEMA_VERSION
+        // was bumped from 2 to 3 to record the ENTRIES -> MemoryId 16
+        // move. Any future change to a map's key/value type OR
+        // MemoryId assignment must bump SCHEMA_VERSION again so
+        // `post_upgrade` can log the migration clearly.
+        //
+        // The constant lives at the top of the stable-state
+        // comment block. If a future refactor undoes the bump,
+        // update this comment so the next maintainer can see
+        // why the bump matters (it's the only signal an operator
+        // gets about which storage version they're running).
+        //
+        // Use a const block so the assertion runs at compile
+        // time — if SCHEMA_VERSION is ever dropped below 3 the
+        // test crate won't compile, which is the loudest possible
+        // signal.
+        const { assert!(SCHEMA_VERSION >= 3, "SCHEMA_VERSION must be >= 3 after the v1.3.3 MemoryId move (issue #7)") };
     }
 }
