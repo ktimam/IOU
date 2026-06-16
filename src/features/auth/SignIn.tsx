@@ -29,28 +29,32 @@ export function SignIn() {
           Sign in with Internet Identity
         </button>
       </div>
-      <div className="cta-row" style={{ justifyContent: "center", marginTop: 12 }}>
-        <button
-          className="secondary"
-          onClick={async () => {
-            try {
-              await signInDev();
-            } catch (e) {
-              console.error(e);
-            }
-          }}
-        >
-          Sign in (dev — local identity)
-        </button>
-      </div>
+      {import.meta.env.DEV && (
+        <div className="cta-row" style={{ justifyContent: "center", marginTop: 12 }}>
+          <button
+            className="secondary"
+            onClick={async () => {
+              try {
+                await signInDev();
+              } catch (e) {
+                console.error(e);
+              }
+            }}
+          >
+            Sign in (dev — local identity)
+          </button>
+        </div>
+      )}
       <p className="muted" style={{ marginTop: 24, fontSize: "0.875rem" }}>
         No email. No password. No one — not even us — can read your data.
       </p>
-      <p className="muted" style={{ fontSize: "0.75rem", marginTop: 4 }}>
-        The dev sign-in is for local dev only. It creates a
-        Secp256k1 identity in your browser's localStorage; sign
-        out to clear it. For production, use Internet Identity.
-      </p>
+      {import.meta.env.DEV && (
+        <p className="muted" style={{ fontSize: "0.75rem", marginTop: 4 }}>
+          The dev sign-in is for local dev only. It creates a
+          Secp256k1 identity in your browser's localStorage; sign
+          out to clear it. For production, use Internet Identity.
+        </p>
+      )}
     </div>
   );
 }

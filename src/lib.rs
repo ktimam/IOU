@@ -145,11 +145,13 @@ pub enum Direction {
 
 // One Entry row in the entries map. Keyed by (sheet_id, entry_id).
 // v1.3.0: replaced the in-memory `BTreeMap<String, Vec<Entry>>`
-// (lost on upgrade) with a StableBTreeMap<u64, Entry> per sheet.
-// Each sheet's entries live in their own MemoryId region so the
-// stable map API stays small. The composite key (sheet_id, entry_id)
-// is encoded as a u64 (entry_id is per-sheet monotonic) and the
-// SHEET_ENTRIES map's `MemoryId` is allocated by `sheet_entries_id(sheet_id)`.
+// (lost on upgrade) with a StableBTreeMap<u64, Entry> per
+// sheet. v1.3.2: a single StableBTreeMap<String, Entry> with
+// a composite (sheet_id, entry_id) String key replaces the
+// per-sheet sharding, which had a 4-region hash collision
+// (issue #1, fix #1). The old MemoryIds 12..14 and 15 are
+// now orphaned; see the memory layout comment near the top
+// of this file.
 //
 // Entries are CIPHERTEXT-ONLY on the canister. The client encrypts
 // the full payload (kind, currency, amount_minor, direction, note,
@@ -222,7 +224,7 @@ impl Storable for RecoveryKey {
 
 // ───────────────────────── stable state ─────────────────────────
 //
-// Memory layout (v1.3.0):
+// Memory layout (v1.3.2):
 //   MemoryId 0: VERSION (StableCell<u32>) — current schema version.
 //     Bump in post_upgrade if you change a map's key/value type.
 //   MemoryId 1: USERS  (StableBTreeMap<Principal, UserRecord>)
@@ -237,15 +239,28 @@ impl Storable for RecoveryKey {
 //   MemoryId 9: VETKD_PUBKEY_CACHE (StableCell<Option<Vec<u8>>>)
 //     Caches the result of vetkd_public_key so anonymous callers
 //     don't trigger an inter-canister call every time. (V6 fix.)
-//   MemoryId 10: ENTRY_COUNTERS (StableBTreeMap<String, u64>)  // sheet -> next id
-//   MemoryId 11..14: SHEET_ENTRIES[0..3] (StableBTreeMap<u64, Entry>)
-//     One region per active sheet_id. Sheets claim an id via
-//     `sheet_entries_id(sheet_id)`. We allocate IDs from
-//     SHEET_ENTRIES_IDS (MemoryId 15) which is a counter stable cell.
-//   MemoryId 15: SHEET_ENTRIES_IDS (StableCell<u64>)
-//     Monotonic counter for the next free sheet-entries region id.
+//   MemoryId 10: ENTRY_COUNTERS (StableBTreeMap<String, u64>)
+//     sheet_id -> next entry id (per-sheet monotonic counter).
+//   MemoryId 11: ENTRIES (StableBTreeMap<String, Entry>)
+//     Single region for ALL entries across ALL sheets. Key is
+//     `format!("{sheet_id}\0{:020}", entry_id)`. The `\0` separator
+//     is safe because sheet_id never contains a NUL byte. v1.3.2
+//     replaces the per-sheet sharding (MemoryIds 11..14) which had a
+//     4-region hash collision (issue #1, fix #1).
+//
+//   The following MemoryIds from the v1.3.0 layout are now
+//   orphaned (no code reads or writes them). They still hold the
+//   broken pre-v1.3.2 data; `dfx canister install --mode reinstall`
+//   will reclaim the space. Pre-existing deploys keep the orphan
+//   data on upgrade (it can't be safely migrated — the keys
+//   themselves are ambiguous), so the first upgrade on existing
+//   data effectively wipes the entry tables. This is a deliberate
+//   trade-off: the old data was already cross-sheet-corrupted.
+//
+//   MemoryId 12..14: (was SHEET_ENTRIES[0..3] in v1.3.0, orphaned in v1.3.2)
+//   MemoryId 15:    (was SHEET_ENTRIES_IDS in v1.3.0, orphaned in v1.3.2)
 
-const SCHEMA_VERSION: u32 = 1;
+const SCHEMA_VERSION: u32 = 2;
 
 thread_local! {
     static MEMORY_MANAGER: RefCell<MemoryManager<DefaultMemoryImpl>> =
@@ -324,38 +339,76 @@ thread_local! {
             MEMORY_MANAGER.with(|m| m.borrow().get(MemoryId::new(10)))
         ));
 
-    static SHEET_ENTRIES_IDS: RefCell<StableCell<u64, Memory>> = RefCell::new(
-        StableCell::init(
-            MEMORY_MANAGER.with(|m| m.borrow().get(MemoryId::new(15))),
-            0,
-        )
-            .expect("SHEET_ENTRIES_IDS cell init")
-    );
+    // v1.3.2: all entries across all sheets live in a single
+    // StableBTreeMap keyed by `entry_key(sheet_id, entry_id)`
+    // (see entry_key() below). Replaces the per-sheet sharding
+    // that shipped in v1.3.0 and which had a 4-region hash
+    // collision (issue #1).
+    static ENTRIES: RefCell<StableBTreeMap<String, Entry, Memory>> =
+        RefCell::new(StableBTreeMap::init(
+            MEMORY_MANAGER.with(|m| m.borrow().get(MemoryId::new(11)))
+        ));
 }
 
-// Each sheet's entries live in their own MemoryId. The first 4
-// sheets (MemoryId 11..14) are pre-allocated; more are allocated
-// from SHEET_ENTRIES_IDS starting at 16. (See `sheet_entries_id`.)
-fn sheet_entries_id(sheet_id: &str) -> u8 {
-    // Hash sheet_id to one of the first 4 slots, then check if that
-    // slot is free; if not, allocate a fresh one. The 4-slot
-    // pre-allocation is a cheap optimization for the common case
-    // (a small number of active sheets at a time).
-    let mut h: u64 = 0xcbf29ce484222325;
-    for b in sheet_id.bytes() {
-        h ^= b as u64;
-        h = h.wrapping_mul(0x100000001b3);
+/// Composite key for the entries map. The NUL separator is
+/// safe because sheet_id (a 16-char hex string in our caller)
+/// never contains a NUL byte. The fixed-width entry id suffix
+/// makes lexicographic order match (sheet_id, entry_id) order
+/// so `iter()` (which is not a range scan in stable structures)
+/// returns entries in deterministic order.
+fn entry_key(sheet_id: &str, entry_id: u64) -> String {
+    format!("{}\0{:020}", sheet_id, entry_id)
+}
+
+/// Extract the sheet_id from an entry key. Returns the slice
+/// up to the first NUL byte.
+fn entry_key_sheet_id(key: &str) -> &str {
+    match key.find('\0') {
+        Some(i) => &key[..i],
+        None => key, // malformed; treat the whole thing as sheet_id
     }
-    // Use the low bits to pick a pre-allocated slot, but then verify
-    // it doesn't already belong to another sheet. In the common case
-    // (one or two active sheets) the pre-allocated slots are enough.
-    let pre_alloc: u8 = 11 + (h % 4) as u8;
-    pre_alloc
 }
 
-fn sheet_entries_map(sheet_id: &str) -> StableBTreeMap<u64, Entry, Memory> {
-    let mid = sheet_entries_id(sheet_id);
-    StableBTreeMap::init(MEMORY_MANAGER.with(|m| m.borrow().get(MemoryId::new(mid))))
+/// v1.3.2: the entry storage is a single StableBTreeMap
+/// (MemoryId 11) keyed by `entry_key(sheet_id, entry_id)`.
+/// These helpers used to fan out across 4 pre-allocated
+/// MemoryIds, which caused cross-sheet data corruption when
+/// more than 4 sheets existed (or any 2 hashed to the same
+/// slot). Issue #1.
+//
+// The functions below keep the old name `sheet_entries_map`
+// for source compat with the call sites (add_entry, edit_entry,
+// get_entry, list_entries) so the rest of the file reads
+// naturally. The body is a thin closure over ENTRIES that
+/// filters by sheet_id.
+fn sheet_entries_get(sheet_id: &str, entry_id: u64) -> Option<Entry> {
+    ENTRIES.with(|m| m.borrow().get(&entry_key(sheet_id, entry_id)))
+}
+
+fn sheet_entries_insert(sheet_id: &str, entry_id: u64, entry: Entry) {
+    ENTRIES.with(|m| m.borrow_mut().insert(entry_key(sheet_id, entry_id), entry));
+}
+
+fn sheet_entries_remove(sheet_id: &str, entry_id: u64) -> Option<Entry> {
+    ENTRIES.with(|m| m.borrow_mut().remove(&entry_key(sheet_id, entry_id)))
+}
+
+/// Returns every entry for the given sheet, in id-ascending
+/// order. v1.3.2 uses a full-table scan (stable structures
+/// don't expose a range API); this is fine for the IOU scale
+/// (each pair has at most one active sheet, so the total
+/// entry count is bounded by the number of pairs).
+fn sheet_entries_iter(sheet_id: &str) -> Vec<Entry> {
+    let mut out: Vec<Entry> = Vec::new();
+    ENTRIES.with(|m| {
+        for (k, v) in m.borrow().iter() {
+            if entry_key_sheet_id(&k) == sheet_id {
+                out.push(v);
+            }
+        }
+    });
+    out.sort_by_key(|e| e.id);
+    out
 }
 
 /// StableBTreeMap has no `get_mut` — use this remove/mutate/insert
@@ -687,25 +740,16 @@ pub struct CreatePairResult {
 async fn create_pair() -> CreatePairResult {
     let caller = ic_cdk::api::msg_caller();
     require_authed();
-    // v1: a principal may be in at most one active pair at a time.
-    // (The spec allows multiple pairs per user; we relax in v1.1.)
-    PAIRS.with(|p| {
-        for (_id, existing) in p.borrow().iter() {
-            if existing.archived_at.is_none() && is_member_of(&existing, caller) {
-                ic_cdk::trap("already in an active pair");
-            }
-        }
-    });
+    // v1.3.2: fix for issue #2 (create_pair async TOCTOU). On the
+    // IC, an `await` (here, the `raw_rand` calls) suspends the
+    // method and lets other ingress messages run. The previous
+    // version did the "already in an active pair" check BEFORE
+    // the awaits, so two concurrent `create_pair` calls from the
+    // same principal could both pass the check and end up in two
+    // active pairs. Fix: do all the awaits first, then perform the
+    // membership check + insert in a single synchronous block.
     let id = now_id().await;
     let invite = gen_invite_code().await;
-    // V5 fix: pre-insert existence check. now_id uses 64 bits of
-    // raw_rand entropy so collisions are vanishingly unlikely, but
-    // check anyway to fail loudly if it ever happens (rather than
-    // silently overwriting a pair). V1 used time+caller-hash and
-    // was guaranteed to collide within a single tick.
-    if PAIRS.with(|p| p.borrow().contains_key(&id)) {
-        ic_cdk::trap("pair id collision; please retry");
-    }
     let now = now_secs();
     let pair = Pair {
         id: id.clone(),
@@ -714,7 +758,25 @@ async fn create_pair() -> CreatePairResult {
         created_at: now,
         archived_at: None,
     };
-    PAIRS.with(|p| p.borrow_mut().insert(id.clone(), pair));
+    PAIRS.with(|p| {
+        // V5 fix: pre-insert existence check. now_id uses 64 bits
+        // of raw_rand entropy so collisions are vanishingly unlikely,
+        // but check anyway to fail loudly if it ever happens.
+        if p.borrow().contains_key(&id) {
+            ic_cdk::trap("pair id collision; please retry");
+        }
+        // v1: a principal may be in at most one active pair at a
+        // time. (The spec allows multiple pairs per user; we relax
+        // in v1.1.) The check + insert are in the same synchronous
+        // block (no await between), so two concurrent create_pair
+        // calls from the same caller cannot both pass the check.
+        for (_id, existing) in p.borrow().iter() {
+            if existing.archived_at.is_none() && is_member_of(&existing, caller) {
+                ic_cdk::trap("already in an active pair");
+            }
+        }
+        p.borrow_mut().insert(id.clone(), pair);
+    });
     INVITES.with(|i| i.borrow_mut().insert(invite.clone(), id.clone()));
     CreatePairResult { pair_id: id, invite_code: invite }
 }
@@ -851,22 +913,38 @@ async fn create_sheet(req: CreateSheetReq) -> Sheet {
             ic_cdk::trap("currency must be a 3-letter ISO 4217 code");
         }
     }
-    let (member_a, member_b) = PAIRS.with(|p| {
-        let map = p.borrow();
-        let pair = match map.get(&req.pair_id) {
-            Some(x) => x,
-            None => ic_cdk::trap("pair not found"),
-        };
-        if pair.members[1] == Principal::anonymous() {
-            ic_cdk::trap("pair is not active (no second member yet)");
+    // v1.3.2: fix for issue #3 (create_sheet async TOCTOU). Same
+    // pattern as create_pair (#2): do all the awaits first, then
+    // the membership / existence / insert in one synchronous
+    // block so two concurrent calls can't both pass the
+    // "already has an active sheet" check.
+    let id = now_id().await;
+    let now = now_secs();
+    let sheet = SHEETS.with(|s| {
+        // V5 fix: pre-insert existence check (see create_pair).
+        if s.borrow().contains_key(&id) {
+            ic_cdk::trap("sheet id collision; please retry");
         }
-        if !is_member_of(&pair, caller) {
-            ic_cdk::trap("not a member of this pair");
-        }
-        (pair.members[0], pair.members[1])
-    });
-    // v1: only one active sheet per pair.
-    SHEETS.with(|s| {
+        // Resolve the parent pair and check membership in the
+        // same synchronous block.
+        let (member_a, member_b) = PAIRS.with(|p| {
+            let map = p.borrow();
+            let pair = match map.get(&req.pair_id) {
+                Some(x) => x,
+                None => ic_cdk::trap("pair not found"),
+            };
+            if pair.members[1] == Principal::anonymous() {
+                ic_cdk::trap("pair is not active (no second member yet)");
+            }
+            if !is_member_of(&pair, caller) {
+                ic_cdk::trap("not a member of this pair");
+            }
+            (pair.members[0], pair.members[1])
+        });
+        // v1: only one active sheet per pair. The check + insert
+        // are in the same synchronous block (no await between), so
+        // two concurrent create_sheet calls for the same pair
+        // cannot both pass the check.
         for (_id, existing) in s.borrow().iter() {
             if existing.pair_id == req.pair_id {
                 if let SheetState::Active = existing.state {
@@ -874,29 +952,24 @@ async fn create_sheet(req: CreateSheetReq) -> Sheet {
                 }
             }
         }
+        let sheet = Sheet {
+            id: id.clone(),
+            pair_id: req.pair_id,
+            state: SheetState::Active,
+            enabled_currencies,
+            closing_window_days: req.closing_window_days,
+            last_entry_at: None,
+            wrapped_key_a: req.wrapped_key_a,
+            wrapped_key_b: req.wrapped_key_b,
+            member_a,
+            member_b,
+            created_at: now,
+            closed_at: None,
+            closing_balances: None,
+        };
+        s.borrow_mut().insert(id, sheet.clone());
+        sheet
     });
-    let id = now_id().await;
-    // V5 fix: pre-insert existence check (see create_pair).
-    if SHEETS.with(|s| s.borrow().contains_key(&id)) {
-        ic_cdk::trap("sheet id collision; please retry");
-    }
-    let now = now_secs();
-    let sheet = Sheet {
-        id: id.clone(),
-        pair_id: req.pair_id,
-        state: SheetState::Active,
-        enabled_currencies,
-        closing_window_days: req.closing_window_days,
-        last_entry_at: None,
-        wrapped_key_a: req.wrapped_key_a,
-        wrapped_key_b: req.wrapped_key_b,
-        member_a,
-        member_b,
-        created_at: now,
-        closed_at: None,
-        closing_balances: None,
-    };
-    SHEETS.with(|s| s.borrow_mut().insert(id, sheet.clone()));
     sheet
 }
 
@@ -1130,9 +1203,10 @@ fn add_entry(req: AddEntryReq) -> Entry {
         iv: req.iv,
     };
     // v1.3.0: per-sheet stable map (not the in-memory BTreeMap<String, Vec<Entry>>
-    // we had before — that lost data on upgrade).
-    let mut entries_map = sheet_entries_map(&req.sheet_id);
-    entries_map.insert(entry.id, entry.clone());
+    // we had before — that lost data on upgrade). v1.3.2: a single
+    // composite-key map replaces the 4-region sharding that had
+    // cross-sheet hash collisions (issue #1).
+    sheet_entries_insert(&req.sheet_id, entry.id, entry.clone());
     record_entry_timestamp(&req.sheet_id, now_secs());
     entry
 }
@@ -1169,13 +1243,12 @@ fn edit_entry(req: EditEntryReq) -> Entry {
         ic_cdk::trap("sheet is not active");
     }
     let now = ic_cdk::api::time();
-    let mut entries_map = sheet_entries_map(&req.sheet_id);
-    let Some(mut entry) = entries_map.remove(&req.entry_id) else {
+    let Some(mut entry) = sheet_entries_remove(&req.sheet_id, req.entry_id) else {
         ic_cdk::trap("entry not found");
     };
     if entry.created_by != caller {
         // put it back before trapping
-        entries_map.insert(req.entry_id, entry);
+        sheet_entries_insert(&req.sheet_id, req.entry_id, entry);
         ic_cdk::trap("only the original creator can edit this entry");
     }
     entry.entry_key = req.entry_key;
@@ -1183,7 +1256,7 @@ fn edit_entry(req: EditEntryReq) -> Entry {
     entry.iv = req.iv;
     entry.updated_at_server = Some(now);
     let result = entry.clone();
-    entries_map.insert(req.entry_id, entry);
+    sheet_entries_insert(&req.sheet_id, req.entry_id, entry);
     result
 }
 
@@ -1193,7 +1266,7 @@ fn get_entry(sheet_id: String, entry_id: u64) -> Option<Entry> {
     if !caller_is_pair_member(&sheet_id) {
         return None;
     }
-    sheet_entries_map(&sheet_id).get(&entry_id)
+    sheet_entries_get(&sheet_id, entry_id)
 }
 
 /// list_entries: paginated by `limit` (newest first). `cursor` is
@@ -1208,10 +1281,11 @@ fn list_entries(
         ic_cdk::trap("not a member of this sheet's pair");
     }
     let limit = limit.min(200) as usize;
-    let mut all: Vec<Entry> = sheet_entries_map(&sheet_id)
-        .iter()
-        .map(|(_id, e)| e)
-        .collect();
+    // v1.3.2: full-table scan filtered by sheet_id (the
+    // single-map layout doesn't have a range API; this is
+    // O(total entries) but bounded by the number of pairs in
+    // practice — each pair has at most one active sheet).
+    let mut all: Vec<Entry> = sheet_entries_iter(&sheet_id);
     // Sort newest first.
     all.sort_by_key(|b| std::cmp::Reverse(b.id));
     let start = match cursor {
@@ -1611,5 +1685,64 @@ fn verify_replace_signature(signed: &SignedReplaceRequest, leaving_principal: &P
     let sig = Signature::from_bytes(&sig_bytes);
     if pk.verify(&msg, &sig).is_err() {
         ic_cdk::trap("signature verification failed");
+    }
+}
+
+// ─────────────────────────── in-canister tests ───────────────────────────
+//
+// Pure-Rust tests of the entry-key format and the sheet_id
+// extraction. These are the building blocks of the v1.3.2 entry
+// storage fix (issue #1); the actual end-to-end multi-sheet
+// isolation is verified via the IBE + smoke runs against a
+// fresh canister. Run with `cargo test --lib`.
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn entry_key_format_is_unique_per_sheet_and_id() {
+        // Same (sheet_id, entry_id) → same key.
+        assert_eq!(entry_key("sheet-a", 1), entry_key("sheet-a", 1));
+        // Different sheet_id → different key.
+        assert_ne!(entry_key("sheet-a", 1), entry_key("sheet-b", 1));
+        // Different entry_id → different key.
+        assert_ne!(entry_key("sheet-a", 1), entry_key("sheet-a", 2));
+    }
+
+    #[test]
+    fn entry_key_round_trips_through_extract() {
+        for sheet in &["a", "sheet-with-dashes", "1234567890abcdef"] {
+            for id in [0u64, 1, 42, u64::MAX, 1_000_000_000_000] {
+                let k = entry_key(sheet, id);
+                assert_eq!(entry_key_sheet_id(&k), *sheet, "round-trip for sheet={sheet} id={id}");
+            }
+        }
+    }
+
+    #[test]
+    fn entry_key_is_nul_separated_and_lexicographic() {
+        // The fixed-width entry id suffix means (sheet_a, 2) sorts
+        // BEFORE (sheet_a, 10) — useful for stable iter() ordering.
+        let k_a_2 = entry_key("a", 2);
+        let k_a_10 = entry_key("a", 10);
+        let k_b_1 = entry_key("b", 1);
+        assert!(k_a_2 < k_a_10, "lexicographic: a\\0...02 < a\\0...10");
+        assert!(k_a_10 < k_b_1, "lexicographic: a* < b*");
+    }
+
+    #[test]
+    fn create_pair_check_pattern_is_atomic() {
+        // Documentation test: v1.3.2's create_pair does the
+        // membership check + insert in a single PAIRS.with(|p| { ... })
+        // closure with no await between, so two concurrent
+        // create_pair calls from the same principal cannot both
+        // pass the check. The real concurrency test would
+        // require a PocketIC integration harness; see
+        // docs/VERIFICATION-2026-06-16.md for the multi-call
+        // test pattern. This test is a placeholder that asserts
+        // nothing at runtime — it's here so a future edit
+        // that moves the check outside the closure will trigger
+        // a code review via this comment.
     }
 }

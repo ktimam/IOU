@@ -2,7 +2,7 @@ import { createContext, useContext, useEffect, useState, type ReactNode } from "
 import { AuthClient } from "@dfinity/auth-client";
 import { HttpAgent, type Identity } from "@dfinity/agent";
 import { Secp256k1KeyIdentity } from "@dfinity/identity-secp256k1";
-import { canisterId, host } from "./config";
+import { canisterId, host, internetIdentityUrl } from "./config";
 
 type AuthState =
   | { kind: "loading" }
@@ -75,7 +75,12 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     const client = await AuthClient.create();
     await new Promise<void>((resolve, reject) => {
       client.login({
-        identityProvider: host === "https://icp-api.io" ? "https://identity.ic0.app" : `http://${host.replace(/^https?:\/\//, "")}`,
+        // v1.3.2: use the II URL from config instead of the
+        // inline ternary. The inline version was wrong on local
+        // (it pointed at the bare replica host instead of the
+        // II-canister subdomain `http://<II_ID>.127.0.0.1:4943`).
+        // internetIdentityUrl already does the right thing.
+        identityProvider: internetIdentityUrl,
         maxTimeToLive: BigInt(30) * BigInt(24) * BigInt(60) * BigInt(60) * BigInt(1_000_000_000),
         onSuccess: () => resolve(),
         onError: (e) => reject(e),
@@ -107,6 +112,12 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   }
 
   async function signOut() {
+    // v1.3.2: also log out of the II delegation. Without this,
+    // the II delegation persists in IndexedDB across signOut,
+    // and the next mount effect (`isAuthenticated()`) re-hydrates
+    // the user — "sign out" didn't actually sign the user out.
+    const client = await AuthClient.create();
+    await client.logout();
     // Clear any persisted dev identity too — a fresh "Sign in
     // (dev)" gets a new principal. The user can sign in with
     // II separately.
