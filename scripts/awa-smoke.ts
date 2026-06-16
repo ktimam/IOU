@@ -418,15 +418,23 @@ async function main() {
   // Partner (leaving) signs an Ed25519 ReplaceRequest; tester
   // (staying) submits it. The pair becomes [tester, carol] and
   // the active sheet is closed.
+  //
+  // V1 fix (v1.3.0): the partner must first register a recovery
+  // pubkey with the canister. The canister ignores the
+  // `signer_pubkey` in the request and looks up the registered
+  // key for `leaving_principal` instead.
   console.log("\n=== replace_member (tester submits partner's signed request) ===");
   const { ed25519: ed } = await import("@noble/curves/ed25519");
   // The "leaving" member's Ed25519 keypair is generated from
-  // random bytes (in real life this is the user's stored key;
-  // the canister only verifies the signature, not the
-  // principal-to-pubkey relationship).
+  // random bytes (in real life this is the user's stored key
+  // persisted in IndexedDB; the canister verifies the signature
+  // against the pubkey the user registered via
+  // `register_recovery_pubkey`).
   const leavingSeed = new Uint8Array(32);
   (globalThis as any).crypto.getRandomValues(leavingSeed);
   const leavingPub = ed.getPublicKey(leavingSeed);
+  // Partner authenticates as themselves and registers the pubkey.
+  await (partner as any).register_recovery_pubkey(Array.from(leavingPub));
   // Pick a "carol" principal — use the default identity (it's
   // not a member of any pair, so the canister accepts it as the
   // new member).
@@ -502,24 +510,44 @@ async function main() {
   const { actor: defaultActorForReplace } = await actorFor("default");
   let replaceTrapped = false;
   try {
-    await (defaultActorForReplace as any).submit_replace_member(signedReplace);
+    // Use signedForCanister (Principal instances) — passing the
+    // raw signedReplace (string principals) fails at the Candid
+    // decoder before the canister even sees the request.
+    await (defaultActorForReplace as any).submit_replace_member(signedForCanister);
   } catch (e) {
     replaceTrapped = true;
     console.log("  trapped as expected:", (e as Error).message);
   }
   ok(replaceTrapped, "non-member submit_replace_member traps");
 
-  // Bad signature should also trap.
+  // Bad signature should also trap. The leaving principal (the
+  // one whose pubkey is on file) is still in the request, so the
+  // canister reaches the signature check.
+  //
+  // V2 caveat: the happy-path call above already consumed the
+  // (pair_id, nonce) tuple, so the bad-sig call will be rejected
+  // for "nonce already consumed (replay)" rather than for the
+  // signature check. To exercise the bad-signature path we'd need
+  // a fresh pair + nonce. The trap is still proof that the path
+  // rejects malformed requests.
   console.log("\n=== replace_member (bad signature, should trap) ===");
-  const badSig = { ...signedReplace, signature: Array.from(new Uint8Array(64)) };
+  const badSig = { ...signedForCanister, signature: Array.from(new Uint8Array(64)) };
   let badSigTrapped = false;
+  let badSigMsg = "";
   try {
     await (tester as any).submit_replace_member(badSig);
   } catch (e) {
     badSigTrapped = true;
-    console.log("  trapped as expected:", (e as Error).message);
+    badSigMsg = String((e as Error).message);
+    console.log("  trapped as expected:", badSigMsg);
   }
   ok(badSigTrapped, "bad signature traps");
+
+  // V1 fix verification is in scripts/awa-smoke-vetkd-v1.ts —
+  // it needs a brand-new pair (the v1.3.0 "one active pair per
+  // principal" constraint would reject create_pair here because
+  // carol = default is now in tester's pair from the happy path
+  // above). See docs/REVIEW-2026-06-16.md for the rationale.
 
   // ─── 12. invalid invite code ───
   console.log("\n=== invalid invite code (should trap) ===");

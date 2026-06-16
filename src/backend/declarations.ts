@@ -177,6 +177,13 @@ export const idlFactory = ({ IDL: idl }: { IDL: IDL }) => {
     ),
     // v1.1.2: replace member
     submit_replace_member: idl.Func([SignedReplaceRequest], [Pair], []),
+    // v1.3.0: recovery key (V1 fix)
+    register_recovery_pubkey: idl.Func([idl.Vec(idl.Nat8)], [], []),
+    get_recovery_pubkey: idl.Func(
+      [idl.Principal],
+      [idl.Opt(idl.Vec(idl.Nat8))],
+      ["query"],
+    ),
   });
 };
 

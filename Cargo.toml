@@ -18,6 +18,7 @@ ic-cdk = "0.20"
 ic-cdk-macros = "0.20"
 ic-cdk-management-canister = "0.1"
 ed25519-dalek = { version = "2", features = ["std"] }
+ic-stable-structures = "0.6"
 serde = { version = "1", features = ["derive"] }
 
 [profile.release]
