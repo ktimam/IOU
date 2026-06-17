@@ -1,6 +1,7 @@
 import { useNavigate } from "react-router-dom";
 import { useAuth } from "./AuthProvider";
 import { useEffect } from "react";
+import { IOUWordmark } from "../ui/Logo";
 
 export function SignIn() {
   const { state, signIn, signInDev } = useAuth();
@@ -14,7 +15,9 @@ export function SignIn() {
 
   return (
     <div className="card" style={{ textAlign: "center", marginTop: 80 }}>
-      <h1>IOU</h1>
+      <h1 style={{ display: "flex", justifyContent: "center", margin: "8px 0 12px" }}>
+        <IOUWordmark height={56} />
+      </h1>
       <p className="muted">Track who owes whom. Encrypted. Yours only.</p>
       <div className="cta-row" style={{ justifyContent: "center" }}>
         <button

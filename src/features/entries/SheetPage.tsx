@@ -213,7 +213,9 @@ export function SheetPage() {
                       ? `You owe ${them.slice(0, 5)}…`
                       : `${them.slice(0, 5)}… owes you`}
                   </strong>{" "}
-                  {formatMinor(Math.abs(b.amount_minor), b.currency)}
+                  <span className={`amt ${iOweThem ? "amt-debt" : "amt-credit"}`}>
+                    {formatMinor(Math.abs(b.amount_minor), b.currency)}
+                  </span>
                 </li>
               );
             })}
@@ -282,7 +284,11 @@ export function SheetPage() {
                       {e.updated_at_server ? " (edited)" : ""}
                     </span>
                   </div>
-                  <div className="row-2">
+                  <div
+                    className={`row-2 ${
+                      e.payload.direction === "credit" ? "amt-credit" : "amt-debt"
+                    }`}
+                  >
                     {sign}
                     {formatMinor(e.payload.amount_minor, e.payload.currency)}
                   </div>

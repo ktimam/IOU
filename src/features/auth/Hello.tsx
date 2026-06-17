@@ -1,6 +1,7 @@
 import { useAuth } from "./AuthProvider";
 import { useEffect, useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
+import { IOUWordmark, IOUMark } from "../ui/Logo";
 
 type WhoAmIResult = string | null;
 
@@ -24,7 +25,9 @@ export function Hello() {
   if (state.kind === "anonymous") {
     return (
       <div className="card" style={{ textAlign: "center", marginTop: 80 }}>
-        <h1>IOU</h1>
+        <h1 style={{ display: "flex", justifyContent: "center", margin: "8px 0 12px" }}>
+          <IOUWordmark height={56} />
+        </h1>
         <p className="muted">Track who owes whom. Encrypted. Yours only.</p>
         <div className="cta-row" style={{ justifyContent: "center" }}>
           <button onClick={() => nav("/sign-in")}>Sign in with Internet Identity</button>
@@ -36,7 +39,10 @@ export function Hello() {
   return (
     <div>
       <div className="row" style={{ justifyContent: "space-between", marginBottom: 24 }}>
-        <h1>Hello.</h1>
+        <div className="row" style={{ gap: 10 }}>
+          <IOUMark size={28} />
+          <h1 style={{ margin: 0 }}>Hello.</h1>
+        </div>
         <button className="secondary" onClick={() => void signOut()}>
           Sign out
         </button>

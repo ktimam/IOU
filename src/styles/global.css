@@ -1,18 +1,40 @@
+@font-face {
+  font-family: "Manrope";
+  src: url("/fonts/manrope-var.woff2") format("woff2");
+  font-weight: 200 800;
+  font-style: normal;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: "JetBrains Mono";
+  src: url("/fonts/jetbrains-mono-var.woff2") format("woff2");
+  font-weight: 100 800;
+  font-style: normal;
+  font-display: swap;
+}
+
 :root {
-  --bg: #fafaf7;
-  --surface: #ffffff;
-  --text: #0c0c10;
-  --text-dim: #6b7280;
-  --accent: #3b5bff;
-  --accent-soft: #e6ebff;
-  --border: #e8e8e3;
-  --credit: #0e8345;
-  --debt: #b42318;
-  --shadow: 0 1px 3px rgba(0, 0, 0, 0.06);
-  --radius-card: 12px;
-  --radius-input: 8px;
+  color-scheme: dark;
+  --bg: #0f1216;
+  --surface: #181c22;
+  --surface-2: #12161b;
+  --text: #eaf0f0;
+  --text-dim: #8a95a1;
+  --accent: #5fe3b3;
+  --accent-hover: #7fecc4;
+  --accent-soft: rgba(95, 227, 179, 0.12);
+  --on-accent: #04241b;
+  --border: #262c34;
+  --credit: #5fe3b3;
+  --debt: #ff8a75;
+  --shadow: 0 1px 3px rgba(0, 0, 0, 0.5);
+  --radius-card: 14px;
+  --radius-input: 12px;
+  --radius-btn: 12px;
   --radius-pill: 999px;
-  --font: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  --font: "Manrope", system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  --font-mono: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
 }
 
 * {
@@ -44,22 +66,22 @@ button {
   font-weight: 600;
   border: 0;
   background: var(--accent);
-  color: #fff;
+  color: var(--on-accent);
   padding: 12px 20px;
-  border-radius: var(--radius-pill);
+  border-radius: var(--radius-btn);
   cursor: pointer;
   transition: background 120ms ease;
 }
 
-button:hover { background: #2c47cc; }
-button:disabled { background: #cbd0e6; cursor: not-allowed; }
+button:hover { background: var(--accent-hover); }
+button:disabled { background: #2a3038; color: #5b646e; cursor: not-allowed; }
 
 button.secondary {
   background: transparent;
   color: var(--text);
   border: 1px solid var(--border);
 }
-button.secondary:hover { background: var(--accent-soft); }
+button.secondary:hover { background: var(--accent-soft); border-color: var(--accent); }
 
 input, textarea, select {
   font-family: inherit;
@@ -241,7 +263,7 @@ h3 { font-size: 1rem; font-weight: 600; }
   border: 1px solid var(--border);
   border-radius: var(--radius-input);
   padding: 12px;
-  background: var(--bg);
+  background: var(--surface-2);
 }
 .entry-form .rate-preview {
   margin-top: 8px;
@@ -264,7 +286,7 @@ h3 { font-size: 1rem; font-weight: 600; }
 .modal-backdrop {
   position: fixed;
   inset: 0;
-  background: rgba(12, 12, 16, 0.5);
+  background: rgba(3, 5, 8, 0.66);
   display: flex;
   align-items: center;
   justify-content: center;
@@ -296,18 +318,19 @@ h3 { font-size: 1rem; font-weight: 600; }
   pointer-events: none;
 }
 .toast {
-  background: var(--text);
-  color: #fff;
+  background: #232a32;
+  color: var(--text);
+  border: 1px solid var(--border);
   padding: 10px 14px;
   border-radius: var(--radius-input);
   font-size: 0.875rem;
-  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.16);
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.4);
   max-width: 320px;
   pointer-events: auto;
   animation: toast-in 120ms ease-out;
 }
-.toast-success { background: var(--credit); }
-.toast-error   { background: var(--debt); }
+.toast-success { background: var(--credit); color: var(--on-accent); border-color: transparent; }
+.toast-error   { background: var(--debt); color: #3a1008; border-color: transparent; }
 
 @keyframes toast-in {
   from { opacity: 0; transform: translateY(-4px); }
@@ -337,7 +360,8 @@ h3 { font-size: 1rem; font-weight: 600; }
   display: flex;
   gap: 6px;
   align-items: baseline;
-  background: var(--bg);
+  background: var(--surface-2);
+  border: 1px solid var(--border);
   padding: 6px 8px;
   border-radius: 6px;
   font-size: 0.9375rem;
@@ -376,3 +400,37 @@ h3 { font-size: 1rem; font-weight: 600; }
   box-shadow: var(--shadow);
   margin: 16px 0;
 }
+
+/* ─── monospaced, color-coded figures (Vault) ─── */
+
+.balances .amt {
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+  font-weight: 500;
+}
+.history li .row-2 {
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+}
+.amt-credit { color: var(--credit); }
+.amt-debt   { color: var(--debt); }
+
+/* ─── dark-theme polish ─── */
+
+a { color: var(--accent); text-decoration: none; }
+a:hover { text-decoration: underline; }
+
+code {
+  font-family: var(--font-mono);
+  font-size: 0.92em;
+  color: var(--text);
+}
+
+input[type="checkbox"], input[type="radio"] {
+  width: auto;
+  accent-color: var(--accent);
+}
+
+input::placeholder, textarea::placeholder { color: var(--text-dim); }
+
+::selection { background: var(--accent-soft); }
