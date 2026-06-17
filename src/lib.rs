@@ -342,6 +342,16 @@ thread_local! {
             .expect("VETKD_KEY_NAME cell init")
     );
 
+    // v1.4.0 (solo sheets): each principal registers their P-256 wrap
+    // pubkey under their own delegation. A solo-sheet creator wraps
+    // K_sheet to the partner's *canister-attested* key (fetched via
+    // get_sheet_pubkey) when granting access, instead of trusting a
+    // pasted string. Fresh MemoryId (17) — additive, no migration.
+    static PARTNER_PUBKEYS: RefCell<StableBTreeMap<Principal, Vec<u8>, Memory>> =
+        RefCell::new(StableBTreeMap::init(
+            MEMORY_MANAGER.with(|m| m.borrow().get(MemoryId::new(17)))
+        ));
+
     // V6: cache the result of vetkd_public_key after first derivation.
     // The key is constant per (canister, context, key_name) so we can
     // serve it from a cell without an inter-canister call.
@@ -690,6 +700,10 @@ fn inspect_message() {
         // v1.3.0: recovery key (V1 fix)
         "register_recovery_pubkey",
         "get_recovery_pubkey",
+        // v1.4.0: solo sheets
+        "grant_partner_access",
+        "register_sheet_pubkey",
+        "get_sheet_pubkey",
     ];
     if !allowed.contains(&method_name.as_str()) {
         ic_cdk::trap(format!(
@@ -718,6 +732,8 @@ fn inspect_message() {
         "vetkd_wrap_sheet_key",
         "submit_replace_member",
         "register_recovery_pubkey",
+        "grant_partner_access",
+        "register_sheet_pubkey",
     ];
     if require_auth_methods.contains(&method_name.as_str())
         && caller == candid::Principal::anonymous()
@@ -1004,14 +1020,22 @@ async fn create_sheet(req: CreateSheetReq) -> Sheet {
                 Some(x) => x,
                 None => ic_cdk::trap("pair not found"),
             };
-            if pair.members[1] == Principal::anonymous() {
-                ic_cdk::trap("pair is not active (no second member yet)");
-            }
+            // Solo sheets are allowed: members[1] may still be anonymous
+            // (no partner has joined yet). is_member_of rejects anonymous,
+            // so only the real creator (members[0]) passes here.
             if !is_member_of(&pair, caller) {
                 ic_cdk::trap("not a member of this pair");
             }
             (pair.members[0], pair.members[1])
         });
+        if req.wrapped_key_a.is_empty() {
+            ic_cdk::trap("wrapped_key_a must not be empty");
+        }
+        // Solo sheet: ignore any client-supplied wrapped_key_b and store an
+        // empty placeholder; grant_partner_access fills it once a partner
+        // joins. member_b stays anonymous until then.
+        let is_solo = member_b == Principal::anonymous();
+        let wrapped_key_b = if is_solo { Vec::new() } else { req.wrapped_key_b.clone() };
         // v1: only one active sheet per pair. The check + insert
         // are in the same synchronous block (no await between), so
         // two concurrent create_sheet calls for the same pair
@@ -1031,7 +1055,7 @@ async fn create_sheet(req: CreateSheetReq) -> Sheet {
             closing_window_days: req.closing_window_days,
             last_entry_at: None,
             wrapped_key_a: req.wrapped_key_a,
-            wrapped_key_b: req.wrapped_key_b,
+            wrapped_key_b,
             member_a,
             member_b,
             created_at: now,
@@ -1203,6 +1227,27 @@ fn next_entry_id(sheet_id: &str) -> u64 {
         let next = cur + 1;
         map.insert(sheet_id.to_string(), next);
         next
+    })
+}
+
+/// caller_owns_sheet: true iff the authenticated caller is member_a or
+/// member_b OF THE SHEET ITSELF (not merely the parent pair). For a solo
+/// sheet member_b is anonymous, so a partner who joined the pair but has
+/// not been granted access (sheet.member_b still anonymous) does NOT own
+/// it. This per-sheet check is the consent gate: it replaces the broader
+/// caller_is_pair_member gate on the key-derivation path so a late joiner
+/// cannot derive K_sheet for sheets the creator made while solo until an
+/// explicit grant_partner_access sets member_b.
+fn caller_owns_sheet(sheet_id: &str) -> bool {
+    let caller = ic_cdk::api::msg_caller();
+    if caller == Principal::anonymous() {
+        return false;
+    }
+    SHEETS.with(|s| {
+        s.borrow()
+            .get(&sheet_id.to_string())
+            .map(|sh| sh.member_a == caller || sh.member_b == caller)
+            .unwrap_or(false)
     })
 }
 
@@ -1470,8 +1515,12 @@ async fn vetkd_wrap_sheet_key(
     if transport_public_key.len() != 48 {
         ic_cdk::trap("transport_public_key must be 48 bytes (BLS12-381 G1, compressed)");
     }
-    if !caller_is_pair_member(&sheet_id) {
-        ic_cdk::trap("not a member of this sheet's pair");
+    // Per-sheet consent gate (not just pair membership): a partner who
+    // joined the pair gains K_sheet only after grant_partner_access sets
+    // them as the sheet's member_b. Equivalent to the old gate for legacy
+    // 2-member sheets (sheet members == pair members there).
+    if !caller_owns_sheet(&sheet_id) {
+        ic_cdk::trap("not a member of this sheet (or partner access not yet granted)");
     }
     if !sheet_is_active(&sheet_id) {
         ic_cdk::trap("sheet is not active");
@@ -1573,6 +1622,119 @@ fn get_recovery_pubkey(principal: Principal) -> Option<Vec<u8>> {
     RECOVERY_KEYS.with(|m| m.borrow().get(&principal).map(|k| k.ed25519_pubkey.clone()))
 }
 
+// ───────────────────── v1.4.0: solo sheets ─────────────────────
+
+/// register_sheet_pubkey: bind a P-256 wrap public key to the caller, so
+/// a solo-sheet creator can wrap K_sheet to the partner's canister-attested
+/// key (fetched via get_sheet_pubkey) rather than a pasted string — closing
+/// the dev key-exchange MITM. Authenticated; one key per principal.
+#[ic_cdk::update]
+fn register_sheet_pubkey(pubkey: Vec<u8>) {
+    require_authed();
+    let caller = ic_cdk::api::msg_caller();
+    if pubkey.is_empty() || pubkey.len() > 256 {
+        ic_cdk::trap("pubkey length out of range");
+    }
+    PARTNER_PUBKEYS.with(|m| m.borrow_mut().insert(caller, pubkey));
+}
+
+/// get_sheet_pubkey: the wrap pubkey a principal registered (or None).
+/// Public so the granter can fetch the partner's attested key.
+#[ic_cdk::query]
+fn get_sheet_pubkey(principal: Principal) -> Option<Vec<u8>> {
+    PARTNER_PUBKEYS.with(|m| m.borrow().get(&principal))
+}
+
+#[derive(Clone, CandidType, Deserialize)]
+pub struct SheetRewrap {
+    pub sheet_id: String,
+    pub wrapped_key_for_partner: Vec<u8>, // dev: K_sheet sealed to partner; prod: empty
+}
+
+/// grant_partner_access: the solo-sheet creator (pair.members[0]) grants a
+/// joined partner access to their still-Active solo sheets. The single
+/// explicit, owner-initiated consent step, used in BOTH dev and prod (in
+/// prod `rewraps` carry empty blobs; the grant works by setting member_b so
+/// the per-sheet vetkd gate passes).
+///
+/// Security guards (all validated before any write — atomic):
+///   - caller authed and == pair.members[0] (the K_sheet holder);
+///   - `expected_partner` must equal the principal that actually joined
+///     (pair.members[1]) — defeats a join-race redirecting the grant;
+///   - each sheet must belong to this pair, be owned by the caller
+///     (member_a == caller), be a genuine solo sheet (member_b anonymous),
+///     and be Active. The member_b-anonymous check makes the grant
+///     idempotent / replay-safe (a second grant fails) and prevents
+///     overwriting a real partner's wrapped_key_b. Closed-before-grant
+///     sheets are skipped, matching the prod sheet_is_active gate.
+/// The canister never sees plaintext K_sheet — only the opaque blob.
+#[ic_cdk::update]
+fn grant_partner_access(
+    pair_id: String,
+    expected_partner: Principal,
+    rewraps: Vec<SheetRewrap>,
+) -> u32 {
+    require_authed();
+    let caller = ic_cdk::api::msg_caller();
+    if expected_partner == Principal::anonymous() {
+        ic_cdk::trap("expected_partner must not be anonymous");
+    }
+    if caller == expected_partner {
+        ic_cdk::trap("cannot grant access to yourself");
+    }
+    let pair = match PAIRS.with(|p| p.borrow().get(&pair_id).clone()) {
+        Some(p) => p,
+        None => ic_cdk::trap("pair not found"),
+    };
+    if pair.archived_at.is_some() {
+        ic_cdk::trap("pair is archived");
+    }
+    if pair.members[0] != caller {
+        ic_cdk::trap("only the sheet owner (pair creator) may grant partner access");
+    }
+    // Recipient binding: the partner must have actually joined this pair and
+    // be exactly who the caller committed to wrapping for.
+    if pair.members.get(1) != Some(&expected_partner) {
+        ic_cdk::trap("expected_partner is not the joined member of this pair");
+    }
+    // Validate the entire batch BEFORE mutating (single message → atomic).
+    let mut validated: Vec<(String, Vec<u8>)> = Vec::with_capacity(rewraps.len());
+    SHEETS.with(|s| {
+        let map = s.borrow();
+        for rw in &rewraps {
+            let sheet = match map.get(&rw.sheet_id) {
+                Some(sh) => sh,
+                None => ic_cdk::trap("sheet not found"),
+            };
+            if sheet.pair_id != pair_id {
+                ic_cdk::trap("sheet does not belong to this pair");
+            }
+            if sheet.member_a != caller {
+                ic_cdk::trap("caller does not own this sheet");
+            }
+            if sheet.member_b != Principal::anonymous() {
+                ic_cdk::trap("sheet already has a partner (not a solo sheet)");
+            }
+            if !matches!(sheet.state, SheetState::Active) {
+                ic_cdk::trap("cannot grant access to a closed sheet");
+            }
+            validated.push((rw.sheet_id.clone(), rw.wrapped_key_for_partner.clone()));
+        }
+    });
+    let mut count = 0u32;
+    for (sid, blob) in validated {
+        let ok = update_sheet_field(&sid, |sheet| {
+            sheet.member_b = expected_partner;
+            sheet.wrapped_key_b = blob.clone();
+            // state stays Active.
+        });
+        if ok {
+            count += 1;
+        }
+    }
+    count
+}
+
 /// Compute the stable-map key for a (pair_id, nonce) pair. Used by
 /// V2 replay protection.
 fn nonce_key(pair_id: &str, nonce: &[u8]) -> String {
@@ -1636,6 +1798,17 @@ fn submit_replace_member(signed: SignedReplaceRequest) -> Pair {
     };
     if pair.archived_at.is_some() {
         ic_cdk::trap("pair is archived");
+    }
+    // v1.4.0 (solo sheets): the anonymous slot is a real, persistent value
+    // now, so it must never participate in a replacement. Adding a partner
+    // to a solo pair is join_pair's job, not replace.
+    if req.leaving_principal == Principal::anonymous()
+        || req.new_principal == Principal::anonymous()
+    {
+        ic_cdk::trap("anonymous principal cannot take part in a member replacement");
+    }
+    if pair.members.get(1) == Some(&Principal::anonymous()) {
+        ic_cdk::trap("cannot replace a member on a solo pair; invite a partner via join instead");
     }
     let leaving_is_a = pair.members.first() == Some(&req.leaving_principal);
     let leaving_is_b = pair.members.get(1) == Some(&req.leaving_principal);

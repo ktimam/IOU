@@ -143,6 +143,14 @@ type ConsumedNonce = record {
     consumed_at : nat64;
 };
 
+// v1.4.0: solo sheets. One entry per still-active solo sheet being
+// granted to a joined partner. wrapped_key_for_partner is K_sheet sealed
+// to the partner's registered pubkey (dev), or empty (prod / vetkd).
+type SheetRewrap = record {
+    sheet_id : text;
+    wrapped_key_for_partner : vec nat8;
+};
+
 service : {
     // Phase 1
     whoami : () -> (opt text) query;
@@ -183,4 +191,9 @@ service : {
     // v1.3.0: recovery key (V1 fix)
     register_recovery_pubkey : (vec nat8) -> ();
     get_recovery_pubkey : (principal) -> (opt vec nat8) query;
+
+    // v1.4.0: solo sheets
+    register_sheet_pubkey : (vec nat8) -> ();
+    get_sheet_pubkey : (principal) -> (opt vec nat8) query;
+    grant_partner_access : (text, principal, vec SheetRewrap) -> (nat32);
 }
