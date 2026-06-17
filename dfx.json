@@ -6,6 +6,12 @@
       "wasm": "target/wasm32-unknown-unknown/release/iou_backend.wasm",
       "build": "scripts/build-backend.sh"
     },
+    "internet_identity": {
+      "type": "custom",
+      "candid": "ii/internet_identity.did",
+      "wasm": "ii/internet_identity_dev.wasm.gz",
+      "remote": { "id": { "ic": "rdmx6-jaaaa-aaaaa-aaadq-cai" } }
+    },
     "iou_assets": {
       "type": "assets",
       "source": ["dist"],

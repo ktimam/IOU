@@ -11,6 +11,9 @@ dist/
 dfx.json.bak
 *.mo.bak
 
+# local Internet Identity build (downloaded by scripts/dev-ii.sh)
+ii/
+
 # editor
 .vscode/
 .idea/
