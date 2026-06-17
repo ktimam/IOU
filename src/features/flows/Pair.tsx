@@ -4,19 +4,22 @@ import { useAuth } from "../auth/AuthProvider";
 import { useActor, unwrap } from "./useActor";
 import { useMyKeypair } from "./useMyKeypair";
 import { useSheetKey } from "./SheetKeyContext";
+import { grantPartnerAccess } from "./grantPartnerAccess";
 
 export function Pair() {
   const { pairId } = useParams<{ pairId: string }>();
   const { state } = useAuth();
   const { actor } = useActor();
   const { keypair: myKp } = useMyKeypair();
-  const { registerPartnerKey } = useSheetKey();
+  const { registerPartnerKey, unwrapFor } = useSheetKey();
   const nav = useNavigate();
   const [pair, setPair] = useState<any | null>(null);
   const [activeSheetId, setActiveSheetId] = useState<string | null>(null);
   const [archivedCount, setArchivedCount] = useState<number>(0);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [grantBusy, setGrantBusy] = useState(false);
+  const [grantMsg, setGrantMsg] = useState<string | null>(null);
 
   useEffect(() => {
     if (state.kind !== "authenticated") {
@@ -38,10 +41,45 @@ export function Pair() {
           const sum = (summaries as any[]).find((s) => s.id === pairId);
           const sid = sum ? unwrap(sum.active_sheet_id) : null;
           setActiveSheetId(sid);
-          // Register my own public key under the active sheet so the
-          // partner can use it as the wrap-sender.
-          if (sid && myKp) {
-            registerPartnerKey(sid, myKp.publicKeyB64);
+          // Publish my wrap pubkey on-canister so the other member can fetch
+          // it (used to grant / to read a granted sheet).
+          if (myKp) {
+            try {
+              await actor.register_sheet_pubkey(
+                Array.from(new TextEncoder().encode(myKp.publicKeyB64)),
+              );
+            } catch {
+              /* non-fatal */
+            }
+          }
+          // Cache the wrap-sender for the active sheet. The creator (member_a)
+          // self-wrapped it; a granted partner (member_b) must use the
+          // creator's attested key as the wrap-sender.
+          const meText =
+            state.kind === "authenticated"
+              ? state.identity.getPrincipal().toText()
+              : "";
+          const creator = p.members?.[0];
+          const creatorText =
+            creator && typeof creator.toText === "function"
+              ? creator.toText()
+              : String(creator ?? "");
+          if (sid) {
+            if (meText === creatorText && myKp) {
+              registerPartnerKey(sid, myKp.publicKeyB64);
+            } else if (meText !== creatorText) {
+              try {
+                const raw = unwrap(await actor.get_sheet_pubkey(creator));
+                if (raw) {
+                  registerPartnerKey(
+                    sid,
+                    new TextDecoder().decode(new Uint8Array(raw as number[])),
+                  );
+                }
+              } catch {
+                /* partner key not published yet */
+              }
+            }
           }
           setArchivedCount(Number(sum?.archived_sheet_count ?? 0));
         }
@@ -76,6 +114,45 @@ export function Pair() {
       ? partner.toText()
       : String(partner ?? "");
   const pairActive = partnerText !== "" && partnerText !== ANON;
+  const meText =
+    state.kind === "authenticated"
+      ? state.identity.getPrincipal().toText()
+      : "";
+  const creatorText =
+    pair.members?.[0] && typeof pair.members[0].toText === "function"
+      ? pair.members[0].toText()
+      : String(pair.members?.[0] ?? "");
+  const iAmCreator = meText !== "" && meText === creatorText;
+
+  async function doGrant() {
+    if (!actor || !activeSheetId || state.kind !== "authenticated") return;
+    setGrantBusy(true);
+    setGrantMsg(null);
+    try {
+      const n = await grantPartnerAccess({
+        actor,
+        identity: state.identity,
+        pairId: pairId ?? "",
+        partnerPrincipalText: partnerText,
+        activeSheetId,
+        getKSheet: (s) => unwrapFor(s),
+      });
+      setGrantMsg(
+        n > 0
+          ? "Done — your partner now has access to this sheet."
+          : "Nothing to grant.",
+      );
+    } catch (e) {
+      const m = (e as Error).message;
+      setGrantMsg(
+        m.includes("already has a partner")
+          ? "Your partner already has access to this sheet."
+          : m,
+      );
+    } finally {
+      setGrantBusy(false);
+    }
+  }
 
   return (
     <div>
@@ -108,6 +185,26 @@ export function Pair() {
               Solo mode — start sheets now and invite a partner anytime with
               the invite code above. When they join you can grant them access
               to everything.
+            </p>
+          )}
+        </div>
+      )}
+      {pairActive && activeSheetId && iAmCreator && (
+        <div className="card">
+          <p className="muted" style={{ fontSize: "0.875rem" }}>
+            Your partner has joined. Grant them access to the current sheet —
+            they'll be able to read its full history.
+          </p>
+          <button
+            className="secondary"
+            disabled={grantBusy}
+            onClick={() => void doGrant()}
+          >
+            {grantBusy ? "Granting…" : "Grant partner access"}
+          </button>
+          {grantMsg && (
+            <p className="muted" style={{ marginTop: 8 }}>
+              {grantMsg}
             </p>
           )}
         </div>

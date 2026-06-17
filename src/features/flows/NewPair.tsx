@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
 import { useAuth } from "../auth/AuthProvider";
 import { useActor } from "./useActor";
+import { deriveUserKeypair } from "../crypto/devVetkd";
 
 export function NewPair() {
   const { state } = useAuth();
@@ -44,6 +45,20 @@ export function NewPair() {
     setError(null);
     try {
       const pairId = await actor.join_pair(inviteCode.trim());
+      // Publish my wrap pubkey on-canister so the creator can seal K_sheet
+      // to me when they grant access (dev path; harmless in prod).
+      if (state.kind === "authenticated") {
+        try {
+          const myKp = await deriveUserKeypair(
+            state.identity.getPrincipal().toText(),
+          );
+          await actor.register_sheet_pubkey(
+            Array.from(new TextEncoder().encode(myKp.publicKeyB64)),
+          );
+        } catch {
+          /* non-fatal */
+        }
+      }
       nav(`/pair/${pairId}`, { replace: true });
     } catch (e) {
       setError((e as Error).message);

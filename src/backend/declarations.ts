@@ -130,6 +130,10 @@ export const idlFactory = ({ IDL: idl }: { IDL: IDL }) => {
     signature: idl.Vec(idl.Nat8),
     signer_pubkey: idl.Vec(idl.Nat8),
   });
+  const SheetRewrap = idl.Record({
+    sheet_id: idl.Text,
+    wrapped_key_for_partner: idl.Vec(idl.Nat8),
+  });
   return idl.Service({
     // Phase 1
     whoami: idl.Func([], [idl.Opt(idl.Text)], ["query"]),
@@ -183,6 +187,18 @@ export const idlFactory = ({ IDL: idl }: { IDL: IDL }) => {
       [idl.Principal],
       [idl.Opt(idl.Vec(idl.Nat8))],
       ["query"],
+    ),
+    // v1.4.0: solo sheets
+    register_sheet_pubkey: idl.Func([idl.Vec(idl.Nat8)], [], []),
+    get_sheet_pubkey: idl.Func(
+      [idl.Principal],
+      [idl.Opt(idl.Vec(idl.Nat8))],
+      ["query"],
+    ),
+    grant_partner_access: idl.Func(
+      [idl.Text, idl.Principal, idl.Vec(SheetRewrap)],
+      [idl.Nat32],
+      [],
     ),
   });
 };
