@@ -65,6 +65,18 @@ export function Pair() {
   }
   if (!pair) return <p className="muted">No pair.</p>;
 
+  // A pair is only "active" once a second member has joined. Until then
+  // members[1] is the anonymous principal (2vxsx-fae) and the backend
+  // rejects create_sheet ("pair is not active"). Detect it so we offer the
+  // invite flow instead of a button that traps.
+  const ANON = "2vxsx-fae";
+  const partner = pair.members?.[1];
+  const partnerText =
+    partner && typeof partner.toText === "function"
+      ? partner.toText()
+      : String(partner ?? "");
+  const pairActive = partnerText !== "" && partnerText !== ANON;
+
   return (
     <div>
       <Link to="/pairs" className="muted">
@@ -84,11 +96,20 @@ export function Pair() {
             <button>Open active sheet →</button>
           </Link>
         </div>
-      ) : (
+      ) : pairActive ? (
         <div className="cta">
           <Link to={`/sheet/new?pairId=${pairId}`}>
             <button>+ New sheet</button>
           </Link>
+        </div>
+      ) : (
+        <div className="card">
+          <h3>Waiting for your partner</h3>
+          <p className="muted">
+            An IOU sheet is shared between two people. Share the invite code
+            above with your partner — once they join, you can start a sheet
+            together.
+          </p>
         </div>
       )}
       {archivedCount > 0 && (

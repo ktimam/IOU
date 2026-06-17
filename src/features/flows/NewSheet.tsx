@@ -55,6 +55,20 @@ export function NewSheet() {
       }
       const memberA = pairObj.members[0];
       const memberB = pairObj.members[1];
+      // A pair isn't usable until a second member joins (members[1] is the
+      // anonymous principal until then). Stop here with a friendly message
+      // rather than letting the canister trap.
+      const memberBText =
+        memberB && typeof memberB.toText === "function"
+          ? memberB.toText()
+          : String(memberB ?? "");
+      if (memberBText === "" || memberBText === "2vxsx-fae") {
+        setError(
+          "This pair isn't active yet — your partner needs to join with the invite code before you can start a sheet.",
+        );
+        setBusy(false);
+        return;
+      }
       // Reference memberA/memberB to keep TS happy; the actual
       // wrap uses our own keypair (dev collapse).
       void memberA;
@@ -88,7 +102,12 @@ export function NewSheet() {
       nav(`/pair/${pairId}`, { replace: true });
       void sheet;
     } catch (e) {
-      setError((e as Error).message);
+      const msg = (e as Error).message;
+      setError(
+        msg.includes("pair is not active")
+          ? "This pair isn't active yet — your partner needs to join with the invite code before you can start a sheet."
+          : msg,
+      );
     } finally {
       setBusy(false);
     }
