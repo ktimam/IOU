@@ -1,6 +1,6 @@
 {
   "name": "iou",
-  "version": "1.3.4",
+  "version": "1.4.0",
   "private": true,
   "type": "module",
   "scripts": {
@@ -19,6 +19,7 @@
     "android:build:debug": "cd android && ./gradlew assembleDebug",
     "android:install": "adb install -r android/app/build/outputs/apk/debug/app-debug.apk",
     "smoke": "pnpm exec tsx scripts/awa-smoke.ts",
+    "smoke:solo": "pnpm exec tsx scripts/awa-smoke-solo.ts",
     "smoke:vetkd": "pnpm exec tsx scripts/awa-smoke-vetkd.ts",
     "smoke:reset": "bash scripts/smoke-reset.sh",
     "test:unit": "vitest run",
