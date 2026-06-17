@@ -96,20 +96,20 @@ export function Pair() {
             <button>Open active sheet →</button>
           </Link>
         </div>
-      ) : pairActive ? (
-        <div className="cta">
-          <Link to={`/sheet/new?pairId=${pairId}`}>
-            <button>+ New sheet</button>
-          </Link>
-        </div>
       ) : (
-        <div className="card">
-          <h3>Waiting for your partner</h3>
-          <p className="muted">
-            An IOU sheet is shared between two people. Share the invite code
-            above with your partner — once they join, you can start a sheet
-            together.
-          </p>
+        <div>
+          <div className="cta">
+            <Link to={`/sheet/new?pairId=${pairId}`}>
+              <button>+ New sheet</button>
+            </Link>
+          </div>
+          {!pairActive && (
+            <p className="muted" style={{ marginTop: 8 }}>
+              Solo mode — start sheets now and invite a partner anytime with
+              the invite code above. When they join you can grant them access
+              to everything.
+            </p>
+          )}
         </div>
       )}
       {archivedCount > 0 && (

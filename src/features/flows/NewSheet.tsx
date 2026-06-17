@@ -55,20 +55,15 @@ export function NewSheet() {
       }
       const memberA = pairObj.members[0];
       const memberB = pairObj.members[1];
-      // A pair isn't usable until a second member joins (members[1] is the
-      // anonymous principal until then). Stop here with a friendly message
-      // rather than letting the canister trap.
+      // Solo sheets are allowed: members[1] may be the anonymous principal
+      // (no partner yet). In that case we wrap K_sheet only for ourselves
+      // and leave the partner slot empty; grant_partner_access fills it if
+      // a partner joins later.
       const memberBText =
         memberB && typeof memberB.toText === "function"
           ? memberB.toText()
           : String(memberB ?? "");
-      if (memberBText === "" || memberBText === "2vxsx-fae") {
-        setError(
-          "This pair isn't active yet — your partner needs to join with the invite code before you can start a sheet.",
-        );
-        setBusy(false);
-        return;
-      }
+      const isSolo = memberBText === "" || memberBText === "2vxsx-fae";
       // Reference memberA/memberB to keep TS happy; the actual
       // wrap uses our own keypair (dev collapse).
       void memberA;
@@ -82,11 +77,14 @@ export function NewSheet() {
       // Dev collapse: use the local keypair for both members'
       // wrap targets. The other member's browser does the same on
       // their side, so the dev fallback is symmetric.
-      const memberApub = myKp.publicKey;
-      const memberBpub = myKp.publicKey;
       const K_sheet = newSheetKey();
-      const wrapA = await wrapSheetKey(K_sheet, memberApub, myKp.privateKey);
-      const wrapB = await wrapSheetKey(K_sheet, memberBpub, myKp.privateKey);
+      const wrapA = await wrapSheetKey(K_sheet, myKp.publicKey, myKp.privateKey);
+      // Solo: no partner key yet — send an empty placeholder (the backend
+      // ignores wrapped_key_b for a solo sheet). Otherwise wrap for the
+      // partner too (dev collapse uses our own key for both).
+      const wrapB = isSolo
+        ? new Uint8Array(0)
+        : await wrapSheetKey(K_sheet, myKp.publicKey, myKp.privateKey);
       const currenciesUpper = currencies.map((c) => c.toUpperCase());
       const sheet = await actor.create_sheet({
         pair_id: pairId,
