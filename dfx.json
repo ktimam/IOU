@@ -12,5 +12,11 @@
       "build": "pnpm build"
     }
   },
+  "networks": {
+    "local": {
+      "bind": "127.0.0.1:40436",
+      "type": "ephemeral"
+    }
+  },
   "version": 1
 }
