@@ -562,7 +562,11 @@ fn require_authed() {
 }
 
 fn is_member_of(pair: &Pair, p: Principal) -> bool {
-    pair.members.contains(&p)
+    // Never treat the anonymous principal as a member. An empty pair slot
+    // (pending invite, or a future solo pair) is Principal::anonymous(), and
+    // several read paths gate purely on membership — without this guard any
+    // anonymous caller would match every such pair.
+    p != Principal::anonymous() && pair.members.contains(&p)
 }
 
 // Generate a random 8-char invite code from a 32-char base32 alphabet
@@ -883,6 +887,7 @@ fn join_pair(invite_code: String) -> String {
 /// get_my_pairs: lists all pairs the caller is a member of (active + archived).
 #[ic_cdk::query]
 fn get_my_pairs() -> Vec<PairSummary> {
+    require_authed();
     let caller = ic_cdk::api::msg_caller();
     let mut out: Vec<PairSummary> = Vec::new();
     PAIRS.with(|p| {
@@ -924,6 +929,7 @@ fn get_my_pairs() -> Vec<PairSummary> {
 /// get_pair: full pair record for a given id. Caller must be a member.
 #[ic_cdk::query]
 fn get_pair(pair_id: String) -> Option<Pair> {
+    require_authed();
     let caller = ic_cdk::api::msg_caller();
     PAIRS.with(|p| {
         p.borrow().get(&pair_id).and_then(|pair| {
@@ -1041,6 +1047,7 @@ async fn create_sheet(req: CreateSheetReq) -> Sheet {
 /// get_sheet: full sheet record. Caller must be a member of the parent pair.
 #[ic_cdk::query]
 fn get_sheet(sheet_id: String) -> Option<Sheet> {
+    require_authed();
     let caller = ic_cdk::api::msg_caller();
     let pair_id = SHEETS.with(|s| s.borrow().get(&sheet_id).map(|sh| sh.pair_id.clone()));
     let pair_id = pair_id?;
@@ -1055,6 +1062,7 @@ fn get_sheet(sheet_id: String) -> Option<Sheet> {
 /// caller is a member of. Newest first by closed_at.
 #[ic_cdk::query]
 fn list_archived_sheets(pair_id: String) -> Vec<Sheet> {
+    require_authed();
     let caller = ic_cdk::api::msg_caller();
     let allowed = PAIRS.with(|p| {
         p.borrow()
@@ -1084,6 +1092,7 @@ fn list_archived_sheets(pair_id: String) -> Vec<Sheet> {
 /// client-side to get the symmetric key.
 #[ic_cdk::query]
 fn get_sheet_wrapped_key(sheet_id: String) -> Option<Vec<u8>> {
+    require_authed();
     let caller = ic_cdk::api::msg_caller();
     SHEETS.with(|s| {
         s.borrow().get(&sheet_id).and_then(|sheet| {
