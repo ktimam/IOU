@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { useNavigate, useSearchParams, Link } from "react-router-dom";
 import { useAuth } from "../auth/AuthProvider";
 import { useActor } from "./useActor";
+import { useSheetKey } from "./SheetKeyContext";
 import { deriveUserKeypair, newSheetKey, wrapSheetKey } from "../crypto/devVetkd";
 
 const COMMON_CURRENCIES = ["USD", "Eur", "Egp", "Gbp", "Jpy", "Aud", "Cad", "Chf"];
@@ -11,6 +12,7 @@ export function NewSheet() {
   const pairId = params.get("pairId") || "";
   const { state } = useAuth();
   const { actor, err } = useActor();
+  const { cache } = useSheetKey();
   const nav = useNavigate();
   const [currencies, setCurrencies] = useState<string[]>(["Usd", "Egp"]);
   const [closingDays, setClosingDays] = useState(365);
@@ -93,12 +95,11 @@ export function NewSheet() {
         wrapped_key_a: Array.from(wrapA),
         wrapped_key_b: Array.from(wrapB),
       });
-      // In v1 dev the PWA doesn't yet store K_sheet in session
-      // storage; that's Phase 3 work. For now we just navigate to
-      // the pair page so the user sees the sheet was created.
-      void K_sheet;
-      nav(`/pair/${pairId}`, { replace: true });
-      void sheet;
+      // Seed K_sheet into the in-memory cache so the sheet page renders
+      // immediately, then open the newly created sheet (previously this
+      // navigated back to the pair page, so the new sheet never opened).
+      cache(sheet.id, K_sheet);
+      nav(`/sheet/${sheet.id}`, { replace: true });
     } catch (e) {
       const msg = (e as Error).message;
       setError(

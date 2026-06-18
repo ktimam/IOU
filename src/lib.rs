@@ -1235,9 +1235,10 @@ fn next_entry_id(sheet_id: &str) -> u64 {
 /// sheet member_b is anonymous, so a partner who joined the pair but has
 /// not been granted access (sheet.member_b still anonymous) does NOT own
 /// it. This per-sheet check is the consent gate: it replaces the broader
-/// caller_is_pair_member gate on the key-derivation path so a late joiner
-/// cannot derive K_sheet for sheets the creator made while solo until an
-/// explicit grant_partner_access sets member_b.
+/// pair-wide membership gate on the read, write, and key-derivation paths
+/// so a late joiner cannot derive K_sheet (or read/write entries) for
+/// sheets the creator made while solo until an explicit
+/// grant_partner_access sets member_b.
 fn caller_owns_sheet(sheet_id: &str) -> bool {
     let caller = ic_cdk::api::msg_caller();
     if caller == Principal::anonymous() {
@@ -1248,22 +1249,6 @@ fn caller_owns_sheet(sheet_id: &str) -> bool {
             .get(&sheet_id.to_string())
             .map(|sh| sh.member_a == caller || sh.member_b == caller)
             .unwrap_or(false)
-    })
-}
-
-fn caller_is_pair_member(sheet_id: &str) -> bool {
-    let caller = ic_cdk::api::msg_caller();
-    SHEETS.with(|s| {
-        let pair_id = match s.borrow().get(&sheet_id.to_string()).map(|sh| sh.pair_id.clone()) {
-            Some(p) => p,
-            None => return false,
-        };
-        PAIRS.with(|p| {
-            p.borrow()
-                .get(&pair_id)
-                .map(|pair| is_member_of(&pair, caller))
-                .unwrap_or(false)
-        })
     })
 }
 
@@ -1282,8 +1267,16 @@ fn record_entry_timestamp(sheet_id: &str, now: u64) {
     });
 }
 
-/// add_entry: store an encrypted entry on an active sheet. Caller
-/// must be a member of the parent pair.
+/// add_entry: store an encrypted entry on an active sheet.
+///
+/// v1.4.0: gated on caller_owns_sheet (per-sheet membership), matching the
+/// read path (list_entries/get_entry) and the key-derivation path. For
+/// legacy 2-member sheets the sheet members are exactly the pair members,
+/// so behavior is unchanged. For a solo sheet a partner who joined the
+/// pair but has not been granted access (sheet.member_b still anonymous)
+/// cannot write entries until an explicit grant_partner_access sets
+/// member_b — closing the integrity gap where an ungranted partner could
+/// pollute the sheet with (undecryptable) junk entries.
 #[ic_cdk::update]
 fn add_entry(req: AddEntryReq) -> Entry {
     let caller = ic_cdk::api::msg_caller();
@@ -1297,8 +1290,8 @@ fn add_entry(req: AddEntryReq) -> Entry {
     if req.iv.is_empty() {
         ic_cdk::trap("iv is empty");
     }
-    if !caller_is_pair_member(&req.sheet_id) {
-        ic_cdk::trap("not a member of this sheet's pair");
+    if !caller_owns_sheet(&req.sheet_id) {
+        ic_cdk::trap("caller does not have access to this sheet");
     }
     if !sheet_is_active(&req.sheet_id) {
         ic_cdk::trap("sheet is not active");
@@ -1355,8 +1348,8 @@ fn edit_entry(req: EditEntryReq) -> Entry {
     if req.iv.is_empty() {
         ic_cdk::trap("iv is empty");
     }
-    if !caller_is_pair_member(&req.sheet_id) {
-        ic_cdk::trap("not a member of this sheet's pair");
+    if !caller_owns_sheet(&req.sheet_id) {
+        ic_cdk::trap("caller does not have access to this sheet");
     }
     if !sheet_is_active(&req.sheet_id) {
         ic_cdk::trap("sheet is not active");
@@ -1380,9 +1373,17 @@ fn edit_entry(req: EditEntryReq) -> Entry {
 }
 
 /// get_entry: fetch a single entry by (sheet_id, id).
+///
+/// v1.4.0: gated on caller_owns_sheet (per-sheet membership), not the
+/// broader pair-wide membership. For legacy 2-member sheets the sheet
+/// members are exactly the pair members, so behavior is unchanged. For a
+/// solo sheet a partner who joined the pair but has not been granted
+/// access (sheet.member_b still anonymous) does not own the sheet, so they
+/// cannot read its entries' ciphertext/metadata — matching the per-sheet
+/// consent boundary already enforced on the key-derivation path.
 #[ic_cdk::query]
 fn get_entry(sheet_id: String, entry_id: u64) -> Option<Entry> {
-    if !caller_is_pair_member(&sheet_id) {
+    if !caller_owns_sheet(&sheet_id) {
         return None;
     }
     sheet_entries_get(&sheet_id, entry_id)
@@ -1390,14 +1391,18 @@ fn get_entry(sheet_id: String, entry_id: u64) -> Option<Entry> {
 
 /// list_entries: paginated by `limit` (newest first). `cursor` is
 /// the smallest `id` already seen (exclusive).
+///
+/// v1.4.0: gated on caller_owns_sheet (per-sheet membership) — see
+/// get_entry for the rationale. A joined-but-ungranted partner of a solo
+/// sheet is rejected here even though they are a pair member.
 #[ic_cdk::query]
 fn list_entries(
     sheet_id: String,
     cursor: Option<u64>,
     limit: u32,
 ) -> ListEntriesResult {
-    if !caller_is_pair_member(&sheet_id) {
-        ic_cdk::trap("not a member of this sheet's pair");
+    if !caller_owns_sheet(&sheet_id) {
+        ic_cdk::trap("caller does not have access to this sheet");
     }
     let limit = limit.min(200) as usize;
     // v1.3.2: full-table scan filtered by sheet_id (the

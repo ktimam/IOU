@@ -41,6 +41,13 @@ interface SheetKeyContextValue {
   registerPartnerKey: (sheetId: string, publicKeyB64: string) => void;
   unwrapFor: (sheetId: string) => Promise<Uint8Array>;
   get: (sheetId: string) => Uint8Array | undefined;
+  /**
+   * Seed K_sheet directly into the in-memory cache. Used right after
+   * create_sheet — the creator already holds K_sheet, so caching it
+   * lets the sheet page render immediately without re-deriving (which
+   * would otherwise require the partner's pubkey from the pair page).
+   */
+  cache: (sheetId: string, key: Uint8Array) => void;
   forget: (sheetId: string) => void;
 }
 
@@ -59,6 +66,10 @@ export function SheetKeyProvider({ children }: { children: React.ReactNode }) {
     (sheetId: string) => keys[sheetId],
     [keys],
   );
+
+  const cache = useCallback((sheetId: string, key: Uint8Array) => {
+    setKeys((prev) => ({ ...prev, [sheetId]: key }));
+  }, []);
 
   async function unwrapFor(sheetId: string): Promise<Uint8Array> {
     if (keys[sheetId]) return keys[sheetId];
@@ -91,7 +102,33 @@ export function SheetKeyProvider({ children }: { children: React.ReactNode }) {
     }
 
     // Dev path: P-256 ECDH wrap (back-compat with v1.1.0).
-    const senderB64 = partnerKeys[sheetId];
+    let senderB64 = partnerKeys[sheetId];
+    if (!senderB64) {
+      // Fallback so the sheet page works on a fresh load without having
+      // visited the pair page first. The creator (member_a) self-wrapped
+      // K_sheet with their own key, so derive the wrap-sender from the
+      // sheet: my own pubkey if I'm the creator, else the creator's
+      // published pubkey (granted-partner case).
+      const sheet = unwrap(await actor.get_sheet(sheetId));
+      if (sheet) {
+        const me = identity.getPrincipal().toText();
+        const creatorText =
+          sheet.member_a && typeof sheet.member_a.toText === "function"
+            ? sheet.member_a.toText()
+            : String(sheet.member_a ?? "");
+        if (me === creatorText) {
+          const myKp = await deriveUserKeypair(me);
+          senderB64 = myKp.publicKeyB64;
+        } else {
+          const raw = unwrap(await actor.get_sheet_pubkey(sheet.member_a));
+          if (raw) {
+            senderB64 = new TextDecoder().decode(
+              new Uint8Array(raw as number[]),
+            );
+          }
+        }
+      }
+    }
     if (!senderB64) {
       throw new Error(
         "missing partner public key for sheet " + sheetId +
@@ -121,7 +158,7 @@ export function SheetKeyProvider({ children }: { children: React.ReactNode }) {
 
   return (
     <SheetKeyContext.Provider
-      value={{ keys, registerPartnerKey, unwrapFor, get, forget }}
+      value={{ keys, registerPartnerKey, unwrapFor, get, cache, forget }}
     >
       {children}
     </SheetKeyContext.Provider>

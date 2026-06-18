@@ -55,9 +55,16 @@ export function SheetPage() {
   const myPrincipal = state.kind === "authenticated"
     ? state.identity.getPrincipal().toText()
     : "";
-  const partnerPrincipal = sheet && sheet.member_a
-    ? (sheet.member_a === myPrincipal ? sheet.member_b : sheet.member_a)
-    : "";
+  // member_a/member_b are Principal objects (Candid), not strings. Treating
+  // them as strings — comparing with === and calling .slice() — threw
+  // "them.slice is not a function" and blanked the whole page (no error
+  // boundary). Convert to text before any string use.
+  const principalText = (p: any): string =>
+    p && typeof p.toText === "function" ? p.toText() : String(p ?? "");
+  const memberAText = sheet ? principalText(sheet.member_a) : "";
+  const memberBText = sheet ? principalText(sheet.member_b) : "";
+  const partnerPrincipal =
+    memberAText === myPrincipal ? memberBText : memberAText;
 
   async function reload() {
     if (!actor || !sheetId) return;
@@ -183,6 +190,11 @@ export function SheetPage() {
   const balances = computeBalances(entries.map((e) => e.payload));
   const me = myPrincipal;
   const them = partnerPrincipal;
+  // Solo sheet: partner slot is the anonymous principal until a partner
+  // joins and is granted access. Show friendly copy instead of "2vxsx…".
+  const ANON = "2vxsx-fae";
+  const isSolo = them === "" || them === ANON;
+  const themShort = isSolo ? "your partner" : `${them.slice(0, 5)}…`;
 
   return (
     <div className="sheet-page">
@@ -190,8 +202,14 @@ export function SheetPage() {
         <Link to="/pairs">← Pairs</Link>
         <h1>Sheet {sheet.id.slice(0, 8)}…</h1>
         <p className="muted small">
-          with <code>{them.slice(0, 8)}…</code> ·{" "}
-          {isActive(sheet.state) ? "Active" : "Closed"} ·{" "}
+          {isSolo ? (
+            "Solo sheet"
+          ) : (
+            <>
+              with <code>{them.slice(0, 8)}…</code>
+            </>
+          )}{" "}
+          · {isActive(sheet.state) ? "Active" : "Closed"} ·{" "}
           {sheet.enabled_currencies.join(", ")}
         </p>
       </header>
@@ -210,8 +228,8 @@ export function SheetPage() {
                 <li key={b.currency}>
                   <strong>
                     {iOweThem
-                      ? `You owe ${them.slice(0, 5)}…`
-                      : `${them.slice(0, 5)}… owes you`}
+                      ? `You owe ${themShort}`
+                      : `${themShort} owes you`}
                   </strong>{" "}
                   <span className={`amt ${iOweThem ? "amt-debt" : "amt-credit"}`}>
                     {formatMinor(Math.abs(b.amount_minor), b.currency)}

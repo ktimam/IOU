@@ -95,6 +95,29 @@ async function main() {
     "partner vetkd_wrap_sheet_key rejected before grant",
     () => partner.vetkd_wrap_sheet_key(sheetId, new Array(48).fill(1)),
   );
+  // v1.4.0: the read path is gated per-sheet too — a joined-but-ungranted
+  // partner must not get the entries' ciphertext/metadata for a solo sheet.
+  await expectTrap(
+    "partner list_entries rejected before grant (solo consent gate)",
+    () => partner.list_entries(sheetId, [], 50),
+  );
+  ok(
+    unwrap(await partner.get_entry(sheetId, 0n)) === null,
+    "partner get_entry -> none before grant",
+  );
+  // The write path is gated per-sheet too. Use valid-shaped fields (32-byte
+  // key, non-empty ciphertext/iv) so the trap comes from the consent gate,
+  // not the field validations that run before it.
+  await expectTrap(
+    "partner add_entry rejected before grant (solo consent gate)",
+    () =>
+      partner.add_entry({
+        sheet_id: sheetId,
+        entry_key: new Array(32).fill(1),
+        ciphertext: [1, 2, 3],
+        iv: [1, 2, 3],
+      }),
+  );
 
   console.log("\n=== (4) grant guards ===");
   await expectTrap("non-owner (partner) grant rejected", () =>
@@ -115,6 +138,15 @@ async function main() {
   ok(Number(n) === 1, "grant_partner_access grants 1 sheet");
   const got = unwrap(await partner.get_sheet_wrapped_key(sheetId)) as number[] | null;
   ok(!!got && got.length === 3 && got[0] === 7, "partner can fetch wrapped_key_b after grant");
+  const afterGrant = await partner.list_entries(sheetId, [], 50);
+  ok(Array.isArray(afterGrant.entries), "partner can list_entries after grant");
+  const written = await partner.add_entry({
+    sheet_id: sheetId,
+    entry_key: new Array(32).fill(1),
+    ciphertext: [1, 2, 3],
+    iv: [1, 2, 3],
+  });
+  ok(written && typeof written.id !== "undefined", "partner can add_entry after grant");
   await expectTrap("re-grant rejected (member_b already set)", () =>
     creator.grant_partner_access(pairId, partnerId.getPrincipal(), [
       { sheet_id: sheetId, wrapped_key_for_partner: [] },

@@ -47,6 +47,25 @@ function loadOrCreateDevIdentity(): Secp256k1KeyIdentity {
   return id;
 }
 
+/**
+ * loadDevIdentityIfPresent: returns the persisted dev identity if one
+ * exists, else null. Unlike loadOrCreateDevIdentity it never *creates*
+ * one — used on app load to re-hydrate a dev session without minting an
+ * identity for a first-time / anonymous visitor. Without this, a page
+ * reload after "Sign in (dev)" dropped back to anonymous because the
+ * mount effect only restored the II delegation, never the dev identity.
+ */
+function loadDevIdentityIfPresent(): Secp256k1KeyIdentity | null {
+  if (typeof localStorage === "undefined") return null;
+  const stored = localStorage.getItem(DEV_IDENTITY_KEY);
+  if (!stored) return null;
+  try {
+    return Secp256k1KeyIdentity.fromJSON(stored);
+  } catch {
+    return null;
+  }
+}
+
 export function AuthProvider({ children }: { children: ReactNode }) {
   const [state, setState] = useState<AuthState>({ kind: "loading" });
 
@@ -63,7 +82,20 @@ export function AuthProvider({ children }: { children: ReactNode }) {
           principal: identity.getPrincipal().toText(),
         });
       } else {
-        setState({ kind: "anonymous" });
+        // No II delegation. Re-hydrate a persisted dev identity if one
+        // exists (the "Sign in (dev)" path stores it in localStorage).
+        // Gated on DEV so a production build never auto-restores a dev
+        // identity — there the branch tree-shakes away.
+        const dev = import.meta.env.DEV ? loadDevIdentityIfPresent() : null;
+        if (dev) {
+          setState({
+            kind: "authenticated",
+            identity: dev,
+            principal: dev.getPrincipal().toText(),
+          });
+        } else {
+          setState({ kind: "anonymous" });
+        }
       }
     })();
     return () => {
