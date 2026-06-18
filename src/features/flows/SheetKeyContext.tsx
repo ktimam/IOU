@@ -29,7 +29,7 @@ import {
   loadOrCreateTransportKey,
   deriveSheetKey as deriveSheetKeyProd,
 } from "../crypto/prodVetkd";
-import { useAuth } from "../auth/AuthProvider";
+import { useAuth, buildAgent } from "../auth/AuthProvider";
 import { canisterId as canisterIdString } from "../auth/config";
 import { unwrap } from "./useActor";
 
@@ -74,7 +74,13 @@ export function SheetKeyProvider({ children }: { children: React.ReactNode }) {
   async function unwrapFor(sheetId: string): Promise<Uint8Array> {
     if (keys[sheetId]) return keys[sheetId];
     if (!identity) throw new Error("not signed in");
-    const actor = createActor(identity) as any;
+    // Build the actor via buildAgent so it targets the configured replica
+    // host (config.ts, :40436 locally) and *awaits* fetchRootKey. Passing
+    // an identity straight to createActor defaults the host to :4943 with
+    // an un-awaited fetchRootKey, which surfaced as "certificate
+    // verification / Invalid signature" errors on a fresh sheet-page load.
+    const agent = await buildAgent(identity);
+    const actor = createActor(agent) as any;
 
     if (isProdVetkd()) {
       // Prod path: vetkd IBE. Each device holds its own transport
