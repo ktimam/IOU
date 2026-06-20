@@ -12,9 +12,13 @@ import type { EntryPayload } from "./types";
 const COLUMNS = [
   "date", // YYYY-MM-DD
   "kind", // expense | payment
+  "txn_type", // settlement | iou
   "currency", // e.g. USD
-  "amount", // major units (e.g. 12.50)
-  "direction", // credit | debt
+  "amount", // NET major units (after any fee) — what counts to the balance
+  "gross_amount", // pre-fee face value (empty if no fee)
+  "fee_percent", // fee % deducted (empty if no fee)
+  "direction", // Credit | Debit
+  "due_dates", // "YYYY-MM-DD:NN%; …" for IOUs (empty for settlements)
   "note", // free text
   "convert_from_currency", // empty if not a conversion
   "convert_from_amount", // empty if not a conversion
@@ -37,9 +41,13 @@ export function entriesToCsv(
     const cells = [
       isoDate(p.ts),
       p.kind,
+      p.txn_type ?? "iou",
       p.currency,
       (p.amount_minor / 100).toFixed(2),
-      p.direction,
+      p.fee ? (p.fee.gross_amount_minor / 100).toFixed(2) : "",
+      p.fee ? String(p.fee.percent) : "",
+      p.direction === "credit" ? "Credit" : "Debit",
+      dueDatesCsv(p),
       p.note,
       p.convert?.from_currency ?? "",
       p.convert ? (p.convert.from_amount_minor / 100).toFixed(2) : "",
@@ -51,6 +59,15 @@ export function entriesToCsv(
     lines.push(cells.map(escapeCsvCell).join(","));
   }
   return lines.join("\n") + "\n";
+}
+
+// "YYYY-MM-DD:NN%; …" for IOUs; empty for settlements. IOUs with no
+// explicit schedule are a single portion due at the entry date.
+function dueDatesCsv(p: EntryPayload): string {
+  if (p.txn_type === "settlement") return "";
+  const sched =
+    p.schedule && p.schedule.length ? p.schedule : [{ due_ts: p.ts, percent: 100 }];
+  return sched.map((s) => `${isoDate(s.due_ts)}:${s.percent}%`).join("; ");
 }
 
 function isoDate(ms: number): string {

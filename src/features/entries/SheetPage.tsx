@@ -399,6 +399,8 @@ export function SheetPage() {
                       {" · "}
                       {mine ? "you" : themShort}
                       {" · "}
+                      {e.payload.direction === "credit" ? "Credit" : "Debit"}
+                      {" · "}
                       {e.payload.txn_type === "settlement" ? "settlement" : "IOU"}
                       {e.updated_at_server ? " (edited)" : ""}
                     </span>

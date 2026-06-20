@@ -20,17 +20,40 @@ describe("csvExport", () => {
     ]);
     const first = csv.split("\n")[0];
     expect(first).toBe(
-      "date,kind,currency,amount,direction,note," +
+      "date,kind,txn_type,currency,amount,gross_amount,fee_percent," +
+        "direction,due_dates,note," +
         "convert_from_currency,convert_from_amount,convert_rate," +
         "convert_source,created_by,edited",
     );
   });
 
-  it("emits an ISO date and the major-unit amount", () => {
+  it("emits ISO date, net amount, txn_type and Credit/Debit direction", () => {
     const csv = entriesToCsv([
       { payload: sampleRow, created_by_me: true, edited: false },
     ]);
-    expect(csv).toContain("2026-06-12,expense,USD,12.50,debt,lunch");
+    // date,kind,txn_type,currency,amount,gross,fee,direction,due_dates,note
+    expect(csv).toContain(
+      "2026-06-12,expense,iou,USD,12.50,,,Debit,2026-06-12:100%,lunch",
+    );
+  });
+
+  it("renders a fee row: net amount + gross + fee%", () => {
+    const csv = entriesToCsv([
+      {
+        payload: {
+          ...sampleRow,
+          direction: "credit",
+          txn_type: "iou",
+          amount_minor: 80000, // net
+          fee: { percent: 20, gross_amount_minor: 100000 },
+        },
+        created_by_me: true,
+        edited: false,
+      },
+    ]);
+    const line = csv.split("\n").find((l) => l.startsWith("2026-06-12"))!;
+    // amount(net)=800.00, gross_amount=1000.00, fee_percent=20, Credit
+    expect(line).toContain("iou,USD,800.00,1000.00,20,Credit,");
   });
 
   it("escapes commas, quotes, and newlines", () => {
@@ -80,19 +103,20 @@ describe("csvExport", () => {
     expect(line!.endsWith("you,true")).toBe(true);
   });
 
-  it("writes empty cells for non-convert rows", () => {
+  it("writes empty cells for non-fee, non-convert rows", () => {
     const csv = entriesToCsv([
       { payload: sampleRow, created_by_me: false, edited: false },
     ]);
     const line = csv.split("\n")[1];
     const cells = line.split(",");
-    // convert_from_currency, convert_from_amount, convert_rate,
-    // convert_source
-    expect(cells[6]).toBe("");
-    expect(cells[7]).toBe("");
-    expect(cells[8]).toBe("");
-    expect(cells[9]).toBe("");
-    expect(cells[10]).toBe("them");
-    expect(cells[11]).toBe("false");
+    expect(cells[5]).toBe(""); // gross_amount
+    expect(cells[6]).toBe(""); // fee_percent
+    // convert_from_currency, convert_from_amount, convert_rate, convert_source
+    expect(cells[10]).toBe("");
+    expect(cells[11]).toBe("");
+    expect(cells[12]).toBe("");
+    expect(cells[13]).toBe("");
+    expect(cells[14]).toBe("them");
+    expect(cells[15]).toBe("false");
   });
 });
