@@ -612,8 +612,13 @@ async fn gen_invite_code() -> String {
     formatted
 }
 
-fn now_secs() -> u64 {
-    ic_cdk::api::time() / 1_000_000_000
+/// Current time in **nanoseconds** (raw `ic_cdk::api::time()`). Display
+/// timestamps (Pair/Sheet `created_at`, `closed_at`, `last_entry_at`) use
+/// this so they match entry/user timestamps — the PWA divides by 1_000_000
+/// to get JS milliseconds. (Previously these fields stored seconds, which
+/// the frontend mis-rendered as 1/1/1970.)
+fn now_nanos() -> u64 {
+    ic_cdk::api::time()
 }
 
 // v1: used in the ID we assign to new pairs/sheets.
@@ -835,7 +840,7 @@ async fn create_pair() -> CreatePairResult {
     // membership check + insert in a single synchronous block.
     let id = now_id().await;
     let invite = gen_invite_code().await;
-    let now = now_secs();
+    let now = now_nanos();
     let pair = Pair {
         id: id.clone(),
         members: [caller, Principal::anonymous()], // [creator, pending]
@@ -1006,7 +1011,7 @@ async fn create_sheet(req: CreateSheetReq) -> Sheet {
     // block so two concurrent calls can't both pass the
     // "already has an active sheet" check.
     let id = now_id().await;
-    let now = now_secs();
+    let now = now_nanos();
     let sheet = SHEETS.with(|s| {
         // V5 fix: pre-insert existence check (see create_pair).
         if s.borrow().contains_key(&id) {
@@ -1177,7 +1182,7 @@ fn close_sheet(sheet_id: String, closing_balances: Vec<ClosingBalance>) {
             ic_cdk::trap("sheet is already closed");
         }
         sheet.state = SheetState::Closed;
-        sheet.closed_at = Some(now_secs());
+        sheet.closed_at = Some(now_nanos());
         sheet.closing_balances = Some(closing_balances);
     });
     if !ok {
@@ -1319,7 +1324,7 @@ fn add_entry(req: AddEntryReq) -> Entry {
     // composite-key map replaces the 4-region sharding that had
     // cross-sheet hash collisions (issue #1).
     sheet_entries_insert(&req.sheet_id, entry.id, entry.clone());
-    record_entry_timestamp(&req.sheet_id, now_secs());
+    record_entry_timestamp(&req.sheet_id, now_nanos());
     entry
 }
 
@@ -1881,7 +1886,7 @@ fn submit_replace_member(signed: SignedReplaceRequest) -> Pair {
             // closing_balances (or none if not yet closed).
             if matches!(sh.state, SheetState::Active) {
                 sh.state = SheetState::Closed;
-                sh.closed_at = Some(now_secs());
+                sh.closed_at = Some(now_nanos());
             }
         });
     }

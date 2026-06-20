@@ -15,6 +15,7 @@ import { RecoveryKeyPage } from "../features/recovery/RecoveryKeyPage";
 import { ToastProvider } from "../features/ui/Toasts";
 import { ReplaceMemberPage } from "../features/replaceMember/ReplaceMemberPage";
 import { AcceptReplacePage } from "../features/replaceMember/AcceptReplacePage";
+import { ErrorBoundary } from "./ErrorBoundary";
 
 export function App() {
   return (
@@ -22,6 +23,7 @@ export function App() {
       <SheetKeyProvider>
         <ToastProvider>
           <Layout>
+            <ErrorBoundary>
             <Routes>
               <Route path="/" element={<Hello />} />
               <Route path="/sign-in" element={<SignIn />} />
@@ -49,6 +51,7 @@ export function App() {
               />
               <Route path="*" element={<Navigate to="/" replace />} />
             </Routes>
+            </ErrorBoundary>
           </Layout>
         </ToastProvider>
       </SheetKeyProvider>

@@ -90,7 +90,14 @@ export function ArchivedSheetsPage() {
           const entries = entriesBySheet[sh.id] ?? [];
           const balances = computeBalances(entries.map((e) => e.payload));
           const me = state.identity.getPrincipal().toText();
-          const them = sh.member_a === me ? sh.member_b : sh.member_a;
+          // member_a/member_b are Principal objects (Candid), not strings —
+          // normalize before comparing/slicing or the page crashes blank.
+          const principalText = (p: any): string =>
+            p && typeof p.toText === "function" ? p.toText() : String(p ?? "");
+          const them =
+            principalText(sh.member_a) === me
+              ? principalText(sh.member_b)
+              : principalText(sh.member_a);
           const closedAtNum = Array.isArray(sh.closed_at) && sh.closed_at.length
             ? Number(sh.closed_at[0])
             : Number(sh.closed_at);
