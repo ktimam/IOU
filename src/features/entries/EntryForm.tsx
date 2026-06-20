@@ -11,8 +11,16 @@
 //     converted amount
 
 import { useEffect, useState } from "react";
-import type { EntryPayload, Direction, ConvertPayload, TxnType, DuePortion } from "./types";
+import type {
+  EntryPayload,
+  Direction,
+  ConvertPayload,
+  TxnType,
+  DuePortion,
+  FeePayload,
+} from "./types";
 import { fetchRate, type FxRate } from "./fx";
+import { netAfterFee, formatMinor } from "./balance";
 import { usePreferences } from "../settings/usePreferences";
 
 type SchedRow = { date: string; percent: number };
@@ -45,16 +53,21 @@ export function EntryForm({
         : enabledCurrencies[0]) ??
       "USD",
   );
+  // The amount field holds the GROSS (face value). For an entry with a fee
+  // the stored amount_minor is the net, so seed from the fee's gross.
   const [amount, setAmount] = useState(
-    initial ? (initial.amount_minor / 100).toFixed(2) : "",
+    initial
+      ? ((initial.fee ? initial.fee.gross_amount_minor : initial.amount_minor) / 100).toFixed(2)
+      : "",
   );
   const [direction, setDirection] = useState<Direction>(initial?.direction ?? "credit");
   const [note, setNote] = useState(initial?.note ?? "");
   const [submitting, setSubmitting] = useState(false);
   const [err, setErr] = useState<string | null>(null);
 
-  // Transaction type + due-date schedule (IOU only).
+  // Transaction type + due-date schedule + fee (IOU only).
   const [txnType, setTxnType] = useState<TxnType>(initial?.txn_type ?? "iou");
+  const [feePercent, setFeePercent] = useState<number>(initial?.fee?.percent ?? 0);
   const initialDate = new Date(initial?.ts ?? Date.now()).toISOString().slice(0, 10);
   const [schedule, setSchedule] = useState<SchedRow[]>(
     initial?.schedule && initial.schedule.length
@@ -150,17 +163,26 @@ export function EntryForm({
         rate_fetched_at: rate.fetchedAt,
       };
     }
+    // Apply the IOU fee: amount_minor stores the NET (what counts toward the
+    // balance + splits across due dates); the gross is kept on the fee
+    // sub-payload so the UI can show before/after.
+    const baseMinor = convert ? convertedMinor! : amountMinor;
+    const useFee = txnType === "iou" && feePercent > 0;
+    const fee: FeePayload | undefined = useFee
+      ? { percent: feePercent, gross_amount_minor: baseMinor }
+      : undefined;
     setSubmitting(true);
     try {
       const payload: EntryPayload = {
         ts,
         kind: txnType === "settlement" ? "payment" : "expense",
         currency: convert ? convertTo : currency,
-        amount_minor: convert ? convertedMinor! : amountMinor,
+        amount_minor: useFee ? netAfterFee(baseMinor, feePercent) : baseMinor,
         direction,
         note,
         txn_type: txnType,
         ...(schedulePayload ? { schedule: schedulePayload } : {}),
+        ...(fee ? { fee } : {}),
         convert,
       };
       await onSubmit(payload);
@@ -221,7 +243,7 @@ export function EntryForm({
               checked={direction === "credit"}
               onChange={() => setDirection("credit")}
             />
-            {`They owe me (credit)`}
+            {`Credit (Incoming)`}
           </label>
           <label>
             <input
@@ -229,7 +251,7 @@ export function EntryForm({
               checked={direction === "debt"}
               onChange={() => setDirection("debt")}
             />
-            {`I owe them (debt)`}
+            {`Debit (Outgoing)`}
           </label>
         </fieldset>
       </div>
@@ -258,6 +280,25 @@ export function EntryForm({
 
       {txnType === "iou" && (
         <div className="card" style={{ padding: 12 }}>
+          <div className="row" style={{ gap: 8, alignItems: "center", marginBottom: 8 }}>
+            <label style={{ flex: "0 0 auto" }}>
+              <span className="muted small">Fee %</span>
+              <input
+                type="number"
+                min={0}
+                max={100}
+                value={feePercent}
+                onChange={(e) => setFeePercent(Number(e.target.value))}
+                style={{ width: 80 }}
+              />
+            </label>
+            {feePercent > 0 && amountMinor > 0 && (
+              <span className="muted small">
+                {formatMinor(amountMinor, currency)} − {feePercent}% ={" "}
+                <strong>{formatMinor(netAfterFee(amountMinor, feePercent), currency)}</strong>
+              </span>
+            )}
+          </div>
           <div className="row" style={{ justifyContent: "space-between" }}>
             <strong>Due {schedule.length > 1 ? "dates" : "date"}</strong>
             <button type="button" className="secondary small" onClick={addRow}>

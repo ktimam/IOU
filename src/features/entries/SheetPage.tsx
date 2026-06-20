@@ -411,6 +411,14 @@ export function SheetPage() {
                     {sign}
                     {formatMinor(e.payload.amount_minor, e.payload.currency)}
                   </div>
+                  {e.payload.fee && (
+                    <div className="muted small">
+                      {formatMinor(e.payload.fee.gross_amount_minor, e.payload.currency)}
+                      {" − "}
+                      {e.payload.fee.percent}% fee → net{" "}
+                      {formatMinor(e.payload.amount_minor, e.payload.currency)}
+                    </div>
+                  )}
                   {formatSchedule(e.payload) && (
                     <div className="muted small">{formatSchedule(e.payload)}</div>
                   )}

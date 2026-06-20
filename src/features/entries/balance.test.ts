@@ -4,6 +4,7 @@ import {
   computeBalances,
   computeBalancesAsOf,
   endOfPrevMonth,
+  netAfterFee,
 } from "./balance";
 import type { EntryPayload } from "./types";
 
@@ -111,6 +112,21 @@ describe("computeBalancesAsOf (maturity buckets)", () => {
     const s = entry({ txn_type: "settlement", direction: "debt", amount_minor: 200, ts: JUN1 });
     expect(computeBalancesAsOf([s], JUN15)).toEqual([{ currency: "USD", amount_minor: -200 }]);
     expect(computeBalancesAsOf([s], JUN1 - DAY)).toEqual([]);
+  });
+});
+
+describe("netAfterFee", () => {
+  it("deducts the percentage from the gross", () => {
+    expect(netAfterFee(100000, 20)).toBe(80000); // 1000.00 − 20% → 800.00
+    expect(netAfterFee(100000, 0)).toBe(100000);
+    expect(netAfterFee(100000, 100)).toBe(0);
+  });
+  it("rounds to the nearest minor unit", () => {
+    expect(netAfterFee(333, 10)).toBe(300); // 333 * 0.9 = 299.7 → 300
+  });
+  it("clamps out-of-range percentages", () => {
+    expect(netAfterFee(100, -5)).toBe(100);
+    expect(netAfterFee(100, 150)).toBe(0);
   });
 });
 

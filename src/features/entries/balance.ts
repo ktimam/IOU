@@ -96,6 +96,15 @@ export function endOfPrevMonth(now: number): number {
   return Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), 1) - 1;
 }
 
+/**
+ * Net (post-fee) minor amount for an IOU: gross minus `percent`%, rounded.
+ * e.g. netAfterFee(100000, 20) === 80000.
+ */
+export function netAfterFee(grossMinor: number, percent: number): number {
+  const p = Math.max(0, Math.min(100, percent));
+  return Math.round(grossMinor * (1 - p / 100));
+}
+
 /** Format a minor-unit amount in a human-friendly way. */
 export function formatMinor(amount_minor: number, currency: string): string {
   // Assume 2 fraction digits for fiat (USD, EGP, EUR, ...). v1 has no

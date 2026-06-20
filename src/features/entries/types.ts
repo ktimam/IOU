@@ -37,6 +37,15 @@ export type DuePortion = {
   percent: number; // 0..100
 };
 
+// Fee/deduction on an IOU. The IOU's face value is `gross_amount_minor`;
+// `percent` is deducted, and the entry's `amount_minor` is the NET (what
+// actually counts toward the balance and is split across the due schedule).
+// e.g. gross 1000 with percent 20 ⇒ amount_minor 800.
+export type FeePayload = {
+  percent: number; // 0..100 deducted from the gross
+  gross_amount_minor: number; // face value before the fee
+};
+
 export type EntryPayload = {
   ts: number;             // ms epoch
   kind: "expense" | "payment";
@@ -46,6 +55,7 @@ export type EntryPayload = {
   note: string;
   txn_type?: TxnType;       // settlement | iou (default iou when absent)
   schedule?: DuePortion[];  // IOU split across due dates; absent ⇒ one portion due at `ts`
+  fee?: FeePayload;         // IOU fee/deduction; amount_minor is the net (post-fee)
   convert?: ConvertPayload; // present iff this entry is a conversion
 };
 
