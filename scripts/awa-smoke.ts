@@ -177,6 +177,8 @@ async function main() {
     closing_window_days: 365,
     wrapped_key_a: Array.from(wrappedKeyA),
     wrapped_key_b: Array.from(wrappedKeyB),
+    name_enc: [],
+    name_iv: [],
   };
   const sheet = await (partner as any).create_sheet(sheetReq);
   console.log("sheet id:", sheet.id);
@@ -389,6 +391,8 @@ async function main() {
     closing_window_days: 365,
     wrapped_key_a: Array.from(new TextEncoder().encode("wrapA-fake-002")),
     wrapped_key_b: Array.from(new TextEncoder().encode("wrapB-fake-002")),
+    name_enc: [],
+    name_iv: [],
   });
   console.log("new sheet id:", newSheet.id);
   ok(isActive(newSheet.state), "new sheet is Active");

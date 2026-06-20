@@ -335,3 +335,88 @@ export async function decryptEntryPayload(
   );
   return new Uint8Array(pt);
 }
+
+// ─────────────── name encryption (Account / Sheet / member names) ───────────────
+//
+// Account names, sheet names, and per-member display names are encrypted
+// E2E with the shared K_sheet so both members can read them. The AES key
+// is derived from K_sheet with a name-scoped salt/info (distinct from the
+// entry-key derivation above) and there is no per-name salt — names are
+// short and re-encrypted wholesale on every change, with a fresh random IV.
+
+const NAME_SALT = "iou-name-aes-v1";
+const NAME_CONTEXT = "iou-name-key-v1";
+
+async function deriveNameAesKey(K_sheet: Uint8Array): Promise<CryptoKey> {
+  const subtle = getSubtle();
+  const baseKey = await subtle.importKey("raw", toBuf(K_sheet), "HKDF", false, ["deriveKey"]);
+  return subtle.deriveKey(
+    {
+      name: "HKDF",
+      hash: "SHA-256",
+      salt: toBuf(new TextEncoder().encode(NAME_SALT)),
+      info: toBuf(new TextEncoder().encode(NAME_CONTEXT)),
+    },
+    baseKey,
+    { name: "AES-GCM", length: 256 },
+    false,
+    ["encrypt", "decrypt"],
+  );
+}
+
+/** Encrypt an arbitrary blob with a key derived from K_sheet. */
+export async function encryptWithSheetKey(
+  K_sheet: Uint8Array,
+  plaintext: Uint8Array,
+): Promise<{ iv: Uint8Array; ciphertext: Uint8Array }> {
+  const subtle = getSubtle();
+  const aesKey = await deriveNameAesKey(K_sheet);
+  const iv = randomBytes(12);
+  const ct = await subtle.encrypt(
+    { name: "AES-GCM", iv: toBuf(iv), tagLength: 128 },
+    aesKey,
+    toBuf(plaintext),
+  );
+  return { iv, ciphertext: new Uint8Array(ct) };
+}
+
+/** Decrypt a blob encrypted with {@link encryptWithSheetKey}. */
+export async function decryptWithSheetKey(
+  K_sheet: Uint8Array,
+  iv: Uint8Array,
+  ciphertext: Uint8Array,
+): Promise<Uint8Array> {
+  const subtle = getSubtle();
+  const aesKey = await deriveNameAesKey(K_sheet);
+  const pt = await subtle.decrypt(
+    { name: "AES-GCM", iv: toBuf(iv), tagLength: 128 },
+    aesKey,
+    toBuf(ciphertext),
+  );
+  return new Uint8Array(pt);
+}
+
+/** Encrypt a UTF-8 name with K_sheet. Returns arrays ready for Candid. */
+export async function encryptName(
+  K_sheet: Uint8Array,
+  name: string,
+): Promise<{ enc: number[]; iv: number[] }> {
+  const { iv, ciphertext } = await encryptWithSheetKey(
+    K_sheet,
+    new TextEncoder().encode(name),
+  );
+  return { enc: Array.from(ciphertext), iv: Array.from(iv) };
+}
+
+/** Decrypt a UTF-8 name with K_sheet; returns "" on any failure. */
+export async function decryptName(
+  K_sheet: Uint8Array,
+  iv: Uint8Array,
+  ciphertext: Uint8Array,
+): Promise<string> {
+  try {
+    return new TextDecoder().decode(await decryptWithSheetKey(K_sheet, iv, ciphertext));
+  } catch {
+    return "";
+  }
+}

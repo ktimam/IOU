@@ -69,6 +69,8 @@ async function main() {
     closing_window_days: 365,
     wrapped_key_a: [1, 2, 3, 4],
     wrapped_key_b: [],
+    name_enc: [],
+    name_iv: [],
   });
   const sheetId = sheet.id;
   ok(typeof sheetId === "string" && sheetId.length > 0, "create_sheet on a solo pair succeeds");
@@ -151,6 +153,27 @@ async function main() {
     creator.grant_partner_access(pairId, partnerId.getPrincipal(), [
       { sheet_id: sheetId, wrapped_key_for_partner: [] },
     ]),
+  );
+
+  console.log("\n=== (5b) encrypted names (set_pair/sheet/member_name) ===");
+  // The canister only stores/serves the blobs; use fake ciphertext bytes.
+  const nameEnc = (b: number) => new Array(16).fill(b);
+  const nameIv = new Array(12).fill(9);
+  await creator.set_pair_name(pairId, nameEnc(1), nameIv);
+  await creator.set_sheet_name(sheetId, nameEnc(2), nameIv);
+  await creator.set_member_name(pairId, nameEnc(3), nameIv);
+  await partner.set_member_name(pairId, nameEnc(4), nameIv);
+  const pairAfter = unwrap(await creator.get_pair(pairId)) as any;
+  ok((unwrap(pairAfter.name_enc) as any)?.[0] === 1, "set_pair_name stored on pair");
+  ok((unwrap(pairAfter.member_a_name_enc) as any)?.[0] === 3, "creator name in member_a slot");
+  ok((unwrap(pairAfter.member_b_name_enc) as any)?.[0] === 4, "partner name in member_b slot");
+  const sheetAfter = unwrap(await creator.get_sheet(sheetId)) as any;
+  ok((unwrap(sheetAfter.name_enc) as any)?.[0] === 2, "set_sheet_name stored on sheet");
+  const sums = (await partner.get_my_pairs()) as any[];
+  const sum = sums.find((s) => s.id === pairId);
+  ok((unwrap(sum?.other_name_enc) as any)?.[0] === 3, "partner sees creator's name (other_name_enc)");
+  await expectTrap("non-member set_pair_name rejected", () =>
+    stranger.set_pair_name(pairId, nameEnc(5), nameIv),
   );
 
   console.log("\n=== (6) replace-member rejects solo / anonymous ===");

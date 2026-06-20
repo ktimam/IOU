@@ -56,6 +56,12 @@ export const idlFactory = ({ IDL: idl }: { IDL: IDL }) => {
     invite_code: idl.Text,
     created_at: idl.Nat64,
     archived_at: idl.Opt(idl.Nat64),
+    name_enc: idl.Opt(idl.Vec(idl.Nat8)),
+    name_iv: idl.Opt(idl.Vec(idl.Nat8)),
+    member_a_name_enc: idl.Opt(idl.Vec(idl.Nat8)),
+    member_a_name_iv: idl.Opt(idl.Vec(idl.Nat8)),
+    member_b_name_enc: idl.Opt(idl.Vec(idl.Nat8)),
+    member_b_name_iv: idl.Opt(idl.Vec(idl.Nat8)),
   });
   const PairSummary = idl.Record({
     id: idl.Text,
@@ -63,6 +69,10 @@ export const idlFactory = ({ IDL: idl }: { IDL: IDL }) => {
     active_sheet_id: idl.Opt(idl.Text),
     archived_sheet_count: idl.Nat32,
     created_at: idl.Nat64,
+    name_enc: idl.Opt(idl.Vec(idl.Nat8)),
+    name_iv: idl.Opt(idl.Vec(idl.Nat8)),
+    other_name_enc: idl.Opt(idl.Vec(idl.Nat8)),
+    other_name_iv: idl.Opt(idl.Vec(idl.Nat8)),
   });
   const Sheet = idl.Record({
     id: idl.Text,
@@ -78,6 +88,8 @@ export const idlFactory = ({ IDL: idl }: { IDL: IDL }) => {
     created_at: idl.Nat64,
     closed_at: idl.Opt(idl.Nat64),
     closing_balances: idl.Opt(idl.Vec(ClosingBalance)),
+    name_enc: idl.Opt(idl.Vec(idl.Nat8)),
+    name_iv: idl.Opt(idl.Vec(idl.Nat8)),
   });
   const CreatePairResult = idl.Record({
     pair_id: idl.Text,
@@ -89,6 +101,8 @@ export const idlFactory = ({ IDL: idl }: { IDL: IDL }) => {
     closing_window_days: idl.Nat32,
     wrapped_key_a: idl.Vec(idl.Nat8),
     wrapped_key_b: idl.Vec(idl.Nat8),
+    name_enc: idl.Opt(idl.Vec(idl.Nat8)),
+    name_iv: idl.Opt(idl.Vec(idl.Nat8)),
   });
   const Entry = idl.Record({
     id: idl.Nat64,
@@ -160,6 +174,22 @@ export const idlFactory = ({ IDL: idl }: { IDL: IDL }) => {
     add_currency: idl.Func([idl.Text, idl.Text], [], []),
     close_sheet: idl.Func([idl.Text, idl.Vec(ClosingBalance)], [], []),
     start_new_sheet: idl.Func([CreateSheetReq], [Sheet], []),
+    // v1.5.0: E2E-encrypted names
+    set_pair_name: idl.Func(
+      [idl.Text, idl.Vec(idl.Nat8), idl.Vec(idl.Nat8)],
+      [],
+      [],
+    ),
+    set_sheet_name: idl.Func(
+      [idl.Text, idl.Vec(idl.Nat8), idl.Vec(idl.Nat8)],
+      [],
+      [],
+    ),
+    set_member_name: idl.Func(
+      [idl.Text, idl.Vec(idl.Nat8), idl.Vec(idl.Nat8)],
+      [],
+      [],
+    ),
     // Phase 3
     add_entry: idl.Func([AddEntryReq], [Entry], []),
     edit_entry: idl.Func([EditEntryReq], [Entry], []),

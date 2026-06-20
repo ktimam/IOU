@@ -1,0 +1,124 @@
+import { describe, it, expect } from "vitest";
+import {
+  portionsOf,
+  computeBalances,
+  computeBalancesAsOf,
+  endOfPrevMonth,
+} from "./balance";
+import type { EntryPayload } from "./types";
+
+function entry(p: Partial<EntryPayload>): EntryPayload {
+  return {
+    ts: 0,
+    kind: "expense",
+    currency: "USD",
+    amount_minor: 0,
+    direction: "credit",
+    note: "",
+    ...p,
+  };
+}
+
+const DAY = 86_400_000;
+const JUN1 = Date.UTC(2026, 5, 1); // 2026-06-01
+const JUN15 = Date.UTC(2026, 5, 15);
+const JUL1 = Date.UTC(2026, 6, 1);
+
+describe("portionsOf", () => {
+  it("settlement → one portion at ts", () => {
+    const ps = portionsOf(entry({ txn_type: "settlement", ts: JUN1, amount_minor: 500 }));
+    expect(ps).toHaveLength(1);
+    expect(ps[0]).toMatchObject({ due_ts: JUN1, amount_minor: 500 });
+  });
+
+  it("iou with no schedule → one portion due at ts", () => {
+    const ps = portionsOf(entry({ txn_type: "iou", ts: JUN15, amount_minor: 1000 }));
+    expect(ps).toHaveLength(1);
+    expect(ps[0]).toMatchObject({ due_ts: JUN15, amount_minor: 1000 });
+  });
+
+  it("legacy entry (no txn_type) → single portion due at ts", () => {
+    const ps = portionsOf(entry({ ts: JUN15, amount_minor: 1000 }));
+    expect(ps).toHaveLength(1);
+    expect(ps[0].amount_minor).toBe(1000);
+  });
+
+  it("splits by percent and gives the remainder to the last portion (no drift)", () => {
+    const ps = portionsOf(
+      entry({
+        txn_type: "iou",
+        amount_minor: 101,
+        schedule: [
+          { due_ts: JUN1, percent: 50 },
+          { due_ts: JUL1, percent: 50 },
+        ],
+      }),
+    );
+    expect(ps.map((p) => p.amount_minor)).toEqual([51, 50]);
+    expect(ps.reduce((s, p) => s + p.amount_minor, 0)).toBe(101);
+  });
+
+  it("three-way split sums exactly to the total", () => {
+    const ps = portionsOf(
+      entry({
+        txn_type: "iou",
+        amount_minor: 100,
+        schedule: [
+          { due_ts: JUN1, percent: 33 },
+          { due_ts: JUN15, percent: 33 },
+          { due_ts: JUL1, percent: 34 },
+        ],
+      }),
+    );
+    expect(ps.map((p) => p.amount_minor)).toEqual([33, 33, 34]);
+    expect(ps.reduce((s, p) => s + p.amount_minor, 0)).toBe(100);
+  });
+});
+
+describe("computeBalancesAsOf (maturity buckets)", () => {
+  const split = entry({
+    txn_type: "iou",
+    direction: "credit",
+    amount_minor: 1000,
+    schedule: [
+      { due_ts: JUN1, percent: 50 }, // matured early
+      { due_ts: JUL1, percent: 50 }, // matures later
+    ],
+  });
+
+  it("only counts portions due on/before the cutoff", () => {
+    const asOfJun15 = computeBalancesAsOf([split], JUN15);
+    expect(asOfJun15).toEqual([{ currency: "USD", amount_minor: 500 }]);
+  });
+
+  it("overall counts every portion (100%)", () => {
+    expect(computeBalances([split])).toEqual([{ currency: "USD", amount_minor: 1000 }]);
+  });
+
+  it("before the first due date, nothing has matured", () => {
+    expect(computeBalancesAsOf([split], JUN1 - DAY)).toEqual([]);
+  });
+
+  it("nets credit against debt per currency", () => {
+    const credit = entry({ direction: "credit", amount_minor: 800, ts: JUN1 });
+    const debt = entry({ direction: "debt", amount_minor: 300, ts: JUN1 });
+    expect(computeBalancesAsOf([credit, debt], JUN15)).toEqual([
+      { currency: "USD", amount_minor: 500 },
+    ]);
+  });
+
+  it("settlement matures instantly at its ts", () => {
+    const s = entry({ txn_type: "settlement", direction: "debt", amount_minor: 200, ts: JUN1 });
+    expect(computeBalancesAsOf([s], JUN15)).toEqual([{ currency: "USD", amount_minor: -200 }]);
+    expect(computeBalancesAsOf([s], JUN1 - DAY)).toEqual([]);
+  });
+});
+
+describe("endOfPrevMonth", () => {
+  it("returns the last ms of the previous calendar month (UTC)", () => {
+    // now = 2026-06-15 → previous month ends 2026-05-31T23:59:59.999Z
+    const eop = endOfPrevMonth(JUN15);
+    expect(eop).toBe(JUN1 - 1);
+    expect(new Date(eop).toISOString()).toBe("2026-05-31T23:59:59.999Z");
+  });
+});

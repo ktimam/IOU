@@ -22,6 +22,12 @@ type Pair = record {
     invite_code : text;
     created_at : nat64;
     archived_at : opt nat64;
+    name_enc : opt vec nat8;            // E2E-encrypted account name
+    name_iv : opt vec nat8;
+    member_a_name_enc : opt vec nat8;   // E2E-encrypted member_a display name
+    member_a_name_iv : opt vec nat8;
+    member_b_name_enc : opt vec nat8;   // E2E-encrypted member_b display name
+    member_b_name_iv : opt vec nat8;
 };
 
 type PairSummary = record {
@@ -30,6 +36,10 @@ type PairSummary = record {
     active_sheet_id : opt text;
     archived_sheet_count : nat32;
     created_at : nat64;
+    name_enc : opt vec nat8;        // E2E-encrypted account name
+    name_iv : opt vec nat8;
+    other_name_enc : opt vec nat8;  // the other member's encrypted name
+    other_name_iv : opt vec nat8;
 };
 
 type SheetState = variant {
@@ -62,6 +72,8 @@ type Sheet = record {
     created_at : nat64;
     closed_at : opt nat64;
     closing_balances : opt vec ClosingBalance;
+    name_enc : opt vec nat8;   // E2E-encrypted sheet name
+    name_iv : opt vec nat8;
 };
 
 type CreatePairResult = record {
@@ -75,6 +87,8 @@ type CreateSheetReq = record {
     closing_window_days : nat32;
     wrapped_key_a : vec nat8;
     wrapped_key_b : vec nat8;
+    name_enc : opt vec nat8;   // optional E2E-encrypted sheet name at creation
+    name_iv : opt vec nat8;
 };
 
 type Entry = record {
@@ -170,6 +184,10 @@ service : {
     add_currency : (text, text) -> ();
     close_sheet : (text, vec ClosingBalance) -> ();
     start_new_sheet : (CreateSheetReq) -> (Sheet);
+    // v1.5.0: E2E-encrypted names
+    set_pair_name : (text, vec nat8, vec nat8) -> ();
+    set_sheet_name : (text, vec nat8, vec nat8) -> ();
+    set_member_name : (text, vec nat8, vec nat8) -> ();
 
     // Phase 3
     add_entry : (AddEntryReq) -> (Entry);

@@ -72,6 +72,15 @@ pub struct Pair {
     pub invite_code: String,
     pub created_at: u64,
     pub archived_at: Option<u64>,  // soft-delete; left in storage
+    // v1.5.0: E2E-encrypted display names (AES-GCM under the active
+    // sheet's K_sheet; the canister stores ciphertext only). All optional
+    // ⇒ Candid-backward-compatible with pre-v1.5.0 records.
+    pub name_enc: Option<Vec<u8>>,         // account name
+    pub name_iv: Option<Vec<u8>>,
+    pub member_a_name_enc: Option<Vec<u8>>, // member_a's display name
+    pub member_a_name_iv: Option<Vec<u8>>,
+    pub member_b_name_enc: Option<Vec<u8>>, // member_b's display name
+    pub member_b_name_iv: Option<Vec<u8>>,
 }
 
 impl Storable for Pair {
@@ -91,6 +100,13 @@ pub struct PairSummary {
     pub active_sheet_id: Option<String>,
     pub archived_sheet_count: Nat32_,
     pub created_at: u64,
+    // v1.5.0: encrypted account name + the OTHER member's encrypted name
+    // (resolved server-side relative to the caller) so the accounts list
+    // can show names once K_sheet is cached.
+    pub name_enc: Option<Vec<u8>>,
+    pub name_iv: Option<Vec<u8>>,
+    pub other_name_enc: Option<Vec<u8>>,
+    pub other_name_iv: Option<Vec<u8>>,
 }
 
 // BTreeMap needs Ord, and Candid's Nat32 isn't a u32 in Rust.
@@ -112,6 +128,9 @@ pub struct Sheet {
     pub created_at: u64,
     pub closed_at: Option<u64>,
     pub closing_balances: Option<Vec<ClosingBalance>>,
+    // v1.5.0: E2E-encrypted sheet name (AES-GCM under this sheet's K_sheet).
+    pub name_enc: Option<Vec<u8>>,
+    pub name_iv: Option<Vec<u8>>,
 }
 
 impl Storable for Sheet {
@@ -280,7 +299,10 @@ impl Storable for RecoveryKey {
 //   with a different key/value type — see issue #7. If you need
 //   a new region, use the next free number (currently 17+).
 
-const SCHEMA_VERSION: u32 = 3;
+// v1.5.0 (schema v3 -> v4): added optional encrypted name fields to Pair,
+// Sheet, PairSummary, CreateSheetReq. All new fields are `opt`, so Candid
+// decodes pre-v4 records with them as None — no data migration needed.
+const SCHEMA_VERSION: u32 = 4;
 
 thread_local! {
     static MEMORY_MANAGER: RefCell<MemoryManager<DefaultMemoryImpl>> =
@@ -691,6 +713,10 @@ fn inspect_message() {
         "add_currency",
         "close_sheet",
         "start_new_sheet",
+        // v1.5.0: encrypted names
+        "set_pair_name",
+        "set_sheet_name",
+        "set_member_name",
         // Phase 4: entries
         "add_entry",
         "edit_entry",
@@ -739,6 +765,9 @@ fn inspect_message() {
         "register_recovery_pubkey",
         "grant_partner_access",
         "register_sheet_pubkey",
+        "set_pair_name",
+        "set_sheet_name",
+        "set_member_name",
     ];
     if require_auth_methods.contains(&method_name.as_str())
         && caller == candid::Principal::anonymous()
@@ -847,6 +876,12 @@ async fn create_pair() -> CreatePairResult {
         invite_code: invite.clone(),
         created_at: now,
         archived_at: None,
+        name_enc: None,
+        name_iv: None,
+        member_a_name_enc: None,
+        member_a_name_iv: None,
+        member_b_name_enc: None,
+        member_b_name_iv: None,
     };
     PAIRS.with(|p| {
         // V5 fix: pre-insert existence check. now_id uses 64 bits
@@ -917,10 +952,17 @@ fn get_my_pairs() -> Vec<PairSummary> {
                 if !is_member_of(&pair, caller) {
                     continue;
                 }
-                let other = if pair.members[0] == caller {
+                let caller_is_a = pair.members[0] == caller;
+                let other = if caller_is_a {
                     pair.members[1]
                 } else {
                     pair.members[0]
+                };
+                // The OTHER member's encrypted name, relative to the caller.
+                let (other_name_enc, other_name_iv) = if caller_is_a {
+                    (pair.member_b_name_enc.clone(), pair.member_b_name_iv.clone())
+                } else {
+                    (pair.member_a_name_enc.clone(), pair.member_a_name_iv.clone())
                 };
                 // Find the active sheet (if any) for this pair.
                 let mut active_sheet: Option<String> = None;
@@ -940,6 +982,10 @@ fn get_my_pairs() -> Vec<PairSummary> {
                     active_sheet_id: active_sheet,
                     archived_sheet_count: archived,
                     created_at: pair.created_at,
+                    name_enc: pair.name_enc.clone(),
+                    name_iv: pair.name_iv.clone(),
+                    other_name_enc,
+                    other_name_iv,
                 });
             }
         });
@@ -972,6 +1018,9 @@ pub struct CreateSheetReq {
     pub closing_window_days: u32,
     pub wrapped_key_a: Vec<u8>,
     pub wrapped_key_b: Vec<u8>,
+    // v1.5.0: optional encrypted sheet name set at creation.
+    pub name_enc: Option<Vec<u8>>,
+    pub name_iv: Option<Vec<u8>>,
 }
 
 /// create_sheet: starts a new active sheet inside a pair. Caller must be
@@ -1066,6 +1115,8 @@ async fn create_sheet(req: CreateSheetReq) -> Sheet {
             created_at: now,
             closed_at: None,
             closing_balances: None,
+            name_enc: req.name_enc,
+            name_iv: req.name_iv,
         };
         s.borrow_mut().insert(id, sheet.clone());
         sheet
@@ -1166,6 +1217,87 @@ fn add_currency(sheet_id: String, iso: String) {
     if !ok {
         ic_cdk::trap("sheet not found");
     }
+}
+
+// ───────────────────────── v1.5.0: E2E-encrypted names ─────────────────────────
+//
+// Account/sheet/member names are AES-GCM ciphertext (encrypted client-side
+// under the shared K_sheet); the canister only stores and serves the blobs.
+
+fn check_name_blob(enc: &[u8], iv: &[u8]) {
+    if enc.is_empty() || enc.len() > 1024 {
+        ic_cdk::trap("name ciphertext length out of range");
+    }
+    if iv.len() < 12 || iv.len() > 16 {
+        ic_cdk::trap("name iv length out of range");
+    }
+}
+
+/// set_sheet_name: set this sheet's encrypted name. Caller must own the sheet.
+#[ic_cdk::update]
+fn set_sheet_name(sheet_id: String, name_enc: Vec<u8>, name_iv: Vec<u8>) {
+    require_authed();
+    check_name_blob(&name_enc, &name_iv);
+    if !caller_owns_sheet(&sheet_id) {
+        ic_cdk::trap("caller does not have access to this sheet");
+    }
+    let ok = update_sheet_field(&sheet_id, |sheet| {
+        sheet.name_enc = Some(name_enc);
+        sheet.name_iv = Some(name_iv);
+    });
+    if !ok {
+        ic_cdk::trap("sheet not found");
+    }
+}
+
+/// set_pair_name: set the account's encrypted name. Caller must be a pair member.
+#[ic_cdk::update]
+fn set_pair_name(pair_id: String, name_enc: Vec<u8>, name_iv: Vec<u8>) {
+    require_authed();
+    check_name_blob(&name_enc, &name_iv);
+    let caller = ic_cdk::api::msg_caller();
+    PAIRS.with(|p| {
+        let mut map = p.borrow_mut();
+        let mut pair = match map.remove(&pair_id) {
+            Some(x) => x,
+            None => ic_cdk::trap("pair not found"),
+        };
+        if !is_member_of(&pair, caller) {
+            map.insert(pair_id.clone(), pair);
+            ic_cdk::trap("not a member of this pair");
+        }
+        pair.name_enc = Some(name_enc);
+        pair.name_iv = Some(name_iv);
+        map.insert(pair_id.clone(), pair);
+    });
+}
+
+/// set_member_name: set the caller's own encrypted display name on this
+/// account. Writes the member_a or member_b slot depending on which member
+/// the caller is.
+#[ic_cdk::update]
+fn set_member_name(pair_id: String, name_enc: Vec<u8>, name_iv: Vec<u8>) {
+    require_authed();
+    check_name_blob(&name_enc, &name_iv);
+    let caller = ic_cdk::api::msg_caller();
+    PAIRS.with(|p| {
+        let mut map = p.borrow_mut();
+        let mut pair = match map.remove(&pair_id) {
+            Some(x) => x,
+            None => ic_cdk::trap("pair not found"),
+        };
+        if pair.members[0] == caller {
+            pair.member_a_name_enc = Some(name_enc);
+            pair.member_a_name_iv = Some(name_iv);
+        } else if pair.members[1] == caller {
+            pair.member_b_name_enc = Some(name_enc);
+            pair.member_b_name_iv = Some(name_iv);
+        } else {
+            map.insert(pair_id.clone(), pair);
+            ic_cdk::trap("not a member of this pair");
+        }
+        map.insert(pair_id.clone(), pair);
+    });
 }
 
 /// close_sheet: marks a sheet closed, captures the closing balances.

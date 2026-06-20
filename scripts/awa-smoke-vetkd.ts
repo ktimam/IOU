@@ -296,6 +296,8 @@ const createSheetReq = {
   closing_window_days: 365,
   wrapped_key_a: dummyWrapped,
   wrapped_key_b: dummyWrapped,
+  name_enc: [],
+  name_iv: [],
 };
 const sheet = await actorA.create_sheet(createSheetReq);
 const sheetId = sheet.id;

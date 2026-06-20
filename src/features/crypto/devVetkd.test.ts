@@ -23,6 +23,8 @@ import {
   isDevVetkd,
   isProdVetkd,
   VETKD_CONTEXT,
+  encryptName,
+  decryptName,
 } from "./devVetkd";
 
 function bytesToHex(b: Uint8Array): string {
@@ -82,5 +84,28 @@ describe("devVetkd adapter", () => {
   it("isDevVetkd is true and isProdVetkd is false today", () => {
     expect(isDevVetkd()).toBe(true);
     expect(isProdVetkd()).toBe(false);
+  });
+
+  it("encryptName/decryptName round-trips a UTF-8 name under K_sheet", async () => {
+    const K_sheet = newSheetKey();
+    const { enc, iv } = await encryptName(K_sheet, "Rent · Café ☕");
+    // Ciphertext must not contain the plaintext bytes.
+    expect(new TextDecoder().decode(new Uint8Array(enc))).not.toContain("Rent");
+    const back = await decryptName(
+      K_sheet,
+      new Uint8Array(iv),
+      new Uint8Array(enc),
+    );
+    expect(back).toBe("Rent · Café ☕");
+  });
+
+  it("decryptName with the wrong key returns '' (no throw)", async () => {
+    const { enc, iv } = await encryptName(newSheetKey(), "Alice");
+    const back = await decryptName(
+      newSheetKey(),
+      new Uint8Array(iv),
+      new Uint8Array(enc),
+    );
+    expect(back).toBe("");
   });
 });

@@ -94,6 +94,8 @@ export function NewSheet() {
         closing_window_days: Math.max(30, Math.min(730, closingDays)),
         wrapped_key_a: Array.from(wrapA),
         wrapped_key_b: Array.from(wrapB),
+        name_enc: [],
+        name_iv: [],
       });
       // Seed K_sheet into the in-memory cache so the sheet page renders
       // immediately, then open the newly created sheet (previously this
