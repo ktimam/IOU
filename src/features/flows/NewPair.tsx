@@ -1,18 +1,24 @@
 import { useEffect, useState } from "react";
-import { Link, useNavigate } from "react-router-dom";
+import { useNavigate } from "react-router-dom";
 import { useAuth } from "../auth/AuthProvider";
 import { useActor } from "./useActor";
+import { useSheetKey } from "./SheetKeyContext";
+import { usePreferences } from "../settings/usePreferences";
 import { deriveUserKeypair } from "../crypto/devVetkd";
+import { createSheetForPair, publishAccountNames } from "./createSheet";
 
 export function NewPair() {
   const { state } = useAuth();
   const { actor, err } = useActor();
+  const { cache } = useSheetKey();
+  const { prefs, cacheAccountName, cacheSheetName } = usePreferences();
   const nav = useNavigate();
   const [mode, setMode] = useState<"create" | "join">("create");
+  const [accountName, setAccountName] = useState("");
+  const [sheetName, setSheetName] = useState("");
   const [inviteCode, setInviteCode] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [createdInvite, setCreatedInvite] = useState<string | null>(null);
 
   useEffect(() => {
     if (state.kind !== "authenticated") {
@@ -23,12 +29,30 @@ export function NewPair() {
   if (state.kind !== "authenticated") return null;
 
   async function doCreate() {
-    if (!actor) return;
+    if (!actor || state.kind !== "authenticated") return;
     setBusy(true);
     setError(null);
     try {
+      // 1. Create the account (pair). 2. Create its first sheet (so there's
+      // somewhere to record entries immediately). 3. Publish the account +
+      // your profile name, E2E-encrypted under the new sheet's K_sheet.
       const out = await actor.create_pair();
-      setCreatedInvite(out.invite_code);
+      const pairId: string = out.pair_id;
+      const { sheet, K_sheet } = await createSheetForPair(actor, state.identity, {
+        pairId,
+        currencies: [prefs.defaultCurrency || "USD"],
+        closingDays: 365,
+        name: sheetName,
+      });
+      await publishAccountNames(actor, K_sheet, {
+        pairId,
+        accountName,
+        profileName: prefs.profileName,
+      });
+      cache(sheet.id, K_sheet);
+      if (accountName.trim()) cacheAccountName(pairId, accountName.trim());
+      if (sheetName.trim()) cacheSheetName(sheet.id, sheetName.trim());
+      nav(`/sheet/${sheet.id}`, { replace: true });
     } catch (e) {
       setError((e as Error).message);
     } finally {
@@ -59,6 +83,8 @@ export function NewPair() {
           /* non-fatal */
         }
       }
+      // The creator must grant access before I can read the sheet, so land
+      // on the account details page (shows status) rather than the sheet.
       nav(`/pair/${pairId}`, { replace: true });
     } catch (e) {
       setError((e as Error).message);
@@ -69,7 +95,7 @@ export function NewPair() {
 
   return (
     <div>
-      <h1>Set up a pair</h1>
+      <h1>New account</h1>
       <div className="row" style={{ marginBottom: 16 }}>
         <button
           className={mode === "create" ? "" : "secondary"}
@@ -87,50 +113,37 @@ export function NewPair() {
 
       {err && <p style={{ color: "var(--debt)" }}>Actor error: {err}</p>}
 
-      {mode === "create" && !createdInvite && (
+      {mode === "create" && (
         <div className="card">
           <p className="muted">
-            Start a new pair. You'll get an invite code to share with your
-            partner.
+            Create an account with someone. We'll start your first sheet so
+            you can record entries right away — invite a partner anytime from
+            the account's details.
           </p>
+          <div className="col">
+            <label htmlFor="accountName">Account name (optional)</label>
+            <input
+              id="accountName"
+              maxLength={48}
+              placeholder="e.g. Alice, Rent, Trip"
+              value={accountName}
+              onChange={(e) => setAccountName(e.target.value)}
+            />
+            <label htmlFor="sheetName">First sheet name (optional)</label>
+            <input
+              id="sheetName"
+              maxLength={48}
+              placeholder="e.g. 2026, June, Q3"
+              value={sheetName}
+              onChange={(e) => setSheetName(e.target.value)}
+            />
+            <span className="lock-cue">🔒 names stored end-to-end encrypted</span>
+          </div>
+          {error && <p style={{ color: "var(--debt)" }}>{error}</p>}
           <div className="cta">
             <button onClick={doCreate} disabled={busy}>
-              {busy ? "Creating…" : "Create pair"}
+              {busy ? "Creating…" : "Create account"}
             </button>
-          </div>
-        </div>
-      )}
-
-      {mode === "create" && createdInvite && (
-        <div className="card">
-          <h2>Share this code with your partner</h2>
-          <div
-            className="row"
-            style={{
-              fontSize: "1.5rem",
-              fontWeight: 700,
-              letterSpacing: "0.1em",
-              margin: "16px 0",
-            }}
-          >
-            {createdInvite}
-          </div>
-          <button
-            className="secondary"
-            onClick={() => {
-              navigator.clipboard?.writeText(createdInvite);
-            }}
-          >
-            Copy
-          </button>
-          <p className="muted" style={{ marginTop: 16 }}>
-            The code is good for one use. After your partner joins, you'll
-            see them in your pairs list.
-          </p>
-          <div className="cta">
-            <Link to="/pairs">
-              <button>Go to my pairs</button>
-            </Link>
           </div>
         </div>
       )}
@@ -153,7 +166,7 @@ export function NewPair() {
           {error && <p style={{ color: "var(--debt)" }}>{error}</p>}
           <div className="cta">
             <button onClick={doJoin} disabled={busy || !inviteCode.trim()}>
-              {busy ? "Joining…" : "Join pair"}
+              {busy ? "Joining…" : "Join account"}
             </button>
           </div>
         </div>

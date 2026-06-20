@@ -6,9 +6,16 @@ import { useParams, Link } from "react-router-dom";
 import { useActor } from "../flows/useActor";
 import { useSheetKey } from "../flows/SheetKeyContext";
 import { useAuth } from "../auth/AuthProvider";
-import { decryptEntryPayload } from "../crypto/devVetkd";
+import { decryptEntryPayload, decryptName } from "../crypto/devVetkd";
 import { decodeEntry, type EntryPayload } from "./types";
 import { computeBalances, formatMinor } from "./balance";
+import { usePreferences } from "../settings/usePreferences";
+
+// Unwrap a Candid opt<vec nat8> to a Uint8Array (or null).
+function optBytes(o: any): Uint8Array | null {
+  const v = Array.isArray(o) ? o[0] : o;
+  return v == null ? null : new Uint8Array(v);
+}
 
 type DecryptedEntry = {
   id: number;
@@ -21,6 +28,7 @@ export function ArchivedSheetsPage() {
   const { state } = useAuth();
   const { actor } = useActor();
   const { get, unwrapFor } = useSheetKey();
+  const { prefs, cacheSheetName } = usePreferences();
 
   const [sheets, setSheets] = useState<any[]>([]);
   const [entriesBySheet, setEntriesBySheet] = useState<
@@ -40,6 +48,12 @@ export function ArchivedSheetsPage() {
         for (const sh of list) {
           try {
             const K_sheet = get(sh.id) ?? (await unwrapFor(sh.id));
+            const senc = optBytes(sh.name_enc);
+            const siv = optBytes(sh.name_iv);
+            if (senc && siv) {
+              const nm = await decryptName(K_sheet, siv, senc);
+              if (nm) cacheSheetName(sh.id, nm);
+            }
             const res = await (actor as any).list_entries(sh.id, [], 200);
             const dec: DecryptedEntry[] = [];
             for (const e of res.entries) {
@@ -81,7 +95,7 @@ export function ArchivedSheetsPage() {
 
   return (
     <div>
-      <Link to={`/pair/${pairId}`}>← Pair</Link>
+      <Link to={`/pair/${pairId}`}>← Account</Link>
       <h1>Archived sheets</h1>
       {sheets.length === 0 ? (
         <p className="muted">📦 No archived sheets yet.</p>
@@ -106,10 +120,11 @@ export function ArchivedSheetsPage() {
               <p className="muted small">
                 Closed{" "}
                 {new Date(closedAtNum / 1_000_000).toLocaleString()} ·{" "}
-                with {them.slice(0, 8)}… · {sh.enabled_currencies.join(", ")}
+                with {prefs.partnerNames[pairId] || `${them.slice(0, 8)}…`} ·{" "}
+                {sh.enabled_currencies.join(", ")}
               </p>
               <h3>
-                Sheet {sh.id.slice(0, 8)}…
+                {prefs.sheetNames[sh.id] || `Sheet ${sh.id.slice(0, 8)}…`}
                 <span className="muted small"> (Closed)</span>
               </h3>
               {balances.length === 0 ? (

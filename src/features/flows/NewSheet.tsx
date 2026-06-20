@@ -3,9 +3,9 @@ import { useNavigate, useSearchParams, Link } from "react-router-dom";
 import { useAuth } from "../auth/AuthProvider";
 import { useActor } from "./useActor";
 import { useSheetKey } from "./SheetKeyContext";
-import { deriveUserKeypair, newSheetKey, wrapSheetKey } from "../crypto/devVetkd";
-
-const COMMON_CURRENCIES = ["USD", "Eur", "Egp", "Gbp", "Jpy", "Aud", "Cad", "Chf"];
+import { usePreferences } from "../settings/usePreferences";
+import { COMMON_CURRENCIES } from "../settings/currencies";
+import { createSheetForPair, publishAccountNames } from "./createSheet";
 
 export function NewSheet() {
   const [params] = useSearchParams();
@@ -13,8 +13,12 @@ export function NewSheet() {
   const { state } = useAuth();
   const { actor, err } = useActor();
   const { cache } = useSheetKey();
+  const { prefs, cacheSheetName } = usePreferences();
   const nav = useNavigate();
-  const [currencies, setCurrencies] = useState<string[]>(["Usd", "Egp"]);
+  const [sheetName, setSheetName] = useState("");
+  const [currencies, setCurrencies] = useState<string[]>([
+    prefs.defaultCurrency || "USD",
+  ]);
   const [closingDays, setClosingDays] = useState(365);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -44,69 +48,30 @@ export function NewSheet() {
       return;
     }
     setBusy(true);
-      setError(null);
+    setError(null);
     try {
-      // In v1 dev: wrap K_sheet for the two members of the pair.
-      // We get the pair to find member_a and member_b.
-      const pair = await actor.get_pair(pairId);
-      const pairObj = Array.isArray(pair) ? pair[0] : pair;
-      if (!pairObj) {
-        setError("Pair not found or not a member.");
-        setBusy(false);
-        return;
-      }
-      const memberA = pairObj.members[0];
-      const memberB = pairObj.members[1];
-      // Solo sheets are allowed: members[1] may be the anonymous principal
-      // (no partner yet). In that case we wrap K_sheet only for ourselves
-      // and leave the partner slot empty; grant_partner_access fills it if
-      // a partner joins later.
-      const memberBText =
-        memberB && typeof memberB.toText === "function"
-          ? memberB.toText()
-          : String(memberB ?? "");
-      const isSolo = memberBText === "" || memberBText === "2vxsx-fae";
-      // Reference memberA/memberB to keep TS happy; the actual
-      // wrap uses our own keypair (dev collapse).
-      void memberA;
-      void memberB;
-      // Each member has a P-256 keypair in localStorage; we read
-      // our own and (in v1 dev) use it for both wraps. In
-      // production, the wrap key is the chain key and each member
-      // can recover it via their own vetkd_derive_key.
-      const myPrincipal = state.identity.getPrincipal().toText();
-      const myKp = await deriveUserKeypair(myPrincipal);
-      // Dev collapse: use the local keypair for both members'
-      // wrap targets. The other member's browser does the same on
-      // their side, so the dev fallback is symmetric.
-      const K_sheet = newSheetKey();
-      const wrapA = await wrapSheetKey(K_sheet, myKp.publicKey, myKp.privateKey);
-      // Solo: no partner key yet — send an empty placeholder (the backend
-      // ignores wrapped_key_b for a solo sheet). Otherwise wrap for the
-      // partner too (dev collapse uses our own key for both).
-      const wrapB = isSolo
-        ? new Uint8Array(0)
-        : await wrapSheetKey(K_sheet, myKp.publicKey, myKp.privateKey);
-      const currenciesUpper = currencies.map((c) => c.toUpperCase());
-      const sheet = await actor.create_sheet({
-        pair_id: pairId,
-        enabled_currencies: currenciesUpper,
-        closing_window_days: Math.max(30, Math.min(730, closingDays)),
-        wrapped_key_a: Array.from(wrapA),
-        wrapped_key_b: Array.from(wrapB),
-        name_enc: [],
-        name_iv: [],
+      const { sheet, K_sheet } = await createSheetForPair(actor, state.identity, {
+        pairId,
+        currencies,
+        closingDays,
+        name: sheetName,
       });
-      // Seed K_sheet into the in-memory cache so the sheet page renders
-      // immediately, then open the newly created sheet (previously this
-      // navigated back to the pair page, so the new sheet never opened).
+      // Re-publish account + member names under the new sheet's K_sheet
+      // (names are encrypted per active sheet). Account name comes from the
+      // local cache; falls back to a no-op if unknown.
+      await publishAccountNames(actor, K_sheet, {
+        pairId,
+        accountName: prefs.accountNames[pairId],
+        profileName: prefs.profileName,
+      });
       cache(sheet.id, K_sheet);
+      if (sheetName.trim()) cacheSheetName(sheet.id, sheetName.trim());
       nav(`/sheet/${sheet.id}`, { replace: true });
     } catch (e) {
       const msg = (e as Error).message;
       setError(
         msg.includes("pair is not active")
-          ? "This pair isn't active yet — your partner needs to join with the invite code before you can start a sheet."
+          ? "This account isn't active yet — your partner needs to join with the invite code before you can start a sheet."
           : msg,
       );
     } finally {
@@ -117,10 +82,24 @@ export function NewSheet() {
   return (
     <div>
       <Link to={`/pair/${pairId}`} className="muted">
-        ← Back to pair
+        ← Back to account
       </Link>
       <h1>New sheet</h1>
       {err && <p style={{ color: "var(--debt)" }}>{err}</p>}
+
+      <div className="card">
+        <div className="col">
+          <label htmlFor="sheetName">Sheet name (optional)</label>
+          <input
+            id="sheetName"
+            maxLength={48}
+            placeholder="e.g. 2026, June, Q3"
+            value={sheetName}
+            onChange={(e) => setSheetName(e.target.value)}
+          />
+          <span className="lock-cue">🔒 stored end-to-end encrypted</span>
+        </div>
+      </div>
 
       <div className="card">
         <h2>Currencies</h2>
@@ -136,7 +115,7 @@ export function NewSheet() {
               onClick={() => toggleCurrency(c)}
               style={{ fontSize: "0.875rem", padding: "6px 12px" }}
             >
-              {c.toUpperCase()}
+              {c}
             </button>
           ))}
         </div>

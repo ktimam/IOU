@@ -5,6 +5,7 @@ import { useActor, unwrap } from "./useActor";
 import { useMyKeypair } from "./useMyKeypair";
 import { useSheetKey } from "./SheetKeyContext";
 import { grantPartnerAccess } from "./grantPartnerAccess";
+import { usePreferences } from "../settings/usePreferences";
 
 export function Pair() {
   const { pairId } = useParams<{ pairId: string }>();
@@ -12,6 +13,7 @@ export function Pair() {
   const { actor } = useActor();
   const { keypair: myKp } = useMyKeypair();
   const { registerPartnerKey, unwrapFor } = useSheetKey();
+  const { prefs } = usePreferences();
   const nav = useNavigate();
   const [pair, setPair] = useState<any | null>(null);
   const [activeSheetId, setActiveSheetId] = useState<string | null>(null);
@@ -97,7 +99,7 @@ export function Pair() {
     return (
       <div>
         <p style={{ color: "var(--debt)" }}>{error}</p>
-        <Link to="/pairs">Back to pairs</Link>
+        <Link to="/pairs">Back to accounts</Link>
       </div>
     );
   }
@@ -157,9 +159,11 @@ export function Pair() {
   return (
     <div>
       <Link to="/pairs" className="muted">
-        ← All pairs
+        ← All accounts
       </Link>
-      <h1>Pair {pairId?.slice(0, 12)}…</h1>
+      <h1>
+        {(pairId && prefs.accountNames[pairId]) || `Account ${pairId?.slice(0, 12)}…`}
+      </h1>
       <div className="card">
         <p className="muted">Invite code</p>
         <h2>{pair.invite_code}</h2>

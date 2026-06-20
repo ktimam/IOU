@@ -54,6 +54,9 @@ export function Hello() {
           {who}
         </p>
         <div className="cta-row" style={{ marginTop: 12 }}>
+          <Link to="/settings">
+            <button className="secondary">Settings</button>
+          </Link>
           <Link to="/settings/recovery-key">
             <button className="secondary">Recovery key (optional)</button>
           </Link>
@@ -63,12 +66,12 @@ export function Hello() {
       <div className="card">
         <h3>What's next?</h3>
         <p className="muted">
-          Set up a pair with someone, then create a sheet to start tracking
-          IOUs in your chosen currencies.
+          Set up an account with someone to start tracking IOUs and
+          settlements in your chosen currencies.
         </p>
         <div className="cta-row">
           <Link to="/pairs">
-            <button>Go to my pairs</button>
+            <button>Go to my accounts</button>
           </Link>
         </div>
       </div>

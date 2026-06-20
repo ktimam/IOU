@@ -17,6 +17,7 @@ import { ReplaceMemberPage } from "../features/replaceMember/ReplaceMemberPage";
 import { AcceptReplacePage } from "../features/replaceMember/AcceptReplacePage";
 import { ErrorBoundary } from "./ErrorBoundary";
 import { PreferencesProvider } from "../features/settings/usePreferences";
+import { SettingsPage } from "../features/settings/SettingsPage";
 
 export function App() {
   return (
@@ -47,6 +48,7 @@ export function App() {
                 path="/pair/:pairId/accept-replace"
                 element={<AcceptReplacePage />}
               />
+              <Route path="/settings" element={<SettingsPage />} />
               <Route
                 path="/settings/recovery-key"
                 element={<RecoveryKeyPage />}

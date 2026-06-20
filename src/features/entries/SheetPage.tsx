@@ -9,7 +9,12 @@ import { useParams, Link } from "react-router-dom";
 import { unwrap, isActive, useActor } from "../flows/useActor";
 import { useSheetKey } from "../flows/SheetKeyContext";
 import { useAuth } from "../auth/AuthProvider";
-import { decryptEntryPayload, encryptEntryPayload, decryptName } from "../crypto/devVetkd";
+import {
+  decryptEntryPayload,
+  encryptEntryPayload,
+  decryptName,
+  encryptName,
+} from "../crypto/devVetkd";
 import { decodeEntry, type EntryPayload } from "./types";
 import {
   computeBalances,
@@ -127,6 +132,13 @@ export function SheetPage() {
           if (penc && piv) {
             const pn = await decryptName(K_sheet, piv, penc);
             if (pn) cachePartnerName(sh.pair_id, pn);
+          }
+          // Publish my profile name on this account if it isn't set yet, so
+          // my partner sees it. One-time per account (skip once present).
+          const myEnc = optBytes(meIsA ? pr.member_a_name_enc : pr.member_b_name_enc);
+          if (!myEnc && prefs.profileName.trim()) {
+            const { enc, iv } = await encryptName(K_sheet, prefs.profileName.trim());
+            await (actor as any).set_member_name(sh.pair_id, enc, iv);
           }
         }
       } catch {
@@ -333,6 +345,9 @@ export function SheetPage() {
             </button>
             <CloseSheetButton
               sheetId={sheet.id}
+              pairId={pairId}
+              currencies={sheet.enabled_currencies}
+              closingDays={Number(sheet.closing_window_days)}
               entries={entries.map((e) => e.payload)}
             />
           </>

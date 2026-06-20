@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
 import { useAuth } from "../auth/AuthProvider";
 import { useActor, unwrap } from "./useActor";
+import { usePreferences } from "../settings/usePreferences";
 
 interface PairSummary {
   id: string;
@@ -28,6 +29,7 @@ function optToString(opt: any): string | null {
 export function Pairs() {
   const { state } = useAuth();
   const { actor, err } = useActor();
+  const { prefs } = usePreferences();
   const nav = useNavigate();
   const [pairs, setPairs] = useState<PairSummary[] | null>(null);
   const [loading, setLoading] = useState(false);
@@ -58,8 +60,8 @@ export function Pairs() {
         className="row"
         style={{ justifyContent: "space-between", marginBottom: 16 }}
       >
-        <h1>Your pairs</h1>
-        <button onClick={() => nav("/pair/new")}>+ New pair</button>
+        <h1>Your accounts</h1>
+        <button onClick={() => nav("/pair/new")}>+ New account</button>
       </div>
 
       {err && <p style={{ color: "var(--debt)" }}>Actor error: {err}</p>}
@@ -67,8 +69,8 @@ export function Pairs() {
       {pairs && pairs.length === 0 && (
         <div className="card">
           <p className="muted">
-            You don't have any pairs yet. Create one to start tracking IOUs
-            with a partner.
+            You don't have any accounts yet. Create one to start tracking
+            IOUs and settlements with someone.
           </p>
         </div>
       )}
@@ -77,28 +79,38 @@ export function Pairs() {
           {pairs.map((p) => {
             const other = principalToText(p.other_principal);
             const activeSheet = optToString(p.active_sheet_id);
+            const accountName = prefs.accountNames[p.id] || "";
+            const partnerName = prefs.partnerNames[p.id] || "";
+            // Account name if known; else partner's name; else principal.
+            const title = accountName || partnerName || `${other.slice(0, 12)}…`;
+            const subtitle = accountName
+              ? partnerName || other
+              : partnerName
+                ? other
+                : "";
+            // Opening an account jumps straight to its active sheet; if
+            // there's none yet (e.g. joiner awaiting access), open details.
+            const to = activeSheet ? `/sheet/${activeSheet}` : `/pair/${p.id}`;
             return (
               <Link
                 key={p.id}
-                to={`/pair/${p.id}`}
+                to={to}
                 style={{ textDecoration: "none", color: "inherit" }}
               >
                 <div className="card" style={{ cursor: "pointer" }}>
                   <div className="row" style={{ justifyContent: "space-between" }}>
                     <div>
-                      <h3>{other.slice(0, 12)}…</h3>
-                      <p className="muted" style={{ fontSize: "0.875rem" }}>
-                        {other}
-                      </p>
+                      <h3>{title}</h3>
+                      {subtitle && (
+                        <p className="muted" style={{ fontSize: "0.875rem" }}>
+                          {subtitle}
+                        </p>
+                      )}
                     </div>
                     <div style={{ textAlign: "right" }}>
-                      {activeSheet ? (
-                        <span className="muted">
-                          Active sheet: {activeSheet.slice(0, 8)}…
-                        </span>
-                      ) : (
-                        <span className="muted">No active sheet</span>
-                      )}
+                      <span className="muted">
+                        {activeSheet ? "Open →" : "No active sheet"}
+                      </span>
                       {p.archived_sheet_count > 0 && (
                         <p className="muted" style={{ fontSize: "0.875rem" }}>
                           + {p.archived_sheet_count} archived
