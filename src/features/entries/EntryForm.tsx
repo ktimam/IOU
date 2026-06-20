@@ -11,8 +11,11 @@
 //     converted amount
 
 import { useEffect, useState } from "react";
-import type { EntryPayload, Direction, ConvertPayload } from "./types";
+import type { EntryPayload, Direction, ConvertPayload, TxnType, DuePortion } from "./types";
 import { fetchRate, type FxRate } from "./fx";
+import { usePreferences } from "../settings/usePreferences";
+
+type SchedRow = { date: string; percent: number };
 
 interface EntryFormProps {
   enabledCurrencies: string[];
@@ -31,11 +34,16 @@ export function EntryForm({
   onCancel,
   onSubmit,
 }: EntryFormProps) {
+  const { prefs } = usePreferences();
   const [date, setDate] = useState(
     new Date(initial?.ts ?? Date.now()).toISOString().slice(0, 10),
   );
   const [currency, setCurrency] = useState(
-    initial?.currency ?? enabledCurrencies[0] ?? "USD",
+    initial?.currency ??
+      (enabledCurrencies.includes(prefs.defaultCurrency)
+        ? prefs.defaultCurrency
+        : enabledCurrencies[0]) ??
+      "USD",
   );
   const [amount, setAmount] = useState(
     initial ? (initial.amount_minor / 100).toFixed(2) : "",
@@ -44,6 +52,26 @@ export function EntryForm({
   const [note, setNote] = useState(initial?.note ?? "");
   const [submitting, setSubmitting] = useState(false);
   const [err, setErr] = useState<string | null>(null);
+
+  // Transaction type + due-date schedule (IOU only).
+  const [txnType, setTxnType] = useState<TxnType>(initial?.txn_type ?? "iou");
+  const initialDate = new Date(initial?.ts ?? Date.now()).toISOString().slice(0, 10);
+  const [schedule, setSchedule] = useState<SchedRow[]>(
+    initial?.schedule && initial.schedule.length
+      ? initial.schedule.map((p) => ({
+          date: new Date(p.due_ts).toISOString().slice(0, 10),
+          percent: p.percent,
+        }))
+      : [{ date: initialDate, percent: 100 }],
+  );
+  const setRowDate = (i: number, d: string) =>
+    setSchedule((s) => s.map((r, j) => (j === i ? { ...r, date: d } : r)));
+  const setRowPercent = (i: number, pct: number) =>
+    setSchedule((s) => s.map((r, j) => (j === i ? { ...r, percent: pct } : r)));
+  const addRow = () => setSchedule((s) => [...s, { date, percent: 0 }]);
+  const removeRow = (i: number) => setSchedule((s) => s.filter((_, j) => j !== i));
+  const percentTotal = schedule.reduce((t, r) => t + (Number(r.percent) || 0), 0);
+  const scheduleValid = schedule.length === 1 || percentTotal === 100;
 
   // Convert state
   const [convertEnabled, setConvertEnabled] = useState(!!initial?.convert);
@@ -92,6 +120,23 @@ export function EntryForm({
       setErr("amount must be > 0");
       return;
     }
+    // IOU: validate the due-date schedule. A single due date is implicitly
+    // 100%; multiple portions must total 100%.
+    let schedulePayload: DuePortion[] | undefined;
+    if (txnType === "iou") {
+      if (schedule.length === 0) {
+        setErr("add at least one due date");
+        return;
+      }
+      if (schedule.length > 1 && percentTotal !== 100) {
+        setErr("due-date percentages must total 100%");
+        return;
+      }
+      schedulePayload = schedule.map((r) => ({
+        due_ts: new Date(r.date + "T00:00:00Z").getTime(),
+        percent: schedule.length === 1 ? 100 : Number(r.percent) || 0,
+      }));
+    }
     const ts = new Date(date + "T00:00:00Z").getTime();
     let convert: ConvertPayload | undefined;
     if (convertEnabled && rate && convertedMinor != null) {
@@ -109,11 +154,13 @@ export function EntryForm({
     try {
       const payload: EntryPayload = {
         ts,
-        kind: "expense",
+        kind: txnType === "settlement" ? "payment" : "expense",
         currency: convert ? convertTo : currency,
         amount_minor: convert ? convertedMinor! : amountMinor,
         direction,
         note,
+        txn_type: txnType,
+        ...(schedulePayload ? { schedule: schedulePayload } : {}),
         convert,
       };
       await onSubmit(payload);
@@ -188,6 +235,79 @@ export function EntryForm({
       </div>
 
       <div className="row">
+        <fieldset>
+          <legend>Type</legend>
+          <label>
+            <input
+              type="radio"
+              checked={txnType === "iou"}
+              onChange={() => setTxnType("iou")}
+            />
+            {" IOU (owed, has due date)"}
+          </label>
+          <label>
+            <input
+              type="radio"
+              checked={txnType === "settlement"}
+              onChange={() => setTxnType("settlement")}
+            />
+            {" Settlement (paid now)"}
+          </label>
+        </fieldset>
+      </div>
+
+      {txnType === "iou" && (
+        <div className="card" style={{ padding: 12 }}>
+          <div className="row" style={{ justifyContent: "space-between" }}>
+            <strong>Due {schedule.length > 1 ? "dates" : "date"}</strong>
+            <button type="button" className="secondary small" onClick={addRow}>
+              + Split
+            </button>
+          </div>
+          {schedule.map((r, i) => (
+            <div className="row" key={i} style={{ gap: 8, alignItems: "center" }}>
+              <input
+                type="date"
+                value={r.date}
+                onChange={(e) => setRowDate(i, e.target.value)}
+                required
+              />
+              {schedule.length > 1 && (
+                <>
+                  <input
+                    type="number"
+                    min={0}
+                    max={100}
+                    value={r.percent}
+                    onChange={(e) => setRowPercent(i, Number(e.target.value))}
+                    style={{ width: 70 }}
+                    aria-label="percent"
+                  />
+                  <span className="muted small">%</span>
+                  <button
+                    type="button"
+                    className="secondary small"
+                    onClick={() => removeRow(i)}
+                    aria-label="remove due date"
+                  >
+                    ✕
+                  </button>
+                </>
+              )}
+            </div>
+          ))}
+          {schedule.length > 1 && (
+            <p
+              className="muted small"
+              style={{ color: scheduleValid ? undefined : "var(--debt)" }}
+            >
+              Total: {percentTotal}%{scheduleValid ? "" : " — must be 100%"}
+            </p>
+          )}
+        </div>
+      )}
+
+      <div className="row">
         <label>
           <span>Note</span>
           <input
@@ -251,7 +371,10 @@ export function EntryForm({
         <button type="button" onClick={onCancel} disabled={submitting}>
           Cancel
         </button>
-        <button type="submit" disabled={submitting}>
+        <button
+          type="submit"
+          disabled={submitting || (txnType === "iou" && !scheduleValid)}
+        >
           {submitting ? "Saving..." : initial ? "Save edit" : "Add entry"}
         </button>
       </div>

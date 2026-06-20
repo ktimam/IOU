@@ -9,13 +9,36 @@ import { useParams, Link } from "react-router-dom";
 import { unwrap, isActive, useActor } from "../flows/useActor";
 import { useSheetKey } from "../flows/SheetKeyContext";
 import { useAuth } from "../auth/AuthProvider";
-import { decryptEntryPayload, encryptEntryPayload } from "../crypto/devVetkd";
+import { decryptEntryPayload, encryptEntryPayload, decryptName } from "../crypto/devVetkd";
 import { decodeEntry, type EntryPayload } from "./types";
-import { computeBalances, formatMinor } from "./balance";
+import {
+  computeBalances,
+  computeBalancesAsOf,
+  endOfPrevMonth,
+  formatMinor,
+  type Balance,
+} from "./balance";
 import { EntryForm } from "./EntryForm";
 import { CloseSheetButton } from "./CloseSheetButton";
 import { downloadCsv, entriesToCsv } from "./csvExport";
 import { useToasts } from "../ui/Toasts";
+import { usePreferences } from "../settings/usePreferences";
+
+// Unwrap a Candid opt<vec nat8> to a Uint8Array (or null).
+function optBytes(o: any): Uint8Array | null {
+  const v = Array.isArray(o) ? o[0] : o;
+  return v == null ? null : new Uint8Array(v);
+}
+
+// Format an IOU's due schedule for the history row.
+function formatSchedule(p: EntryPayload): string | null {
+  if (p.txn_type === "settlement") return null;
+  const sched = p.schedule && p.schedule.length ? p.schedule : null;
+  if (!sched) return null;
+  const fmt = (ts: number) => new Date(ts).toISOString().slice(0, 10);
+  if (sched.length === 1) return `due ${fmt(sched[0].due_ts)}`;
+  return "due " + sched.map((s) => `${fmt(s.due_ts)} (${s.percent}%)`).join(", ");
+}
 
 type DecryptedEntry = {
   id: number;
@@ -40,6 +63,7 @@ export function SheetPage() {
   const { actor } = useActor();
   const { get, unwrapFor } = useSheetKey();
   const toasts = useToasts();
+  const { prefs, cacheSheetName, cacheAccountName, cachePartnerName } = usePreferences();
 
   const [sheet, setSheet] = useState<any>(null);
   const [entries, setEntries] = useState<DecryptedEntry[]>([]);
@@ -79,6 +103,35 @@ export function SheetPage() {
       }
       setSheet(sh);
       const K_sheet = get(sheetId) ?? (await unwrapFor(sheetId));
+      // Decrypt names (best-effort) and cache the plaintext locally so the
+      // accounts list / headers render instantly. Names are E2E-encrypted
+      // under K_sheet; failures are non-fatal (fall back to principals).
+      try {
+        const senc = optBytes(sh.name_enc);
+        const siv = optBytes(sh.name_iv);
+        if (senc && siv) {
+          const nm = await decryptName(K_sheet, siv, senc);
+          if (nm) cacheSheetName(sheetId, nm);
+        }
+        const pr = unwrap(await (actor as any).get_pair(sh.pair_id));
+        if (pr) {
+          const aenc = optBytes(pr.name_enc);
+          const aiv = optBytes(pr.name_iv);
+          if (aenc && aiv) {
+            const an = await decryptName(K_sheet, aiv, aenc);
+            if (an) cacheAccountName(sh.pair_id, an);
+          }
+          const meIsA = principalText(pr.members[0]) === myPrincipal;
+          const penc = optBytes(meIsA ? pr.member_b_name_enc : pr.member_a_name_enc);
+          const piv = optBytes(meIsA ? pr.member_b_name_iv : pr.member_a_name_iv);
+          if (penc && piv) {
+            const pn = await decryptName(K_sheet, piv, penc);
+            if (pn) cachePartnerName(sh.pair_id, pn);
+          }
+        }
+      } catch {
+        /* names are best-effort */
+      }
       const res = await (actor as any).list_entries(sheetId, [], 200);
       const dec: DecryptedEntry[] = [];
       for (const e of res.entries) {
@@ -187,27 +240,43 @@ export function SheetPage() {
   if (err) return <p className="err">{err}</p>;
   if (!sheet) return <p>Not found.</p>;
 
-  const balances = computeBalances(entries.map((e) => e.payload));
+  const payloads = entries.map((e) => e.payload);
+  const overall = computeBalances(payloads);
+  const thisMonth = computeBalancesAsOf(payloads, Date.now());
+  const prevMonth = computeBalancesAsOf(payloads, endOfPrevMonth(Date.now()));
   const me = myPrincipal;
   const them = partnerPrincipal;
   // Solo sheet: partner slot is the anonymous principal until a partner
   // joins and is granted access. Show friendly copy instead of "2vxsx…".
   const ANON = "2vxsx-fae";
   const isSolo = them === "" || them === ANON;
-  const themShort = isSolo ? "your partner" : `${them.slice(0, 5)}…`;
+  const pairId: string = sheet.pair_id;
+  const partnerName = prefs.partnerNames[pairId] || "";
+  const sheetName = prefs.sheetNames[sheetId] || "";
+  // Counterparty label: decrypted name if known, else solo copy, else a
+  // shortened principal.
+  const themShort = partnerName || (isSolo ? "your partner" : `${them.slice(0, 5)}…`);
+  const buckets: { label: string; hint: string; list: Balance[] }[] = [
+    { label: "This month", hint: "due so far", list: thisMonth },
+    { label: "Previous month", hint: "due by end of last month", list: prevMonth },
+    { label: "Overall", hint: "incl. upcoming", list: overall },
+  ];
 
   return (
     <div className="sheet-page">
       <header>
-        <Link to="/pairs">← Pairs</Link>
-        <h1>Sheet {sheet.id.slice(0, 8)}…</h1>
+        <div className="row" style={{ justifyContent: "space-between" }}>
+          <Link to="/pairs">← Accounts</Link>
+          <Link to={`/pair/${pairId}`} className="muted small">
+            Details →
+          </Link>
+        </div>
+        <h1>{sheetName || `Sheet ${sheet.id.slice(0, 8)}…`}</h1>
         <p className="muted small">
-          {isSolo ? (
+          {isSolo && !partnerName ? (
             "Solo sheet"
           ) : (
-            <>
-              with <code>{them.slice(0, 8)}…</code>
-            </>
+            <>with {partnerName ? partnerName : <code>{them.slice(0, 8)}…</code>}</>
           )}{" "}
           · {isActive(sheet.state) ? "Active" : "Closed"} ·{" "}
           {sheet.enabled_currencies.join(", ")}
@@ -216,28 +285,43 @@ export function SheetPage() {
 
       <section className="balances">
         <h2>Balances</h2>
-        {balances.length === 0 ? (
+        {overall.length === 0 ? (
           <p className="muted">
             🎉 All settled. Add an entry to get started.
           </p>
         ) : (
-          <ul>
-            {balances.map((b) => {
-              const iOweThem = b.amount_minor < 0;
-              return (
-                <li key={b.currency}>
-                  <strong>
-                    {iOweThem
-                      ? `You owe ${themShort}`
-                      : `${themShort} owes you`}
-                  </strong>{" "}
-                  <span className={`amt ${iOweThem ? "amt-debt" : "amt-credit"}`}>
-                    {formatMinor(Math.abs(b.amount_minor), b.currency)}
-                  </span>
-                </li>
-              );
-            })}
-          </ul>
+          <div className="balance-buckets">
+            {buckets.map((bk) => (
+              <div key={bk.label} className="card" style={{ padding: 12 }}>
+                <div className="muted small">
+                  {bk.label} <span style={{ opacity: 0.6 }}>· {bk.hint}</span>
+                </div>
+                {bk.list.length === 0 ? (
+                  <p className="muted small">All settled.</p>
+                ) : (
+                  <ul>
+                    {bk.list.map((b) => {
+                      const iOweThem = b.amount_minor < 0;
+                      return (
+                        <li key={b.currency}>
+                          <strong>
+                            {iOweThem
+                              ? `You owe ${themShort}`
+                              : `${themShort} owes you`}
+                          </strong>{" "}
+                          <span
+                            className={`amt ${iOweThem ? "amt-debt" : "amt-credit"}`}
+                          >
+                            {formatMinor(Math.abs(b.amount_minor), b.currency)}
+                          </span>
+                        </li>
+                      );
+                    })}
+                  </ul>
+                )}
+              </div>
+            ))}
+          </div>
         )}
       </section>
 
@@ -298,7 +382,9 @@ export function SheetPage() {
                       {" · "}
                       {new Date(e.payload.ts).toISOString().slice(0, 10)}
                       {" · "}
-                      {mine ? "you" : "them"}
+                      {mine ? "you" : themShort}
+                      {" · "}
+                      {e.payload.txn_type === "settlement" ? "settlement" : "IOU"}
                       {e.updated_at_server ? " (edited)" : ""}
                     </span>
                   </div>
@@ -310,6 +396,9 @@ export function SheetPage() {
                     {sign}
                     {formatMinor(e.payload.amount_minor, e.payload.currency)}
                   </div>
+                  {formatSchedule(e.payload) && (
+                    <div className="muted small">{formatSchedule(e.payload)}</div>
+                  )}
                   {e.payload.convert && (
                     <div className="muted small">
                       from {e.payload.convert.from_amount_minor / 100}{" "}

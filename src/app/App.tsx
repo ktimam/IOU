@@ -16,10 +16,12 @@ import { ToastProvider } from "../features/ui/Toasts";
 import { ReplaceMemberPage } from "../features/replaceMember/ReplaceMemberPage";
 import { AcceptReplacePage } from "../features/replaceMember/AcceptReplacePage";
 import { ErrorBoundary } from "./ErrorBoundary";
+import { PreferencesProvider } from "../features/settings/usePreferences";
 
 export function App() {
   return (
     <AuthProvider>
+      <PreferencesProvider>
       <SheetKeyProvider>
         <ToastProvider>
           <Layout>
@@ -55,6 +57,7 @@ export function App() {
           </Layout>
         </ToastProvider>
       </SheetKeyProvider>
+      </PreferencesProvider>
     </AuthProvider>
   );
 }
