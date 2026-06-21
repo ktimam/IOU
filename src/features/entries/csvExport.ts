@@ -17,6 +17,7 @@ const COLUMNS = [
   "amount", // NET major units (after any fee) — what counts to the balance
   "gross_amount", // pre-fee face value (empty if no fee)
   "fee_percent", // fee % deducted (empty if no fee)
+  "fee_fixed", // flat fee deducted (empty if none)
   "direction", // Credit | Debit
   "due_dates", // "YYYY-MM-DD:NN%; …" for IOUs (empty for settlements)
   "note", // free text
@@ -46,6 +47,7 @@ export function entriesToCsv(
       (p.amount_minor / 100).toFixed(2),
       p.fee ? (p.fee.gross_amount_minor / 100).toFixed(2) : "",
       p.fee ? String(p.fee.percent) : "",
+      p.fee && p.fee.fixed_minor ? (p.fee.fixed_minor / 100).toFixed(2) : "",
       p.direction === "credit" ? "Credit" : "Debit",
       dueDatesCsv(p),
       p.note,

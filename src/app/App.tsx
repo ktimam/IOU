@@ -3,6 +3,7 @@ import { AuthProvider} from "../features/auth/AuthProvider";
 import {SignIn} from "../features/auth/SignIn";
 import {SetDisplayName} from "../features/auth/SetDisplayName";
 import {Hello} from "../features/auth/Hello";
+import {ProfilePage} from "../features/auth/ProfilePage";
 import {Layout} from "./Layout";
 import {Pairs} from "../features/flows/Pairs";
 import {NewPair} from "../features/flows/NewPair";
@@ -18,17 +19,20 @@ import { AcceptReplacePage } from "../features/replaceMember/AcceptReplacePage";
 import { ErrorBoundary } from "./ErrorBoundary";
 import { PreferencesProvider } from "../features/settings/usePreferences";
 import { SettingsPage } from "../features/settings/SettingsPage";
+import { TemplatesProvider } from "../features/templates/TemplatesContext";
 
 export function App() {
   return (
     <AuthProvider>
       <PreferencesProvider>
+      <TemplatesProvider>
       <SheetKeyProvider>
         <ToastProvider>
           <Layout>
             <ErrorBoundary>
             <Routes>
               <Route path="/" element={<Hello />} />
+              <Route path="/me" element={<ProfilePage />} />
               <Route path="/sign-in" element={<SignIn />} />
               <Route path="/set-name" element={<SetDisplayName />} />
               <Route path="/pairs" element={<Pairs />} />
@@ -59,6 +63,7 @@ export function App() {
           </Layout>
         </ToastProvider>
       </SheetKeyProvider>
+      </TemplatesProvider>
       </PreferencesProvider>
     </AuthProvider>
   );

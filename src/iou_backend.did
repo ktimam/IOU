@@ -9,6 +9,8 @@ type UserRecord = record {
     wrapped_display_name : vec nat8;
     display_name_iv : vec nat8;
     created_at : nat64;
+    templates_enc : opt vec nat8;   // E2E-encrypted transaction templates
+    templates_iv : opt vec nat8;
 };
 
 type Config = record {
@@ -170,6 +172,7 @@ service : {
     whoami : () -> (opt text) query;
     get_my_user : () -> (opt UserRecord) query;
     set_display_name : (vec nat8, vec nat8) -> (UserRecord);
+    set_user_templates : (vec nat8, vec nat8) -> (UserRecord);
     get_config : () -> (Config) query;
     set_creator_principal : (principal) -> ();
 

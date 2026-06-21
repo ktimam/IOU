@@ -29,7 +29,11 @@ interface EntryFormProps {
   enabledCurrencies: string[];
   myPrincipal: string;
   partnerPrincipal: string;
-  initial?: EntryPayload;
+  // A full entry (edit) or a partial set of defaults (e.g. from a template).
+  initial?: Partial<EntryPayload>;
+  // True only when editing an existing entry (controls the submit label) —
+  // a template also passes `initial` but is still an "add".
+  isEdit?: boolean;
   onCancel: () => void;
   onSubmit: (p: EntryPayload) => Promise<void>;
 }
@@ -39,6 +43,7 @@ export function EntryForm({
   myPrincipal,
   partnerPrincipal,
   initial,
+  isEdit = false,
   onCancel,
   onSubmit,
 }: EntryFormProps) {
@@ -55,9 +60,13 @@ export function EntryForm({
   );
   // The amount field holds the GROSS (face value). For an entry with a fee
   // the stored amount_minor is the net, so seed from the fee's gross.
+  // Templates may carry no amount at all → leave it blank.
+  const initialGrossMinor = initial?.fee
+    ? initial.fee.gross_amount_minor
+    : initial?.amount_minor;
   const [amount, setAmount] = useState(
-    initial
-      ? ((initial.fee ? initial.fee.gross_amount_minor : initial.amount_minor) / 100).toFixed(2)
+    initialGrossMinor && initialGrossMinor > 0
+      ? (initialGrossMinor / 100).toFixed(2)
       : "",
   );
   const [direction, setDirection] = useState<Direction>(initial?.direction ?? "credit");
@@ -68,6 +77,9 @@ export function EntryForm({
   // Transaction type + due-date schedule + fee (IOU only).
   const [txnType, setTxnType] = useState<TxnType>(initial?.txn_type ?? "iou");
   const [feePercent, setFeePercent] = useState<number>(initial?.fee?.percent ?? 0);
+  const [feeFixed, setFeeFixed] = useState(
+    initial?.fee?.fixed_minor ? (initial.fee.fixed_minor / 100).toFixed(2) : "",
+  );
   const initialDate = new Date(initial?.ts ?? Date.now()).toISOString().slice(0, 10);
   const [schedule, setSchedule] = useState<SchedRow[]>(
     initial?.schedule && initial.schedule.length
@@ -122,6 +134,7 @@ export function EntryForm({
   }, [convertEnabled, currency, convertTo]);
 
   const amountMinor = Math.round((parseFloat(amount) || 0) * 100);
+  const feeFixedMinor = Math.round((parseFloat(feeFixed) || 0) * 100);
   const convertedMinor = rate
     ? Math.round(amountMinor * rate.rate)
     : null;
@@ -167,9 +180,9 @@ export function EntryForm({
     // balance + splits across due dates); the gross is kept on the fee
     // sub-payload so the UI can show before/after.
     const baseMinor = convert ? convertedMinor! : amountMinor;
-    const useFee = txnType === "iou" && feePercent > 0;
+    const useFee = txnType === "iou" && (feePercent > 0 || feeFixedMinor > 0);
     const fee: FeePayload | undefined = useFee
-      ? { percent: feePercent, gross_amount_minor: baseMinor }
+      ? { percent: feePercent, fixed_minor: feeFixedMinor, gross_amount_minor: baseMinor }
       : undefined;
     setSubmitting(true);
     try {
@@ -177,7 +190,7 @@ export function EntryForm({
         ts,
         kind: txnType === "settlement" ? "payment" : "expense",
         currency: convert ? convertTo : currency,
-        amount_minor: useFee ? netAfterFee(baseMinor, feePercent) : baseMinor,
+        amount_minor: useFee ? netAfterFee(baseMinor, feePercent, feeFixedMinor) : baseMinor,
         direction,
         note,
         txn_type: txnType,
@@ -280,7 +293,10 @@ export function EntryForm({
 
       {txnType === "iou" && (
         <div className="card" style={{ padding: 12 }}>
-          <div className="row" style={{ gap: 8, alignItems: "center", marginBottom: 8 }}>
+          <div
+            className="row"
+            style={{ gap: 8, alignItems: "center", marginBottom: 8, flexWrap: "wrap" }}
+          >
             <label style={{ flex: "0 0 auto" }}>
               <span className="muted small">Fee %</span>
               <input
@@ -292,10 +308,30 @@ export function EntryForm({
                 style={{ width: 80 }}
               />
             </label>
-            {feePercent > 0 && amountMinor > 0 && (
+            <label style={{ flex: "0 0 auto" }}>
+              <span className="muted small">Fixed fee</span>
+              <input
+                type="number"
+                min={0}
+                step="0.01"
+                value={feeFixed}
+                onChange={(e) => setFeeFixed(e.target.value)}
+                placeholder="0.00"
+                style={{ width: 100 }}
+              />
+            </label>
+            {(feePercent > 0 || feeFixedMinor > 0) && amountMinor > 0 && (
               <span className="muted small">
-                {formatMinor(amountMinor, currency)} − {feePercent}% ={" "}
-                <strong>{formatMinor(netAfterFee(amountMinor, feePercent), currency)}</strong>
+                {formatMinor(amountMinor, currency)}
+                {feePercent > 0 ? ` − ${feePercent}%` : ""}
+                {feeFixedMinor > 0 ? ` − ${formatMinor(feeFixedMinor, currency)}` : ""}
+                {" = "}
+                <strong>
+                  {formatMinor(
+                    netAfterFee(amountMinor, feePercent, feeFixedMinor),
+                    currency,
+                  )}
+                </strong>
               </span>
             )}
           </div>
@@ -416,7 +452,7 @@ export function EntryForm({
           type="submit"
           disabled={submitting || (txnType === "iou" && !scheduleValid)}
         >
-          {submitting ? "Saving..." : initial ? "Save edit" : "Add entry"}
+          {submitting ? "Saving..." : isEdit ? "Save edit" : "Add entry"}
         </button>
       </div>
 

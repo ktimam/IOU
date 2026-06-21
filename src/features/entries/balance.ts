@@ -97,12 +97,19 @@ export function endOfPrevMonth(now: number): number {
 }
 
 /**
- * Net (post-fee) minor amount for an IOU: gross minus `percent`%, rounded.
- * e.g. netAfterFee(100000, 20) === 80000.
+ * Net (post-fee) minor amount for an IOU: gross minus `percent`% of the
+ * gross, minus a flat `fixedMinor`, clamped at 0.
+ * e.g. netAfterFee(100000, 20) === 80000;
+ *      netAfterFee(500000, 20, 100000) === 300000.
  */
-export function netAfterFee(grossMinor: number, percent: number): number {
+export function netAfterFee(
+  grossMinor: number,
+  percent: number,
+  fixedMinor = 0,
+): number {
   const p = Math.max(0, Math.min(100, percent));
-  return Math.round(grossMinor * (1 - p / 100));
+  const pctAmount = Math.round((grossMinor * p) / 100);
+  return Math.max(0, grossMinor - pctAmount - Math.max(0, fixedMinor));
 }
 
 /** Format a minor-unit amount in a human-friendly way. */

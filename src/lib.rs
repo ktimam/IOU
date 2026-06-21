@@ -37,6 +37,10 @@ pub struct UserRecord {
     pub wrapped_display_name: Vec<u8>,
     pub display_name_iv: Vec<u8>,
     pub created_at: u64,
+    // v1.6.0: per-user encrypted transaction templates (AES-GCM under a
+    // self-derived user key). Optional ⇒ Candid-backward-compatible.
+    pub templates_enc: Option<Vec<u8>>,
+    pub templates_iv: Option<Vec<u8>>,
 }
 
 impl Storable for UserRecord {
@@ -300,9 +304,11 @@ impl Storable for RecoveryKey {
 //   a new region, use the next free number (currently 17+).
 
 // v1.5.0 (schema v3 -> v4): added optional encrypted name fields to Pair,
-// Sheet, PairSummary, CreateSheetReq. All new fields are `opt`, so Candid
-// decodes pre-v4 records with them as None — no data migration needed.
-const SCHEMA_VERSION: u32 = 4;
+// Sheet, PairSummary, CreateSheetReq.
+// v1.6.0 (schema v4 -> v5): added optional templates_enc/iv to UserRecord.
+// All new fields are `opt`, so Candid decodes older records with them as
+// None — no data migration needed.
+const SCHEMA_VERSION: u32 = 5;
 
 thread_local! {
     static MEMORY_MANAGER: RefCell<MemoryManager<DefaultMemoryImpl>> =
@@ -698,6 +704,7 @@ fn inspect_message() {
         "whoami",
         "get_my_user",
         "set_display_name",
+        "set_user_templates",
         "get_config",
         "set_creator_principal",
         // Phase 2: pair lifecycle
@@ -751,6 +758,7 @@ fn inspect_message() {
     // this list and remain callable by anonymous callers.
     let require_auth_methods: &[&str] = &[
         "set_display_name",
+        "set_user_templates",
         "set_creator_principal",
         "create_pair",
         "join_pair",
@@ -807,18 +815,59 @@ fn set_display_name(wrapped_display_name: Vec<u8>, display_name_iv: Vec<u8>) -> 
     if display_name_iv.is_empty() {
         ic_cdk::trap("displayNameIv is empty");
     }
+    let caller = ic_cdk::api::msg_caller();
     let now = ic_cdk::api::time();
-    let rec = UserRecord {
-        user_principal: ic_cdk::api::msg_caller(),
-        wrapped_display_name,
-        display_name_iv,
-        created_at: now,
-    };
     USERS.with(|u| {
-        u.borrow_mut()
-            .insert(rec.user_principal, rec.clone());
-    });
-    rec
+        let mut map = u.borrow_mut();
+        let existing = map.get(&caller);
+        // Preserve templates + original created_at when updating the name.
+        let rec = UserRecord {
+            user_principal: caller,
+            wrapped_display_name,
+            display_name_iv,
+            created_at: existing.as_ref().map(|e| e.created_at).unwrap_or(now),
+            templates_enc: existing.as_ref().and_then(|e| e.templates_enc.clone()),
+            templates_iv: existing.as_ref().and_then(|e| e.templates_iv.clone()),
+        };
+        map.insert(caller, rec.clone());
+        rec
+    })
+}
+
+/// set_user_templates: store the caller's encrypted transaction templates
+/// (a single AES-GCM blob, encrypted client-side under the user key).
+/// Preserves the display name. Usable across all of the user's sheets.
+#[ic_cdk::update]
+fn set_user_templates(templates_enc: Vec<u8>, templates_iv: Vec<u8>) -> UserRecord {
+    require_authed();
+    if templates_enc.len() > 64_000 {
+        ic_cdk::trap("templates blob too large");
+    }
+    if templates_iv.len() < 12 || templates_iv.len() > 16 {
+        ic_cdk::trap("templates iv length out of range");
+    }
+    let caller = ic_cdk::api::msg_caller();
+    let now = ic_cdk::api::time();
+    USERS.with(|u| {
+        let mut map = u.borrow_mut();
+        let existing = map.get(&caller);
+        let rec = UserRecord {
+            user_principal: caller,
+            wrapped_display_name: existing
+                .as_ref()
+                .map(|e| e.wrapped_display_name.clone())
+                .unwrap_or_default(),
+            display_name_iv: existing
+                .as_ref()
+                .map(|e| e.display_name_iv.clone())
+                .unwrap_or_default(),
+            created_at: existing.as_ref().map(|e| e.created_at).unwrap_or(now),
+            templates_enc: Some(templates_enc),
+            templates_iv: Some(templates_iv),
+        };
+        map.insert(caller, rec.clone());
+        rec
+    })
 }
 
 #[ic_cdk::query]

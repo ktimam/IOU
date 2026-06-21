@@ -170,6 +170,22 @@ export async function importPublicKeyB64Wrap(b64: string): Promise<CryptoKey> {
   return importPublicKeyRaw(b64ToBytes(b64));
 }
 
+/**
+ * A stable per-user symmetric key (32 bytes) derived by self-ECDH over the
+ * user's own keypair. Reproducible on any device holding the same keypair;
+ * used to encrypt user-level data (e.g. transaction templates) so it can be
+ * stored on-chain yet only the user can read it.
+ */
+export async function deriveUserKey(principal: string): Promise<Uint8Array> {
+  const { publicKey, privateKey } = await deriveUserKeypair(principal);
+  const bits = await getSubtle().deriveBits(
+    { name: "ECDH", public: publicKey },
+    privateKey,
+    256,
+  );
+  return new Uint8Array(bits);
+}
+
 export function newSheetKey(): Uint8Array {
   return randomBytes(32);
 }

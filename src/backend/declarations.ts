@@ -32,6 +32,8 @@ export const idlFactory = ({ IDL: idl }: { IDL: IDL }) => {
     wrapped_display_name: idl.Vec(idl.Nat8),
     display_name_iv: idl.Vec(idl.Nat8),
     created_at: idl.Nat64,
+    templates_enc: idl.Opt(idl.Vec(idl.Nat8)),
+    templates_iv: idl.Opt(idl.Vec(idl.Nat8)),
   });
   const Config = idl.Record({
     creator_principal: idl.Principal,
@@ -153,6 +155,11 @@ export const idlFactory = ({ IDL: idl }: { IDL: IDL }) => {
     whoami: idl.Func([], [idl.Opt(idl.Text)], ["query"]),
     get_my_user: idl.Func([], [idl.Opt(UserRecord)], ["query"]),
     set_display_name: idl.Func(
+      [idl.Vec(idl.Nat8), idl.Vec(idl.Nat8)],
+      [UserRecord],
+      [],
+    ),
+    set_user_templates: idl.Func(
       [idl.Vec(idl.Nat8), idl.Vec(idl.Nat8)],
       [UserRecord],
       [],

@@ -38,11 +38,14 @@ export type DuePortion = {
 };
 
 // Fee/deduction on an IOU. The IOU's face value is `gross_amount_minor`;
-// `percent` is deducted, and the entry's `amount_minor` is the NET (what
-// actually counts toward the balance and is split across the due schedule).
-// e.g. gross 1000 with percent 20 ⇒ amount_minor 800.
+// a `percent` of it AND a `fixed_minor` amount are deducted, and the
+// entry's `amount_minor` is the NET (what counts toward the balance and is
+// split across the due schedule). Either component may be zero.
+// e.g. gross 1000, percent 20, fixed 0 ⇒ net 800; gross 5000, percent 20,
+// fixed 1000 ⇒ net 3000.
 export type FeePayload = {
-  percent: number; // 0..100 deducted from the gross
+  percent: number; // 0..100 of the gross
+  fixed_minor?: number; // flat amount deducted (entry currency); absent ⇒ 0
   gross_amount_minor: number; // face value before the fee
 };
 

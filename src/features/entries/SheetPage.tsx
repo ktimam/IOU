@@ -28,6 +28,25 @@ import { CloseSheetButton } from "./CloseSheetButton";
 import { downloadCsv, entriesToCsv } from "./csvExport";
 import { useToasts } from "../ui/Toasts";
 import { usePreferences } from "../settings/usePreferences";
+import { useTemplates, type TxnTemplate } from "../templates/TemplatesContext";
+
+// Build entry-form defaults from a template.
+function templateToInitial(t: TxnTemplate): Partial<EntryPayload> {
+  const gross = t.amount_minor ?? 0;
+  const feePct = t.fee_percent ?? 0;
+  const feeFixed = t.fee_fixed_minor ?? 0;
+  const hasFee = t.txn_type === "iou" && (feePct > 0 || feeFixed > 0);
+  return {
+    currency: t.currency,
+    amount_minor: t.amount_minor,
+    direction: t.direction,
+    note: t.note ?? "",
+    txn_type: t.txn_type,
+    fee: hasFee
+      ? { percent: feePct, fixed_minor: feeFixed, gross_amount_minor: gross }
+      : undefined,
+  };
+}
 
 // Unwrap a Candid opt<vec nat8> to a Uint8Array (or null).
 function optBytes(o: any): Uint8Array | null {
@@ -76,10 +95,16 @@ export function SheetPage() {
   const [err, setErr] = useState<string | null>(null);
 
   const [modal, setModal] = useState<null | {
-    initial: EntryPayload | null;
+    initial: Partial<EntryPayload> | null;
     entryId: number | null;
   }>(null);
   const [sortKey, setSortKey] = useState<SortKey>("newest");
+  const { templates } = useTemplates();
+  const [addOpen, setAddOpen] = useState(false);
+  const openAdd = (initial: Partial<EntryPayload> | null) => {
+    setModal({ initial, entryId: null });
+    setAddOpen(false);
+  };
 
   const myPrincipal = state.kind === "authenticated"
     ? state.identity.getPrincipal().toText()
@@ -340,9 +365,43 @@ export function SheetPage() {
       <div className="row">
         {isActive(sheet.state) && !modal && (
           <>
-            <button onClick={() => setModal({ initial: null, entryId: null })}>
-              + Add entry
-            </button>
+            {templates.length > 0 ? (
+              <div style={{ position: "relative", display: "inline-block" }}>
+                <button onClick={() => setAddOpen((o) => !o)}>+ Add ▾</button>
+                {addOpen && (
+                  <div
+                    className="card"
+                    style={{
+                      position: "absolute",
+                      zIndex: 10,
+                      marginTop: 4,
+                      padding: 8,
+                      minWidth: 200,
+                    }}
+                  >
+                    <button
+                      className="secondary"
+                      style={{ display: "block", width: "100%", marginBottom: 6 }}
+                      onClick={() => openAdd(null)}
+                    >
+                      Blank entry
+                    </button>
+                    {templates.map((t) => (
+                      <button
+                        key={t.id}
+                        className="secondary"
+                        style={{ display: "block", width: "100%", marginBottom: 6 }}
+                        onClick={() => openAdd(templateToInitial(t))}
+                      >
+                        {t.name}
+                      </button>
+                    ))}
+                  </div>
+                )}
+              </div>
+            ) : (
+              <button onClick={() => openAdd(null)}>+ Add entry</button>
+            )}
             <CloseSheetButton
               sheetId={sheet.id}
               pairId={pairId}
@@ -416,8 +475,11 @@ export function SheetPage() {
                   {e.payload.fee && (
                     <div className="muted small">
                       {formatMinor(e.payload.fee.gross_amount_minor, e.payload.currency)}
-                      {" − "}
-                      {e.payload.fee.percent}% fee → net{" "}
+                      {e.payload.fee.percent > 0 ? ` − ${e.payload.fee.percent}%` : ""}
+                      {e.payload.fee.fixed_minor
+                        ? ` − ${formatMinor(e.payload.fee.fixed_minor, e.payload.currency)}`
+                        : ""}
+                      {" fee → net "}
                       {formatMinor(e.payload.amount_minor, e.payload.currency)}
                     </div>
                   )}
@@ -463,6 +525,7 @@ export function SheetPage() {
               myPrincipal={me}
               partnerPrincipal={them}
               initial={modal.initial ?? undefined}
+              isEdit={modal.entryId != null}
               onCancel={() => setModal(null)}
               onSubmit={onSubmit}
             />

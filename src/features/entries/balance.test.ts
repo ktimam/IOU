@@ -121,12 +121,17 @@ describe("netAfterFee", () => {
     expect(netAfterFee(100000, 0)).toBe(100000);
     expect(netAfterFee(100000, 100)).toBe(0);
   });
+  it("deducts a fixed amount, and percent + fixed together", () => {
+    expect(netAfterFee(100000, 0, 1000)).toBe(99000); // − 10.00 fixed
+    expect(netAfterFee(500000, 20, 100000)).toBe(300000); // − 20% − 1000.00
+  });
   it("rounds to the nearest minor unit", () => {
     expect(netAfterFee(333, 10)).toBe(300); // 333 * 0.9 = 299.7 → 300
   });
-  it("clamps out-of-range percentages", () => {
+  it("clamps to zero and ignores out-of-range inputs", () => {
     expect(netAfterFee(100, -5)).toBe(100);
     expect(netAfterFee(100, 150)).toBe(0);
+    expect(netAfterFee(100, 0, 500)).toBe(0); // fixed exceeds gross → 0
   });
 });
 
