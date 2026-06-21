@@ -18,7 +18,7 @@ function fmtMajor(minor?: number): string {
 
 type SchedRow = { anchor: DueAnchor; days: number; percent: number };
 
-export function TemplatesManager() {
+export function TemplatesManager({ onSaved }: { onSaved?: () => void } = {}) {
   const { templates, addTemplate, updateTemplate, removeTemplate, loading, error } =
     useTemplates();
   const [editingId, setEditingId] = useState<string | null>(null);
@@ -131,6 +131,7 @@ export function TemplatesManager() {
       if (editingId) await updateTemplate({ id: editingId, ...base });
       else await addTemplate(base);
       resetForm();
+      onSaved?.();
     } catch (e) {
       setErr((e as Error).message);
     } finally {

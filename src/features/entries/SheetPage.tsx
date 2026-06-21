@@ -21,6 +21,7 @@ import {
   computeBalancesAsOf,
   endOfPrevMonth,
   formatMinor,
+  portionsOf,
   type Balance,
 } from "./balance";
 import { EntryForm } from "./EntryForm";
@@ -72,14 +73,16 @@ function optBytes(o: any): Uint8Array | null {
   return v == null ? null : new Uint8Array(v);
 }
 
-// Format an IOU's due schedule for the history row.
-function formatSchedule(p: EntryPayload): string | null {
+// Per-due display lines for an IOU history row (date + the value due then,
+// after any fee). Returns null for settlements.
+function dueDisplayLines(
+  p: EntryPayload,
+): { date: string; value: string }[] | null {
   if (p.txn_type === "settlement") return null;
-  const sched = p.schedule && p.schedule.length ? p.schedule : null;
-  if (!sched) return null;
-  const fmt = (ts: number) => new Date(ts).toISOString().slice(0, 10);
-  if (sched.length === 1) return `due ${fmt(sched[0].due_ts)}`;
-  return "due " + sched.map((s) => `${fmt(s.due_ts)} (${s.percent}%)`).join(", ");
+  return portionsOf(p).map((x) => ({
+    date: new Date(x.due_ts).toISOString().slice(0, 10),
+    value: formatMinor(x.amount_minor, x.currency),
+  }));
 }
 
 type DecryptedEntry = {
@@ -123,6 +126,9 @@ export function SheetPage() {
   const [renamingSheet, setRenamingSheet] = useState(false);
   const [sheetNameDraft, setSheetNameDraft] = useState("");
   const [renameBusy, setRenameBusy] = useState(false);
+  const [renamingAccount, setRenamingAccount] = useState(false);
+  const [accountNameDraft, setAccountNameDraft] = useState("");
+  const [accountRenameBusy, setAccountRenameBusy] = useState(false);
   const openAdd = (initial: Partial<EntryPayload> | null) => {
     setModal({ initial, entryId: null });
     setAddOpen(false);
@@ -292,6 +298,23 @@ export function SheetPage() {
     }
   }
 
+  async function saveAccountName() {
+    if (!actor || !sheet) return;
+    setAccountRenameBusy(true);
+    try {
+      const K = get(sheetId) ?? (await unwrapFor(sheetId));
+      const { enc, iv } = await encryptName(K, accountNameDraft.trim());
+      await (actor as any).set_pair_name(sheet.pair_id, enc, iv);
+      cacheAccountName(sheet.pair_id, accountNameDraft.trim());
+      setRenamingAccount(false);
+      toasts.show({ kind: "success", text: "Account renamed" });
+    } catch (e) {
+      toasts.show({ kind: "error", text: (e as Error).message });
+    } finally {
+      setAccountRenameBusy(false);
+    }
+  }
+
   async function saveSheetName() {
     if (!actor) return;
     setRenameBusy(true);
@@ -347,6 +370,47 @@ export function SheetPage() {
             Details →
           </Link>
         </div>
+        {renamingAccount ? (
+          <div className="row" style={{ gap: 8, alignItems: "center", marginTop: 4 }}>
+            <span className="muted small">Account:</span>
+            <input
+              value={accountNameDraft}
+              onChange={(e) => setAccountNameDraft(e.target.value)}
+              maxLength={48}
+              placeholder="Account name"
+              autoFocus
+            />
+            <button
+              className="small"
+              onClick={() => void saveAccountName()}
+              disabled={accountRenameBusy || !accountNameDraft.trim()}
+            >
+              {accountRenameBusy ? "Saving…" : "Save"}
+            </button>
+            <button
+              className="secondary small"
+              onClick={() => setRenamingAccount(false)}
+              disabled={accountRenameBusy}
+            >
+              Cancel
+            </button>
+          </div>
+        ) : (
+          <div className="row" style={{ gap: 8, alignItems: "center", marginTop: 4 }}>
+            <span className="muted small">
+              Account: {prefs.accountNames[pairId] || "(unnamed)"}
+            </span>
+            <button
+              className="secondary small"
+              onClick={() => {
+                setAccountNameDraft(prefs.accountNames[pairId] ?? "");
+                setRenamingAccount(true);
+              }}
+            >
+              Rename
+            </button>
+          </div>
+        )}
         {renamingSheet ? (
           <div className="row" style={{ gap: 8, alignItems: "center" }}>
             <input
@@ -383,7 +447,7 @@ export function SheetPage() {
                 setRenamingSheet(true);
               }}
             >
-              Rename
+              Rename sheet
             </button>
           </div>
         )}
@@ -570,9 +634,24 @@ export function SheetPage() {
                       {formatMinor(e.payload.amount_minor, e.payload.currency)}
                     </div>
                   )}
-                  {formatSchedule(e.payload) && (
-                    <div className="muted small">{formatSchedule(e.payload)}</div>
-                  )}
+                  {(() => {
+                    const lines = dueDisplayLines(e.payload);
+                    if (!lines) return null;
+                    if (lines.length === 1) {
+                      return (
+                        <div className="muted small">due {lines[0].date}</div>
+                      );
+                    }
+                    return (
+                      <div className="muted small">
+                        {lines.map((l, i) => (
+                          <div key={i}>
+                            due {l.date}: {l.value}
+                          </div>
+                        ))}
+                      </div>
+                    );
+                  })()}
                   {e.payload.convert && (
                     <div className="muted small">
                       from {e.payload.convert.from_amount_minor / 100}{" "}
@@ -634,7 +713,7 @@ export function SheetPage() {
                 Close
               </button>
             </div>
-            <TemplatesManager />
+            <TemplatesManager onSaved={() => setTypesOpen(false)} />
           </div>
         </div>
       )}

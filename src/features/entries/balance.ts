@@ -30,10 +30,10 @@ export type Portion = {
 };
 
 /**
- * Expand an entry into dated portions. Splits `amount_minor` by each
- * portion's `percent` using rounding, giving the **last** portion the
- * remainder so the portions always sum exactly to `amount_minor` (no
- * rounding drift).
+ * Expand an entry into dated portions. Splits the GROSS by each portion's
+ * `percent` (last portion takes the rounding remainder), then deducts any
+ * fee from the FINAL due(s) — so earlier installments are paid in full and
+ * the fee lands on the last. Portions always sum to the net `amount_minor`.
  */
 export function portionsOf(e: EntryPayload): Portion[] {
   if (e.txn_type === "settlement") {
@@ -43,13 +43,15 @@ export function portionsOf(e: EntryPayload): Portion[] {
   }
   const sched =
     e.schedule && e.schedule.length > 0 ? e.schedule : [{ due_ts: e.ts, percent: 100 }];
+  // amount_minor is the NET; with a fee the gross is on the fee sub-payload.
+  const gross = e.fee ? e.fee.gross_amount_minor : e.amount_minor;
   const portions: Portion[] = [];
   let allocated = 0;
   for (let i = 0; i < sched.length; i++) {
     const isLast = i === sched.length - 1;
     const amt = isLast
-      ? e.amount_minor - allocated
-      : Math.round((e.amount_minor * sched[i].percent) / 100);
+      ? gross - allocated
+      : Math.round((gross * sched[i].percent) / 100);
     allocated += amt;
     portions.push({
       currency: e.currency,
@@ -57,6 +59,16 @@ export function portionsOf(e: EntryPayload): Portion[] {
       amount_minor: amt,
       direction: e.direction,
     });
+  }
+  // Deduct the fee from the final installment, cascading backward only if
+  // the last one can't absorb it.
+  if (e.fee) {
+    let remainingFee = gross - e.amount_minor;
+    for (let i = portions.length - 1; i >= 0 && remainingFee > 0; i--) {
+      const take = Math.min(portions[i].amount_minor, remainingFee);
+      portions[i].amount_minor -= take;
+      remainingFee -= take;
+    }
   }
   return portions;
 }

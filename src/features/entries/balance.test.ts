@@ -76,6 +76,70 @@ describe("portionsOf", () => {
   });
 });
 
+describe("portionsOf with a fee (deducted from the final due)", () => {
+  it("splits the gross and takes the fee off the last installment", () => {
+    const ps = portionsOf(
+      entry({
+        txn_type: "iou",
+        amount_minor: 80000, // net = 1000 − 20%
+        fee: { percent: 20, gross_amount_minor: 100000 },
+        schedule: [
+          { due_ts: JUN1, percent: 50 },
+          { due_ts: JUL1, percent: 50 },
+        ],
+      }),
+    );
+    // gross split 500/500; fee 200 off the last → 500, 300
+    expect(ps.map((p) => p.amount_minor)).toEqual([50000, 30000]);
+    expect(ps.reduce((s, p) => s + p.amount_minor, 0)).toBe(80000); // = net
+  });
+
+  it("cascades the fee backward when the last installment is too small", () => {
+    const ps = portionsOf(
+      entry({
+        txn_type: "iou",
+        amount_minor: 80000,
+        fee: { percent: 20, gross_amount_minor: 100000 },
+        schedule: [
+          { due_ts: JUN1, percent: 90 },
+          { due_ts: JUL1, percent: 10 },
+        ],
+      }),
+    );
+    // gross 900/100; fee 200 empties the last (100) then takes 100 off the first
+    expect(ps.map((p) => p.amount_minor)).toEqual([80000, 0]);
+    expect(ps.reduce((s, p) => s + p.amount_minor, 0)).toBe(80000);
+  });
+
+  it("single due with a fee nets to the post-fee amount", () => {
+    const ps = portionsOf(
+      entry({
+        txn_type: "iou",
+        amount_minor: 75000,
+        fee: { percent: 20, fixed_minor: 5000, gross_amount_minor: 100000 },
+      }),
+    );
+    expect(ps.map((p) => p.amount_minor)).toEqual([75000]);
+  });
+
+  it("early installments stay full; only the matured (full) part shows this month", () => {
+    const split = entry({
+      txn_type: "iou",
+      direction: "credit",
+      amount_minor: 80000,
+      fee: { percent: 20, gross_amount_minor: 100000 },
+      schedule: [
+        { due_ts: JUN1, percent: 50 }, // matured, full 500
+        { due_ts: JUL1, percent: 50 }, // future, 300 after fee
+      ],
+    });
+    expect(computeBalancesAsOf([split], JUN15)).toEqual([
+      { currency: "USD", amount_minor: 50000 },
+    ]);
+    expect(computeBalances([split])).toEqual([{ currency: "USD", amount_minor: 80000 }]);
+  });
+});
+
 describe("computeBalancesAsOf (maturity buckets)", () => {
   const split = entry({
     txn_type: "iou",
