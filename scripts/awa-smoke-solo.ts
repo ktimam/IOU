@@ -176,6 +176,41 @@ async function main() {
     stranger.set_pair_name(pairId, nameEnc(5), nameIv),
   );
 
+  console.log("\n=== (5c) edit history + soft delete ===");
+  const eid = written.id; // entry created by partner above
+  const findEntry = async (a: any) =>
+    (await a.list_entries(sheetId, [], 50)).entries.find((e: any) => e.id === eid);
+  await partner.edit_entry({
+    sheet_id: sheetId,
+    entry_id: eid,
+    entry_key: new Array(32).fill(2),
+    ciphertext: [4, 5, 6],
+    iv: [7, 8, 9],
+  });
+  const afterEdit = await findEntry(partner);
+  ok((unwrap(afterEdit.history) as any[])?.length === 1, "edit pushes one history version");
+  ok(unwrap(afterEdit.updated_at_server) != null, "updated_at_server set after edit");
+  ok(
+    ((unwrap(afterEdit.history) as any[])?.[0]?.ciphertext as number[])?.[0] === 1,
+    "history version keeps the prior ciphertext",
+  );
+  await partner.delete_entry(sheetId, eid);
+  ok(unwrap((await findEntry(partner)).deleted_at) != null, "delete sets deleted_at");
+  await expectTrap("cannot edit a deleted entry", () =>
+    partner.edit_entry({
+      sheet_id: sheetId,
+      entry_id: eid,
+      entry_key: new Array(32).fill(3),
+      ciphertext: [9],
+      iv: [9],
+    }),
+  );
+  await expectTrap("non-creator member cannot delete entry", () =>
+    creator.delete_entry(sheetId, eid),
+  );
+  await partner.restore_entry(sheetId, eid);
+  ok(unwrap((await findEntry(partner)).deleted_at) == null, "restore clears deleted_at");
+
   console.log("\n=== (6) replace-member rejects solo / anonymous ===");
   const cp2 = await stranger.create_pair(); // stranger isn't paired yet
   await expectTrap("replace on a solo pair rejected", () =>

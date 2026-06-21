@@ -106,6 +106,12 @@ export const idlFactory = ({ IDL: idl }: { IDL: IDL }) => {
     name_enc: idl.Opt(idl.Vec(idl.Nat8)),
     name_iv: idl.Opt(idl.Vec(idl.Nat8)),
   });
+  const EntryVersion = idl.Record({
+    entry_key: idl.Vec(idl.Nat8),
+    ciphertext: idl.Vec(idl.Nat8),
+    iv: idl.Vec(idl.Nat8),
+    replaced_at: idl.Nat64,
+  });
   const Entry = idl.Record({
     id: idl.Nat64,
     pair_id: idl.Text,
@@ -116,6 +122,8 @@ export const idlFactory = ({ IDL: idl }: { IDL: IDL }) => {
     entry_key: idl.Vec(idl.Nat8),
     ciphertext: idl.Vec(idl.Nat8),
     iv: idl.Vec(idl.Nat8),
+    history: idl.Opt(idl.Vec(EntryVersion)),
+    deleted_at: idl.Opt(idl.Nat64),
   });
   const AddEntryReq = idl.Record({
     sheet_id: idl.Text,
@@ -200,6 +208,8 @@ export const idlFactory = ({ IDL: idl }: { IDL: IDL }) => {
     // Phase 3
     add_entry: idl.Func([AddEntryReq], [Entry], []),
     edit_entry: idl.Func([EditEntryReq], [Entry], []),
+    delete_entry: idl.Func([idl.Text, idl.Nat64], [], []),
+    restore_entry: idl.Func([idl.Text, idl.Nat64], [], []),
     get_entry: idl.Func([idl.Text, idl.Nat64], [idl.Opt(Entry)], ["query"]),
     list_entries: idl.Func(
       [idl.Text, idl.Opt(idl.Nat64), idl.Nat32],

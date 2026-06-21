@@ -180,6 +180,16 @@ pub enum Direction {
 // the full payload (kind, currency, amount_minor, direction, note,
 // ts) with a per-entry key derived from K_sheet, and the canister
 // only stores the ciphertext + iv + the encrypted entry_key.
+// v1.7.0: a prior (superseded) version of an entry, kept for the edit
+// history. Ciphertext-only, same encryption as Entry.
+#[derive(Clone, CandidType, Deserialize)]
+pub struct EntryVersion {
+    pub entry_key: Vec<u8>,
+    pub ciphertext: Vec<u8>,
+    pub iv: Vec<u8>,
+    pub replaced_at: u64, // ns when this version was superseded by an edit
+}
+
 #[derive(Clone, CandidType, Deserialize)]
 pub struct Entry {
     pub id: u64,
@@ -191,6 +201,10 @@ pub struct Entry {
     pub entry_key: Vec<u8>,   // 32 random bytes (per-entry salt)
     pub ciphertext: Vec<u8>,  // AES-GCM(per_entry_key, K_sheet, payload)
     pub iv: Vec<u8>,
+    // v1.7.0: edit history + soft delete. Optional ⇒ Candid decodes
+    // pre-v1.7.0 entries with these absent (None).
+    pub history: Option<Vec<EntryVersion>>, // prior versions, oldest first
+    pub deleted_at: Option<u64>,            // soft-delete marker (ns)
 }
 
 impl Storable for Entry {
@@ -306,9 +320,10 @@ impl Storable for RecoveryKey {
 // v1.5.0 (schema v3 -> v4): added optional encrypted name fields to Pair,
 // Sheet, PairSummary, CreateSheetReq.
 // v1.6.0 (schema v4 -> v5): added optional templates_enc/iv to UserRecord.
-// All new fields are `opt`, so Candid decodes older records with them as
-// None — no data migration needed.
-const SCHEMA_VERSION: u32 = 5;
+// v1.7.0 (schema v5 -> v6): added optional history + deleted_at to Entry
+// (edit history + soft delete). All new fields are `opt`, so Candid decodes
+// older records with them absent — no data migration needed.
+const SCHEMA_VERSION: u32 = 6;
 
 thread_local! {
     static MEMORY_MANAGER: RefCell<MemoryManager<DefaultMemoryImpl>> =
@@ -727,6 +742,8 @@ fn inspect_message() {
         // Phase 4: entries
         "add_entry",
         "edit_entry",
+        "delete_entry",
+        "restore_entry",
         "get_entry",
         "list_entries",
         // v1.1.1: real vetkd
@@ -768,6 +785,8 @@ fn inspect_message() {
         "start_new_sheet",
         "add_entry",
         "edit_entry",
+        "delete_entry",
+        "restore_entry",
         "vetkd_wrap_sheet_key",
         "submit_replace_member",
         "register_recovery_pubkey",
@@ -1499,6 +1518,8 @@ fn add_entry(req: AddEntryReq) -> Entry {
         entry_key: req.entry_key,
         ciphertext: req.ciphertext,
         iv: req.iv,
+        history: None,
+        deleted_at: None,
     };
     // v1.3.0: per-sheet stable map (not the in-memory BTreeMap<String, Vec<Entry>>
     // we had before — that lost data on upgrade). v1.3.2: a single
@@ -1549,6 +1570,20 @@ fn edit_entry(req: EditEntryReq) -> Entry {
         sheet_entries_insert(&req.sheet_id, req.entry_id, entry);
         ic_cdk::trap("only the original creator can edit this entry");
     }
+    if entry.deleted_at.is_some() {
+        sheet_entries_insert(&req.sheet_id, req.entry_id, entry);
+        ic_cdk::trap("cannot edit a deleted entry");
+    }
+    // v1.7.0: snapshot the current (pre-edit) ciphertext into history before
+    // overwriting, so the full edit history is preserved.
+    let mut hist = entry.history.take().unwrap_or_default();
+    hist.push(EntryVersion {
+        entry_key: entry.entry_key.clone(),
+        ciphertext: entry.ciphertext.clone(),
+        iv: entry.iv.clone(),
+        replaced_at: now,
+    });
+    entry.history = Some(hist);
     entry.entry_key = req.entry_key;
     entry.ciphertext = req.ciphertext;
     entry.iv = req.iv;
@@ -1556,6 +1591,54 @@ fn edit_entry(req: EditEntryReq) -> Entry {
     let result = entry.clone();
     sheet_entries_insert(&req.sheet_id, req.entry_id, entry);
     result
+}
+
+/// delete_entry: soft-delete (mark deleted). The entry stays stored (with
+/// its history) so it can be shown/restored; balances exclude it. Only the
+/// original creator can delete, on an active sheet.
+#[ic_cdk::update]
+fn delete_entry(sheet_id: String, entry_id: u64) {
+    let caller = ic_cdk::api::msg_caller();
+    require_authed();
+    if !caller_owns_sheet(&sheet_id) {
+        ic_cdk::trap("caller does not have access to this sheet");
+    }
+    if !sheet_is_active(&sheet_id) {
+        ic_cdk::trap("sheet is not active");
+    }
+    let Some(mut entry) = sheet_entries_remove(&sheet_id, entry_id) else {
+        ic_cdk::trap("entry not found");
+    };
+    if entry.created_by != caller {
+        sheet_entries_insert(&sheet_id, entry_id, entry);
+        ic_cdk::trap("only the original creator can delete this entry");
+    }
+    if entry.deleted_at.is_none() {
+        entry.deleted_at = Some(ic_cdk::api::time());
+    }
+    sheet_entries_insert(&sheet_id, entry_id, entry);
+}
+
+/// restore_entry: undo a soft-delete. Creator-only, active sheet.
+#[ic_cdk::update]
+fn restore_entry(sheet_id: String, entry_id: u64) {
+    let caller = ic_cdk::api::msg_caller();
+    require_authed();
+    if !caller_owns_sheet(&sheet_id) {
+        ic_cdk::trap("caller does not have access to this sheet");
+    }
+    if !sheet_is_active(&sheet_id) {
+        ic_cdk::trap("sheet is not active");
+    }
+    let Some(mut entry) = sheet_entries_remove(&sheet_id, entry_id) else {
+        ic_cdk::trap("entry not found");
+    };
+    if entry.created_by != caller {
+        sheet_entries_insert(&sheet_id, entry_id, entry);
+        ic_cdk::trap("only the original creator can restore this entry");
+    }
+    entry.deleted_at = None;
+    sheet_entries_insert(&sheet_id, entry_id, entry);
 }
 
 /// get_entry: fetch a single entry by (sheet_id, id).

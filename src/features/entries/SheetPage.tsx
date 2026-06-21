@@ -85,12 +85,16 @@ function dueDisplayLines(
   }));
 }
 
+type EntryHistoryVersion = { payload: EntryPayload; replacedAt: number };
+
 type DecryptedEntry = {
   id: number;
   created_by: string;
   created_at_server: number;
   updated_at_server: number | null;
   payload: EntryPayload;
+  deleted: boolean;
+  history: EntryHistoryVersion[]; // prior versions, oldest first
 };
 
 type SortKey = "newest" | "oldest" | "amount-desc" | "amount-asc";
@@ -129,6 +133,14 @@ export function SheetPage() {
   const [renamingAccount, setRenamingAccount] = useState(false);
   const [accountNameDraft, setAccountNameDraft] = useState("");
   const [accountRenameBusy, setAccountRenameBusy] = useState(false);
+  const [showDeleted, setShowDeleted] = useState(false);
+  const [openHistory, setOpenHistory] = useState<Set<number>>(new Set());
+  const toggleHistory = (id: number) =>
+    setOpenHistory((s) => {
+      const n = new Set(s);
+      n.has(id) ? n.delete(id) : n.add(id);
+      return n;
+    });
   const openAdd = (initial: Partial<EntryPayload> | null) => {
     setModal({ initial, entryId: null });
     setAddOpen(false);
@@ -206,6 +218,22 @@ export function SheetPage() {
           new Uint8Array(e.ciphertext),
           K_sheet,
         );
+        // Decrypt prior versions (edit history), oldest first.
+        const versions: any[] = e.history && e.history.length ? e.history[0] : [];
+        const history: EntryHistoryVersion[] = [];
+        for (const v of versions) {
+          try {
+            const vpt = await decryptEntryPayload(
+              new Uint8Array(v.entry_key),
+              new Uint8Array(v.iv),
+              new Uint8Array(v.ciphertext),
+              K_sheet,
+            );
+            history.push({ payload: decodeEntry(vpt), replacedAt: Number(v.replaced_at) });
+          } catch {
+            /* skip an undecryptable version */
+          }
+        }
         dec.push({
           id: Number(e.id),
           created_by: e.created_by.toText(),
@@ -214,6 +242,8 @@ export function SheetPage() {
             ? Number(e.updated_at_server[0])
             : null,
           payload: decodeEntry(pt),
+          deleted: !!(e.deleted_at && e.deleted_at.length),
+          history,
         });
       }
       setEntries(dec);
@@ -231,7 +261,7 @@ export function SheetPage() {
   }, [actor, sheetId]);
 
   const sorted = useMemo(() => {
-    const arr = entries.slice();
+    const arr = entries.filter((e) => showDeleted || !e.deleted);
     switch (sortKey) {
       case "newest":
         return arr.sort((a, b) => b.payload.ts - a.payload.ts);
@@ -246,7 +276,7 @@ export function SheetPage() {
           (a, b) => a.payload.amount_minor - b.payload.amount_minor,
         );
     }
-  }, [entries, sortKey]);
+  }, [entries, sortKey, showDeleted]);
 
   async function onSubmit(p: EntryPayload) {
     if (!actor) return;
@@ -277,12 +307,36 @@ export function SheetPage() {
     await reload();
   }
 
+  async function onDelete(entryId: number) {
+    if (!actor) return;
+    try {
+      await (actor as any).delete_entry(sheetId, BigInt(entryId));
+      toasts.show({ kind: "success", text: "Entry deleted" });
+      await reload();
+    } catch (e) {
+      toasts.show({ kind: "error", text: (e as Error).message });
+    }
+  }
+
+  async function onRestore(entryId: number) {
+    if (!actor) return;
+    try {
+      await (actor as any).restore_entry(sheetId, BigInt(entryId));
+      toasts.show({ kind: "success", text: "Entry restored" });
+      await reload();
+    } catch (e) {
+      toasts.show({ kind: "error", text: (e as Error).message });
+    }
+  }
+
   function onExportCsv() {
-    if (entries.length === 0) return;
+    // Export only live (non-deleted) entries.
+    const live = entries.filter((e) => !e.deleted);
+    if (live.length === 0) return;
     const me = state.kind === "authenticated"
       ? state.identity.getPrincipal().toText()
       : "";
-    const rows = entries.map((e) => ({
+    const rows = live.map((e) => ({
       payload: e.payload,
       created_by_me: e.created_by === me,
       edited: e.updated_at_server != null,
@@ -339,7 +393,8 @@ export function SheetPage() {
   if (err) return <p className="err">{err}</p>;
   if (!sheet) return <p>Not found.</p>;
 
-  const payloads = entries.map((e) => e.payload);
+  // Balances ignore deleted entries.
+  const payloads = entries.filter((e) => !e.deleted).map((e) => e.payload);
   const overall = computeBalances(payloads);
   const thisMonth = computeBalancesAsOf(payloads, Date.now());
   const prevMonth = computeBalancesAsOf(payloads, endOfPrevMonth(Date.now()));
@@ -549,7 +604,7 @@ export function SheetPage() {
               pairId={pairId}
               currencies={sheet.enabled_currencies}
               closingDays={Number(sheet.closing_window_days)}
-              entries={entries.map((e) => e.payload)}
+              entries={entries.filter((e) => !e.deleted).map((e) => e.payload)}
             />
           </>
         )}
@@ -576,21 +631,35 @@ export function SheetPage() {
       <section className="history">
         <div className="history-head">
           <h2>History</h2>
-          {entries.length > 1 && (
-            <label className="sort">
-              <span className="muted small">Sort:</span>
-              <select
-                value={sortKey}
-                onChange={(e) => setSortKey(e.target.value as SortKey)}
-              >
-                {SORT_OPTIONS.map((o) => (
-                  <option key={o.value} value={o.value}>
-                    {o.label}
-                  </option>
-                ))}
-              </select>
-            </label>
-          )}
+          <div className="row" style={{ gap: 12, alignItems: "center" }}>
+            {entries.some((e) => e.deleted) && (
+              <label className="row" style={{ gap: 4, alignItems: "center" }}>
+                <input
+                  type="checkbox"
+                  checked={showDeleted}
+                  onChange={(e) => setShowDeleted(e.target.checked)}
+                />
+                <span className="muted small">
+                  Show deleted ({entries.filter((e) => e.deleted).length})
+                </span>
+              </label>
+            )}
+            {entries.length > 1 && (
+              <label className="sort">
+                <span className="muted small">Sort:</span>
+                <select
+                  value={sortKey}
+                  onChange={(e) => setSortKey(e.target.value as SortKey)}
+                >
+                  {SORT_OPTIONS.map((o) => (
+                    <option key={o.value} value={o.value}>
+                      {o.label}
+                    </option>
+                  ))}
+                </select>
+              </label>
+            )}
+          </div>
         </div>
         {entries.length === 0 ? (
           <p className="muted">📝 No entries yet. Add one above.</p>
@@ -601,74 +670,132 @@ export function SheetPage() {
               const sign = e.payload.direction === "credit" ? "+" : "−";
               return (
                 <li key={e.id}>
-                  <div className="row-1">
-                    <strong>{e.payload.note || "(no note)"}</strong>
-                    <span className="muted small">
-                      {" · "}
-                      {new Date(e.payload.ts).toISOString().slice(0, 10)}
-                      {" · "}
-                      {mine ? "you" : themShort}
-                      {" · "}
-                      {e.payload.direction === "credit" ? "Credit" : "Debit"}
-                      {" · "}
-                      {e.payload.txn_type === "settlement" ? "settlement" : "IOU"}
-                      {e.updated_at_server ? " (edited)" : ""}
-                    </span>
-                  </div>
                   <div
-                    className={`row-2 ${
-                      e.payload.direction === "credit" ? "amt-credit" : "amt-debt"
-                    }`}
-                  >
-                    {sign}
-                    {formatMinor(e.payload.amount_minor, e.payload.currency)}
-                  </div>
-                  {e.payload.fee && (
-                    <div className="muted small">
-                      {formatMinor(e.payload.fee.gross_amount_minor, e.payload.currency)}
-                      {e.payload.fee.percent > 0 ? ` − ${e.payload.fee.percent}%` : ""}
-                      {e.payload.fee.fixed_minor
-                        ? ` − ${formatMinor(e.payload.fee.fixed_minor, e.payload.currency)}`
-                        : ""}
-                      {" fee → net "}
-                      {formatMinor(e.payload.amount_minor, e.payload.currency)}
-                    </div>
-                  )}
-                  {(() => {
-                    const lines = dueDisplayLines(e.payload);
-                    if (!lines) return null;
-                    if (lines.length === 1) {
-                      return (
-                        <div className="muted small">due {lines[0].date}</div>
-                      );
+                    style={
+                      e.deleted
+                        ? {
+                            textDecoration: "line-through",
+                            color: "var(--debt)",
+                            opacity: 0.6,
+                          }
+                        : undefined
                     }
-                    return (
-                      <div className="muted small">
-                        {lines.map((l, i) => (
-                          <div key={i}>
-                            due {l.date}: {l.value}
-                          </div>
-                        ))}
-                      </div>
-                    );
-                  })()}
-                  {e.payload.convert && (
-                    <div className="muted small">
-                      from {e.payload.convert.from_amount_minor / 100}{" "}
-                      {e.payload.convert.from_currency} @{" "}
-                      {e.payload.convert.rate.toFixed(4)} (
-                      {e.payload.convert.rate_source})
+                  >
+                    <div className="row-1">
+                      <strong>{e.payload.note || "(no note)"}</strong>
+                      <span className="muted small">
+                        {" · "}
+                        {new Date(e.payload.ts).toISOString().slice(0, 10)}
+                        {" · "}
+                        {mine ? "you" : themShort}
+                        {" · "}
+                        {e.payload.direction === "credit" ? "Credit" : "Debit"}
+                        {" · "}
+                        {e.payload.txn_type === "settlement" ? "settlement" : "IOU"}
+                        {e.history.length > 0 ? ` · edited ${e.history.length}×` : ""}
+                      </span>
                     </div>
-                  )}
-                  {mine && isActive(sheet.state) && (
-                    <button
-                      className="small"
-                      onClick={() =>
-                        setModal({ initial: e.payload, entryId: e.id })
+                    <div
+                      className={
+                        "row-2" +
+                        (e.deleted
+                          ? ""
+                          : e.payload.direction === "credit"
+                            ? " amt-credit"
+                            : " amt-debt")
                       }
                     >
-                      edit
-                    </button>
+                      {sign}
+                      {formatMinor(e.payload.amount_minor, e.payload.currency)}
+                    </div>
+                    {e.payload.fee && (
+                      <div className="muted small">
+                        {formatMinor(e.payload.fee.gross_amount_minor, e.payload.currency)}
+                        {e.payload.fee.percent > 0 ? ` − ${e.payload.fee.percent}%` : ""}
+                        {e.payload.fee.fixed_minor
+                          ? ` − ${formatMinor(e.payload.fee.fixed_minor, e.payload.currency)}`
+                          : ""}
+                        {" fee → net "}
+                        {formatMinor(e.payload.amount_minor, e.payload.currency)}
+                      </div>
+                    )}
+                    {(() => {
+                      const lines = dueDisplayLines(e.payload);
+                      if (!lines) return null;
+                      if (lines.length === 1) {
+                        return (
+                          <div className="muted small">due {lines[0].date}</div>
+                        );
+                      }
+                      return (
+                        <div className="muted small">
+                          {lines.map((l, i) => (
+                            <div key={i}>
+                              due {l.date}: {l.value}
+                            </div>
+                          ))}
+                        </div>
+                      );
+                    })()}
+                    {e.payload.convert && (
+                      <div className="muted small">
+                        from {e.payload.convert.from_amount_minor / 100}{" "}
+                        {e.payload.convert.from_currency} @{" "}
+                        {e.payload.convert.rate.toFixed(4)} (
+                        {e.payload.convert.rate_source})
+                      </div>
+                    )}
+                  </div>
+
+                  <div className="row" style={{ gap: 10, alignItems: "center", marginTop: 4 }}>
+                    {e.deleted ? (
+                      <>
+                        <span className="muted small" style={{ color: "var(--debt)" }}>
+                          deleted
+                        </span>
+                        {mine && isActive(sheet.state) && (
+                          <button className="small secondary" onClick={() => void onRestore(e.id)}>
+                            restore
+                          </button>
+                        )}
+                      </>
+                    ) : (
+                      mine &&
+                      isActive(sheet.state) && (
+                        <>
+                          <button
+                            className="small"
+                            onClick={() => setModal({ initial: e.payload, entryId: e.id })}
+                          >
+                            edit
+                          </button>
+                          <button className="small secondary" onClick={() => void onDelete(e.id)}>
+                            delete
+                          </button>
+                        </>
+                      )
+                    )}
+                    {e.history.length > 0 && (
+                      <button className="small secondary" onClick={() => toggleHistory(e.id)}>
+                        {openHistory.has(e.id) ? "hide history" : "history"}
+                      </button>
+                    )}
+                  </div>
+
+                  {openHistory.has(e.id) && e.history.length > 0 && (
+                    <div
+                      className="muted small"
+                      style={{ marginTop: 4, paddingLeft: 8, borderLeft: "2px solid var(--debt)" }}
+                    >
+                      {e.history.map((v, i) => (
+                        <div key={i}>
+                          changed {new Date(v.replacedAt / 1_000_000).toISOString().slice(0, 10)} — was:{" "}
+                          {v.payload.note || "(no note)"} ·{" "}
+                          {v.payload.direction === "credit" ? "+" : "−"}
+                          {formatMinor(v.payload.amount_minor, v.payload.currency)}
+                        </div>
+                      ))}
+                    </div>
                   )}
                 </li>
               );

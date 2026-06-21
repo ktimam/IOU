@@ -93,6 +93,13 @@ type CreateSheetReq = record {
     name_iv : opt vec nat8;
 };
 
+type EntryVersion = record {
+    entry_key : vec nat8;
+    ciphertext : vec nat8;
+    iv : vec nat8;
+    replaced_at : nat64;
+};
+
 type Entry = record {
     id : nat64;
     pair_id : text;
@@ -103,6 +110,8 @@ type Entry = record {
     entry_key : vec nat8;   // 32 random bytes (per-entry salt)
     ciphertext : vec nat8;  // AES-GCM(per_entry_key, K_sheet, payload)
     iv : vec nat8;
+    history : opt vec EntryVersion;  // prior versions (edit history)
+    deleted_at : opt nat64;          // soft-delete marker
 };
 
 type AddEntryReq = record {
@@ -195,6 +204,8 @@ service : {
     // Phase 3
     add_entry : (AddEntryReq) -> (Entry);
     edit_entry : (EditEntryReq) -> (Entry);
+    delete_entry : (text, nat64) -> ();
+    restore_entry : (text, nat64) -> ();
     get_entry : (text, nat64) -> (opt Entry) query;
     list_entries : (text, opt nat64, nat32) -> (ListEntriesResult) query;
 
