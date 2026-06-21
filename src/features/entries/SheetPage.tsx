@@ -29,6 +29,7 @@ import { downloadCsv, entriesToCsv } from "./csvExport";
 import { useToasts } from "../ui/Toasts";
 import { usePreferences } from "../settings/usePreferences";
 import { useTemplates, type TxnTemplate } from "../templates/TemplatesContext";
+import { TemplatesManager } from "../templates/TemplatesManager";
 
 // Build entry-form defaults from a template.
 function templateToInitial(t: TxnTemplate): Partial<EntryPayload> {
@@ -113,6 +114,7 @@ export function SheetPage() {
   const [sortKey, setSortKey] = useState<SortKey>("newest");
   const { templates } = useTemplates();
   const [addOpen, setAddOpen] = useState(false);
+  const [typesOpen, setTypesOpen] = useState(false);
   const openAdd = (initial: Partial<EntryPayload> | null) => {
     setModal({ initial, entryId: null });
     setAddOpen(false);
@@ -432,6 +434,15 @@ export function SheetPage() {
             ⤓ Export CSV
           </button>
         )}
+        {!modal && (
+          <button
+            className="secondary"
+            onClick={() => setTypesOpen(true)}
+            title="Create or edit reusable transaction types"
+          >
+            Add type
+          </button>
+        )}
       </div>
 
       <section className="history">
@@ -541,6 +552,25 @@ export function SheetPage() {
               onCancel={() => setModal(null)}
               onSubmit={onSubmit}
             />
+          </div>
+        </div>
+      )}
+
+      {typesOpen && (
+        <div className="modal-backdrop" onClick={() => setTypesOpen(false)}>
+          <div
+            className="modal"
+            onClick={(e) => e.stopPropagation()}
+            role="dialog"
+            aria-modal="true"
+            style={{ maxHeight: "85vh", overflowY: "auto" }}
+          >
+            <div className="row" style={{ justifyContent: "flex-end" }}>
+              <button className="secondary small" onClick={() => setTypesOpen(false)}>
+                Close
+              </button>
+            </div>
+            <TemplatesManager />
           </div>
         </div>
       )}
