@@ -21,6 +21,11 @@ import {
 import { unwrap } from "../flows/useActor";
 import type { Direction, TxnType } from "../entries/types";
 
+// One slice of a template's default due schedule. Relative (days from the
+// transaction date) so the template stays reusable; converted to absolute
+// due dates when applied. percents across the schedule must total 100.
+export type TemplatePortion = { offset_days: number; percent: number };
+
 export type TxnTemplate = {
   id: string;
   name: string;
@@ -30,6 +35,7 @@ export type TxnTemplate = {
   amount_minor?: number; // optional default face/gross amount
   fee_percent?: number; // IOU fee %
   fee_fixed_minor?: number; // IOU flat fee
+  schedule?: TemplatePortion[]; // IOU default due schedule (relative)
   note?: string;
 };
 
@@ -38,6 +44,7 @@ type Ctx = {
   loading: boolean;
   error: string | null;
   addTemplate: (t: Omit<TxnTemplate, "id">) => Promise<void>;
+  updateTemplate: (t: TxnTemplate) => Promise<void>;
   removeTemplate: (id: string) => Promise<void>;
 };
 
@@ -113,6 +120,15 @@ export function TemplatesProvider({ children }: { children: ReactNode }) {
     [templates, persist],
   );
 
+  const updateTemplate = useCallback(
+    async (t: TxnTemplate) => {
+      const next = templates.map((x) => (x.id === t.id ? t : x));
+      await persist(next);
+      setTemplates(next);
+    },
+    [templates, persist],
+  );
+
   const removeTemplate = useCallback(
     async (id: string) => {
       const next = templates.filter((t) => t.id !== id);
@@ -124,7 +140,7 @@ export function TemplatesProvider({ children }: { children: ReactNode }) {
 
   return (
     <TemplatesContext.Provider
-      value={{ templates, loading, error, addTemplate, removeTemplate }}
+      value={{ templates, loading, error, addTemplate, updateTemplate, removeTemplate }}
     >
       {children}
     </TemplatesContext.Provider>

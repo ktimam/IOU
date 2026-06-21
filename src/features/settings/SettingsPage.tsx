@@ -9,7 +9,11 @@ import { useState } from "react";
 import { Link } from "react-router-dom";
 import { usePreferences } from "./usePreferences";
 import { COMMON_CURRENCIES } from "./currencies";
-import { useTemplates } from "../templates/TemplatesContext";
+import {
+  useTemplates,
+  type TxnTemplate,
+  type TemplatePortion,
+} from "../templates/TemplatesContext";
 import type { Direction, TxnType } from "../entries/types";
 
 export function SettingsPage() {
@@ -84,8 +88,12 @@ function fmtMajor(minor?: number): string {
   return minor ? (minor / 100).toFixed(2) : "";
 }
 
+type SchedRow = { days: number; percent: number };
+
 function TemplatesManager() {
-  const { templates, addTemplate, removeTemplate, loading, error } = useTemplates();
+  const { templates, addTemplate, updateTemplate, removeTemplate, loading, error } =
+    useTemplates();
+  const [editingId, setEditingId] = useState<string | null>(null);
   const [name, setName] = useState("");
   const [direction, setDirection] = useState<Direction>("credit");
   const [txnType, setTxnType] = useState<TxnType>("iou");
@@ -94,35 +102,94 @@ function TemplatesManager() {
   const [feeFixed, setFeeFixed] = useState("");
   const [amount, setAmount] = useState("");
   const [note, setNote] = useState("");
+  const [sched, setSched] = useState<SchedRow[]>([{ days: 0, percent: 100 }]);
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
 
-  async function add() {
+  const schedTotal = sched.reduce((t, r) => t + (Number(r.percent) || 0), 0);
+  const schedValid = sched.length === 1 || schedTotal === 100;
+
+  const setRowDays = (i: number, d: number) =>
+    setSched((s) => s.map((r, j) => (j === i ? { ...r, days: d } : r)));
+  const setRowPct = (i: number, p: number) =>
+    setSched((s) => s.map((r, j) => (j === i ? { ...r, percent: p } : r)));
+  const addSchedRow = () => setSched((s) => [...s, { days: 0, percent: 0 }]);
+  const removeSchedRow = (i: number) =>
+    setSched((s) => s.filter((_, j) => j !== i));
+
+  function resetForm() {
+    setEditingId(null);
+    setName("");
+    setDirection("credit");
+    setTxnType("iou");
+    setCurrency("");
+    setFeePercent(0);
+    setFeeFixed("");
+    setAmount("");
+    setNote("");
+    setSched([{ days: 0, percent: 100 }]);
+    setErr(null);
+  }
+
+  function startEdit(t: TxnTemplate) {
+    setEditingId(t.id);
+    setName(t.name);
+    setDirection(t.direction);
+    setTxnType(t.txn_type);
+    setCurrency(t.currency ?? "");
+    setFeePercent(t.fee_percent ?? 0);
+    setFeeFixed(t.fee_fixed_minor ? (t.fee_fixed_minor / 100).toFixed(2) : "");
+    setAmount(t.amount_minor ? (t.amount_minor / 100).toFixed(2) : "");
+    setNote(t.note ?? "");
+    setSched(
+      t.schedule && t.schedule.length
+        ? t.schedule.map((p) => ({ days: p.offset_days, percent: p.percent }))
+        : [{ days: 0, percent: 100 }],
+    );
+    setErr(null);
+  }
+
+  async function save() {
     if (!name.trim()) {
       setErr("Give the template a name");
       return;
     }
+    let schedule: TemplatePortion[] | undefined;
+    if (txnType === "iou") {
+      if (sched.length > 1 && schedTotal !== 100) {
+        setErr("schedule percentages must total 100%");
+        return;
+      }
+      // Only store a schedule if it's non-trivial (a split, or a non-zero
+      // delay); a single "due in 0 days" is the default already.
+      const meaningful = sched.length > 1 || (sched.length === 1 && sched[0].days > 0);
+      if (meaningful) {
+        schedule = sched.map((r) => ({
+          offset_days: Math.max(0, Math.round(r.days) || 0),
+          percent: sched.length === 1 ? 100 : Number(r.percent) || 0,
+        }));
+      }
+    }
+    const base = {
+      name: name.trim(),
+      direction,
+      txn_type: txnType,
+      currency: currency || undefined,
+      amount_minor: amount ? Math.round(parseFloat(amount) * 100) : undefined,
+      fee_percent: txnType === "iou" && feePercent > 0 ? feePercent : undefined,
+      fee_fixed_minor:
+        txnType === "iou" && feeFixed
+          ? Math.round(parseFloat(feeFixed) * 100)
+          : undefined,
+      schedule,
+      note: note.trim() || undefined,
+    };
     setBusy(true);
     setErr(null);
     try {
-      await addTemplate({
-        name: name.trim(),
-        direction,
-        txn_type: txnType,
-        currency: currency || undefined,
-        amount_minor: amount ? Math.round(parseFloat(amount) * 100) : undefined,
-        fee_percent: txnType === "iou" && feePercent > 0 ? feePercent : undefined,
-        fee_fixed_minor:
-          txnType === "iou" && feeFixed
-            ? Math.round(parseFloat(feeFixed) * 100)
-            : undefined,
-        note: note.trim() || undefined,
-      });
-      setName("");
-      setFeePercent(0);
-      setFeeFixed("");
-      setAmount("");
-      setNote("");
+      if (editingId) await updateTemplate({ id: editingId, ...base });
+      else await addTemplate(base);
+      resetForm();
     } catch (e) {
       setErr((e as Error).message);
     } finally {
@@ -130,7 +197,7 @@ function TemplatesManager() {
     }
   }
 
-  function summary(t: (typeof templates)[number]): string {
+  function summary(t: TxnTemplate): string {
     const parts: string[] = [
       t.direction === "credit" ? "Credit" : "Debit",
       t.txn_type === "settlement" ? "Settlement" : "IOU",
@@ -141,6 +208,15 @@ function TemplatesManager() {
     if (t.fee_percent) fee.push(`${t.fee_percent}%`);
     if (t.fee_fixed_minor) fee.push(`${fmtMajor(t.fee_fixed_minor)} fixed`);
     if (fee.length) parts.push(`fee ${fee.join(" + ")}`);
+    if (t.schedule && t.schedule.length) {
+      const sd = t.schedule
+        .map((p) => {
+          const when = p.offset_days === 0 ? "now" : `+${p.offset_days}d`;
+          return t.schedule!.length > 1 ? `${when} ${p.percent}%` : when;
+        })
+        .join(", ");
+      parts.push(`due ${sd}`);
+    }
     return parts.join(" · ");
   }
 
@@ -148,9 +224,10 @@ function TemplatesManager() {
     <div className="card">
       <h2>Transaction templates</h2>
       <p className="muted small">
-        Save presets like “Reservation” (e.g. 20% + a fixed fee). Pick one
-        from <strong>+ Add ▾</strong> on any sheet to pre-fill an entry.
-        Stored encrypted on your account, usable everywhere.
+        Save presets like “Reservation” (e.g. 20% + a fixed fee, split due
+        dates). Pick one from <strong>+ Add ▾</strong> on any sheet to
+        pre-fill an entry. Stored encrypted on your account, usable
+        everywhere.
       </p>
 
       {loading && <p className="muted small">Loading…</p>}
@@ -162,6 +239,9 @@ function TemplatesManager() {
             <li key={t.id} style={{ marginBottom: 6 }}>
               <strong>{t.name}</strong>{" "}
               <span className="muted small">{summary(t)}</span>{" "}
+              <button className="secondary small" onClick={() => startEdit(t)}>
+                Edit
+              </button>{" "}
               <button
                 className="secondary small"
                 onClick={() => void removeTemplate(t.id)}
@@ -174,6 +254,9 @@ function TemplatesManager() {
       )}
 
       <div className="col" style={{ gap: 8, marginTop: 12 }}>
+        <strong className="small">
+          {editingId ? "Edit template" : "New template"}
+        </strong>
         <input
           placeholder="Template name (e.g. Reservation)"
           maxLength={48}
@@ -240,6 +323,59 @@ function TemplatesManager() {
             </label>
           </div>
         )}
+        {txnType === "iou" && (
+          <div className="col" style={{ gap: 6 }}>
+            <div className="row" style={{ justifyContent: "space-between" }}>
+              <span className="muted small">Default due schedule</span>
+              <button type="button" className="secondary small" onClick={addSchedRow}>
+                + Split
+              </button>
+            </div>
+            {sched.map((r, i) => (
+              <div className="row" key={i} style={{ gap: 6, alignItems: "center" }}>
+                <span className="muted small">Due in</span>
+                <input
+                  type="number"
+                  min={0}
+                  value={r.days}
+                  onChange={(e) => setRowDays(i, Number(e.target.value))}
+                  style={{ width: 70 }}
+                />
+                <span className="muted small">days</span>
+                {sched.length > 1 && (
+                  <>
+                    <input
+                      type="number"
+                      min={0}
+                      max={100}
+                      value={r.percent}
+                      onChange={(e) => setRowPct(i, Number(e.target.value))}
+                      style={{ width: 70 }}
+                      aria-label="percent"
+                    />
+                    <span className="muted small">%</span>
+                    <button
+                      type="button"
+                      className="secondary small"
+                      onClick={() => removeSchedRow(i)}
+                      aria-label="remove portion"
+                    >
+                      ✕
+                    </button>
+                  </>
+                )}
+              </div>
+            ))}
+            {sched.length > 1 && (
+              <span
+                className="muted small"
+                style={{ color: schedValid ? undefined : "var(--debt)" }}
+              >
+                Total: {schedTotal}%{schedValid ? "" : " — must be 100%"}
+              </span>
+            )}
+          </div>
+        )}
         <div className="row" style={{ gap: 8, flexWrap: "wrap" }}>
           <label>
             <span className="muted small">Default amount (optional)</span>
@@ -259,10 +395,18 @@ function TemplatesManager() {
           </label>
         </div>
         {err && <p className="err">{err}</p>}
-        <div className="cta">
-          <button onClick={() => void add()} disabled={busy || !name.trim()}>
-            {busy ? "Saving…" : "Add template"}
+        <div className="cta-row">
+          <button
+            onClick={() => void save()}
+            disabled={busy || !name.trim() || (txnType === "iou" && !schedValid)}
+          >
+            {busy ? "Saving…" : editingId ? "Save changes" : "Add template"}
           </button>
+          {editingId && (
+            <button className="secondary" onClick={resetForm} disabled={busy}>
+              Cancel
+            </button>
+          )}
         </div>
       </div>
     </div>

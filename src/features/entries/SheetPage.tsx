@@ -36,6 +36,17 @@ function templateToInitial(t: TxnTemplate): Partial<EntryPayload> {
   const feePct = t.fee_percent ?? 0;
   const feeFixed = t.fee_fixed_minor ?? 0;
   const hasFee = t.txn_type === "iou" && (feePct > 0 || feeFixed > 0);
+  // Convert the template's relative schedule (days from today) to absolute
+  // due dates anchored at today (UTC midnight, matching the entry form).
+  let schedule: EntryPayload["schedule"];
+  if (t.txn_type === "iou" && t.schedule && t.schedule.length) {
+    const now = new Date();
+    const base = Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate());
+    schedule = t.schedule.map((p) => ({
+      due_ts: base + p.offset_days * 86_400_000,
+      percent: p.percent,
+    }));
+  }
   return {
     currency: t.currency,
     amount_minor: t.amount_minor,
@@ -45,6 +56,7 @@ function templateToInitial(t: TxnTemplate): Partial<EntryPayload> {
     fee: hasFee
       ? { percent: feePct, fixed_minor: feeFixed, gross_amount_minor: gross }
       : undefined,
+    ...(schedule ? { schedule } : {}),
   };
 }
 
