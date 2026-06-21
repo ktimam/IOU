@@ -8,6 +8,7 @@ import {
   useTemplates,
   type TxnTemplate,
   type TemplatePortion,
+  type DueAnchor,
 } from "./TemplatesContext";
 import type { Direction, TxnType } from "../entries/types";
 
@@ -15,7 +16,7 @@ function fmtMajor(minor?: number): string {
   return minor ? (minor / 100).toFixed(2) : "";
 }
 
-type SchedRow = { days: number; percent: number };
+type SchedRow = { anchor: DueAnchor; days: number; percent: number };
 
 export function TemplatesManager() {
   const { templates, addTemplate, updateTemplate, removeTemplate, loading, error } =
@@ -29,7 +30,9 @@ export function TemplatesManager() {
   const [feeFixed, setFeeFixed] = useState("");
   const [amount, setAmount] = useState("");
   const [note, setNote] = useState("");
-  const [sched, setSched] = useState<SchedRow[]>([{ days: 0, percent: 100 }]);
+  const [sched, setSched] = useState<SchedRow[]>([
+    { anchor: "in_days", days: 0, percent: 100 },
+  ]);
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
 
@@ -40,7 +43,10 @@ export function TemplatesManager() {
     setSched((s) => s.map((r, j) => (j === i ? { ...r, days: d } : r)));
   const setRowPct = (i: number, p: number) =>
     setSched((s) => s.map((r, j) => (j === i ? { ...r, percent: p } : r)));
-  const addSchedRow = () => setSched((s) => [...s, { days: 0, percent: 0 }]);
+  const setRowAnchor = (i: number, a: DueAnchor) =>
+    setSched((s) => s.map((r, j) => (j === i ? { ...r, anchor: a } : r)));
+  const addSchedRow = () =>
+    setSched((s) => [...s, { anchor: "in_days", days: 0, percent: 0 }]);
   const removeSchedRow = (i: number) =>
     setSched((s) => s.filter((_, j) => j !== i));
 
@@ -54,7 +60,7 @@ export function TemplatesManager() {
     setFeeFixed("");
     setAmount("");
     setNote("");
-    setSched([{ days: 0, percent: 100 }]);
+    setSched([{ anchor: "in_days", days: 0, percent: 100 }]);
     setErr(null);
   }
 
@@ -70,8 +76,12 @@ export function TemplatesManager() {
     setNote(t.note ?? "");
     setSched(
       t.schedule && t.schedule.length
-        ? t.schedule.map((p) => ({ days: p.offset_days, percent: p.percent }))
-        : [{ days: 0, percent: 100 }],
+        ? t.schedule.map((p) => ({
+            anchor: p.anchor ?? "in_days",
+            days: p.offset_days,
+            percent: p.percent,
+          }))
+        : [{ anchor: "in_days", days: 0, percent: 100 }],
     );
     setErr(null);
   }
@@ -87,13 +97,17 @@ export function TemplatesManager() {
         setErr("schedule percentages must total 100%");
         return;
       }
-      // Only store a schedule if it's non-trivial (a split, or a non-zero
-      // delay); a single "due in 0 days" is the default already.
-      const meaningful = sched.length > 1 || (sched.length === 1 && sched[0].days > 0);
+      // Only store a schedule if it's non-trivial (a split, a non-zero
+      // delay, or a non-default anchor); a single "due in 0 days" is the
+      // default already.
+      const meaningful =
+        sched.length > 1 ||
+        sched.some((r) => r.anchor !== "in_days" || r.days > 0);
       if (meaningful) {
         schedule = sched.map((r) => ({
-          offset_days: Math.max(0, Math.round(r.days) || 0),
+          offset_days: r.anchor === "in_days" ? Math.max(0, Math.round(r.days) || 0) : 0,
           percent: sched.length === 1 ? 100 : Number(r.percent) || 0,
+          ...(r.anchor !== "in_days" ? { anchor: r.anchor } : {}),
         }));
       }
     }
@@ -138,7 +152,12 @@ export function TemplatesManager() {
     if (t.schedule && t.schedule.length) {
       const sd = t.schedule
         .map((p) => {
-          const when = p.offset_days === 0 ? "now" : `+${p.offset_days}d`;
+          const when =
+            p.anchor === "start_of_next_month"
+              ? "1st next mo"
+              : p.offset_days === 0
+                ? "now"
+                : `+${p.offset_days}d`;
           return t.schedule!.length > 1 ? `${when} ${p.percent}%` : when;
         })
         .join(", ");
@@ -259,16 +278,27 @@ export function TemplatesManager() {
               </button>
             </div>
             {sched.map((r, i) => (
-              <div className="row" key={i} style={{ gap: 6, alignItems: "center" }}>
-                <span className="muted small">Due in</span>
-                <input
-                  type="number"
-                  min={0}
-                  value={r.days}
-                  onChange={(e) => setRowDays(i, Number(e.target.value))}
-                  style={{ width: 70 }}
-                />
-                <span className="muted small">days</span>
+              <div className="row" key={i} style={{ gap: 6, alignItems: "center", flexWrap: "wrap" }}>
+                <span className="muted small">Due</span>
+                <select
+                  value={r.anchor}
+                  onChange={(e) => setRowAnchor(i, e.target.value as DueAnchor)}
+                >
+                  <option value="in_days">in days</option>
+                  <option value="start_of_next_month">start of next month</option>
+                </select>
+                {r.anchor === "in_days" && (
+                  <>
+                    <input
+                      type="number"
+                      min={0}
+                      value={r.days}
+                      onChange={(e) => setRowDays(i, Number(e.target.value))}
+                      style={{ width: 70 }}
+                    />
+                    <span className="muted small">days</span>
+                  </>
+                )}
                 {sched.length > 1 && (
                   <>
                     <input

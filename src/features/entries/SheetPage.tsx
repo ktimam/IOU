@@ -42,9 +42,14 @@ function templateToInitial(t: TxnTemplate): Partial<EntryPayload> {
   let schedule: EntryPayload["schedule"];
   if (t.txn_type === "iou" && t.schedule && t.schedule.length) {
     const now = new Date();
-    const base = Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate());
+    const y = now.getUTCFullYear();
+    const m = now.getUTCMonth();
+    const base = Date.UTC(y, m, now.getUTCDate());
     schedule = t.schedule.map((p) => ({
-      due_ts: base + p.offset_days * 86_400_000,
+      due_ts:
+        p.anchor === "start_of_next_month"
+          ? Date.UTC(y, m + 1, 1) // rolls over in December correctly
+          : base + p.offset_days * 86_400_000,
       percent: p.percent,
     }));
   }
@@ -115,6 +120,9 @@ export function SheetPage() {
   const { templates } = useTemplates();
   const [addOpen, setAddOpen] = useState(false);
   const [typesOpen, setTypesOpen] = useState(false);
+  const [renamingSheet, setRenamingSheet] = useState(false);
+  const [sheetNameDraft, setSheetNameDraft] = useState("");
+  const [renameBusy, setRenameBusy] = useState(false);
   const openAdd = (initial: Partial<EntryPayload> | null) => {
     setModal({ initial, entryId: null });
     setAddOpen(false);
@@ -284,6 +292,23 @@ export function SheetPage() {
     }
   }
 
+  async function saveSheetName() {
+    if (!actor) return;
+    setRenameBusy(true);
+    try {
+      const K = get(sheetId) ?? (await unwrapFor(sheetId));
+      const { enc, iv } = await encryptName(K, sheetNameDraft.trim());
+      await (actor as any).set_sheet_name(sheetId, enc, iv);
+      cacheSheetName(sheetId, sheetNameDraft.trim());
+      setRenamingSheet(false);
+      toasts.show({ kind: "success", text: "Sheet renamed" });
+    } catch (e) {
+      toasts.show({ kind: "error", text: (e as Error).message });
+    } finally {
+      setRenameBusy(false);
+    }
+  }
+
   if (!state.kind || state.kind !== "authenticated") {
     return <p>Please sign in.</p>;
   }
@@ -322,7 +347,46 @@ export function SheetPage() {
             Details →
           </Link>
         </div>
-        <h1>{sheetName || `Sheet ${sheet.id.slice(0, 8)}…`}</h1>
+        {renamingSheet ? (
+          <div className="row" style={{ gap: 8, alignItems: "center" }}>
+            <input
+              value={sheetNameDraft}
+              onChange={(e) => setSheetNameDraft(e.target.value)}
+              maxLength={48}
+              placeholder="Sheet name"
+              autoFocus
+            />
+            <button
+              className="small"
+              onClick={() => void saveSheetName()}
+              disabled={renameBusy || !sheetNameDraft.trim()}
+            >
+              {renameBusy ? "Saving…" : "Save"}
+            </button>
+            <button
+              className="secondary small"
+              onClick={() => setRenamingSheet(false)}
+              disabled={renameBusy}
+            >
+              Cancel
+            </button>
+          </div>
+        ) : (
+          <div className="row" style={{ gap: 8, alignItems: "center" }}>
+            <h1 style={{ margin: 0 }}>
+              {sheetName || `Sheet ${sheet.id.slice(0, 8)}…`}
+            </h1>
+            <button
+              className="secondary small"
+              onClick={() => {
+                setSheetNameDraft(sheetName);
+                setRenamingSheet(true);
+              }}
+            >
+              Rename
+            </button>
+          </div>
+        )}
         <p className="muted small">
           {isSolo && !partnerName ? (
             "Solo sheet"

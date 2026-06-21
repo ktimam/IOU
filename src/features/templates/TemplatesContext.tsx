@@ -21,10 +21,19 @@ import {
 import { unwrap } from "../flows/useActor";
 import type { Direction, TxnType } from "../entries/types";
 
-// One slice of a template's default due schedule. Relative (days from the
-// transaction date) so the template stays reusable; converted to absolute
-// due dates when applied. percents across the schedule must total 100.
-export type TemplatePortion = { offset_days: number; percent: number };
+// How a template portion's due date is anchored, relative to the
+// transaction date (so the template stays reusable):
+//   "in_days"             → offset_days after the transaction date
+//   "start_of_next_month" → the 1st of the month after the transaction date
+export type DueAnchor = "in_days" | "start_of_next_month";
+
+// One slice of a template's default due schedule. Converted to an absolute
+// due date when applied. percents across the schedule must total 100.
+export type TemplatePortion = {
+  offset_days: number; // used when anchor is "in_days"
+  percent: number;
+  anchor?: DueAnchor; // default "in_days"
+};
 
 export type TxnTemplate = {
   id: string;

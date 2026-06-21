@@ -6,6 +6,7 @@ import { useMyKeypair } from "./useMyKeypair";
 import { useSheetKey } from "./SheetKeyContext";
 import { grantPartnerAccess } from "./grantPartnerAccess";
 import { usePreferences } from "../settings/usePreferences";
+import { encryptName } from "../crypto/devVetkd";
 
 export function Pair() {
   const { pairId } = useParams<{ pairId: string }>();
@@ -13,7 +14,7 @@ export function Pair() {
   const { actor } = useActor();
   const { keypair: myKp } = useMyKeypair();
   const { registerPartnerKey, unwrapFor } = useSheetKey();
-  const { prefs } = usePreferences();
+  const { prefs, cacheAccountName } = usePreferences();
   const nav = useNavigate();
   const [pair, setPair] = useState<any | null>(null);
   const [activeSheetId, setActiveSheetId] = useState<string | null>(null);
@@ -22,6 +23,9 @@ export function Pair() {
   const [error, setError] = useState<string | null>(null);
   const [grantBusy, setGrantBusy] = useState(false);
   const [grantMsg, setGrantMsg] = useState<string | null>(null);
+  const [renaming, setRenaming] = useState(false);
+  const [nameDraft, setNameDraft] = useState("");
+  const [renameBusy, setRenameBusy] = useState(false);
 
   useEffect(() => {
     if (state.kind !== "authenticated") {
@@ -156,14 +160,71 @@ export function Pair() {
     }
   }
 
+  async function saveAccountName() {
+    if (!actor || !activeSheetId || !pairId) return;
+    setRenameBusy(true);
+    try {
+      // Account names are E2E-encrypted under the active sheet's K_sheet.
+      const K = await unwrapFor(activeSheetId);
+      const { enc, iv } = await encryptName(K, nameDraft.trim());
+      await actor.set_pair_name(pairId, enc, iv);
+      cacheAccountName(pairId, nameDraft.trim());
+      setRenaming(false);
+    } catch (e) {
+      setError((e as Error).message);
+    } finally {
+      setRenameBusy(false);
+    }
+  }
+
+  const accountName =
+    (pairId && prefs.accountNames[pairId]) || `Account ${pairId?.slice(0, 12)}…`;
+
   return (
     <div>
       <Link to="/pairs" className="muted">
         ← All accounts
       </Link>
-      <h1>
-        {(pairId && prefs.accountNames[pairId]) || `Account ${pairId?.slice(0, 12)}…`}
-      </h1>
+      {renaming ? (
+        <div className="row" style={{ gap: 8, alignItems: "center", margin: "8px 0" }}>
+          <input
+            value={nameDraft}
+            onChange={(e) => setNameDraft(e.target.value)}
+            maxLength={48}
+            placeholder="Account name"
+            autoFocus
+          />
+          <button
+            className="small"
+            onClick={() => void saveAccountName()}
+            disabled={renameBusy || !nameDraft.trim()}
+          >
+            {renameBusy ? "Saving…" : "Save"}
+          </button>
+          <button
+            className="secondary small"
+            onClick={() => setRenaming(false)}
+            disabled={renameBusy}
+          >
+            Cancel
+          </button>
+        </div>
+      ) : (
+        <div className="row" style={{ gap: 8, alignItems: "center" }}>
+          <h1 style={{ margin: 0 }}>{accountName}</h1>
+          {activeSheetId && (
+            <button
+              className="secondary small"
+              onClick={() => {
+                setNameDraft(prefs.accountNames[pairId ?? ""] ?? "");
+                setRenaming(true);
+              }}
+            >
+              Rename
+            </button>
+          )}
+        </div>
+      )}
       <div className="card">
         <p className="muted">Invite code</p>
         <h2>{pair.invite_code}</h2>
