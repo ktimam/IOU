@@ -217,6 +217,58 @@ shows. Hand it to the other browser; they paste it into
 "Accept replacement (staying)" and submit. The active sheet
 gets closed and the new member inherits history.
 
+## Chat import (AI → ledger)
+
+Turn a money-transfer **screenshot** or a reservation into a ledger entry using
+**your own** Claude (or ChatGPT) account — no developer API key, and the
+end-to-end encryption is preserved. Your AI extracts the fields into a small
+JSON *draft*; the draft lands in a **"Pending from chat"** inbox on the sheet;
+you confirm it in the normal form, which encrypts on-device and calls
+`add_entry`. The relay and connector are **key-blind** — they only ever hold the
+draft (the same fields the AI already saw), never `K_sheet`, and nothing is
+written until you confirm. Full design + milestones:
+[docs/chat-agent.md](docs/chat-agent.md).
+
+**Verified end-to-end on PC (2026-06-22, 10/10):** Claude → connector → relay →
+app inbox → confirm → encrypted `add_entry` → entry in history → relay cleared.
+
+### Which front-end — chat or code?
+
+The connector is a **local stdio MCP server**, so any client that can launch one
+works:
+
+| Front-end | Works? | Registered via |
+| --- | --- | --- |
+| **Claude Code** (CLI) | ✅ | project `.mcp.json` |
+| **Claude Desktop** (chat app) | ✅ | `claude_desktop_config.json` (`%APPDATA%\Claude\`) — chat, not code |
+| **claude.ai** (browser) / **Claude mobile** | ❌ | remote connectors only — needs the OAuth cloud connector (not built yet) |
+
+So locally you can use the **Claude Desktop chat app** *or* Claude Code. Browser
+and mobile chat need the remote (cloud) connector — that's the Option B+C work
+tracked in [docs/chat-agent.md](docs/chat-agent.md).
+
+### Local / desktop quick start
+
+```text
+1. Run: dfx start  +  pnpm relay:serve (:8788)  +  pnpm dev
+2. Register the connector (Claude Code .mcp.json or Claude Desktop config),
+   baking the relay env into the launch command:
+     IOU_RELAY_URL=http://127.0.0.1:8788 IOU_LINK_TOKEN=<token> \
+       ./node_modules/.bin/tsx scripts/iou-mcp/server.ts
+   (On Windows the command is wrapped in `wsl.exe -d Ubuntu bash -lc '…'`;
+    wsl.exe does NOT forward Windows env, so bake the vars into the command.)
+3. App → Settings → "Chat import (relay)": URL http://localhost:8788, paste the
+   SAME <token> (don't Generate a new one), Save.
+4. In Claude Code / Claude Desktop: share a screenshot and ask it to "prepare an
+   IOU entry" → it calls prepare_iou_entry → the draft hits the relay.
+5. App sheet → "Pending from chat" card → Review & add → Add entry. Done.
+```
+
+The connector pushes to the relay only when `IOU_RELAY_URL` + `IOU_LINK_TOKEN`
+are set; otherwise it returns paste-JSON you drop into the app's **✨ Import**
+box. Connector + relay live in `scripts/iou-mcp/` and `scripts/iou-relay/`
+(`pnpm mcp:selftest`, `pnpm relay:selftest`).
+
 ## Test
 
 ### Unit tests (24 tests, all pure)
@@ -374,6 +426,13 @@ sides. To enable:
   replica, inspect_message hook on by default (no cargo
   feature flag), deploy script fixed. See [Changelog](#changelog)
   below.
+- [x] Chat import (AI → ledger) — local/desktop A-path:
+  `prepare_iou_entry` stdio connector + key-blind relay +
+  "Pending from chat" inbox. Verified end-to-end on PC (10/10).
+  Works from Claude Code **or** the Claude Desktop chat app. See
+  [docs/chat-agent.md](docs/chat-agent.md).
+- [ ] Chat import cloud/mobile — remote OAuth connector
+  (Option B+C): browser/mobile chat, hosted hardened relay.
 - [ ] v1.1.5 — signed Android release, iOS, deep links, app
   icon + splash
 - [ ] v2 — real production deploy to IC mainnet

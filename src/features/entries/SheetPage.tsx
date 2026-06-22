@@ -32,6 +32,12 @@ import { usePreferences } from "../settings/usePreferences";
 import { useTemplates, type TxnTemplate } from "../templates/TemplatesContext";
 import { TemplatesManager } from "../templates/TemplatesManager";
 import { parseDraft, isDuplicateDraft } from "./draft";
+import {
+  getRelayConfig,
+  fetchPending,
+  deletePending,
+  type PendingDraft,
+} from "../relay/relay";
 
 // Build entry-form defaults from a template.
 function templateToInitial(t: TxnTemplate): Partial<EntryPayload> {
@@ -176,6 +182,73 @@ export function SheetPage() {
     setDraftText("");
     openAdd(res.value.initial);
   };
+
+  // "Pending from chat": drafts the chat connector pushed to the key-blind relay.
+  // We poll, show them, and import each through the same confirm seam; on a
+  // successful write we clear it from the relay. The relay never holds K_sheet.
+  const [pending, setPending] = useState<PendingDraft[]>([]);
+  const [pendingRelayId, setPendingRelayId] = useState<string | null>(null);
+  const reloadPending = async () => {
+    const cfg = getRelayConfig();
+    if (!cfg) {
+      setPending([]);
+      return;
+    }
+    try {
+      setPending(await fetchPending(cfg));
+    } catch {
+      /* relay unreachable — leave the inbox as-is */
+    }
+  };
+  const clearRelay = async (id: string) => {
+    const cfg = getRelayConfig();
+    if (cfg) {
+      try {
+        await deletePending(cfg, id);
+      } catch {
+        /* ignore */
+      }
+    }
+    await reloadPending();
+  };
+  const closeEntryModal = () => {
+    setModal(null);
+    setPendingRelayId(null);
+  };
+  const importFromRelay = (p: PendingDraft) => {
+    const res = parseDraft(p.draft);
+    if (!res.ok) {
+      toasts.show({ kind: "error", text: "Invalid draft from chat: " + res.errors.join("; ") });
+      return;
+    }
+    if (isDuplicateDraft(entries, res.value.draftId)) {
+      toasts.show({ kind: "info", text: "Already added — clearing it from chat" });
+      void clearRelay(p.id);
+      return;
+    }
+    setPendingRelayId(p.id);
+    openAdd(res.value.initial);
+  };
+  useEffect(() => {
+    const cfg = getRelayConfig();
+    if (!cfg) return;
+    let cancelled = false;
+    const load = async () => {
+      try {
+        const p = await fetchPending(cfg);
+        if (!cancelled) setPending(p);
+      } catch {
+        /* relay down */
+      }
+    };
+    void load();
+    const iv = setInterval(() => void load(), 15000);
+    return () => {
+      cancelled = true;
+      clearInterval(iv);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   const myPrincipal = state.kind === "authenticated"
     ? state.identity.getPrincipal().toText()
@@ -333,7 +406,9 @@ export function SheetPage() {
         iv: Array.from(enc.iv),
       });
       toasts.show({ kind: "success", text: "Entry added" });
+      if (pendingRelayId) await clearRelay(pendingRelayId);
     }
+    setPendingRelayId(null);
     setModal(null);
     await reload();
   }
@@ -590,6 +665,41 @@ export function SheetPage() {
         )}
       </section>
 
+      {!modal && isActive(sheet.state) && pending.length > 0 && (
+        <section className="card" style={{ marginBottom: 12 }}>
+          <h2 style={{ marginTop: 0 }}>✨ Pending from chat ({pending.length})</h2>
+          <p className="muted small" style={{ marginTop: 0 }}>
+            Drafts your AI assistant sent. Review each before it's saved — nothing is
+            written until you confirm.
+          </p>
+          <ul style={{ listStyle: "none", padding: 0, margin: 0 }}>
+            {pending.map((p) => {
+              const r = parseDraft(p.draft);
+              return (
+                <li
+                  key={p.id}
+                  className="row"
+                  style={{ justifyContent: "space-between", alignItems: "center", gap: 8, padding: "6px 0" }}
+                >
+                  <span className="small">{r.ok ? r.value.summary : "⚠ invalid draft"}</span>
+                  <span className="row" style={{ gap: 6 }}>
+                    <button className="secondary small" onClick={() => importFromRelay(p)}>
+                      Review &amp; add
+                    </button>
+                    <button
+                      className="secondary small"
+                      onClick={() => void clearRelay(p.id)}
+                      title="Dismiss without adding"
+                    >
+                      ✕
+                    </button>
+                  </span>
+                </li>
+              );
+            })}
+          </ul>
+        </section>
+      )}
       <div className="row">
         {isActive(sheet.state) && !modal && (
           <>
@@ -848,7 +958,7 @@ export function SheetPage() {
       </section>
 
       {modal && (
-        <div className="modal-backdrop" onClick={() => setModal(null)}>
+        <div className="modal-backdrop" onClick={closeEntryModal}>
           <div
             className="modal"
             onClick={(e) => e.stopPropagation()}
@@ -862,7 +972,7 @@ export function SheetPage() {
               partnerPrincipal={them}
               initial={modal.initial ?? undefined}
               isEdit={modal.entryId != null}
-              onCancel={() => setModal(null)}
+              onCancel={closeEntryModal}
               onSubmit={onSubmit}
             />
           </div>

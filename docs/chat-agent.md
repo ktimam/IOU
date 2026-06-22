@@ -432,13 +432,167 @@ Send a **visible** "Add to IOU" notification carrying the opaque draft pointer. 
 > relay receives the draft + `draft_id`, 6/6), falling back to paste-JSON otherwise.
 > `package.json` gains `relay:serve`/`relay:selftest`.
 >
-> **Still to build:** the IOU app's **"Pending from chat" inbox** (poll `GET /v1/drafts`,
-> open each via the M0 confirm seam, `DELETE` after writing) + a **link-token** UI (generate/
-> show the token to paste into the connector config) + the relay URL config. And — for
-> **mobile / Claude.ai remote** — replace the link token with **OAuth** (Claude-user →
-> IOU-principal) so the cloud connector routes to the right user; the relay's store/serve/
-> delete-by-key core is unchanged. Until the app inbox lands, the no-paste push reaches the
-> relay but the user still imports via M0's "✨ Import".
+> **App inbox + relay settings built (2026-06-22).** `src/features/relay/relay.ts` — the
+> app-side relay client (`getRelayConfig`/`setRelayConfig`, `generateToken` → `iou_`+48 hex,
+> `fetchPending`/`deletePending`; localStorage `iou:relay:url` + `iou:relay:token`).
+> `src/features/relay/RelaySettings.tsx` — a Settings card to set the relay URL, generate/copy
+> the link token, and show the `IOU_RELAY_URL`/`IOU_LINK_TOKEN` env block to paste into the
+> connector. `SheetPage.tsx` — a **"✨ Pending from chat"** card that polls `GET /v1/drafts`
+> every 15 s, lists each draft's summary, and on **Review & add** runs the *same* M0 seam
+> (`parseDraft → openAdd → EntryForm → onSubmit → encryptEntryPayload → add_entry`) then
+> `DELETE`s the draft from the relay; a dismiss "✕" clears without writing; dedup skips drafts
+> already in the sheet. The relay never holds K_sheet — the encrypted write is on-device.
+> **Verified end-to-end on PC (2026-06-22) — the complete A-path cycle, in a real browser.**
+> Drove Chromium (Playwright, in WSL) through the running app against the live local replica +
+> relay: dev sign-in → create solo account/sheet → configure relay in Settings (token
+> generated) → connector POSTs a draft to the relay → app inbox shows
+> `Settlement 42.50 USD · owed to you · dinner split from chat` → **Review & add** → EntryForm
+> opens prefilled (amount 42.50, note) → **Add entry** → encrypted `add_entry` → balance shows
+> "your partner owes you 42.50 USD" + the history row → **draft auto-cleared from the relay**,
+> inbox card removed. **10/10 assertions, 0 console errors** (`scripts/e2e-drive.mjs`,
+> screenshots in `.e2e-shots/`). The earlier relay-client HTTP round-trip (connector POST →
+> `fetchPending` → `deletePending` → token isolation) also passed 7/7 standalone.
+>
+> **Still to build — routing/auth for mobile + the cloud connector (see options below):** the
+> link token is a single-secret prototype good for the local/desktop stdio connector. For
+> **mobile / Claude.ai remote** the round trip splits into two legs that need **B + C together**
+> — **C** (OAuth, Claude-user → IOU-principal) so the cloud connector routes a draft to the
+> right user without a shared secret (push leg), and **B** (signed-challenge with the on-device
+> identity) so the app authenticates its fetch/clear (pull leg); the relay's
+> store/serve/delete-by-key core is unchanged. Also still to build: a **hosted, hardened**
+> relay (the current one is localhost), and the push/tap notification so the inbox surfaces
+> without the app already being open.
+
+#### Routing / auth options (how a pushed draft reaches the right user's app)
+
+The relay stores drafts under a **routing key** and the app fetches by the same key. The round
+trip has **two legs**, and they're authenticated separately:
+
+- **Push leg** — *AI → connector → relay* (`POST /v1/drafts`): who may deposit a draft, and
+  **for which user**? This is a **routing** question.
+- **Pull leg** — *relay → IOU app* (`GET`/`DELETE`): who may fetch/clear that user's drafts?
+  This is a **pull-auth** question.
+
+The options below each answer one or both legs. The relay's `POST`/`GET`/`DELETE` core is
+identical across all of them — only the auth in front changes:
+
+- **Option A — Link token (BUILT, prototype).** *Covers both legs with one shared secret.* A
+  random token the user generates in Settings and pastes once into the connector
+  (`IOU_LINK_TOKEN`); the connector pushes under it (push leg) and the app fetches under it
+  (pull leg). Whoever holds the token can read/clear that token's drafts, so it's a bearer
+  password — fine for a **local/desktop stdio connector the same user runs**, where the secret
+  never leaves their machine. *Limits:* manual copy step; no per-user identity; a leaked token
+  leaks future drafts until rotated. Mitigated by ≥24-char random tokens, 1 h TTL, per-token
+  cap, and on-device dedup. **Use for: local / desktop today.**
+
+- **Option B — IC-principal + signed challenge (the PULL leg).** Key the relay by the user's
+  **IOU IC principal** instead of a random token; the app authenticates each `GET`/`DELETE` by
+  signing a server nonce with its on-device II/dev identity (the key it already holds — still
+  never leaves the device). Removes the bearer-secret weakness on the read side (no password to
+  leak) and ties drafts to a real identity. **This secures the pull leg; it does not by itself
+  tell a remote connector which principal to push to** — that's the push leg (A's pairing, or
+  C's OAuth). **Use for: a hardened self-hosted relay; the pull-side half of the production
+  cycle.**
+
+- **Option C — OAuth 2.1 + PKCE (the PUSH leg; required for Claude.ai cloud / mobile).** When
+  the connector is a **remote** MCP server added on claude.ai (which syncs to Claude mobile),
+  there's no local process and no place to paste a token. The connector runs an OAuth login
+  mapping the **Claude user → an IOU user record** (which holds the routing key — the user's
+  IOU principal — + target `{pair, active sheet_id}`), and pushes drafts for that mapped user.
+  The relay/connector remain **key-blind** — they hold the draft and the routing mapping, never
+  K_sheet or an IC identity. *Risk to resolve:* OAuth gives **no guaranteed stable
+  cross-provider `sub`**, so the connector must persist its own subject→IOU-user mapping (a
+  trusted-but-key-blind state store; abuse/rotation story still to design). **Use for: the
+  push-side half of the production cycle (mobile + cloud connector).**
+
+**The complete cloud/mobile cycle needs B *and* C together** — they secure different legs:
+
+| Leg | Question | Mechanism |
+|---|---|---|
+| Push (connector → relay) | *which user does this draft belong to?* | **C** (OAuth maps Claude-user → IOU principal) |
+| Pull (relay → app) | *is this really that user's app asking?* | **B** (app signs a challenge with its on-device identity) |
+
+Because C makes the **routing key = the user's IOU principal**, the natural, secure way for the
+app to claim drafts under that key is to prove it owns that principal — i.e. Option B. (You
+*could* run C with an A-style bearer token on the pull leg and skip B, but that reintroduces the
+exact bearer-secret weakness B exists to remove, so it's not the target design.)
+
+Build order: **A → B + C**. A unblocks desktop today (single secret, both legs). For the
+"send a screenshot in Claude **mobile** and it lands in your IOU inbox" cycle, ship **B and C
+together** — C so the cloud connector routes to the right user, B so the app authenticates its
+pull by identity. Both ride on the same hosted, hardened relay; the `POST`/`GET`/`DELETE` core
+never changes.
+
+**Cost of the Option-C cloud connector (researched & verified 2026-06-22, official Anthropic
+sources):** Anthropic charges **nothing** to build, add, OAuth-authenticate, or use a custom
+remote MCP connector — on any plan, Free included. The only costs are **ours**: hosting the
+hardened relay + remote MCP server (compute, domain, TLS) and IOU's own OAuth 2.1 + PKCE
+authorization server (needed because IOU handles private data) — both can start near-$0 on
+hobby tiers. Two caveats: (1) **plan caps, not fees** — Free is limited to *one* custom
+connector; Pro/Max/Team/Enterprise lift that; a public Connectors-Directory *listing* (which we
+don't need — ours is private) requires Team/Enterprise. (2) **token budget is the real marginal
+cost** — connector tool calls are token-heavy and count against the user's plan usage limit, so
+keep draft payloads and tool-call counts lean. Mobile adds no extra fee, but **installing**
+connectors on mobile is still beta — design onboarding so the user adds/authorizes the
+connector **once on web/Desktop**, after which it syncs to their phone. (Date-sensitive — these
+are beta-era facts; re-verify against support.claude.com / claude.com/pricing before shipping
+any user-facing pricing claim.)
+
+#### Try it now — local / desktop runbook (the BUILT A-path)
+
+This is the cycle verified end-to-end on PC (10/10, 2026-06-22). It runs entirely on one
+machine: the connector and the IOU app share **one link token**, the relay is localhost, the
+encrypted write happens on-device.
+
+**Which front-ends work — chat vs. code:** the connector is a **local stdio MCP server**, so it
+works with any AI client that can launch a local MCP server:
+
+| Front-end | Works? | How it's registered |
+|---|---|---|
+| **Claude Code** (CLI / "code") | ✅ | project `.mcp.json` |
+| **Claude Desktop** (the chat app) | ✅ | `claude_desktop_config.json` (`%APPDATA%\Claude\` on Windows) — *this is chat, not code* |
+| **claude.ai** in a browser | ❌ | remote connectors only → needs Option B+C (not built) |
+| **Claude mobile app** | ❌ | remote connectors only → needs Option B+C (not built) |
+
+So locally you can use **either Claude Code or the Claude Desktop chat app** — you do *not* have
+to use the CLI. The browser/mobile chat is the only thing that needs the cloud connector.
+
+**One-time setup**
+
+1. Run the stack: local replica (`dfx start`), the relay (`pnpm relay:serve`, listens `:8788`),
+   and the app (`pnpm dev`, or deploy the asset canister).
+2. Register the connector with the relay env baked in. Same server block for either client
+   (Windows→WSL form shown; on a native box drop the `wsl.exe`/`bash -lc` wrapper):
+   ```json
+   {
+     "mcpServers": {
+       "iou": {
+         "command": "wsl.exe",
+         "args": ["-d","Ubuntu","bash","-lc",
+           "cd /mnt/c/Kiko/MyProjects/IOU && IOU_RELAY_URL=http://127.0.0.1:8788 IOU_LINK_TOKEN=<your-link-token> exec ./node_modules/.bin/tsx scripts/iou-mcp/server.ts"]
+       }
+     }
+   }
+   ```
+   — Claude Code reads `.mcp.json` in the project; Claude Desktop reads `claude_desktop_config.json`.
+   The connector only pushes to the relay when `IOU_RELAY_URL` + `IOU_LINK_TOKEN` are set;
+   without them it falls back to returning paste-JSON. (Note: `wsl.exe` does **not** forward
+   Windows env vars into WSL — bake them into the `bash -lc` command, not a JSON `env` block.)
+3. In the app: sign in → open a sheet → **Settings → Chat import (relay)** → set URL
+   `http://localhost:8788`, **paste the same `<your-link-token>`** (don't *Generate* a new one,
+   or it won't match the connector) → **Save**.
+
+**Each use**
+
+4. In Claude Code or Claude Desktop, share a transfer screenshot (or just describe it) and ask
+   it to *prepare an IOU entry*. It calls `prepare_iou_entry` → the connector pushes a validated
+   draft to the relay → replies "Sent to your IOU app's Pending from chat inbox."
+5. In the app sheet, the **"📋 Pending from chat"** card appears within ~15 s (or refresh) →
+   **Review & add** → the EntryForm opens prefilled → **Add entry** → encrypted `add_entry`, and
+   the draft is cleared from the relay.
+
+The AI only ever sees the draft fields (the same screenshot it already processed); it never
+touches K_sheet, and nothing is written until you confirm in the form.
 
 - Stand up the **remote MCP connector** (OAuth 2.1 + PKCE; Claude-user → IOU-user mapping; token + `{pair, sheet_id}` custody; key-blind) and the **wake-and-fetch relay** (short-lived pending drafts keyed by `draft_id`, TLS auth by on-device IC identity).
 - Add `@capacitor/push-notifications` + FCM project; push backend sends a **visible "Add to IOU" notification** with an opaque pointer.

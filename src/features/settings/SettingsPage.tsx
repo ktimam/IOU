@@ -8,6 +8,7 @@ import { useState } from "react";
 import { Link } from "react-router-dom";
 import { usePreferences } from "./usePreferences";
 import { COMMON_CURRENCIES } from "./currencies";
+import { RelaySettings } from "../relay/RelaySettings";
 
 export function SettingsPage() {
   const { prefs, setDefaultCurrency, setProfileName } = usePreferences();
@@ -71,6 +72,8 @@ export function SettingsPage() {
           ))}
         </select>
       </div>
+
+      <RelaySettings />
     </div>
   );
 }
