@@ -41,3 +41,7 @@ test-results/
 
 # OS
 Thumbs.db
+
+# Local Claude Code MCP registration — machine-specific (absolute paths + wsl.exe).
+# Portable setup instructions live in scripts/iou-mcp/README.md.
+.mcp.json
