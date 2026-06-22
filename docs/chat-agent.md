@@ -544,18 +544,28 @@ This is the cycle verified end-to-end on PC (10/10, 2026-06-22). It runs entirel
 machine: the connector and the IOU app share **one link token**, the relay is localhost, the
 encrypted write happens on-device.
 
-**Which front-ends work — chat vs. code:** the connector is a **local stdio MCP server**, so it
-works with any AI client that can launch a local MCP server:
+**Which front-ends work — chat vs. code (corrected 2026-06-23, confirmed empirically).** The
+connector is a **local stdio MCP server**. Only surfaces that *launch local MCP servers* can see
+it; surfaces built on the **remote-connector framework** (claude.ai and the unified Claude app's
+general/cowork chat) cannot — they returned "I don't have a `prepare_iou_entry` tool."
 
-| Front-end | Works? | How it's registered |
+| Front-end | Local stdio connector? | How |
 |---|---|---|
-| **Claude Code** (CLI / "code") | ✅ | project `.mcp.json` |
-| **Claude Desktop** (the chat app) | ✅ | `claude_desktop_config.json` (`%APPDATA%\Claude\` on Windows) — *this is chat, not code* |
-| **claude.ai** in a browser | ❌ | remote connectors only → needs Option B+C (not built) |
-| **Claude mobile app** | ❌ | remote connectors only → needs Option B+C (not built) |
+| **Claude Code** sessions (CLI or in-app, opened on the project) | ✅ | project `.mcp.json`, or user scope via `claude mcp add -s user` — **the reliable local surface** |
+| **Classic Claude Desktop** (the standalone app) | ✅ | `mcpServers` in `claude_desktop_config.json` — only if you run that separate app |
+| **Unified Claude app — general / cowork chat** | ❌ | remote-connector framework; does **not** load project/local stdio connectors → use a Claude Code session instead |
+| **claude.ai** (browser) / **Claude mobile** | ❌ | remote connectors only → needs Option B+C (not built) |
 
-So locally you can use **either Claude Code or the Claude Desktop chat app** — you do *not* have
-to use the CLI. The browser/mobile chat is the only thing that needs the cloud connector.
+So the no-paste connector is effectively a **Claude Code** feature on this setup. The general
+desktop chat is in the *same bucket as the browser/mobile* — it needs the remote cloud connector
+(Option C), which isn't built.
+
+> **Universal fallback — the paste flow works in EVERY chat today, no connector.** The connector
+> only removes a copy-paste step. In *any* chat (general desktop chat, claude.ai, mobile), ask
+> the AI to output the draft JSON
+> (`{"kind":"settlement","amount":<major>,"currency":"USD","direction":"credit|debt","note":"…"}`)
+> and paste it into the app's **✨ Import** box → confirm. This is the "from any chat" answer
+> until Option C lands.
 
 **One-time setup**
 
@@ -574,19 +584,23 @@ to use the CLI. The browser/mobile chat is the only thing that needs the cloud c
      }
    }
    ```
-   — Claude Code reads `.mcp.json` in the project; Claude Desktop reads `claude_desktop_config.json`.
-   The connector only pushes to the relay when `IOU_RELAY_URL` + `IOU_LINK_TOKEN` are set;
-   without them it falls back to returning paste-JSON. (Note: `wsl.exe` does **not** forward
-   Windows env vars into WSL — bake them into the `bash -lc` command, not a JSON `env` block.)
+   — **Claude Code** reads `.mcp.json` in the project (or use `claude mcp add -s user iou -- …`
+   to make it global); the **classic** Claude Desktop app reads the same block under `mcpServers`
+   in `claude_desktop_config.json`. The unified app's general chat does **not** read either — use
+   a Claude Code session there. The connector only pushes to the relay when `IOU_RELAY_URL` +
+   `IOU_LINK_TOKEN` are set; without them it falls back to returning paste-JSON. (Note: `wsl.exe`
+   does **not** forward Windows env vars into WSL — bake them into the `bash -lc` command, not a
+   JSON `env` block.)
 3. In the app: sign in → open a sheet → **Settings → Chat import (relay)** → set URL
    `http://localhost:8788`, **paste the same `<your-link-token>`** (don't *Generate* a new one,
    or it won't match the connector) → **Save**.
 
 **Each use**
 
-4. In Claude Code or Claude Desktop, share a transfer screenshot (or just describe it) and ask
-   it to *prepare an IOU entry*. It calls `prepare_iou_entry` → the connector pushes a validated
-   draft to the relay → replies "Sent to your IOU app's Pending from chat inbox."
+4. In a **Claude Code session opened on the project** (not the general chat), share a transfer
+   screenshot (or just describe it) and ask it to *prepare an IOU entry*. It calls
+   `prepare_iou_entry` → the connector pushes a validated draft to the relay → replies "Sent to
+   your IOU app's Pending from chat inbox."
 5. In the app sheet, the **"📋 Pending from chat"** card appears within ~15 s (or refresh) →
    **Review & add** → the EntryForm opens prefilled → **Add entry** → encrypted `add_entry`, and
    the draft is cleared from the relay.

@@ -234,18 +234,25 @@ app inbox → confirm → encrypted `add_entry` → entry in history → relay c
 
 ### Which front-end — chat or code?
 
-The connector is a **local stdio MCP server**, so any client that can launch one
-works:
+The connector is a **local stdio MCP server**, so only surfaces that *launch
+local MCP servers* see it. Surfaces on the **remote-connector framework**
+(claude.ai and the unified Claude app's general/cowork chat) do not:
 
-| Front-end | Works? | Registered via |
+| Front-end | Local stdio connector? | How |
 | --- | --- | --- |
-| **Claude Code** (CLI) | ✅ | project `.mcp.json` |
-| **Claude Desktop** (chat app) | ✅ | `claude_desktop_config.json` (`%APPDATA%\Claude\`) — chat, not code |
-| **claude.ai** (browser) / **Claude mobile** | ❌ | remote connectors only — needs the OAuth cloud connector (not built yet) |
+| **Claude Code** sessions (CLI or in-app, on the project) | ✅ | project `.mcp.json`, or `claude mcp add -s user` |
+| **Classic Claude Desktop** (standalone app) | ✅ | `mcpServers` in `claude_desktop_config.json` |
+| **Unified Claude app — general / cowork chat** | ❌ | remote framework — use a Claude Code session |
+| **claude.ai** (browser) / **Claude mobile** | ❌ | remote connectors only — needs the OAuth cloud connector (not built) |
 
-So locally you can use the **Claude Desktop chat app** *or* Claude Code. Browser
-and mobile chat need the remote (cloud) connector — that's the Option B+C work
-tracked in [docs/chat-agent.md](docs/chat-agent.md).
+So the no-paste connector is effectively a **Claude Code** feature here; the
+general chat / browser / mobile need the remote (cloud) connector — the Option
+B+C work tracked in [docs/chat-agent.md](docs/chat-agent.md).
+
+**Works in *any* chat today (no connector): the paste flow.** Ask any chat to
+output the draft JSON
+(`{"kind":"settlement","amount":<n>,"currency":"USD","direction":"credit|debt","note":"…"}`)
+and paste it into the app's **✨ Import** box → confirm.
 
 ### Local / desktop quick start
 
@@ -259,8 +266,9 @@ tracked in [docs/chat-agent.md](docs/chat-agent.md).
     wsl.exe does NOT forward Windows env, so bake the vars into the command.)
 3. App → Settings → "Chat import (relay)": URL http://localhost:8788, paste the
    SAME <token> (don't Generate a new one), Save.
-4. In Claude Code / Claude Desktop: share a screenshot and ask it to "prepare an
-   IOU entry" → it calls prepare_iou_entry → the draft hits the relay.
+4. In a Claude Code session opened on the project (not the general chat): share a
+   screenshot and ask it to "prepare an IOU entry" → it calls prepare_iou_entry →
+   the draft hits the relay.
 5. App sheet → "Pending from chat" card → Review & add → Add entry. Done.
 ```
 
@@ -429,8 +437,9 @@ sides. To enable:
 - [x] Chat import (AI → ledger) — local/desktop A-path:
   `prepare_iou_entry` stdio connector + key-blind relay +
   "Pending from chat" inbox. Verified end-to-end on PC (10/10).
-  Works from Claude Code **or** the Claude Desktop chat app. See
-  [docs/chat-agent.md](docs/chat-agent.md).
+  No-paste works from a **Claude Code** session (local stdio
+  connector); the paste flow (**✨ Import**) works from any chat.
+  See [docs/chat-agent.md](docs/chat-agent.md).
 - [ ] Chat import cloud/mobile — remote OAuth connector
   (Option B+C): browser/mobile chat, hosted hardened relay.
 - [ ] v1.1.5 — signed Android release, iOS, deep links, app
