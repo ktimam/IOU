@@ -31,6 +31,7 @@ import { useToasts } from "../ui/Toasts";
 import { usePreferences } from "../settings/usePreferences";
 import { useTemplates, type TxnTemplate } from "../templates/TemplatesContext";
 import { TemplatesManager } from "../templates/TemplatesManager";
+import { parseDraft, isDuplicateDraft } from "./draft";
 
 // Build entry-form defaults from a template.
 function templateToInitial(t: TxnTemplate): Partial<EntryPayload> {
@@ -141,9 +142,39 @@ export function SheetPage() {
       n.has(id) ? n.delete(id) : n.add(id);
       return n;
     });
+  const [draftOpen, setDraftOpen] = useState(false);
+  const [draftText, setDraftText] = useState("");
+  const [draftErrors, setDraftErrors] = useState<string[]>([]);
   const openAdd = (initial: Partial<EntryPayload> | null) => {
     setModal({ initial, entryId: null });
     setAddOpen(false);
+  };
+  // Import an AI-extracted draft (chat bridge, Milestone 0): parse the pasted
+  // JSON, dedupe by draft_id, then open the prefilled EntryForm to confirm.
+  // Nothing is written until the user confirms in the form (no auto-write).
+  const openFromDraft = () => {
+    setDraftErrors([]);
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(draftText);
+    } catch {
+      setDraftErrors(["not valid JSON — paste the JSON your assistant produced"]);
+      return;
+    }
+    const res = parseDraft(parsed);
+    if (!res.ok) {
+      setDraftErrors(res.errors);
+      return;
+    }
+    if (isDuplicateDraft(entries, res.value.draftId)) {
+      toasts.show({ kind: "info", text: "Already added from this draft" });
+      setDraftOpen(false);
+      setDraftText("");
+      return;
+    }
+    setDraftOpen(false);
+    setDraftText("");
+    openAdd(res.value.initial);
   };
 
   const myPrincipal = state.kind === "authenticated"
@@ -599,6 +630,18 @@ export function SheetPage() {
             ) : (
               <button onClick={() => openAdd(null)}>+ Add entry</button>
             )}
+            <button
+              className="secondary"
+              onClick={() => {
+                setDraftErrors([]);
+                setDraftText("");
+                setAddOpen(false);
+                setDraftOpen(true);
+              }}
+              title="Import an entry your AI assistant extracted from a screenshot"
+            >
+              ✨ Import
+            </button>
             <CloseSheetButton
               sheetId={sheet.id}
               pairId={pairId}
@@ -841,6 +884,53 @@ export function SheetPage() {
               </button>
             </div>
             <TemplatesManager onSaved={() => setTypesOpen(false)} />
+          </div>
+        </div>
+      )}
+
+      {draftOpen && (
+        <div className="modal-backdrop" onClick={() => setDraftOpen(false)}>
+          <div
+            className="modal"
+            onClick={(e) => e.stopPropagation()}
+            role="dialog"
+            aria-modal="true"
+          >
+            <h3>Import</h3>
+            <p className="muted small">
+              Paste the JSON your assistant produced from the screenshot. You'll
+              review and confirm every field before anything is saved — nothing is
+              written automatically.
+            </p>
+            <textarea
+              value={draftText}
+              onChange={(e) => setDraftText(e.target.value)}
+              rows={8}
+              spellCheck={false}
+              placeholder={
+                '{\n  "kind": "settlement",\n  "amount": 25.00,\n  "currency": "USD",\n  "direction": "credit",\n  "date": "2026-06-20",\n  "counterparty": "Sam",\n  "note": "lunch"\n}'
+              }
+              style={{ width: "100%", fontFamily: "monospace", fontSize: 13 }}
+            />
+            {draftErrors.length > 0 && (
+              <ul className="err" style={{ marginTop: 8 }}>
+                {draftErrors.map((er, i) => (
+                  <li key={i}>{er}</li>
+                ))}
+              </ul>
+            )}
+            <div className="actions" style={{ marginTop: 8 }}>
+              <button type="button" onClick={() => setDraftOpen(false)}>
+                Cancel
+              </button>
+              <button
+                type="button"
+                onClick={openFromDraft}
+                disabled={!draftText.trim()}
+              >
+                Review in form
+              </button>
+            </div>
           </div>
         </div>
       )}

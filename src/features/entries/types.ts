@@ -60,6 +60,11 @@ export type EntryPayload = {
   schedule?: DuePortion[];  // IOU split across due dates; absent ⇒ one portion due at `ts`
   fee?: FeePayload;         // IOU fee/deduction; amount_minor is the net (post-fee)
   convert?: ConvertPayload; // present iff this entry is a conversion
+  // Optional idempotency key for entries created from an imported "draft"
+  // (e.g. an AI-extracted transfer screenshot via the chat bridge). Stable per
+  // draft, so the same draft imported twice maps to one entry. Absent for
+  // manually-entered entries. See src/features/entries/draft.ts.
+  draft_id?: string;
 };
 
 export function encodeEntry(p: EntryPayload): Uint8Array {

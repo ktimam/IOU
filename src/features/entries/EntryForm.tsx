@@ -197,6 +197,10 @@ export function EntryForm({
         ...(schedulePayload ? { schedule: schedulePayload } : {}),
         ...(fee ? { fee } : {}),
         convert,
+        // Carry the idempotency key through when the form was pre-filled from
+        // an imported draft (chat bridge). Invisible to the user; lets a
+        // re-imported draft dedupe to one entry.
+        ...(initial?.draft_id ? { draft_id: initial.draft_id } : {}),
       };
       await onSubmit(payload);
     } catch (e) {
