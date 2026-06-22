@@ -24,6 +24,26 @@ import { buildDraftResult, type PrepareInput } from "./draftResult";
 
 const TOOL_NAME = "prepare_iou_entry";
 
+// Optional no-paste delivery: when a key-blind relay is configured, push the
+// draft to it so it lands in the IOU app's "Pending from chat" inbox (no
+// copy-paste). The relay only ever sees the plaintext draft — never K_sheet.
+const RELAY_URL = process.env.IOU_RELAY_URL;
+const LINK_TOKEN = process.env.IOU_LINK_TOKEN;
+
+async function pushToRelay(draft: unknown): Promise<boolean> {
+  if (!RELAY_URL || !LINK_TOKEN) return false;
+  try {
+    const r = await fetch(`${RELAY_URL.replace(/\/+$/, "")}/v1/drafts`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ token: LINK_TOKEN, draft }),
+    });
+    return r.ok;
+  } catch {
+    return false;
+  }
+}
+
 const inputSchema = {
   type: "object",
   properties: {
@@ -102,12 +122,16 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
       isError: true,
     };
   }
-  const text =
-    `Prepared: ${res.summary}\n\n` +
-    `To add it: open the IOU app → "✨ Import" → paste this JSON → review & confirm:\n\n` +
-    "```json\n" +
-    res.pasteJson +
-    "\n```\n";
+  const pushed = await pushToRelay(res.draft);
+  const text = pushed
+    ? `Prepared: ${res.summary}\n\n` +
+      `Sent to your IOU app's "Pending from chat" inbox — open IOU and confirm it ` +
+      `(you review every field before it's saved; nothing is written to the ledger yet).`
+    : `Prepared: ${res.summary}\n\n` +
+      `To add it: open the IOU app → "✨ Import" → paste this JSON → review & confirm:\n\n` +
+      "```json\n" +
+      res.pasteJson +
+      "\n```\n";
   return { content: [{ type: "text", text }] };
 });
 

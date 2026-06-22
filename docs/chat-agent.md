@@ -422,11 +422,23 @@ Send a **visible** "Add to IOU" notification carrying the opaque draft pointer. 
 > canister), `server.ts` (a **local stdio** MCP server exposing `prepare_iou_entry`, works in
 > Claude Desktop/Code today), `selftest.ts` (16/16 pass), `README.md`. `package.json` gains
 > `mcp:serve`/`mcp:selftest` + the `@modelcontextprotocol/sdk` dep (run `pnpm install`).
-> **Still to build (the no-copy-paste, mobile part — needs the security decisions in
-> `scripts/iou-mcp/README.md` confirmed first):** the **remote** HTTP transport + OAuth
-> subject→principal mapping, the wake-and-fetch **relay**, the **push backend** + visible
-> notification, and the IOU app **"Pending from chat" inbox** + tap handler. Until then the
-> connector output is pasted into M0's "✨ From AI draft".
+>
+> **Relay backend built (2026-06-22).** `scripts/iou-relay/server.ts` — a **key-blind**
+> draft relay (Node `http`, no deps): `POST /v1/drafts` (connector pushes), `GET /v1/drafts`
+> (app polls), `DELETE /v1/drafts/:id` (app clears after writing), keyed by an opaque **link
+> token**, with TTL + per-token cap + token isolation. It only ever holds the plaintext draft
+> (never K_sheet). `selftest.ts` (8/8). The **connector now pushes** to it when
+> `IOU_RELAY_URL` + `IOU_LINK_TOKEN` are set (verified end-to-end: `prepare_iou_entry` →
+> relay receives the draft + `draft_id`, 6/6), falling back to paste-JSON otherwise.
+> `package.json` gains `relay:serve`/`relay:selftest`.
+>
+> **Still to build:** the IOU app's **"Pending from chat" inbox** (poll `GET /v1/drafts`,
+> open each via the M0 confirm seam, `DELETE` after writing) + a **link-token** UI (generate/
+> show the token to paste into the connector config) + the relay URL config. And — for
+> **mobile / Claude.ai remote** — replace the link token with **OAuth** (Claude-user →
+> IOU-principal) so the cloud connector routes to the right user; the relay's store/serve/
+> delete-by-key core is unchanged. Until the app inbox lands, the no-paste push reaches the
+> relay but the user still imports via M0's "✨ Import".
 
 - Stand up the **remote MCP connector** (OAuth 2.1 + PKCE; Claude-user → IOU-user mapping; token + `{pair, sheet_id}` custody; key-blind) and the **wake-and-fetch relay** (short-lived pending drafts keyed by `draft_id`, TLS auth by on-device IC identity).
 - Add `@capacitor/push-notifications` + FCM project; push backend sends a **visible "Add to IOU" notification** with an opaque pointer.

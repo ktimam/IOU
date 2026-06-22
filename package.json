@@ -25,6 +25,8 @@
     "test:unit": "vitest run",
     "mcp:serve": "pnpm exec tsx scripts/iou-mcp/server.ts",
     "mcp:selftest": "pnpm exec tsx scripts/iou-mcp/selftest.ts",
+    "relay:serve": "pnpm exec tsx scripts/iou-relay/server.ts",
+    "relay:selftest": "pnpm exec tsx scripts/iou-relay/selftest.ts",
     "postinstall": "node scripts/patch-vetkeys-esm.mjs"
   },
   "dependencies": {
