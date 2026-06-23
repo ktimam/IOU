@@ -26,6 +26,106 @@ pattern in `scripts/awa-smoke-vetkd.ts` / `scripts/awa-smoke-solo.ts`.
 
 ---
 
+> **⚠️ Direction update (2026-06-23) — OpenChat + on-device Gemma, revisited & verified.**
+> The owner asked whether OpenChat could be the *all-in-one* surface with an on-device Gemma doing the
+> vision. Two adversarially-verified research passes (13 + 5 agents) settled it. See the full decision
+> record: **[§ OpenChat + on-device Gemma — feasibility & decision](#openchat--on-device-gemma--feasibility--decision-2026-06-23)** immediately below.
+> **TL;DR:** the *autonomous-signer* version is **unsafe + infeasible**; the owner's **refined
+> confirmed-draft flow** (human confirms in chat, then Accept/Reject in the sheet) is **feasible and
+> sound** — and it is *the relay + "Pending from chat" inbox already built*, with OpenChat as a new
+> source. It can ship as a **v1 with no OpenChat fork and no core PR**.
+
+---
+
+## OpenChat + on-device Gemma — feasibility & decision (2026-06-23)
+
+The owner explored making OpenChat (the ICP-native chat app) an all-in-one surface: a user shares a
+transfer screenshot in chat, an **on-device Gemma** reads it, and the entry flows into IOU — "without
+getting out of the chat app or building external interfaces." Two framings were assessed; the verdict
+flips between them on one hinge: **who authorizes the ledger write.**
+
+### Framing A — autonomous LLM signer — REJECTED
+
+"Give the LLM direct access to read chat, **sign messages**, and call canisters." Verified verdict:
+**unsafe by construction *and* infeasible as 'OpenChat doing it.'**
+
+- **Unsafe:** the agent reads attacker-influenceable chat/images *and* holds signing authority — a
+  textbook confused-deputy. Image prompt-injection has [~64% peak success with no full defense](https://labs.cloudsecurityalliance.org/research/csa-research-note-image-prompt-injection-multimodal-llm-2026/);
+  running on-device removes the *cloud* attacker, not the in-band injection channel. IC delegations
+  scope to canister + expiry only — **not method or amount** — so a broad delegation has no
+  value-limiting backstop. The only robust mitigation (mandatory human confirmation) deletes the
+  "autonomous, zero-tap" goal.
+- **Infeasible as "OpenChat doing it":** writing an entry needs `K_sheet` (on-device, vetKD/ECDH) **and**
+  `caller_owns_sheet` (a member principal). An OpenChat bot acts under its **own** JWT identity, never
+  the user's II delegation/IOU principal; II derives a **different principal per origin**; and
+  `derivationOrigin` aliasing is [spec-forbidden for third parties](https://github.com/dfinity/internet-identity/blob/main/docs/ii-spec.mdx)
+  *and* wouldn't help (still no `K_sheet`). Any working version embeds IOU's auth+crypto inside the
+  OpenChat fork — i.e. **IOU re-implemented inside OpenChat**, with `K_sheet` moved into OpenChat's
+  trust boundary. Plus OpenChat is AGPL-3.0 (fork = own canister deploy + store pipeline + source
+  disclosure + perpetual rebasing) and default chats aren't even E2E.
+
+### Framing B — confirmed-draft flow (owner's refined design) — FEASIBLE & SOUND
+
+The owner's refined steps put a **human in the loop twice**, which removes the autonomous-signer
+showstopper entirely:
+
+1. User sends a transaction image in chat — **works as-is** (image is core OpenChat content).
+2. On-device Gemma extracts → shows an **in-chat card with the details + a Confirm button** — **needs a
+   feature** (see build split). Owner has tested Gemma-4B vision and is satisfied with its accuracy.
+3. User Confirms → ~~OpenChat signs on behalf of the user~~ → **CORRECTED: OpenChat authenticates and
+   forwards a *plaintext draft*.** OpenChat **cannot** produce the encrypted entry (no `K_sheet`) and
+   isn't a sheet member (`caller_owns_sheet`). The signed+encrypted write does **not** happen here.
+4. In the IOU sheet the draft appears tagged **"from OpenChat"** with **Accept/Reject**; on **Accept**
+   the **IOU client** (member principal, holding `K_sheet`) encrypts on-device and calls `add_entry` —
+   **works as-is: this is the existing relay + "Pending from chat" inbox**, with OpenChat as a new source.
+
+So the sound shape is: **OpenChat → authenticated plaintext draft → IOU inbox → Accept → on-device
+encrypt + write.** Identical to the M0/M1 pattern already shipped; OpenChat is just a new draft source
++ provenance label (backed by the OpenChat-signed JWT proving which OpenChat user produced it).
+
+### Build split — and the v1 that needs no fork / no core PR
+
+| Layer | v1 (ship now) | v2 (the reusable upstream prize) |
+|---|---|---|
+| Confirm card | **Bot ephemeral message + `/confirm` command** (existing primitives) | New interactive `MessageContent` variant + callback + client renderer — the upstream core PR ([none exists today](https://raw.githubusercontent.com/open-chat-labs/open-chat-bots/main/rs/sdk/src/types/message_content.rs); [stock client renders unknown kinds as nothing](https://raw.githubusercontent.com/open-chat-labs/open-chat/master/frontend/app/src/components/home/ChatMessageContent.svelte)) |
+| Gemma vision | **Companion native runtime** (MediaPipe/LiteRT/llama.cpp) — bots can't run vision; in-browser WebGPU vision isn't ready | Embedded in a forked Tauri client |
+| Forward draft | **Bot draft-emitter (official [SDK](https://github.com/open-chat-labs/open-chat-bots)) → existing M1 relay endpoint** | same |
+| IOU app | **Reuse M0 inbox** + add "OpenChat" source + JWT-provenance check | same |
+| Routing | **One-time pairing** (IOU shows a code/QR linking OpenChat-user ↔ sheet) — mandatory; the JWT proves *who* but not *which sheet*. This is the consent boundary. | same |
+
+**v1 delivers the whole 4-step UX with zero OpenChat core changes and no client fork** — most of it is
+the already-built relay+inbox plus existing bot primitives + a companion vision app. The heavy
+interactive-card-as-upstream-primitive is **v2**, done once the flow is proven.
+
+### Residual risks even with confirmation (+ cheap mitigations)
+
+- **Rubber-stamping a forged card** → show the **exact to-be-written values on *both* gates**, with the
+  IOU Accept card rendering from the draft IOU *actually received*, not what OpenChat displays.
+- **Direction inversion** → render direction in **plain language** on both gates ("You will owe Alice
+  40"), not a signed number.
+- **Plaintext draft in transit/at rest** until Accept → same key-blind tradeoff as the relay; carry the
+  **same explicit consent flag** for this source.
+- **Provenance spoofing** → verify the OpenChat JWT against the paired identity on ingest; reject
+  unpaired/mismatched drafts.
+
+### The reusable primitive (what's actually general)
+
+It decomposes into two pieces that live in different places: the **authenticated-forward** half (AI
+proposes → on confirm, emit a JWT-signed payload to an external app) **fits the existing bot framework,
+no fork**; the **interactive confirm-card in chat** is the genuinely new upstream primitive (a new
+`MessageContent` interactive variant + callback + renderer). On-device vision is orthogonal — a
+client-shell concern any such feature needs.
+
+### Decision
+
+Pursue **Framing B**, sequenced **v1 (no fork) → v2 (upstream interactive-card PR)**. Never build
+Framing A (autonomous signer). **Re-verify** the Bot SDK message types, `ephemeral`/send semantics, and
+`ChatMessageContent.svelte` before committing the fork-vs-wait call — an interactive-message variant
+could land upstream and remove the need for our own core PR. *(Verdicts adversarially verified against
+the OpenChat repo, Bot SDK, and the II spec, 2026-06-23.)*
+
+---
+
 ## 1. What we're building
 
 A bot that lives in a chat shared by the two members of an IOU **account
@@ -725,6 +825,11 @@ own device** — strictly more moving parts, and it would *still* have to call I
 on-device crypto. For a 2-person ledger where both members already run the IOU app, that's
 pure overhead (and a Telegram userbot watching a private chat is ToS-grey). **Ranking:
 direct-in-IOU ≫ (nothing) > OpenChat local bot > Telegram userbot.**
+
+> **Update (2026-06-23):** OpenChat was **revisited** with an on-device Gemma + a *confirmed-draft*
+> flow (not an autonomous bot). That verified analysis — which finds the confirmed-draft flow
+> feasible as a v1 with no fork — supersedes this ranking for the OpenChat case. See
+> [§ OpenChat + on-device Gemma — feasibility & decision](#openchat--on-device-gemma--feasibility--decision-2026-06-23).
 
 ### 7. Recommendation & what's built
 - **Ship M2 (paste/share + confirm) first** — universal, zero new native code, the import

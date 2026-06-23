@@ -442,6 +442,11 @@ sides. To enable:
   See [docs/chat-agent.md](docs/chat-agent.md).
 - [ ] Chat import cloud/mobile — remote OAuth connector
   (Option B+C): browser/mobile chat, hosted hardened relay.
+- [ ] OpenChat + on-device Gemma — assessed (2026-06-23):
+  autonomous-signer rejected (unsafe); owner's **confirmed-draft**
+  flow is feasible as a v1 with **no OpenChat fork** (bot draft →
+  existing inbox → on-device encrypted write on Accept). Design
+  record in [docs/chat-agent.md](docs/chat-agent.md).
 - [ ] v1.1.5 — signed Android release, iOS, deep links, app
   icon + splash
 - [ ] v2 — real production deploy to IC mainnet
