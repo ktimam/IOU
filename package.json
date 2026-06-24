@@ -45,6 +45,7 @@
     "react-router-dom": "^6.26.0",
     "qrcode": "^1.5.4",
     "@aparajita/capacitor-secure-storage": "^7.1.6",
+    "@capacitor/app": "^7.0.0",
     "@capacitor/core": "^7.6.0",
     "@capacitor/android": "^7.6.0"
   },

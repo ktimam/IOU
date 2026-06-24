@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { useNavigate } from "react-router-dom";
+import { useNavigate, useSearchParams } from "react-router-dom";
 import { useAuth } from "../auth/AuthProvider";
 import { useActor } from "./useActor";
 import { useSheetKey } from "./SheetKeyContext";
@@ -13,6 +13,7 @@ export function NewPair() {
   const { cache } = useSheetKey();
   const { prefs, cacheAccountName, cacheSheetName } = usePreferences();
   const nav = useNavigate();
+  const [searchParams] = useSearchParams();
   const [mode, setMode] = useState<"create" | "join">("create");
   const [accountName, setAccountName] = useState("");
   const [sheetName, setSheetName] = useState("");
@@ -25,6 +26,15 @@ export function NewPair() {
       nav("/sign-in", { replace: true });
     }
   }, [state, nav]);
+
+  // Deep link `iou://join/CODE` → /pair/new?join=CODE: prefill the join form.
+  useEffect(() => {
+    const code = searchParams.get("join");
+    if (code) {
+      setMode("join");
+      setInviteCode(code.trim().toUpperCase());
+    }
+  }, [searchParams]);
 
   if (state.kind !== "authenticated") return null;
 

@@ -19,6 +19,7 @@ import {
   type ReplaceRequest,
 } from "./replaceMember";
 import { useToasts } from "../ui/Toasts";
+import { QrScanner } from "../ui/QrScanner";
 
 export function ReplaceMemberPage() {
   const { pairId = "" } = useParams();
@@ -31,6 +32,7 @@ export function ReplaceMemberPage() {
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
   const [myKey, setMyKey] = useState<{ publicKeyB64: string } | null>(null);
+  const [scanOpen, setScanOpen] = useState(false);
 
   useEffect(() => {
     if (state.kind !== "authenticated") {
@@ -94,12 +96,27 @@ export function ReplaceMemberPage() {
       </p>
       <label>
         <span>New member's principal</span>
-        <input
-          value={newPrincipalText}
-          onChange={(e) => setNewPrincipalText(e.target.value)}
-          placeholder="paste the principal here (or scan a QR in v1.1.5)"
-        />
+        <div className="row" style={{ gap: 8, alignItems: "center" }}>
+          <input
+            value={newPrincipalText}
+            onChange={(e) => setNewPrincipalText(e.target.value)}
+            placeholder="paste the principal here, or scan a QR"
+            style={{ flex: 1 }}
+          />
+          <button type="button" className="secondary small" onClick={() => setScanOpen(true)}>
+            Scan QR
+          </button>
+        </div>
       </label>
+      {scanOpen && (
+        <QrScanner
+          onResult={(t) => {
+            setNewPrincipalText(t.trim());
+            setScanOpen(false);
+          }}
+          onClose={() => setScanOpen(false)}
+        />
+      )}
       <div className="actions">
         <button
           onClick={onSignAndShare}

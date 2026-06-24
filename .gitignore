@@ -22,6 +22,11 @@ ii/
 *.wasm
 target/
 
+# Android release signing (v1.1.5) — NEVER commit keystores or secrets
+android/keystore.properties
+*.jks
+*.keystore
+
 # TypeScript / Vite build output
 *.tsbuildinfo
 vite.config.d.ts

@@ -20,6 +20,14 @@ import { ErrorBoundary } from "./ErrorBoundary";
 import { PreferencesProvider } from "../features/settings/usePreferences";
 import { SettingsPage } from "../features/settings/SettingsPage";
 import { TemplatesProvider } from "../features/templates/TemplatesContext";
+import { useDeepLinks } from "../features/deeplinks/deepLink";
+
+// Registers the native deep-link listener (no-op on web). Lives inside the
+// router so it can navigate; renders nothing.
+function DeepLinks() {
+  useDeepLinks();
+  return null;
+}
 
 export function App() {
   return (
@@ -30,6 +38,7 @@ export function App() {
         <ToastProvider>
           <Layout>
             <ErrorBoundary>
+            <DeepLinks />
             <Routes>
               <Route path="/" element={<Hello />} />
               <Route path="/me" element={<ProfilePage />} />

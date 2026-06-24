@@ -93,14 +93,44 @@ need a signing key:
   browser, and in a desktop PWA install — so the same
   behavior is exercised in three environments.
 
-## What v1.1.5 will add (out of scope for v1.1.4)
+## v1.1.5 — status
 
-- A signed release keystore + a Play Store listing.
-- App Store / Play Store metadata, screenshots, descriptions.
-- iOS build (Capacitor supports it; just `cap add ios` and
-  build with Xcode on a Mac).
-- Deep links (e.g. `iou://pair/abc123` from a share sheet).
-- A real native splash screen + app icon set.
+**Implemented in code (2026-06-24):**
+- **Deep links** — custom scheme `iou://`. AndroidManifest has the
+  `VIEW`/`BROWSABLE` intent-filter (`scheme="iou"`); `@capacitor/app`'s
+  `appUrlOpen` is wired in `src/features/deeplinks/deepLink.ts` (`useDeepLinks`),
+  with a pure, unit-tested `deepLinkToPath` (4/4) mapping an allowlisted set of
+  hosts to in-app routes (`iou://sheet/<id>`, `iou://pair/<id>`, `iou://pairs`,
+  `iou://settings`, `iou://me`, `iou://join/<code>` → prefills the join form).
+  Unknown hosts are rejected (no arbitrary navigation).
+- **QR scanning** for the replace-member handoff —
+  `src/features/ui/QrScanner.tsx` uses the platform `BarcodeDetector` over a
+  `getUserMedia` camera (no native plugin, no JS barcode lib); wired into
+  `ReplaceMemberPage`. CAMERA permission added to the manifest. Falls back to a
+  clear "paste instead" message where unsupported (e.g. iOS Safari today).
+- **Release signing config** — `android/app/build.gradle` reads a gitignored
+  `keystore.properties` (template: `android/keystore.properties.example`); the
+  release build signs only when the keystore is present (so CI/fresh clones
+  still build, just unsigned).
+
+**Still requires your build machine / accounts (can't be done/verified here —
+no Android SDK in this env, and iOS needs macOS):**
+- **Generate the keystore** (`keytool …`), copy `keystore.properties.example` →
+  `keystore.properties`, then `cd android && ./gradlew assembleRelease` to
+  produce the signed APK/AAB. Back up the `.jks` — losing it blocks all future
+  updates.
+- **App icon + splash** — generate the set from a 1024×1024 source with
+  `@capacitor/assets` (`npx @capacitor/assets generate --android`) into
+  `android/app/src/main/res`, then `pnpm cap:sync`. (Source asset: derive a PNG
+  from the IOU wordmark in `src/features/ui/Logo.tsx` / `public/pwa-512x512.png`.)
+- **iOS build** — `cap add ios` + Xcode on a Mac (Associated Domains for App
+  Links if you want https deep links there).
+- **Play / App Store** — listing, metadata, screenshots, review.
+
+**On-device verification to run after building:** deep-link delivery
+(`adb shell am start -a android.intent.action.VIEW -d "iou://sheet/test"`
+should open the app on that route) and the QR camera scan in the replace-member
+flow.
 
 ## Troubleshooting
 

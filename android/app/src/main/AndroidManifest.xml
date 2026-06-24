@@ -22,6 +22,15 @@
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
 
+            <!-- Deep links: iou://<host>/<path> → @capacitor/app appUrlOpen
+                 → deepLinkToPath() routes inside the WebView (v1.1.5). -->
+            <intent-filter>
+                <action android:name="android.intent.action.VIEW" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <category android:name="android.intent.category.BROWSABLE" />
+                <data android:scheme="iou" />
+            </intent-filter>
+
         </activity>
 
         <provider
@@ -38,4 +47,7 @@
     <!-- Permissions -->
 
     <uses-permission android:name="android.permission.INTERNET" />
+    <!-- QR scanning (replace-member handoff): camera via BarcodeDetector (v1.1.5) -->
+    <uses-permission android:name="android.permission.CAMERA" />
+    <uses-feature android:name="android.hardware.camera" android:required="false" />
 </manifest>

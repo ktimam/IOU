@@ -1,5 +1,16 @@
 apply plugin: 'com.android.application'
 
+// Release signing (v1.1.5). Secrets live in a gitignored keystore.properties
+// (copy keystore.properties.example → keystore.properties and fill in). When it
+// is absent (CI, dev, fresh clone) the release build is simply left unsigned,
+// so the project still builds without the keystore.
+def keystorePropertiesFile = rootProject.file("keystore.properties")
+def keystoreProperties = new Properties()
+def hasKeystore = keystorePropertiesFile.exists()
+if (hasKeystore) {
+    keystoreProperties.load(new FileInputStream(keystorePropertiesFile))
+}
+
 android {
     namespace "com.iou.app"
     compileSdk rootProject.ext.compileSdkVersion
@@ -16,10 +27,24 @@ android {
             ignoreAssetsPattern '!.svn:!.git:!.ds_store:!*.scc:.*:!CVS:!thumbs.db:!picasa.ini:!*~'
         }
     }
+    signingConfigs {
+        release {
+            if (hasKeystore) {
+                storeFile file(keystoreProperties['storeFile'])
+                storePassword keystoreProperties['storePassword']
+                keyAlias keystoreProperties['keyAlias']
+                keyPassword keystoreProperties['keyPassword']
+            }
+        }
+    }
     buildTypes {
         release {
             minifyEnabled false
             proguardFiles getDefaultProguardFile('proguard-android.txt'), 'proguard-rules.pro'
+            // Sign the release only when the keystore is present.
+            if (hasKeystore) {
+                signingConfig signingConfigs.release
+            }
         }
     }
 }
