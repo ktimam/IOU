@@ -447,8 +447,10 @@ sides. To enable:
   flow is feasible as a v1 with **no OpenChat fork** (bot draft →
   existing inbox → on-device encrypted write on Accept). Design
   record in [docs/chat-agent.md](docs/chat-agent.md).
-- [ ] v1.1.5 — signed Android release, iOS, deep links, app
-  icon + splash
+- [~] v1.1.5 — **done in code:** deep links (`iou://`), QR scan
+  (replace-member), release-signing config. **Remaining (build
+  machine):** signed APK build, app icon + splash, iOS, store
+  listing. See [docs/08-mobile.md](docs/08-mobile.md).
 - [ ] v2 — real production deploy to IC mainnet
 
 ## Changelog
