@@ -29,6 +29,8 @@
     "relay:selftest": "pnpm exec tsx scripts/iou-relay/selftest.ts",
     "relay:selftest:openchat": "pnpm exec tsx scripts/iou-relay/selftest-openchat.ts",
     "openchat:standin": "pnpm exec tsx scripts/iou-relay/openchat-standin.ts",
+    "ocbot:serve": "pnpm exec tsx scripts/iou-openchat-bot/server.ts",
+    "ocbot:selftest": "pnpm exec tsx scripts/iou-openchat-bot/selftest.ts",
     "postinstall": "node scripts/patch-vetkeys-esm.mjs"
   },
   "dependencies": {

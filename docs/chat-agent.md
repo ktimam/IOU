@@ -198,6 +198,40 @@ Confirm card, and on Confirm OpenChat forwards the draft to `/v1/openchat/drafts
 key. Point `verifyOpenChatToken` at OpenChat's published key (the only open seam) — steps 2-5 are
 unchanged.
 
+#### The OpenChat connector — real contract (2026-06-24)
+
+The OpenChat fork (`C:\Kiko\MyProjects\Blockchain\ICP\open-chat`, branches `feat/on-device-model-manager`
+and `feat/interactive-action-card`) was inspected. **OpenChat is *not* fully feature-complete:** **A**
+(on-device model manager + llama.cpp/Gemma inference) is built; **B** (the `ActionCard` `MessageContent`
+variant + `respond_to_action_card` on group+community + renderer) is **~80%** (candid regen, the mobile
+Confirm button, and community/user re-verify still pending per the fork's `fork-notes/`); **C** (the
+AI-action *registration/runner* that auto-runs the model and posts the card) is **not built**. So the
+auto image→model→card→forward orchestration doesn't exist yet — what exists is: a **bot posts an
+ActionCard, a human Confirms, and OpenChat forwards the confirmed event to the bot's endpoint.**
+
+The real forward contract (read from the fork, not assumed): on Confirm, `notification_pusher`
+(`pusher.rs`) does `POST {bot-endpoint}/notify` with the raw event body and header **`x-oc-signature`**
+= base64url **ES256** signature over the body (P-256, `libraries/jwt`). So the connector is an
+**off-chain bot** that verifies OpenChat's ES256 signature and bridges to the IOU relay — built at
+**`scripts/iou-openchat-bot/`**:
+
+- `ocVerify.ts` — `verifyOcSignature` (x-oc-signature over the body) + `verifyOcJwt` (the ES256
+  `Claims<T>` format), matched exactly to the fork. **Note this corrects the earlier stand-in's
+  Ed25519 assumption: OpenChat signs ES256.**
+- `rowsToDraft.ts` — maps the confirmed ActionCard `rows` (Amount/Currency/Direction/Note, direction in
+  plain language) back to an IOU draft (inverse of the registered card layout).
+- `server.ts` — the bridge: `POST /notify` verifies `x-oc-signature` against OpenChat's public key,
+  parses the confirmed card, maps rows→draft, and forwards to the relay `/v1/openchat/drafts` (routed by
+  pairing for `responded_by`). Bot→relay reuses the relay's own provenance (the bot holds the relay
+  signing key); the bot never holds K_sheet or an IOU identity.
+
+**Verified now:** ES256 `x-oc-signature` + JWT verification and rows→draft mapping, with real P-256 keys
+(`pnpm ocbot:selftest`, 9/9); the bot→relay forward rides the already-green relay path. **Open seams:**
+(1) `/notify` decodes the event as JSON — production decodes OpenChat's msgpack/candid `BotEventPayload`
+via the open-chat-bots SDK once PR-B's candid is regenerated; (2) a real end-to-end needs the OpenChat
+fork built (finish B) + deployed to register the bot and post cards; (3) the auto-orchestration awaits
+**C**. None of this is in OpenChat — it is all IOU-side bot + relay code.
+
 ---
 
 ## 1. What we're building
