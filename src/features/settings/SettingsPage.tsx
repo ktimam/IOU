@@ -9,6 +9,7 @@ import { Link } from "react-router-dom";
 import { usePreferences } from "./usePreferences";
 import { COMMON_CURRENCIES } from "./currencies";
 import { RelaySettings } from "../relay/RelaySettings";
+import { OpenChatSettings } from "../openchat/OpenChatSettings";
 
 export function SettingsPage() {
   const { prefs, setDefaultCurrency, setProfileName } = usePreferences();
@@ -74,6 +75,7 @@ export function SettingsPage() {
       </div>
 
       <RelaySettings />
+      <OpenChatSettings />
     </div>
   );
 }

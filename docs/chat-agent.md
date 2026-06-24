@@ -124,6 +124,49 @@ Framing A (autonomous signer). **Re-verify** the Bot SDK message types, `ephemer
 could land upstream and remove the need for our own core PR. *(Verdicts adversarially verified against
 the OpenChat repo, Bot SDK, and the II spec, 2026-06-23.)*
 
+### IOU-side integration (the consumer half) — BUILT 2026-06-24
+
+OpenChat owns the generic features (model manager, Confirm-card primitive, app-integration hook).
+IOU is the reference *consumer*: everything below lives in the IOU repo and uses only generic
+OpenChat capabilities — there are **zero IOU references in OpenChat**. Built + verified now (the
+final wire-up to OpenChat's published provenance key + registration API is a documented seam, since
+those OpenChat features ship with the PR):
+
+- **Provenance + routing in the relay** (`scripts/iou-relay/server.ts`, `openchatAuth.ts`). New
+  key-blind endpoints on the existing relay: `POST /v1/pairings/start` (the IOU app, holding its
+  link token, mints a short pairing code), `POST /v1/pairings/claim` (OpenChat submits the code + an
+  Ed25519 **provenance token**; the relay verifies it against OpenChat's PUBLIC key
+  `IOU_OPENCHAT_PUBKEY` and binds that OpenChat user → the link token), `GET`/`DELETE /v1/pairings`
+  (list / revoke), and `POST /v1/openchat/drafts` (OpenChat forwards a confirmed draft + provenance;
+  the relay verifies, looks up the pairing, and stores it under the link token tagged
+  `source:"openchat"` + provenance). The relay still **never holds K_sheet** — only draft text +
+  routing metadata. Verified end-to-end over HTTP incl. forged/expired/unpaired/single-use-code
+  negatives (`scripts/iou-relay/selftest-openchat.ts`, **15/15**).
+- **Pairing UI** (`src/features/openchat/OpenChatSettings.tsx`, in Settings): link an OpenChat
+  account (shows the pairing code to give the OpenChat integration), list linked accounts, revoke,
+  with a consent/disclosure that OpenChat sees draft fields (key-blind) and nothing is written until
+  Accept.
+- **Inbox source tag** (`SheetPage.tsx`): OpenChat-forwarded drafts appear in the existing "Pending
+  from chat" inbox with a "✦ OpenChat" badge + the provenance user; the summary already shows the
+  amount + **plain-language direction** ("owed to you" / "you owe") — the defense the human reads at
+  the Accept gate. The Accept path is unchanged: `parseDraft → confirm → on-device encrypt →
+  add_entry`, then the draft is cleared from the relay.
+- **AI-action manifest** (`src/features/openchat/actionManifest.ts`): the declarative config IOU
+  registers with OpenChat's hook — the extraction prompt (image → draft JSON), the output schema
+  (= the IOU `EntryDraft`), the Confirm-card layout (+ plain-language direction labels), and the
+  callback (`/v1/openchat/drafts`, `openchat-provenance`). A unit test ties it to the real
+  `parseDraft`, so OpenChat's declared output is guaranteed to validate on the IOU side
+  (`actionManifest.test.ts`, 4/4).
+
+**Reused unchanged:** `parseDraft`/`isDuplicateDraft`, the inbox poll/render, the on-device encrypt
++ `add_entry` on Accept, and the relay store/serve/delete core. **Not on the IOU side:** the
+on-device model, the vision, and the in-chat Confirm-card rendering — all OpenChat's generic
+features; IOU only supplies the prompt, verifies provenance, routes, and writes.
+
+**The one open seam:** the relay verifies provenance against `IOU_OPENCHAT_PUBKEY` using an Ed25519
+token `{sub, iat, exp}`. When the OpenChat PR lands, swap in OpenChat's published key + claim format
+— it's isolated to `verifyOpenChatToken` in `scripts/iou-relay/openchatAuth.ts`.
+
 ---
 
 ## 1. What we're building

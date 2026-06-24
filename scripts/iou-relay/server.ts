@@ -22,16 +22,43 @@
 // Run:  IOU_RELAY_PORT=8788 pnpm relay:serve
 
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
-import { randomUUID } from "node:crypto";
+import { randomUUID, randomBytes } from "node:crypto";
+import { verifyOpenChatToken } from "./openchatAuth";
 
 const PORT = Number(process.env.IOU_RELAY_PORT ?? 8788);
 const TTL_MS = Number(process.env.IOU_RELAY_TTL_MS ?? 60 * 60 * 1000); // 1h
+const PAIRING_TTL_MS = Number(process.env.IOU_PAIRING_TTL_MS ?? 10 * 60 * 1000); // 10m
 const MAX_PER_TOKEN = 50;
 const MIN_TOKEN_LEN = 24;
 const MAX_BODY = 64 * 1024;
+// OpenChat provenance public key (PEM). Unset → the OpenChat ingestion + claim
+// paths return 503; the link-token path is unaffected. The relay only ever holds
+// OpenChat's PUBLIC key, so it verifies provenance but can't forge it.
+const OPENCHAT_PUBKEY = process.env.IOU_OPENCHAT_PUBKEY ?? "";
 
-type Pending = { id: string; draft: unknown; created_at: number };
+type Pending = {
+  id: string;
+  draft: unknown;
+  created_at: number;
+  source?: "connector" | "openchat";
+  provenance?: { openchat_user: string };
+};
 const store = new Map<string, Pending[]>(); // link token -> pending drafts
+
+// OpenChat pairing — KEY-BLIND routing metadata only (OpenChat-user → which IOU
+// link token a draft routes to). Never K_sheet, never an IC identity.
+//   pairingCodes: short-lived code  → IOU link token (the IOU app starts this)
+//   pairings:     OpenChat user id  → IOU link token (claimed by OpenChat)
+type Coded = { token: string; created_at: number };
+const pairingCodes = new Map<string, Coded>();
+const pairings = new Map<string, Coded>();
+
+function pushDraft(token: string, pending: Pending): void {
+  const list = store.get(token) ?? [];
+  if (list.length >= MAX_PER_TOKEN) list.shift(); // drop oldest
+  list.push(pending);
+  store.set(token, list);
+}
 
 function prune(): void {
   const now = Date.now();
@@ -39,6 +66,9 @@ function prune(): void {
     const kept = list.filter((p) => now - p.created_at < TTL_MS);
     if (kept.length) store.set(token, kept);
     else store.delete(token);
+  }
+  for (const [code, v] of pairingCodes) {
+    if (now - v.created_at >= PAIRING_TTL_MS) pairingCodes.delete(code);
   }
 }
 
@@ -87,11 +117,10 @@ async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> 
     if (!validToken(parsed?.token)) return void send(res, 400, { error: "token must be >= 24 chars" });
     if (parsed?.draft == null || typeof parsed.draft !== "object")
       return void send(res, 400, { error: "draft must be an object" });
-    const list = store.get(parsed.token) ?? [];
-    if (list.length >= MAX_PER_TOKEN) list.shift(); // drop oldest
-    const pending: Pending = { id: randomUUID(), draft: parsed.draft, created_at: Date.now() };
-    list.push(pending);
-    store.set(parsed.token, list);
+    const pending: Pending = {
+      id: randomUUID(), draft: parsed.draft, created_at: Date.now(), source: "connector",
+    };
+    pushDraft(parsed.token, pending);
     return void send(res, 200, { id: pending.id });
   }
 
@@ -112,6 +141,78 @@ async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> 
     if (next.length) store.set(token, next);
     else store.delete(token);
     return void send(res, 200, { ok: true, removed: list.length - next.length });
+  }
+
+  // --- OpenChat pairing + ingestion (confirmed-draft consumer side) ---
+
+  // POST /v1/pairings/start { token }  → { code, expires_in_ms }
+  // The IOU app (which holds the link token) starts a pairing and shows `code`
+  // as a short string / QR for the user to give the OpenChat integration.
+  if (req.method === "POST" && path === "/v1/pairings/start") {
+    let parsed: any;
+    try { parsed = JSON.parse(await readBody(req)); } catch { return void send(res, 400, { error: "invalid JSON body" }); }
+    if (!validToken(parsed?.token)) return void send(res, 400, { error: "token must be >= 24 chars" });
+    const code = randomBytes(5).toString("hex").toUpperCase(); // 10 hex chars
+    pairingCodes.set(code, { token: parsed.token, created_at: Date.now() });
+    return void send(res, 200, { code, expires_in_ms: PAIRING_TTL_MS });
+  }
+
+  // POST /v1/pairings/claim { code, oc_token }  → { ok, openchat_user }
+  // The OpenChat integration submits the user's pairing code + a provenance
+  // token; the relay binds that OpenChat user to the link token.
+  if (req.method === "POST" && path === "/v1/pairings/claim") {
+    if (!OPENCHAT_PUBKEY) return void send(res, 503, { error: "OpenChat provenance key not configured" });
+    let parsed: any;
+    try { parsed = JSON.parse(await readBody(req)); } catch { return void send(res, 400, { error: "invalid JSON body" }); }
+    const coded = typeof parsed?.code === "string" ? pairingCodes.get(parsed.code) : undefined;
+    if (!coded) return void send(res, 404, { error: "unknown or expired pairing code" });
+    const claims = verifyOpenChatToken(String(parsed?.oc_token ?? ""), OPENCHAT_PUBKEY, Date.now());
+    if (!claims) return void send(res, 401, { error: "invalid OpenChat provenance token" });
+    pairings.set(claims.sub, { token: coded.token, created_at: Date.now() });
+    pairingCodes.delete(parsed.code);
+    return void send(res, 200, { ok: true, openchat_user: claims.sub });
+  }
+
+  // GET /v1/pairings?token=...  → { pairings: [{ openchat_user, created_at }] }
+  if (req.method === "GET" && path === "/v1/pairings") {
+    const token = url.searchParams.get("token");
+    if (!validToken(token)) return void send(res, 400, { error: "token required" });
+    const list = [...pairings.entries()]
+      .filter(([, v]) => v.token === token)
+      .map(([sub, v]) => ({ openchat_user: sub, created_at: v.created_at }));
+    return void send(res, 200, { pairings: list });
+  }
+
+  // DELETE /v1/pairings/:openchat_user?token=...  → revoke a link
+  if (req.method === "DELETE" && path.startsWith("/v1/pairings/")) {
+    const token = url.searchParams.get("token");
+    const sub = decodeURIComponent(path.slice("/v1/pairings/".length));
+    if (!validToken(token)) return void send(res, 400, { error: "token required" });
+    const cur = pairings.get(sub);
+    let removed = 0;
+    if (cur && cur.token === token) { pairings.delete(sub); removed = 1; }
+    return void send(res, 200, { ok: true, removed });
+  }
+
+  // POST /v1/openchat/drafts { oc_token, draft }  → route to the paired token.
+  // OpenChat forwards a confirmed draft + provenance; verify, look up pairing,
+  // store under the IOU link token (source "openchat").
+  if (req.method === "POST" && path === "/v1/openchat/drafts") {
+    if (!OPENCHAT_PUBKEY) return void send(res, 503, { error: "OpenChat provenance key not configured" });
+    let parsed: any;
+    try { parsed = JSON.parse(await readBody(req)); } catch { return void send(res, 400, { error: "invalid JSON body" }); }
+    const claims = verifyOpenChatToken(String(parsed?.oc_token ?? ""), OPENCHAT_PUBKEY, Date.now());
+    if (!claims) return void send(res, 401, { error: "invalid OpenChat provenance token" });
+    if (parsed?.draft == null || typeof parsed.draft !== "object")
+      return void send(res, 400, { error: "draft must be an object" });
+    const coded = pairings.get(claims.sub);
+    if (!coded) return void send(res, 409, { error: "OpenChat user not paired to any IOU account" });
+    const pending: Pending = {
+      id: randomUUID(), draft: parsed.draft, created_at: Date.now(),
+      source: "openchat", provenance: { openchat_user: claims.sub },
+    };
+    pushDraft(coded.token, pending);
+    return void send(res, 200, { id: pending.id });
   }
 
   if (req.method === "GET" && path === "/health") return void send(res, 200, { ok: true });

@@ -681,7 +681,18 @@ export function SheetPage() {
                   className="row"
                   style={{ justifyContent: "space-between", alignItems: "center", gap: 8, padding: "6px 0" }}
                 >
-                  <span className="small">{r.ok ? r.value.summary : "⚠ invalid draft"}</span>
+                  <span className="small">
+                    {p.source === "openchat" && (
+                      <span
+                        className="lock-cue"
+                        title={`Forwarded by OpenChat user ${p.provenance?.openchat_user ?? "?"}`}
+                        style={{ marginRight: 6 }}
+                      >
+                        ✦ OpenChat
+                      </span>
+                    )}
+                    {r.ok ? r.value.summary : "⚠ invalid draft"}
+                  </span>
                   <span className="row" style={{ gap: 6 }}>
                     <button className="secondary small" onClick={() => importFromRelay(p)}>
                       Review &amp; add
