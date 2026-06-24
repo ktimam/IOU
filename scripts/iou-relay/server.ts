@@ -23,6 +23,7 @@
 
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { randomUUID, randomBytes } from "node:crypto";
+import { readFileSync } from "node:fs";
 import { verifyOpenChatToken } from "./openchatAuth";
 
 const PORT = Number(process.env.IOU_RELAY_PORT ?? 8788);
@@ -31,10 +32,23 @@ const PAIRING_TTL_MS = Number(process.env.IOU_PAIRING_TTL_MS ?? 10 * 60 * 1000);
 const MAX_PER_TOKEN = 50;
 const MIN_TOKEN_LEN = 24;
 const MAX_BODY = 64 * 1024;
-// OpenChat provenance public key (PEM). Unset → the OpenChat ingestion + claim
-// paths return 503; the link-token path is unaffected. The relay only ever holds
+// OpenChat provenance public key (PEM), inline (IOU_OPENCHAT_PUBKEY) or from a
+// file (IOU_OPENCHAT_PUBKEY_FILE). Unset → the OpenChat ingestion + claim paths
+// return 503; the link-token path is unaffected. The relay only ever holds
 // OpenChat's PUBLIC key, so it verifies provenance but can't forge it.
-const OPENCHAT_PUBKEY = process.env.IOU_OPENCHAT_PUBKEY ?? "";
+function loadOpenChatPubkey(): string {
+  if (process.env.IOU_OPENCHAT_PUBKEY) return process.env.IOU_OPENCHAT_PUBKEY;
+  const f = process.env.IOU_OPENCHAT_PUBKEY_FILE;
+  if (f) {
+    try {
+      return readFileSync(f, "utf8");
+    } catch {
+      console.error(`iou-relay: could not read IOU_OPENCHAT_PUBKEY_FILE=${f}`);
+    }
+  }
+  return "";
+}
+const OPENCHAT_PUBKEY = loadOpenChatPubkey();
 
 type Pending = {
   id: string;

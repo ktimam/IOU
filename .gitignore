@@ -27,6 +27,9 @@ android/keystore.properties
 *.jks
 *.keystore
 
+# OpenChat stand-in test keys (local full-cycle check) — never commit
+scripts/iou-relay/.standin-*.pem
+
 # TypeScript / Vite build output
 *.tsbuildinfo
 vite.config.d.ts

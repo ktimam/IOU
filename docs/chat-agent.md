@@ -167,6 +167,37 @@ features; IOU only supplies the prompt, verifies provenance, routes, and writes.
 token `{sub, iat, exp}`. When the OpenChat PR lands, swap in OpenChat's published key + claim format
 — it's isolated to `verifyOpenChatToken` in `scripts/iou-relay/openchatAuth.ts`.
 
+#### How to check the full cycle
+
+**Now — with the local OpenChat stand-in** (`scripts/iou-relay/openchat-standin.ts`; it mints the
+same Ed25519 provenance tokens the real connector will — key files gitignored). Drives the whole IOU
+consumer path against the live relay + canister:
+
+1. **Point the relay at the stand-in's key** and (re)start it:
+   ```
+   ./node_modules/.bin/tsx scripts/iou-relay/openchat-standin.ts pubkey   # writes scripts/iou-relay/.standin-pub.pem
+   IOU_OPENCHAT_PUBKEY_FILE=$PWD/scripts/iou-relay/.standin-pub.pem pnpm relay:serve
+   ```
+2. **In the IOU app:** sign in → open a sheet → Settings → "Chat import (relay)": set the relay URL +
+   a token, Save. Then **"OpenChat link" → Link an OpenChat account** → copy the pairing **code**.
+3. **Stand-in claims the pairing** (acts as OpenChat): `… openchat-standin.ts claim <CODE> oc-demo`.
+   Back in Settings, `oc-demo` now shows under linked accounts.
+4. **Stand-in forwards a confirmed draft:**
+   `… openchat-standin.ts send oc-demo 42.50 USD credit "dinner"`.
+5. **In the app sheet:** within ~15 s a **"✦ OpenChat"** card appears in "Pending from chat" →
+   **Review & add** → confirm → encrypted `add_entry`; balance + history update; the draft clears from
+   the relay. **Revoke** in Settings stops further routing.
+
+Headless equivalents that assert the whole path: `pnpm relay:selftest:openchat` (15/15, incl.
+forged/expired/unpaired/single-use negatives) + `pnpm test:unit` (`actionManifest`, `deepLink`).
+
+**Later — the real cross-app cycle** (once the OpenChat PR ships its model manager + Confirm-card +
+integration hook): identical steps, but instead of the stand-in the user installs the IOU integration
+in OpenChat, shares a transfer screenshot, OpenChat's on-device model extracts it and shows the
+Confirm card, and on Confirm OpenChat forwards the draft to `/v1/openchat/drafts` signed with its own
+key. Point `verifyOpenChatToken` at OpenChat's published key (the only open seam) — steps 2-5 are
+unchanged.
+
 ---
 
 ## 1. What we're building
