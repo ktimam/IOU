@@ -13,6 +13,7 @@ import {
   revokePairing,
   type OpenChatPairing,
 } from "../relay/relay";
+import { ActionInboxSettings } from "./ActionInboxSettings";
 
 export function OpenChatSettings() {
   const [pairings, setPairings] = useState<OpenChatPairing[]>([]);
@@ -36,12 +37,16 @@ export function OpenChatSettings() {
 
   if (!cfg) {
     return (
-      <div className="card">
-        <h2>OpenChat link</h2>
-        <p className="muted small">
-          Set up “Chat import (relay)” above first — OpenChat forwards drafts through it.
-        </p>
-      </div>
+      <>
+        <ActionInboxSettings />
+        <div className="card">
+          <h2>OpenChat link (relay)</h2>
+          <p className="muted small">
+            Set up “Chat import (relay)” above first — OpenChat forwards drafts through it. (The on-chain action
+            inbox above is the relay-free alternative.)
+          </p>
+        </div>
+      </>
     );
   }
 
@@ -69,8 +74,10 @@ export function OpenChatSettings() {
   };
 
   return (
+    <>
+    <ActionInboxSettings />
     <div className="card">
-      <h2>OpenChat link</h2>
+      <h2>OpenChat link (relay)</h2>
       <p className="muted small">
         Link an OpenChat account so a transaction screenshot you confirm in OpenChat lands here as
         “Pending from chat”. The encrypted entry is still written on <em>this device</em> when you
@@ -125,5 +132,6 @@ export function OpenChatSettings() {
 
       <span className="lock-cue">🔒 nothing is written until you Accept on the sheet</span>
     </div>
+    </>
   );
 }

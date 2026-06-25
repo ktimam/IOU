@@ -22,8 +22,13 @@ export type IouActionManifest = {
     fields: { key: string; label: string }[];
     directionLabels: Record<Direction, string>;
   };
-  // Where OpenChat forwards the confirmed draft (the IOU relay ingestion path).
+  // Where OpenChat forwards the confirmed draft (the legacy IOU relay ingestion path).
   callback: { path: string; auth: "openchat-provenance" };
+  // How a confirmed action is delivered. "action_inbox" = OpenChat encrypts the confirmed draft to the
+  // consumer's registered recipient_public_key and deposits it on-chain (relay-free; the consumer reads +
+  // decrypts it locally). "relay" = the legacy off-chain webhook above. The recipient_public_key is
+  // per-device and supplied at registration, not in this static manifest (see ActionInboxSettings).
+  delivery: { mode: "action_inbox" } | { mode: "relay" };
 };
 
 export const IOU_EXTRACTION_PROMPT = `You are extracting a single money transaction from an image
@@ -64,6 +69,7 @@ export const iouActionManifest: IouActionManifest = {
     },
   },
   callback: { path: "/v1/openchat/drafts", auth: "openchat-provenance" },
+  delivery: { mode: "action_inbox" },
 };
 
 /** Serialize the manifest for registration with OpenChat's integration hook. */
