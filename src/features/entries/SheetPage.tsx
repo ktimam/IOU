@@ -38,6 +38,7 @@ import {
   deletePending,
   type PendingDraft,
 } from "../relay/relay";
+import { pollActionInbox, getActionInboxConfig } from "../openchat/actionInboxClient";
 
 // Build entry-form defaults from a template.
 function templateToInitial(t: TxnTemplate): Partial<EntryPayload> {
@@ -187,6 +188,7 @@ export function SheetPage() {
   // We poll, show them, and import each through the same confirm seam; on a
   // successful write we clear it from the relay. The relay never holds K_sheet.
   const [pending, setPending] = useState<PendingDraft[]>([]);
+  const [inboxPending, setInboxPending] = useState<PendingDraft[]>([]);
   const [pendingRelayId, setPendingRelayId] = useState<string | null>(null);
   const reloadPending = async () => {
     const cfg = getRelayConfig();
@@ -201,6 +203,11 @@ export function SheetPage() {
     }
   };
   const clearRelay = async (id: string) => {
+    if (id.startsWith("oc-")) {
+      // On-chain inbox actions are append-only; just drop it from the local pending view.
+      setInboxPending((prev) => prev.filter((p) => p.id !== id));
+      return;
+    }
     const cfg = getRelayConfig();
     if (cfg) {
       try {
@@ -239,6 +246,44 @@ export function SheetPage() {
         if (!cancelled) setPending(p);
       } catch {
         /* relay down */
+      }
+    };
+    void load();
+    const iv = setInterval(() => void load(), 15000);
+    return () => {
+      cancelled = true;
+      clearInterval(iv);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // "Pending from OpenChat": confirmed actions OpenChat deposited on-chain. We pull them from the action_inbox
+  // canister, verify OpenChat's provenance signature + decrypt locally, then feed each through the same seam.
+  useEffect(() => {
+    const cfg = getActionInboxConfig();
+    if (!cfg) return;
+    let cancelled = false;
+    let since = 0n;
+    const load = async () => {
+      try {
+        const drafts = await pollActionInbox({ config: cfg, sinceId: since });
+        if (cancelled || drafts.length === 0) return;
+        for (const d of drafts) if (d.id >= since) since = d.id + 1n;
+        setInboxPending((prev) => {
+          const seen = new Set(prev.map((p) => p.id));
+          const add: PendingDraft[] = drafts
+            .filter((d) => !seen.has(`oc-${d.id}`))
+            .map((d) => ({
+              id: `oc-${d.id}`,
+              draft: d.draft,
+              created_at: Number(d.created_at / 1_000_000n),
+              source: "openchat",
+              provenance: { openchat_user: "action-inbox" },
+            }));
+          return add.length ? [...prev, ...add] : prev;
+        });
+      } catch {
+        /* inbox unreachable — leave as-is */
       }
     };
     void load();
@@ -665,15 +710,15 @@ export function SheetPage() {
         )}
       </section>
 
-      {!modal && isActive(sheet.state) && pending.length > 0 && (
+      {!modal && isActive(sheet.state) && pending.length + inboxPending.length > 0 && (
         <section className="card" style={{ marginBottom: 12 }}>
-          <h2 style={{ marginTop: 0 }}>✨ Pending from chat ({pending.length})</h2>
+          <h2 style={{ marginTop: 0 }}>✨ Pending from chat ({pending.length + inboxPending.length})</h2>
           <p className="muted small" style={{ marginTop: 0 }}>
             Drafts your AI assistant sent. Review each before it's saved — nothing is
             written until you confirm.
           </p>
           <ul style={{ listStyle: "none", padding: 0, margin: 0 }}>
-            {pending.map((p) => {
+            {[...pending, ...inboxPending].map((p) => {
               const r = parseDraft(p.draft);
               return (
                 <li
