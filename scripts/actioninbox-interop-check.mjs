@@ -13,6 +13,9 @@ const VEC = {
   ephemeral_public_key_b64: "BM8/i9pzJUADvSgLGzaep8oPGY+6u8tG8rtiHKDWb4wtXzdtTSY/mCyvv25wuRcN6dg+mIKIPQSOlrLoqHsADik=",
   ciphertext_b64:
     "nvDw0tfQh5q51eoPJyWsP164l9n8jo//h6OD0au67ANOEFnEHjgTXLEUFog1IXQRWiX9NcJ7sNufw0iDFE6m2nxeFFi2cPk9t9TE/AKdzlZj",
+  oc_public_key_pem_b64:
+    "LS0tLS1CRUdJTiBQVUJMSUMgS0VZLS0tLS0NCk1Ga3dFd1lIS29aSXpqMENBUVlJS29aSXpqMERBUWNEUWdBRU9rTTVhejdJVGNyODVIQkJkSXluczZsclFjRDQNCnpIbUFwSHRxQUJOVzZzclRkZGkrZFFCYk03SlVXanZBcW1xUE5TYTJZQUIyNk5HazJVdllFR1Vzbmc9PQ0KLS0tLS1FTkQgUFVCTElDIEtFWS0tLS0tDQo=",
+  oc_signature_b64: "aicN/G4qVL3FSQzc9rppGgjoeE47wXNQdjlq45WPh3gIH+2HtPpq9+kzUkab/picrOlv2PwkL9IW5QXju6UY4w==",
   expected_plaintext: '{"action_id":"iou.add","rows":[{"label":"Amount","value":"$20"}]}',
   fingerprint_hex: "2d86d5f2f9c5204734f13f2a39f2f724848b775543ab847243c78d91cd126137",
 };
@@ -59,6 +62,22 @@ if (fp === VEC.fingerprint_hex) {
 } else {
   failures++;
   console.log("FAIL fingerprint: got", fp, "expected", VEC.fingerprint_hex);
+}
+
+// Provenance: verify the real jwt::sign_bytes signature over (ephemeral_public_key || ciphertext).
+const ocPubPem = new TextDecoder().decode(b64(VEC.oc_public_key_pem_b64));
+const ocPub = await subtle.importKey("spki", pemToDer(ocPubPem), { name: "ECDSA", namedCurve: "P-256" }, false, ["verify"]);
+const eph = b64(VEC.ephemeral_public_key_b64);
+const ct = b64(VEC.ciphertext_b64);
+const preimage = new Uint8Array(eph.length + ct.length);
+preimage.set(eph, 0);
+preimage.set(ct, eph.length);
+const sigOk = await subtle.verify({ name: "ECDSA", hash: "SHA-256" }, ocPub, b64(VEC.oc_signature_b64), preimage);
+if (sigOk) {
+  console.log("PASS provenance signature verify (ECDSA P-256, raw r||s)");
+} else {
+  failures++;
+  console.log("FAIL provenance signature verify");
 }
 
 console.log(failures === 0 ? "\nALL INTEROP CHECKS PASSED" : `\n${failures} CHECK(S) FAILED`);
