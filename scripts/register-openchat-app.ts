@@ -13,6 +13,13 @@
 // Env:
 //   OC_USER_INDEX_CANISTER_ID   (required for a live run) OpenChat user_index canister id
 //   IC_URL                      IC replica URL (default http://127.0.0.1:8080 — OpenChat local dfx)
+//   OC_APP_PUBLIC_ORIGIN        Public origin of the IOU app itself, baked into the manifest's
+//                               surface URLs (the chat_link page OpenChat opens). Default
+//                               http://127.0.0.1:3000 (the dev server origin). MUST be the EXACT
+//                               scheme+host+port the user browses IOU on — the surface page reuses
+//                               the signed-in session and browser storage is origin-scoped, so
+//                               "localhost" and "127.0.0.1" are NOT interchangeable. Set it to the
+//                               deployed app origin for a real deployment.
 //   OC_CONSUMER_PUBLIC_KEY_PEM  OPTIONAL explicit app-level delivery key (P-256 SPKI PEM).
 //                               The IOU manifest sets per_user_keys=true, so delivery always uses
 //                               each user's own paired key and the app-level key is unused — the
@@ -57,6 +64,11 @@ function usage(): string {
     "",
     "Optional:",
     "  IC_URL      IC replica URL (default http://127.0.0.1:8080)",
+    "  OC_APP_PUBLIC_ORIGIN        Public origin of the IOU app, baked into the manifest's",
+    "      surface URLs (the chat_link page OpenChat opens in a chat). Default",
+    "      http://127.0.0.1:3000 (dev origin). MUST match the exact scheme+host+port you browse",
+    "      IOU on (localhost != 127.0.0.1 for browser storage); set it to the deployed app origin",
+    "      for live runs.",
     "  OC_CONSUMER_PUBLIC_KEY_PEM  or  --key-file <path>",
     "      Explicit app-level delivery key (consumer P-256 SPKI PEM). Only needed for",
     "      legacy / per_user_keys=false manifests; when provided it is validated and",
@@ -152,12 +164,16 @@ async function main(): Promise<void> {
   // any network call.
   const encoded = IDL.encode([RegisterAiAppArgs], [{ manifest }]);
   const actions = manifest.actions as { name: string }[];
+  const surfaces = manifest.surfaces as { kind: string; url: string }[];
   const appKey = consumerPublicKeyPem === "" ? "empty (per-user keys)" : "explicit PEM";
   console.log(
     `${TAG} manifest "iou" (${actions.length} action${actions.length === 1 ? "" : "s"}: ` +
       `${actions.map((a) => a.name).join(", ")}; per-user keys: ${manifest.per_user_keys ? "on" : "off"}; ` +
       `app key: ${appKey}) — candid-encoded ${encoded.byteLength} bytes`,
   );
+  for (const s of surfaces) {
+    console.log(`${TAG} surface "${s.kind}": ${s.url}`);
+  }
 
   if (args.dryRun) {
     console.log(`${TAG} --dry-run: skipping registration.`);

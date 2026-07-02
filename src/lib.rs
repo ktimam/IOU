@@ -319,10 +319,16 @@ impl Storable for RecoveryKey {
 //     v1.8.0 OpenChat per-user consumer keypair — opaque wrapped
 //     private-key blob + public key PEM, wrapped client-side under the
 //     vetkd-derived user key (the canister never sees the plaintext).
+//   MemoryId 19: CHAT_SHEET_LINKS (StableBTreeMap<String, ChatSheetLink>)
+//     v1.9.0 OpenChat chat → sheet mapping. Key is
+//     `format!("{}\0{}", caller.to_text(), chat_key)` — see
+//     chat_link_key(). Caller-keyed; chat_key is the opaque OpenChat
+//     context.chat string; sheet_id is the 16-hex-char sheet id
+//     encoded as a u64.
 //
 //   DO NOT re-use these orphaned MemoryIds for a new structure
 //   with a different key/value type — see issue #7. If you need
-//   a new region, use the next free number (currently 19+).
+//   a new region, use the next free number (currently 20+).
 
 // v1.5.0 (schema v3 -> v4): added optional encrypted name fields to Pair,
 // Sheet, PairSummary, CreateSheetReq.
@@ -413,6 +419,20 @@ thread_local! {
     static CONSUMER_KEYPAIRS: RefCell<StableBTreeMap<Principal, ConsumerKeypair, Memory>> =
         RefCell::new(StableBTreeMap::init(
             MEMORY_MANAGER.with(|m| m.borrow().get(MemoryId::new(18)))
+        ));
+
+    // v1.9.0 (OpenChat delivery provenance): per-user chat → sheet
+    // mapping. When OpenChat deposits a confirmed action it now carries
+    // the source chat in the envelope's v2 context wrapper; the PWA lets
+    // the user pin "always import this chat's drafts into this sheet".
+    // The mapping is caller-keyed (composite String key, see
+    // chat_link_key()); the chat_key is OPAQUE text to the canister
+    // (OpenChat's canonical "group:<principal>" /
+    // "channel:<principal>:<id>" form). Mirrors the CONSUMER_KEYPAIRS
+    // conventions: fresh MemoryId (19), additive, no migration.
+    static CHAT_SHEET_LINKS: RefCell<StableBTreeMap<String, ChatSheetLink, Memory>> =
+        RefCell::new(StableBTreeMap::init(
+            MEMORY_MANAGER.with(|m| m.borrow().get(MemoryId::new(19)))
         ));
 
     // V6: cache the result of vetkd_public_key after first derivation.
@@ -782,7 +802,12 @@ fn inspect_message() {
         // v1.8.0: OpenChat per-user consumer keypair
         "set_consumer_keypair",
         "get_consumer_keypair",
+        "delete_consumer_keypair",
         "vetkd_wrap_consumer_key",
+        // v1.9.0: OpenChat chat → sheet mapping
+        "set_chat_sheet_link",
+        "remove_chat_sheet_link",
+        "chat_sheet_links",
     ];
     if !allowed.contains(&method_name.as_str()) {
         ic_cdk::trap(format!(
@@ -820,7 +845,10 @@ fn inspect_message() {
         "set_sheet_name",
         "set_member_name",
         "set_consumer_keypair",
+        "delete_consumer_keypair",
         "vetkd_wrap_consumer_key",
+        "set_chat_sheet_link",
+        "remove_chat_sheet_link",
     ];
     if require_auth_methods.contains(&method_name.as_str())
         && caller == candid::Principal::anonymous()
@@ -984,16 +1012,14 @@ async fn create_pair() -> CreatePairResult {
         if p.borrow().contains_key(&id) {
             ic_cdk::trap("pair id collision; please retry");
         }
-        // v1: a principal may be in at most one active pair at a
-        // time. (The spec allows multiple pairs per user; we relax
-        // in v1.1.) The check + insert are in the same synchronous
-        // block (no await between), so two concurrent create_pair
-        // calls from the same caller cannot both pass the check.
-        for (_id, existing) in p.borrow().iter() {
-            if existing.archived_at.is_none() && is_member_of(&existing, caller) {
-                ic_cdk::trap("already in an active pair");
-            }
-        }
+        // A principal may be in any number of pairs concurrently — one shared
+        // ledger per partner. The earlier v1 "at most one active pair per
+        // principal" restriction was dropped (see the comment it replaced):
+        // get_my_pairs already returns the full list and the UI picks among
+        // them, join_pair never enforced the limit anyway, and there is no
+        // principal->pair index to maintain — sheets are keyed per pair and
+        // keys per principal, so unbounded pairs need no other change. The
+        // `archived_at` field is retained for a future leave/close-pair action.
         p.borrow_mut().insert(id.clone(), pair);
     });
     INVITES.with(|i| i.borrow_mut().insert(invite.clone(), id.clone()));
@@ -1953,6 +1979,122 @@ fn get_consumer_keypair() -> Option<ConsumerKeypair> {
     CONSUMER_KEYPAIRS.with(|m| m.borrow().get(&caller))
 }
 
+/// delete_consumer_keypair: caller-keyed removal of the stored consumer
+/// keypair. Backs the app's "Disconnect from OpenChat" action — once removed
+/// the device holds no wrapped private key, so it can no longer decrypt any
+/// action-inbox envelope and stops importing. This is the app-side half of a
+/// one-sided unlink that needs no code from OpenChat; removing the OpenChat-side
+/// delivery key (so OpenChat stops sending) is the separate `remove_my_ai_app_key`
+/// action in the OpenChat UI. Idempotent — a no-op when the caller has none.
+/// Only the opaque wrapped blob + PEM are affected; the plaintext private key
+/// never lived in the canister, so the E2E invariant is untouched.
+#[ic_cdk::update]
+fn delete_consumer_keypair() {
+    require_authed();
+    let caller = ic_cdk::api::msg_caller();
+    CONSUMER_KEYPAIRS.with(|m| m.borrow_mut().remove(&caller));
+}
+
+// ───────────── v1.9.0: OpenChat chat → sheet mapping ─────────────
+//
+// OpenChat's confirmed-action envelopes now carry a v2 context wrapper
+// with the source chat ("group:<principal>" or
+// "channel:<principal>:<channel id>"). The PWA lets the user remember
+// "always import this chat's drafts into this sheet"; the mapping lives
+// here so it follows the user across devices (localStorage is only a
+// cache). The chat_key is OPAQUE to the canister — plain text, never
+// parsed. sheet_id is the 16-hex-char sheet id encoded as a u64 (the
+// ids come from now_id(): 8 raw_rand bytes hex-encoded, so the mapping
+// is loss-free). Caller-keyed like CONSUMER_KEYPAIRS: a principal only
+// ever sees / edits its own links.
+
+#[derive(Clone, CandidType, Deserialize)]
+pub struct ChatSheetLink {
+    pub chat_key: String,
+    pub sheet_id: u64,
+}
+
+impl Storable for ChatSheetLink {
+    fn to_bytes(&self) -> Cow<'_, [u8]> {
+        Cow::Owned(Encode!(self).unwrap())
+    }
+    fn from_bytes(bytes: Cow<[u8]>) -> Self {
+        Decode!(bytes.as_ref(), Self).unwrap()
+    }
+    const BOUND: Bound = Bound::Unbounded;
+}
+
+/// Composite key for CHAT_SHEET_LINKS: `caller text \0 chat_key`. The
+/// NUL separator is safe because principal text never contains a NUL
+/// byte and validate_chat_key rejects NUL in chat_key. Same pattern as
+/// entry_key().
+fn chat_link_key(caller: &Principal, chat_key: &str) -> String {
+    format!("{}\0{}", caller.to_text(), chat_key)
+}
+
+/// Validation shared by set/remove: the chat_key is opaque but bounded
+/// (1..=200 chars) and must not contain NUL (it is embedded in the
+/// composite stable-map key).
+fn validate_chat_key(chat_key: &str) {
+    let n = chat_key.chars().count();
+    if n == 0 || n > 200 {
+        ic_cdk::trap("chat_key length out of range (1..=200 chars)");
+    }
+    if chat_key.contains('\0') {
+        ic_cdk::trap("chat_key must not contain NUL");
+    }
+}
+
+/// set_chat_sheet_link: caller-keyed upsert of a chat → sheet mapping.
+/// `chat_key` is the OpenChat context.chat string (opaque here);
+/// `sheet_id` is the sheet id as a u64 (hex-decoded client-side).
+#[ic_cdk::update]
+fn set_chat_sheet_link(chat_key: String, sheet_id: u64) {
+    require_authed();
+    validate_chat_key(&chat_key);
+    let caller = ic_cdk::api::msg_caller();
+    CHAT_SHEET_LINKS.with(|m| {
+        m.borrow_mut().insert(
+            chat_link_key(&caller, &chat_key),
+            ChatSheetLink { chat_key, sheet_id },
+        )
+    });
+}
+
+/// remove_chat_sheet_link: caller-keyed removal. Removing a mapping
+/// that does not exist is a no-op (idempotent).
+#[ic_cdk::update]
+fn remove_chat_sheet_link(chat_key: String) {
+    require_authed();
+    validate_chat_key(&chat_key);
+    let caller = ic_cdk::api::msg_caller();
+    CHAT_SHEET_LINKS.with(|m| {
+        m.borrow_mut().remove(&chat_link_key(&caller, &chat_key));
+    });
+}
+
+/// chat_sheet_links: all of the CALLER's chat → sheet mappings. The
+/// anonymous principal never has any. Full-table scan filtered by the
+/// caller prefix — same trade-off as sheet_entries_iter (bounded by
+/// the number of chats a user has ever linked).
+#[ic_cdk::query]
+fn chat_sheet_links() -> Vec<ChatSheetLink> {
+    let caller = ic_cdk::api::msg_caller();
+    if caller == Principal::anonymous() {
+        return Vec::new();
+    }
+    let prefix = format!("{}\0", caller.to_text());
+    let mut out: Vec<ChatSheetLink> = Vec::new();
+    CHAT_SHEET_LINKS.with(|m| {
+        for (k, v) in m.borrow().iter() {
+            if k.starts_with(&prefix) {
+                out.push(v);
+            }
+        }
+    });
+    out
+}
+
 // ────────────────────── v1.1.2: replace-member (offline sig + QR) ──────────────────────
 //
 // The flow:
@@ -2389,6 +2531,24 @@ mod tests {
         let k_b_1 = entry_key("b", 1);
         assert!(k_a_2 < k_a_10, "lexicographic: a\\0...02 < a\\0...10");
         assert!(k_a_10 < k_b_1, "lexicographic: a* < b*");
+    }
+
+    #[test]
+    fn chat_link_key_is_caller_scoped_and_unambiguous() {
+        // v1.9.0: CHAT_SHEET_LINKS uses `caller\0chat_key` composite
+        // keys. Same caller + chat → same key; anything else differs.
+        let a = Principal::from_text("aaaaa-aa").unwrap();
+        let b = Principal::anonymous();
+        assert_eq!(chat_link_key(&a, "group:x"), chat_link_key(&a, "group:x"));
+        assert_ne!(chat_link_key(&a, "group:x"), chat_link_key(&a, "group:y"));
+        assert_ne!(chat_link_key(&a, "group:x"), chat_link_key(&b, "group:x"));
+        // The caller-prefix scan in chat_sheet_links() relies on the
+        // NUL separator: a key belongs to caller `p` iff it starts
+        // with `p.to_text() + "\0"`. Principal text never contains
+        // NUL, so no other principal's keys can match the prefix.
+        let key = chat_link_key(&a, "channel:xyz:42");
+        assert!(key.starts_with(&format!("{}\0", a.to_text())));
+        assert_eq!(&key[a.to_text().len() + 1..], "channel:xyz:42");
     }
 
     #[test]

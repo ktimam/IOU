@@ -17,10 +17,14 @@
 // wrapped blob); decryption happens here on poll. Nothing is written to a sheet until the user
 // Accepts, exactly like the relay path.
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useAuth } from "../auth/AuthProvider";
-import { consumerPublicKeyPem, loadOrCreateConsumerKeypair } from "./consumerKeypair";
-import { claimAiAppLinkCode, registerAiApp } from "./registerAiApp";
+import {
+  clearConsumerKeypair,
+  consumerPublicKeyPem,
+  loadOrCreateConsumerKeypair,
+} from "./consumerKeypair";
+import { claimAiAppLinkCode, registerAiApp, revokeAiAppUserKey } from "./registerAiApp";
 
 const LS_INBOX = "iou.openchat.actionInbox.v1";
 
@@ -55,6 +59,9 @@ export function ActionInboxSettings() {
   const [link, setLink] = useState<LinkStatus>({ kind: "idle" });
   const [linkCode, setLinkCode] = useState("");
   const [connect, setConnect] = useState<LinkStatus>({ kind: "idle" });
+  const [disconnect, setDisconnect] = useState<LinkStatus>({ kind: "idle" });
+  const connectRef = useRef<HTMLHeadingElement | null>(null);
+  const codeInputRef = useRef<HTMLInputElement | null>(null);
 
   useEffect(() => {
     void (async () => {
@@ -66,6 +73,16 @@ export function ActionInboxSettings() {
         /* WebCrypto unavailable */
       }
     })();
+  }, []);
+
+  // OpenChat's consent sheet links here as <origin>/settings#openchat-connect (the manifest's
+  // "connect" surface): scroll the Connect section into view and put the caret in the code input
+  // so the user can paste immediately.
+  useEffect(() => {
+    if (globalThis.location?.hash === "#openchat-connect") {
+      connectRef.current?.scrollIntoView({ behavior: "smooth", block: "start" });
+      codeInputRef.current?.focus();
+    }
   }, []);
 
   const copy = (t: string) => {
@@ -169,6 +186,48 @@ export function ActionInboxSettings() {
     }
   };
 
+  // One-sided disconnect from the IOU side: delete this account's wrapped consumer keypair
+  // (canister + device cache), and — while we still know the PEM — best-effort revoke the same key
+  // on OpenChat (revoke_ai_app_user_key; the PEM is the bearer authorization). With the key gone
+  // there too, OpenChat's in-chat propose flow re-detects "not connected" and offers the user the
+  // pairing sheet right in the chat. Reconnecting = a fresh keypair + a new 6-digit pairing.
+  const disconnectFromOpenChat = async () => {
+    setDisconnect({ kind: "busy" });
+    try {
+      // Revoke FIRST (needs the PEM; after clearConsumerKeypair it is gone for good). Failure is
+      // non-fatal — the local delete still stops all importing; OpenChat-side cleanup can then be
+      // done via Disconnect in the chat's Apps settings.
+      let revoked = false;
+      if (pubKeyPem && OC_USER_INDEX_CANISTER_ID) {
+        try {
+          const outcome = await revokeAiAppUserKey({
+            host: OC_IC_URL,
+            userIndexCanisterId: OC_USER_INDEX_CANISTER_ID,
+            publicKeyPem: pubKeyPem,
+            identity,
+          });
+          revoked = outcome.kind === "success" || outcome.kind === "key_not_found";
+        } catch {
+          /* unreachable user_index — proceed with the local delete */
+        }
+      }
+      await clearConsumerKeypair();
+      setPubKeyPem("");
+      setFingerprint("");
+      setDisconnect({
+        kind: "ok",
+        message: revoked
+          ? "Disconnected — your delivery key was deleted here AND removed from OpenChat. Next time an " +
+            "action is proposed in a chat, OpenChat will offer to reconnect."
+          : "Disconnected — your delivery key was deleted, so OpenChat actions can no longer be decrypted " +
+            "or imported. OpenChat couldn't be reached to remove its copy — also press Disconnect in the " +
+            "chat's Apps settings there.",
+      });
+    } catch (e) {
+      setDisconnect({ kind: "err", message: (e as Error).message });
+    }
+  };
+
   const save = () => {
     try {
       globalThis.localStorage?.setItem(LS_INBOX, JSON.stringify({ canisterId: canisterId.trim(), host: host.trim() }));
@@ -222,13 +281,16 @@ export function ActionInboxSettings() {
         </p>
       )}
 
-      <h3 style={{ marginTop: 16 }}>Connect to OpenChat</h3>
+      <h3 id="openchat-connect" ref={connectRef} style={{ marginTop: 16 }}>
+        Connect to OpenChat
+      </h3>
       <p className="muted small">
         OpenChat delivers <em>your</em> confirmed actions encrypted to a key only your IOU account holds.
         When OpenChat shows you a 6-digit code, enter it here to connect them — once per account, ever.
       </p>
       <div className="row" style={{ gap: 8, flexWrap: "wrap", alignItems: "center" }}>
         <input
+          ref={codeInputRef}
           placeholder="6-digit code"
           value={linkCode}
           onChange={(e) => setLinkCode(e.target.value)}
@@ -252,6 +314,30 @@ export function ActionInboxSettings() {
       {connect.kind === "err" && (
         <p className="small" style={{ color: "var(--debt)", marginTop: 6 }}>
           {connect.message}
+        </p>
+      )}
+
+      <div className="row" style={{ gap: 8, alignItems: "center", marginTop: 12 }}>
+        <button
+          type="button"
+          className="secondary"
+          onClick={() => void disconnectFromOpenChat()}
+          disabled={disconnect.kind === "busy" || !pubKeyPem}
+        >
+          {disconnect.kind === "busy" ? "Disconnecting…" : "Disconnect from OpenChat"}
+        </button>
+        <span className="muted small">
+          Deletes this account's delivery key — one-sided, no code needed.
+        </span>
+      </div>
+      {disconnect.kind === "ok" && (
+        <p className="small" style={{ color: "var(--credit)", marginTop: 6 }}>
+          {disconnect.message}
+        </p>
+      )}
+      {disconnect.kind === "err" && (
+        <p className="small" style={{ color: "var(--debt)", marginTop: 6 }}>
+          {disconnect.message}
         </p>
       )}
 

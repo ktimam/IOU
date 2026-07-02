@@ -1,0 +1,64 @@
+import { describe, it, expect } from "vitest";
+import { parseInboxPlaintext } from "./actionInboxClient";
+
+// The v2 envelope plaintext wrapper OpenChat's local_user_index builds around the confirm payload:
+//   { context: { chat, messageId, confirmedBy, confirmedAt }, payload: <original confirm-payload JSON> }
+// Wrapper-less plaintexts (pre-v2 deposits, non-OpenChat producers) must be tolerated by treating the
+// whole document as the payload.
+describe("parseInboxPlaintext (v2 envelope wrapper)", () => {
+  const payload = { action_id: "iou.add", rows: [{ label: "Amount", value: "$20" }] };
+  const context = {
+    chat: "group:dfdal-2uaaa-aaaaa-qaama-cai",
+    messageId: "123456789012345678",
+    confirmedBy: "27eue-hyaaa-aaaaf-aaa4a-cai",
+    confirmedAt: 1750000000123,
+  };
+
+  it("splits a v2 wrapper into payload + context", () => {
+    const out = parseInboxPlaintext(JSON.stringify({ context, payload }));
+    expect(out.payload).toEqual(payload);
+    expect(out.context).toEqual(context);
+  });
+
+  it("supports the channel chat key form", () => {
+    const chan = { ...context, chat: "channel:dfdal-2uaaa-aaaaa-qaama-cai:42" };
+    const out = parseInboxPlaintext(JSON.stringify({ context: chan, payload }));
+    expect(out.context?.chat).toBe("channel:dfdal-2uaaa-aaaaa-qaama-cai:42");
+  });
+
+  it("treats a wrapper-less JSON document as the payload (no context)", () => {
+    const out = parseInboxPlaintext(JSON.stringify(payload));
+    expect(out.payload).toEqual(payload);
+    expect(out.context).toBeUndefined();
+  });
+
+  it("treats non-object JSON as the payload", () => {
+    expect(parseInboxPlaintext('"just a string"')).toEqual({ payload: "just a string" });
+    expect(parseInboxPlaintext("[1,2,3]")).toEqual({ payload: [1, 2, 3] });
+  });
+
+  it("does not mistake a payload that merely HAS a context field for a wrapper", () => {
+    // "payload" key missing → not the wrapper shape, whole doc is the payload.
+    const doc = { context: { chat: "group:x", messageId: "1" }, something_else: true };
+    const out = parseInboxPlaintext(JSON.stringify(doc));
+    expect(out.payload).toEqual(doc);
+    expect(out.context).toBeUndefined();
+  });
+
+  it("keeps the payload but drops a malformed context", () => {
+    const out = parseInboxPlaintext(JSON.stringify({ context: { chat: 42 }, payload }));
+    expect(out.payload).toEqual(payload);
+    expect(out.context).toBeUndefined();
+  });
+
+  it("tolerates missing optional context fields", () => {
+    const out = parseInboxPlaintext(
+      JSON.stringify({ context: { chat: "group:x", messageId: "7" }, payload }),
+    );
+    expect(out.context).toEqual({ chat: "group:x", messageId: "7", confirmedBy: "", confirmedAt: 0 });
+  });
+
+  it("throws on non-JSON input (caller drops the envelope)", () => {
+    expect(() => parseInboxPlaintext("not json")).toThrow();
+  });
+});

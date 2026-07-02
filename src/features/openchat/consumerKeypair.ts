@@ -291,3 +291,25 @@ export async function loadOrCreateConsumerKeypair(): Promise<ConsumerKeypair> {
 export async function consumerPublicKeyPem(): Promise<string> {
   return (await loadOrCreateConsumerKeypair()).publicKeySpkiPem;
 }
+
+/**
+ * clearConsumerKeypair: the app-side half of a one-sided OpenChat disconnect. Deletes the
+ * canister-backed wrapped keypair (delete_consumer_keypair) and the device cache, so NO device of
+ * this account can decrypt action-inbox envelopes any more — importing stops even though nothing
+ * was exchanged with OpenChat. (OpenChat still holds the PUBLIC key until the user also
+ * disconnects there; its deliveries just become undecryptable ciphertext, which is harmless.)
+ * Reconnecting later generates a fresh keypair and goes through the normal pairing code.
+ */
+export async function clearConsumerKeypair(): Promise<void> {
+  const identity = backendIdentity;
+  inflight = null; // drop any memoized sync — the next load must not resurrect the old keypair
+  try {
+    globalThis.localStorage?.removeItem(LS_KEY);
+  } catch {
+    /* ignore */
+  }
+  if (identity) {
+    const actor = await buildBackendActor(identity);
+    await actor.delete_consumer_keypair();
+  }
+}

@@ -13,6 +13,13 @@ const INFO = "oc-action-inbox-v1";
 
 // The deposit/keys come from the Rust ecies_payload `print_interop_vector` (StdRng seed 424242) — the same
 // vector the crypto interop check uses, so this exercises real OpenChat-produced bytes end to end.
+//
+// v2 provenance preimage: the signature covers (ephemeral_public_key || ciphertext || created_at) with
+// created_at as a u64 little-endian — created_at used to be unsigned. That means the signature is only
+// valid for the EXACT created_at it was produced with, so the deposit now sends the fixed VEC.created_at
+// instead of Date.now(). The oc_signature_b64 below is still the OLD v1 signature: re-run the Rust
+// `print_interop_vector` (after its v2 preimage change) and paste its oc_signature_b64 + created_at here —
+// until then `read` reports provenance=INVALID (old entries are unverifiable by design; local dev only).
 const VEC = {
   recipient_sk_pem_b64:
     "LS0tLS1CRUdJTiBQUklWQVRFIEtFWS0tLS0tDQpNSUdIQWdFQU1CTUdCeXFHU000OUFnRUdDQ3FHU000OUF3RUhCRzB3YXdJQkFRUWdubWp0TktHU2lkRU96ZHhrDQpqRTI4bkh3TFd3QkRZVWxTbDZyYmo1OHIrV3FoUkFOQ0FBUnJESmo1VTJPQkF0bGdyNzJGSmNBSWFNYjVOT1BNDQp3T1FYMDVIMWdzeWthN3Nheitld1JJNWxyRWtudzlTaTBCMGV6OXl0TTlZZGpXZ2NJenR1OGlLSw0KLS0tLS1FTkQgUFJJVkFURSBLRVktLS0tLQ0K",
@@ -20,6 +27,7 @@ const VEC = {
   ciphertext_b64:
     "nvDw0tfQh5q51eoPJyWsP164l9n8jo//h6OD0au67ANOEFnEHjgTXLEUFog1IXQRWiX9NcJ7sNufw0iDFE6m2nxeFFi2cPk9t9TE/AKdzlZj",
   oc_signature_b64: "aicN/G4qVL3FSQzc9rppGgjoeE47wXNQdjlq45WPh3gIH+2HtPpq9+kzUkab/picrOlv2PwkL9IW5QXju6UY4w==",
+  created_at: 1750000000123n, // epoch ms; MUST match the created_at the Rust vector signed (v2 preimage)
   fingerprint_hex: "2d86d5f2f9c5204734f13f2a39f2f724848b775543ab847243c78d91cd126137",
   expected_plaintext: '{"action_id":"iou.add","rows":[{"label":"Amount","value":"$20"}]}',
 };
@@ -82,11 +90,14 @@ async function decrypt(ephRaw, ciphertext, skPem) {
   return new TextDecoder().decode(new Uint8Array(pt));
 }
 
-async function verify(ephRaw, ciphertext, sig, ocPubPem) {
+// v2 preimage: ephemeral_public_key || ciphertext || created_at (u64 LE, 8 bytes). Mirrors
+// actionInboxCrypto.signingPreimageV2 / the Rust ecies_payload signing_preimage.
+async function verify(ephRaw, ciphertext, createdAt, sig, ocPubPem) {
   const pub = await subtle.importKey("spki", pemToDer(ocPubPem), { name: "ECDSA", namedCurve: "P-256" }, false, ["verify"]);
-  const preimage = new Uint8Array(ephRaw.length + ciphertext.length);
+  const preimage = new Uint8Array(ephRaw.length + ciphertext.length + 8);
   preimage.set(ephRaw, 0);
   preimage.set(ciphertext, ephRaw.length);
+  new DataView(preimage.buffer).setBigUint64(ephRaw.length + ciphertext.length, BigInt(createdAt), true);
   return subtle.verify({ name: "ECDSA", hash: "SHA-256" }, pub, sig, preimage);
 }
 
@@ -105,7 +116,8 @@ if (mode === "principal") {
         ephemeral_public_key: Array.from(b64(VEC.ephemeral_public_key_b64)),
         ciphertext: Array.from(b64(VEC.ciphertext_b64)),
         oc_signature: Array.from(b64(VEC.oc_signature_b64)),
-        created_at: BigInt(Date.now()),
+        // v2: created_at is signed, so it must be the exact value the vector's signature covers.
+        created_at: VEC.created_at,
       },
     ],
   });
@@ -125,7 +137,7 @@ if (mode === "principal") {
   for (const a of actions) {
     const eph = Uint8Array.from(a.ephemeral_public_key);
     const ct = Uint8Array.from(a.ciphertext);
-    const signed = await verify(eph, ct, Uint8Array.from(a.oc_signature), ocPubPem);
+    const signed = await verify(eph, ct, a.created_at, Uint8Array.from(a.oc_signature), ocPubPem);
     const pt = await decrypt(eph, ct, new TextDecoder().decode(b64(VEC.recipient_sk_pem_b64)));
     const match = pt === VEC.expected_plaintext;
     console.log(`  action id=${a.id}  provenance=${signed ? "VALID" : "INVALID"}  decrypt=${match ? "MATCH" : "MISMATCH"}`);

@@ -134,6 +134,105 @@ an **empty** app-level key — with per-user delivery the app key is unused. A r
 only matters for `per_user_keys=false` manifests (see
 [Explicit app-level key (legacy)](#explicit-app-level-key-legacy)).
 
+## Delivery provenance and the chat → sheet mapping
+
+Since the v2 envelope format, every confirmed action OpenChat deposits carries **delivery
+provenance** inside the encrypted plaintext: a `context` wrapper with the source chat
+(`"group:<chat canister principal>"` or `"channel:<community principal>:<channel id>"`), the
+message id, the confirming user's principal and the confirm timestamp, alongside the unchanged
+draft `payload`. The provenance signature was hardened at the same time: OpenChat now signs
+`ephemeral_public_key ‖ ciphertext ‖ created_at` (created_at as u64 little-endian), so the
+deposit timestamp can no longer be forged. Two consequences:
+
+- IOU shows *where* a pending draft came from (chat + confirming user) instead of a generic
+  "action-inbox" badge, and tolerates older wrapper-less deposits (whole plaintext = payload,
+  no provenance shown).
+- Deposits made before the v2 change no longer pass signature verification and are dropped —
+  acceptable for the local dev environments this ships in.
+
+On top of the provenance IOU keeps a per-user **chat → sheet mapping**:
+
+- The first time you import a draft from a chat that has no mapping yet, the review form shows a
+  **"Remember: always import this chat's drafts into this sheet"** checkbox (ticked by default).
+  Confirming the entry stores the mapping.
+- Once a chat is mapped, its drafts only appear on the mapped sheet's page — other sheets hide
+  them. Drafts from unmapped chats (or wrapper-less deposits) appear everywhere, as before.
+- The mapping is **canister-backed and caller-keyed** (`set_chat_sheet_link` /
+  `remove_chat_sheet_link` / `chat_sheet_links` on the IOU backend), so it follows you across
+  devices; localStorage (`iou.openchat.chatSheetLinks.v1`) is only an optimistic cache. The chat
+  key is opaque text to the canister; the sheet id travels as a `nat64` (IOU sheet ids are 16 hex
+  chars, i.e. exactly 64 bits).
+
+## App surfaces: the in-chat "link this chat" page
+
+A **surface** is a page of the IOU app that OpenChat can open on the app's behalf. Surfaces are
+part of the registered manifest (`AiAppManifest.surfaces`); each one carries:
+
+- `kind` — what the surface is for. `"chat_link"` is the kind OpenChat knows today: it opens the
+  surface after the **first confirmed action in a chat**, so the user can configure that chat
+  inside the app. Kinds OpenChat does not recognise are ignored, so new kinds can ship in the
+  manifest ahead of OpenChat support.
+- `url` — a URL **template**. OpenChat substitutes `{chatKey}` (the canonical chat key, the same
+  format the delivery provenance uses: `group:<principal>` / `channel:<principal>:<id>`) and
+  `{appId}` before opening it.
+- `display` — `"sheet"` (embedded in OpenChat as an iframe inside a bottom sheet) or
+  `"external"` (opened in the system browser / a new tab).
+
+IOU registers exactly one surface:
+
+```
+kind:    chat_link
+url:     <app origin>/openchat/link-chat?chat={chatKey}
+display: sheet
+```
+
+The target is the IOU route **`/openchat/link-chat`**: it requires sign-in, lists your active
+sheets with their decrypted names, preselects the chat's current mapping if one exists, and on
+save stores the mapping through the same canister-backed `set_chat_sheet_link` path described
+above — so linking a chat from inside OpenChat and ticking "Remember" on an imported draft are
+the same mapping. No new canister endpoints are involved.
+
+### How the deploy step registers it
+
+The surface URL must be **absolute at registration time** — OpenChat stores it verbatim (only
+the placeholders are substituted later). The origin is resolved when the manifest is built
+(`resolvePublicOrigin()` in `src/features/openchat/actionManifest.ts`):
+
+- **CLI script** (`pnpm register:openchat`, runs under node): `OC_APP_PUBLIC_ORIGIN`, default
+  `http://127.0.0.1:3000` (the dev-server origin — `vite.config.ts` sets `host: "127.0.0.1"`,
+  `port: 3000`). Set it to the deployed IOU app origin before registering:
+
+  ```sh
+  export OC_APP_PUBLIC_ORIGIN=https://<iou assets canister>.icp0.io
+  pnpm register:openchat
+  ```
+
+  > **The origin must be the EXACT one you browse IOU on** — scheme, host, *and* port. OpenChat
+  > opens the chat-link page in the system browser, where it reuses your already-signed-in IOU
+  > session; the browser scopes that session (II delegation / dev identity, and hence your
+  > sheets) to the origin. `http://localhost:3000` and `http://127.0.0.1:3000` are **different
+  > origins** — registering one while browsing the other makes the page open cross-origin, see no
+  > session, and re-prompt sign-in as an empty (sheet-less) principal.
+
+- **In-app button** ("Link to OpenChat"): `VITE_PUBLIC_ORIGIN`, baked in at build time (same
+  default). Add it to `.env.local` / the build environment when the app is not served from
+  `http://127.0.0.1:3000`.
+
+`pnpm register:openchat -- --dry-run` prints each surface (`surface "chat_link": <url>`) along
+with the candid-encoded size, so a pipeline can verify the origin before a live run. Because
+registration is an upsert, re-running the script after changing the origin simply updates the
+stored URL.
+
+### Adding more surfaces later
+
+Add an entry to `iouActionManifest.surfaces` in `src/features/openchat/actionManifest.ts` — the
+wire mapping in `registerAiApp.ts` (`buildManifestWire` + the `AiAppSurface` IDL) passes every
+entry through, so no other code changes are needed. Keep within OpenChat's validation limits: at
+most **10 surfaces**, `kind` 1–64 chars, `url` 1–2000 chars and parseable once the placeholders
+are substituted. Use `display: "external"` for pages that refuse framing or need a full browser;
+note that unknown kinds are ignored by OpenChat rather than rejected, so shipping a
+forward-looking surface is safe.
+
 ## Troubleshooting
 
 - Button: `VITE_OC_USER_INDEX_CANISTER_ID is not set` — add the OpenChat user_index canister id

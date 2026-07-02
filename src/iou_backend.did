@@ -185,6 +185,15 @@ type ConsumerKeypair = record {
     public_key_pem : text;
 };
 
+// v1.9.0: OpenChat chat → sheet mapping. chat_key is the opaque
+// OpenChat context.chat string ("group:<principal>" or
+// "channel:<principal>:<channel id>"); sheet_id is the 16-hex-char
+// sheet id encoded as a nat64. Caller-keyed.
+type ChatSheetLink = record {
+    chat_key : text;
+    sheet_id : nat64;
+};
+
 service : {
     // Phase 1
     whoami : () -> (opt text) query;
@@ -241,5 +250,11 @@ service : {
     // v1.8.0: OpenChat per-user consumer keypair
     set_consumer_keypair : (vec nat8, text) -> ();
     get_consumer_keypair : () -> (opt ConsumerKeypair) query;
+    delete_consumer_keypair : () -> ();
     vetkd_wrap_consumer_key : (vec nat8) -> (vec nat8);
+
+    // v1.9.0: OpenChat chat → sheet mapping
+    set_chat_sheet_link : (text, nat64) -> ();
+    remove_chat_sheet_link : (text) -> ();
+    chat_sheet_links : () -> (vec ChatSheetLink) query;
 }

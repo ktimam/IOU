@@ -78,6 +78,14 @@ export function buildIdl() {
     consumer_public_key: IDL.Opt(IDL.Text),
     rules: IDL.Vec(AiActionRuleIdl),
   });
+  // App surfaces: pages of the app OpenChat can open (e.g. the chat_link chat → sheet page).
+  // display uses per-variant #[serde(rename)] snake labels, same rule as the enums above.
+  const SurfaceDisplay = IDL.Variant({ sheet: IDL.Null, external: IDL.Null });
+  const AiAppSurface = IDL.Record({
+    kind: IDL.Text,
+    url: IDL.Text,
+    display: SurfaceDisplay,
+  });
   const AiAppManifest = IDL.Record({
     name: IDL.Text,
     description: IDL.Text,
@@ -88,6 +96,9 @@ export function buildIdl() {
     // `#[serde(default)] bool` on the Rust side, but candid still REQUIRES the field on encode.
     per_user_keys: IDL.Bool,
     actions: IDL.Vec(AiActionDefinition),
+    // `#[serde(default)] Vec` on the Rust side, but candid still REQUIRES the field on encode —
+    // buildManifestWire always sends it ([] when the manifest declares none).
+    surfaces: IDL.Vec(AiAppSurface),
   });
   const UserId = IDL.Principal;
   const AiAppRegistration = IDL.Record({
@@ -120,14 +131,23 @@ export function buildIdl() {
     InvalidRequest: IDL.Text,
     Error: OCError,
   });
+  // One-sided disconnect, app side: presenting the EXACT registered PEM is the authorization
+  // (only OpenChat and this app ever hold it), so no caller guard and an anonymous agent works.
+  const RevokeAiAppUserKeyArgs = IDL.Record({ public_key: IDL.Text });
+  const RevokeAiAppUserKeyResponse = IDL.Variant({
+    Success: IDL.Null,
+    KeyNotFound: IDL.Null,
+    Error: OCError,
+  });
 
   const service = IDL.Service({
     register_ai_app: IDL.Func([RegisterAiAppArgs], [RegisterAiAppResponse], []),
     ai_apps: IDL.Func([AiAppsArgs], [AiAppsResponse], ["query"]),
     claim_ai_app_link_code: IDL.Func([ClaimAiAppLinkCodeArgs], [ClaimAiAppLinkCodeResponse], []),
+    revoke_ai_app_user_key: IDL.Func([RevokeAiAppUserKeyArgs], [RevokeAiAppUserKeyResponse], []),
   });
 
-  return { RegisterAiAppArgs, ClaimAiAppLinkCodeArgs, service };
+  return { RegisterAiAppArgs, ClaimAiAppLinkCodeArgs, RevokeAiAppUserKeyArgs, service };
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -151,6 +171,7 @@ const OP_LABEL: Record<string, string> = {
   trim: "trim",
 };
 const CONTEXT_LABEL: Record<string, string> = { today: "today" };
+const DISPLAY_LABEL: Record<string, string> = { sheet: "sheet", external: "external" };
 
 function candidLabel(table: Record<string, string>, value: string, what: string): string {
   const label = table[value];
@@ -271,6 +292,15 @@ export function buildManifestWire(
     // unused ("" is the norm) and only meaningful for per_user_keys=false manifests.
     per_user_keys: iouActionManifest.perUserKeys,
     actions: [action],
+    // App surfaces (candid requires the field even though the Rust side defaults it): the
+    // chat_link page OpenChat opens after the first confirmed action in a chat. The wire is
+    // msgpack/candid-identical: {kind, url, display: "sheet"|"external"} with snake variant
+    // labels.
+    surfaces: iouActionManifest.surfaces.map((s) => ({
+      kind: s.kind,
+      url: s.url,
+      display: { [candidLabel(DISPLAY_LABEL, s.display, "surface display")]: null },
+    })),
   };
 }
 
@@ -378,6 +408,55 @@ export async function claimAiAppLinkCode(opts: ClaimLinkCodeOptions): Promise<Cl
   }
   if ("InvalidRequest" in response) {
     return { kind: "invalid_request", message: response.InvalidRequest as string };
+  }
+  const [code, message] = response.Error as [number, CandidOpt<string>];
+  return { kind: "oc_error", code, message: message.length ? message[0] : undefined };
+}
+
+// ---------------------------------------------------------------------------------------------
+// One-sided disconnect (app side) — revoke this user's delivery key on OpenChat, authorized by
+// knowledge of the exact registered PEM. Called at disconnect time, BEFORE the local keypair is
+// deleted (the PEM is the last thing we still know). Same agent/host conventions as claim above.
+// ---------------------------------------------------------------------------------------------
+
+export type RevokeUserKeyOptions = {
+  /** IC gateway serving the OpenChat user_index (NOT IOU's own replica). */
+  host: string;
+  /** OpenChat user_index canister id. */
+  userIndexCanisterId: string;
+  /** The exact P-256 SPKI PEM currently registered on OpenChat for this user. */
+  publicKeyPem: string;
+  /** Caller identity; optional — the PEM itself is the authorization, so anonymous works. */
+  identity?: Identity;
+};
+
+export type RevokeUserKeyOutcome =
+  | { kind: "success" }
+  | { kind: "key_not_found" }
+  | { kind: "oc_error"; code: number; message?: string };
+
+/**
+ * Revoke the user's per-app delivery key on OpenChat (`revoke_ai_app_user_key`, plain candid).
+ * With the key gone, OpenChat's in-chat propose flow re-detects "not connected" and re-offers the
+ * pairing sheet — so a disconnect made HERE surfaces as a reconnect prompt THERE, with no code
+ * exchange. key_not_found is a fine outcome (already revoked / never registered).
+ */
+export async function revokeAiAppUserKey(opts: RevokeUserKeyOptions): Promise<RevokeUserKeyOutcome> {
+  const { service } = buildIdl();
+
+  const agent = new HttpAgent({ host: opts.host, ...(opts.identity ? { identity: opts.identity } : {}) });
+  if (opts.host.includes("127.0.0.1") || opts.host.includes("localhost")) {
+    await agent.fetchRootKey();
+  }
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const actor: any = Actor.createActor(() => service, { agent, canisterId: opts.userIndexCanisterId });
+
+  const response = await actor.revoke_ai_app_user_key({ public_key: opts.publicKeyPem });
+  if ("Success" in response) {
+    return { kind: "success" };
+  }
+  if ("KeyNotFound" in response) {
+    return { kind: "key_not_found" };
   }
   const [code, message] = response.Error as [number, CandidOpt<string>];
   return { kind: "oc_error", code, message: message.length ? message[0] : undefined };

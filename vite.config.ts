@@ -37,7 +37,13 @@ export default defineConfig({
     sourcemap: true,
   },
   server: {
-    port: 5173,
+    // 127.0.0.1:3000 is IOU's canonical dev origin. It must match the origin baked into the
+    // OpenChat surface URL (see actionManifest.ts resolvePublicOrigin, default
+    // http://127.0.0.1:3000): OpenChat opens the chat-link page in the system browser, and that
+    // page relies on the user's already-signed-in IOU session. Browser storage (II delegation /
+    // dev identity, and therefore the user's sheets) is origin-scoped, and "localhost" ≠
+    // "127.0.0.1" — so host and port here are load-bearing, not cosmetic. Change both together.
+    port: 3000,
     host: "127.0.0.1",
   },
 });

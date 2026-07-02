@@ -23,6 +23,11 @@ export type PendingDraft = {
   // or a paste; "openchat" = forwarded by a paired OpenChat integration.
   source?: "connector" | "openchat";
   provenance?: { openchat_user: string };
+  // Delivery provenance from the on-chain inbox's v2 envelope wrapper
+  // (openchat source only; absent for wrapper-less/pre-v2 deposits).
+  // chat is OpenChat's canonical chat key ("group:<principal>" or
+  // "channel:<community principal>:<channel id>").
+  context?: { chat: string; messageId: string; confirmedBy: string; confirmedAt: number };
 };
 export type OpenChatPairing = { openchat_user: string; created_at: number };
 

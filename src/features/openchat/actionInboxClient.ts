@@ -1,7 +1,8 @@
 // Client for OpenChat's on-chain action_inbox canister. Replaces the off-chain relay pull: instead of
 // GET /v1/drafts, we query the inbox `actions` (keyed by our key fingerprint), verify OpenChat's provenance
-// signature, decrypt the envelope with our consumer private key, and yield the plaintext draft — which feeds
-// the exact same parseDraft -> openAdd flow the relay path uses.
+// signature (v2 preimage: eph ‖ ct ‖ created_at LE u64), decrypt the envelope with our consumer private key,
+// and split the v2 plaintext wrapper into { context, payload } — the payload feeds the exact same
+// parseDraft -> openAdd flow the relay path uses; the context carries chat/message provenance.
 
 import { Actor, HttpAgent, type Identity } from "@dfinity/agent";
 import { decryptInboxEnvelope, verifyOpenChatSignature } from "./actionInboxCrypto";
@@ -40,11 +41,57 @@ type RawStoredAction = {
   created_at: bigint;
 };
 
+/**
+ * Delivery provenance carried by the v2 envelope plaintext wrapper:
+ *   { "context": { chat, messageId, confirmedBy, confirmedAt }, "payload": <draft> }
+ * chat is OpenChat's canonical chat key ("group:<principal>" or
+ * "channel:<community principal>:<channel id>"), messageId a decimal string,
+ * confirmedBy the confirming user's principal text, confirmedAt epoch ms.
+ */
+export type InboxDraftContext = {
+  chat: string;
+  messageId: string;
+  confirmedBy: string;
+  confirmedAt: number;
+};
+
 export type InboxDraft = {
   id: bigint; // inbox action id (monotonic) — also drives the since_id cursor
-  draft: unknown; // decrypted plaintext (for IOU, the JSON draft parseDraft accepts)
+  draft: unknown; // decrypted payload (for IOU, the JSON draft parseDraft accepts)
   created_at: bigint;
+  context?: InboxDraftContext; // absent for wrapper-less (pre-v2) plaintexts
 };
+
+/**
+ * Split a decrypted plaintext into { payload, context }. The v2 wrapper is
+ * { context: {...}, payload: <draft> }; anything else — including a JSON
+ * document without the context/payload shape — is treated as the payload
+ * itself (wrapper-less tolerance, so pre-v2 deposits and non-OpenChat
+ * producers keep working).
+ */
+export function parseInboxPlaintext(text: string): { payload: unknown; context?: InboxDraftContext } {
+  const doc: unknown = JSON.parse(text);
+  if (typeof doc === "object" && doc !== null && !Array.isArray(doc)) {
+    const rec = doc as Record<string, unknown>;
+    if ("payload" in rec && typeof rec.context === "object" && rec.context !== null && !Array.isArray(rec.context)) {
+      const c = rec.context as Record<string, unknown>;
+      if (typeof c.chat === "string" && typeof c.messageId === "string") {
+        return {
+          payload: rec.payload,
+          context: {
+            chat: c.chat,
+            messageId: c.messageId,
+            confirmedBy: typeof c.confirmedBy === "string" ? c.confirmedBy : "",
+            confirmedAt: typeof c.confirmedAt === "number" ? c.confirmedAt : 0,
+          },
+        };
+      }
+      // Malformed context: still honour the wrapper's payload, drop the context.
+      return { payload: rec.payload };
+    }
+  }
+  return { payload: doc };
+}
 
 export type ActionInboxConfig = {
   canisterId: string;
@@ -96,12 +143,16 @@ export async function pollActionInbox(opts: {
       ephemeralPublicKey: asBytes(a.ephemeral_public_key),
       ciphertext: asBytes(a.ciphertext),
     };
-    // Provenance first: only act on actions OpenChat actually signed.
-    const signed = await verifyOpenChatSignature(env, asBytes(a.oc_signature), ocPublicKeyPem).catch(() => false);
+    // Provenance first: only act on actions OpenChat actually signed. The v2
+    // preimage binds created_at (u64 LE), so a tampered timestamp fails here.
+    const signed = await verifyOpenChatSignature(env, a.created_at, asBytes(a.oc_signature), ocPublicKeyPem).catch(
+      () => false,
+    );
     if (!signed) continue;
     try {
       const plaintext = await decryptInboxEnvelope(env, kp.privateKey);
-      out.push({ id: a.id, draft: JSON.parse(new TextDecoder().decode(plaintext)), created_at: a.created_at });
+      const { payload, context } = parseInboxPlaintext(new TextDecoder().decode(plaintext));
+      out.push({ id: a.id, draft: payload, created_at: a.created_at, ...(context ? { context } : {}) });
     } catch {
       // Not addressed to us (wrong key) or corrupt — skip.
     }

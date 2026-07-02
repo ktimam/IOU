@@ -10,8 +10,12 @@
 //   plaintext   = AES-256-GCM-open(key, nonce, ciphertext)     // ciphertext carries the 16-byte tag appended
 //   envelope    = { ephemeral_public_key: 65-byte SEC1 uncompressed, ciphertext }
 //
-// Provenance: OpenChat signs (ephemeral_public_key ‖ ciphertext) with its platform P-256 key as
-// ECDSA(SHA-256). The signature is a raw 64-byte r‖s. Verify it against the inbox's openchat_public_key.
+// Provenance (v2 preimage): OpenChat signs (ephemeral_public_key ‖ ciphertext ‖ created_at) with its
+// platform P-256 key as ECDSA(SHA-256), where created_at is the deposit's u64 millisecond timestamp encoded
+// little-endian in 8 bytes. Binding created_at closes the v1 hole where the timestamp travelled unsigned.
+// The signature is a raw 64-byte r‖s. Verify it against the inbox's openchat_public_key.
+// NOTE: entries deposited before the v2 change verify against the old (eph ‖ ct) preimage only and are
+// dropped by this verifier — acceptable for the local dev environment this ships in.
 //
 // NOTE on the salt: the Rust side uses `Hkdf::<Sha256>::new(None, ikm)`, where `None` means RFC-5869's
 // default salt of HashLen (32) zero bytes. We pass an explicit 32-zero-byte salt to match exactly. (An empty
@@ -112,12 +116,28 @@ export async function decryptInboxEnvelope(
 }
 
 /**
- * Verify OpenChat's provenance signature over (ephemeral_public_key ‖ ciphertext).
+ * The exact bytes OpenChat signs for provenance (v2):
+ * `ephemeral_public_key ‖ ciphertext ‖ created_at` with created_at as a u64 little-endian (8 bytes).
+ * Mirrors the Rust `EciesEnvelope::signing_preimage` byte for byte.
+ */
+export function signingPreimageV2(env: InboxEnvelope, createdAt: bigint): Uint8Array {
+  const preimage = new Uint8Array(env.ephemeralPublicKey.length + env.ciphertext.length + 8);
+  preimage.set(env.ephemeralPublicKey, 0);
+  preimage.set(env.ciphertext, env.ephemeralPublicKey.length);
+  new DataView(preimage.buffer).setBigUint64(env.ephemeralPublicKey.length + env.ciphertext.length, createdAt, true);
+  return preimage;
+}
+
+/**
+ * Verify OpenChat's provenance signature over the v2 preimage
+ * (ephemeral_public_key ‖ ciphertext ‖ created_at as u64 LE — see signingPreimageV2).
  * `openchatPublicKeyPem` is the inbox's openchat_public_key (P-256 SPKI PEM).
  * `signature` is a raw 64-byte r‖s.
+ * Pre-v2 deposits (signed without created_at) fail this check by design — local dev only.
  */
 export async function verifyOpenChatSignature(
   env: InboxEnvelope,
+  createdAt: bigint,
   signature: Uint8Array,
   openchatPublicKeyPem: string,
 ): Promise<boolean> {
@@ -129,9 +149,7 @@ export async function verifyOpenChatSignature(
     false,
     ["verify"],
   );
-  const preimage = new Uint8Array(env.ephemeralPublicKey.length + env.ciphertext.length);
-  preimage.set(env.ephemeralPublicKey, 0);
-  preimage.set(env.ciphertext, env.ephemeralPublicKey.length);
+  const preimage = signingPreimageV2(env, createdAt);
   return subtle.verify({ name: "ECDSA", hash: "SHA-256" }, pub, toBuf(signature), toBuf(preimage));
 }
 

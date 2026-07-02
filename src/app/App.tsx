@@ -21,6 +21,7 @@ import { PreferencesProvider } from "../features/settings/usePreferences";
 import { SettingsPage } from "../features/settings/SettingsPage";
 import { TemplatesProvider } from "../features/templates/TemplatesContext";
 import { ConsumerKeypairSync } from "../features/openchat/ConsumerKeypairSync";
+import { LinkChatPage } from "../features/openchat/LinkChatPage";
 import { useDeepLinks } from "../features/deeplinks/deepLink";
 
 // Registers the native deep-link listener (no-op on web). Lives inside the
@@ -68,6 +69,9 @@ export function App() {
                 path="/settings/recovery-key"
                 element={<RecoveryKeyPage />}
               />
+              {/* OpenChat "chat_link" surface: opened by OpenChat (in a bottom-sheet
+                  iframe) with ?chat=<chatKey> to map that chat to a sheet. */}
+              <Route path="/openchat/link-chat" element={<LinkChatPage />} />
               <Route path="*" element={<Navigate to="/" replace />} />
             </Routes>
             </ErrorBoundary>

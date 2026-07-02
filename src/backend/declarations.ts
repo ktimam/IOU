@@ -162,6 +162,10 @@ export const idlFactory = ({ IDL: idl }: { IDL: IDL }) => {
     wrapped_private_key: idl.Vec(idl.Nat8),
     public_key_pem: idl.Text,
   });
+  const ChatSheetLink = idl.Record({
+    chat_key: idl.Text,
+    sheet_id: idl.Nat64,
+  });
   return idl.Service({
     // Phase 1
     whoami: idl.Func([], [idl.Opt(idl.Text)], ["query"]),
@@ -254,11 +258,16 @@ export const idlFactory = ({ IDL: idl }: { IDL: IDL }) => {
     // v1.8.0: OpenChat per-user consumer keypair
     set_consumer_keypair: idl.Func([idl.Vec(idl.Nat8), idl.Text], [], []),
     get_consumer_keypair: idl.Func([], [idl.Opt(ConsumerKeypair)], ["query"]),
+    delete_consumer_keypair: idl.Func([], [], []),
     vetkd_wrap_consumer_key: idl.Func(
       [idl.Vec(idl.Nat8)],
       [idl.Vec(idl.Nat8)],
       [],
     ),
+    // v1.9.0: OpenChat chat → sheet mapping
+    set_chat_sheet_link: idl.Func([idl.Text, idl.Nat64], [], []),
+    remove_chat_sheet_link: idl.Func([idl.Text], [], []),
+    chat_sheet_links: idl.Func([], [idl.Vec(ChatSheetLink)], ["query"]),
   });
 };
 

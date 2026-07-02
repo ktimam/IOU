@@ -3,10 +3,12 @@ import {
   decryptInboxEnvelope,
   importEcdhPrivateKeyFromPkcs8Pem,
   keyFingerprint,
+  signingPreimageV2,
+  verifyOpenChatSignature,
   __testing,
 } from "./actionInboxCrypto";
 
-const { b64ToBytes } = __testing;
+const { b64ToBytes, bytesToB64 } = __testing;
 
 // Cross-language interop vector, produced by the Rust `ecies_payload` library that OpenChat itself uses to
 // encrypt confirmed actions into the action_inbox (test `print_interop_vector`, StdRng seed 424242). If this
@@ -47,5 +49,74 @@ describe("action_inbox ECIES interop with Rust ecies_payload", () => {
     const pkPem = new TextDecoder().decode(b64ToBytes(VEC.recipient_pk_pem_b64));
     const fp = await keyFingerprint(pkPem);
     expect(bytesToHex(fp)).toBe(VEC.fingerprint_hex);
+  });
+});
+
+// v2 provenance preimage: eph ‖ ct ‖ created_at (u64 LE, 8 bytes). The Rust signer (ecies_payload
+// signing_preimage + local_user_index deposit) changed in lockstep; these tests pin the byte layout and
+// prove that created_at is BOUND by the signature (the v1 hole this closes). Signing happens with a
+// WebCrypto-generated P-256 key — ECDSA(SHA-256) with a raw 64-byte r‖s, the same shape jwt::sign_bytes
+// produces — over the fixed Rust-produced envelope bytes.
+describe("action_inbox provenance signature (v2 preimage binds created_at)", () => {
+  const env = {
+    ephemeralPublicKey: b64ToBytes(VEC.ephemeral_public_key_b64),
+    ciphertext: b64ToBytes(VEC.ciphertext_b64),
+  };
+  const CREATED_AT = 1_750_000_000_123n; // arbitrary epoch ms
+
+  function spkiToPem(der: Uint8Array): string {
+    const body = bytesToB64(der).match(/.{1,64}/g)?.join("\n") ?? bytesToB64(der);
+    return `-----BEGIN PUBLIC KEY-----\n${body}\n-----END PUBLIC KEY-----\n`;
+  }
+
+  async function signV2(createdAt: bigint): Promise<{ signature: Uint8Array; pem: string }> {
+    const subtle = globalThis.crypto.subtle;
+    const kp = (await subtle.generateKey({ name: "ECDSA", namedCurve: "P-256" }, true, [
+      "sign",
+      "verify",
+    ])) as CryptoKeyPair;
+    const preimage = signingPreimageV2(env, createdAt);
+    const sig = new Uint8Array(
+      await subtle.sign({ name: "ECDSA", hash: "SHA-256" }, kp.privateKey, preimage.slice().buffer as ArrayBuffer),
+    );
+    const spki = new Uint8Array(await subtle.exportKey("spki", kp.publicKey));
+    return { signature: sig, pem: spkiToPem(spki) };
+  }
+
+  it("lays out the preimage as eph ‖ ct ‖ u64 LE created_at", () => {
+    const preimage = signingPreimageV2(env, CREATED_AT);
+    expect(preimage.length).toBe(env.ephemeralPublicKey.length + env.ciphertext.length + 8);
+    expect(Array.from(preimage.slice(0, env.ephemeralPublicKey.length))).toEqual(
+      Array.from(env.ephemeralPublicKey),
+    );
+    const tail = preimage.slice(preimage.length - 8);
+    const le = new DataView(tail.slice().buffer).getBigUint64(0, true);
+    expect(le).toBe(CREATED_AT);
+  });
+
+  it("verifies a signature over the v2 preimage", async () => {
+    const { signature, pem } = await signV2(CREATED_AT);
+    await expect(verifyOpenChatSignature(env, CREATED_AT, signature, pem)).resolves.toBe(true);
+  });
+
+  it("rejects when created_at is tampered (timestamp is now signed)", async () => {
+    const { signature, pem } = await signV2(CREATED_AT);
+    await expect(verifyOpenChatSignature(env, CREATED_AT + 1n, signature, pem)).resolves.toBe(false);
+  });
+
+  it("rejects a v1 signature (eph ‖ ct only) — old inbox entries are unverifiable by design", async () => {
+    const subtle = globalThis.crypto.subtle;
+    const kp = (await subtle.generateKey({ name: "ECDSA", namedCurve: "P-256" }, true, [
+      "sign",
+      "verify",
+    ])) as CryptoKeyPair;
+    const v1 = new Uint8Array(env.ephemeralPublicKey.length + env.ciphertext.length);
+    v1.set(env.ephemeralPublicKey, 0);
+    v1.set(env.ciphertext, env.ephemeralPublicKey.length);
+    const sig = new Uint8Array(
+      await subtle.sign({ name: "ECDSA", hash: "SHA-256" }, kp.privateKey, v1.slice().buffer as ArrayBuffer),
+    );
+    const spki = new Uint8Array(await subtle.exportKey("spki", kp.publicKey));
+    await expect(verifyOpenChatSignature(env, CREATED_AT, sig, spkiToPem(spki))).resolves.toBe(false);
   });
 });

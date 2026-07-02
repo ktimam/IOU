@@ -40,6 +40,41 @@ import {
 } from "../relay/relay";
 import { pollActionInbox, getActionInboxConfig } from "../openchat/actionInboxClient";
 
+// Dismissed/imported on-chain inbox drafts, persisted so they stay gone across refreshes — the
+// inbox itself is append-only and the poll cursor is in-memory, so without this every handled
+// draft would reappear on reload. localStorage is per-device; a cross-device "handled" store can
+// ride the canister later if it ever matters (dismissals are cosmetic).
+const HANDLED_INBOX_KEY = "iou.openchat.handledInboxDrafts.v1";
+const HANDLED_INBOX_CAP = 1000;
+function loadHandledInboxIds(): Set<string> {
+  try {
+    const raw = localStorage.getItem(HANDLED_INBOX_KEY);
+    const parsed: unknown = raw === null ? [] : JSON.parse(raw);
+    return new Set(Array.isArray(parsed) ? parsed.filter((v): v is string => typeof v === "string") : []);
+  } catch {
+    return new Set();
+  }
+}
+const handledInboxIds = loadHandledInboxIds();
+function markInboxDraftHandled(id: string): void {
+  handledInboxIds.add(id);
+  try {
+    localStorage.setItem(
+      HANDLED_INBOX_KEY,
+      JSON.stringify([...handledInboxIds].slice(-HANDLED_INBOX_CAP)),
+    );
+  } catch {
+    /* best-effort: the in-memory set still applies for this session */
+  }
+}
+import {
+  readCachedLinks,
+  writeCachedLinks,
+  fetchChatSheetLinks,
+  storeChatSheetLink,
+  type ChatSheetLinks,
+} from "../openchat/chatSheetLinks";
+
 // Build entry-form defaults from a template.
 function templateToInitial(t: TxnTemplate): Partial<EntryPayload> {
   const gross = t.amount_minor ?? 0;
@@ -190,6 +225,12 @@ export function SheetPage() {
   const [pending, setPending] = useState<PendingDraft[]>([]);
   const [inboxPending, setInboxPending] = useState<PendingDraft[]>([]);
   const [pendingRelayId, setPendingRelayId] = useState<string | null>(null);
+  // Chat → sheet mapping (delivery provenance): canister-backed, cache-first.
+  const [chatLinks, setChatLinks] = useState<ChatSheetLinks>(() => readCachedLinks());
+  // The chat key of the draft currently being reviewed (openchat drafts only),
+  // and whether "remember this chat → this sheet" is ticked (default on).
+  const [pendingChatKey, setPendingChatKey] = useState<string | null>(null);
+  const [rememberChat, setRememberChat] = useState(true);
   const reloadPending = async () => {
     const cfg = getRelayConfig();
     if (!cfg) {
@@ -204,7 +245,9 @@ export function SheetPage() {
   };
   const clearRelay = async (id: string) => {
     if (id.startsWith("oc-")) {
-      // On-chain inbox actions are append-only; just drop it from the local pending view.
+      // On-chain inbox actions are append-only; drop it from the local pending view and remember
+      // it as handled so it does not reappear on the next refresh/poll.
+      markInboxDraftHandled(id);
       setInboxPending((prev) => prev.filter((p) => p.id !== id));
       return;
     }
@@ -221,6 +264,7 @@ export function SheetPage() {
   const closeEntryModal = () => {
     setModal(null);
     setPendingRelayId(null);
+    setPendingChatKey(null);
   };
   const importFromRelay = (p: PendingDraft) => {
     const res = parseDraft(p.draft);
@@ -234,7 +278,24 @@ export function SheetPage() {
       return;
     }
     setPendingRelayId(p.id);
+    // Track the source chat so confirming can remember chat → sheet.
+    setPendingChatKey(p.context?.chat ?? null);
+    setRememberChat(true);
     openAdd(res.value.initial);
+  };
+  // Persist a chat → sheet mapping: optimistic (state + cache first), then the
+  // canister call; on failure roll back and let the next fetch re-sync.
+  const rememberChatMapping = (chatKey: string) => {
+    const prev = chatLinks;
+    const next = { ...prev, [chatKey]: sheetId };
+    setChatLinks(next);
+    writeCachedLinks(next);
+    if (!actor) return;
+    void storeChatSheetLink(actor, chatKey, sheetId).catch(() => {
+      setChatLinks(prev);
+      writeCachedLinks(prev);
+      toasts.show({ kind: "error", text: "Could not save the chat → sheet mapping" });
+    });
   };
   useEffect(() => {
     const cfg = getRelayConfig();
@@ -257,6 +318,24 @@ export function SheetPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  // Refresh the chat → sheet links from the canister (cache-first: state is
+  // seeded from localStorage above, the canister copy wins when it arrives).
+  useEffect(() => {
+    if (!actor) return;
+    let cancelled = false;
+    void fetchChatSheetLinks(actor)
+      .then((links) => {
+        if (!cancelled) setChatLinks(links);
+      })
+      .catch(() => {
+        /* canister unreachable — keep the cached copy */
+      });
+    return () => {
+      cancelled = true;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [actor]);
+
   // "Pending from OpenChat": confirmed actions OpenChat deposited on-chain. We pull them from the action_inbox
   // canister, verify OpenChat's provenance signature + decrypt locally, then feed each through the same seam.
   useEffect(() => {
@@ -272,13 +351,17 @@ export function SheetPage() {
         setInboxPending((prev) => {
           const seen = new Set(prev.map((p) => p.id));
           const add: PendingDraft[] = drafts
-            .filter((d) => !seen.has(`oc-${d.id}`))
+            .filter((d) => !seen.has(`oc-${d.id}`) && !handledInboxIds.has(`oc-${d.id}`))
             .map((d) => ({
               id: `oc-${d.id}`,
               draft: d.draft,
-              created_at: Number(d.created_at / 1_000_000n),
+              // action_inbox stores TimestampMillis — no nanosecond conversion.
+              created_at: Number(d.created_at),
               source: "openchat",
-              provenance: { openchat_user: "action-inbox" },
+              // Real delivery provenance from the v2 envelope wrapper; older
+              // wrapper-less deposits have no context and keep the fallback.
+              provenance: { openchat_user: d.context?.confirmedBy ?? "action-inbox" },
+              ...(d.context ? { context: d.context } : {}),
             }));
           return add.length ? [...prev, ...add] : prev;
         });
@@ -452,8 +535,14 @@ export function SheetPage() {
       });
       toasts.show({ kind: "success", text: "Entry added" });
       if (pendingRelayId) await clearRelay(pendingRelayId);
+      // First import from a chat that isn't mapped yet: honour the
+      // "remember" checkbox (default on) by pinning chat → this sheet.
+      if (pendingRelayId && pendingChatKey && rememberChat && !chatLinks[pendingChatKey]) {
+        rememberChatMapping(pendingChatKey);
+      }
     }
     setPendingRelayId(null);
+    setPendingChatKey(null);
     setModal(null);
     await reload();
   }
@@ -566,6 +655,15 @@ export function SheetPage() {
     { label: "Previous month", hint: "due by end of last month", list: prevMonth },
     { label: "Overall", hint: "incl. upcoming", list: overall },
   ];
+  // Inbox drafts whose source chat is pinned to a DIFFERENT sheet are hidden
+  // here — they show up on their mapped sheet's page instead. Drafts without
+  // context (wrapper-less deposits) and unmapped chats stay visible.
+  const visibleInbox = inboxPending.filter(
+    (p) => !p.context?.chat || !chatLinks[p.context.chat] || chatLinks[p.context.chat] === sheetId,
+  );
+  // The draft under review came from a chat with no mapping yet → offer to
+  // remember the chat → sheet link on confirm.
+  const showRememberChat = pendingRelayId != null && !!pendingChatKey && !chatLinks[pendingChatKey];
 
   return (
     <div className="sheet-page">
@@ -710,15 +808,15 @@ export function SheetPage() {
         )}
       </section>
 
-      {!modal && isActive(sheet.state) && pending.length + inboxPending.length > 0 && (
+      {!modal && isActive(sheet.state) && pending.length + visibleInbox.length > 0 && (
         <section className="card" style={{ marginBottom: 12 }}>
-          <h2 style={{ marginTop: 0 }}>✨ Pending from chat ({pending.length + inboxPending.length})</h2>
+          <h2 style={{ marginTop: 0 }}>✨ Pending from chat ({pending.length + visibleInbox.length})</h2>
           <p className="muted small" style={{ marginTop: 0 }}>
             Drafts your AI assistant sent. Review each before it's saved — nothing is
             written until you confirm.
           </p>
           <ul style={{ listStyle: "none", padding: 0, margin: 0 }}>
-            {[...pending, ...inboxPending].map((p) => {
+            {[...pending, ...visibleInbox].map((p) => {
               const r = parseDraft(p.draft);
               return (
                 <li
@@ -730,10 +828,19 @@ export function SheetPage() {
                     {p.source === "openchat" && (
                       <span
                         className="lock-cue"
-                        title={`Forwarded by OpenChat user ${p.provenance?.openchat_user ?? "?"}`}
+                        title={
+                          p.context
+                            ? `Confirmed by ${p.context.confirmedBy} in ${p.context.chat} (message ${p.context.messageId})`
+                            : `Forwarded by OpenChat user ${p.provenance?.openchat_user ?? "?"}`
+                        }
                         style={{ marginRight: 6 }}
                       >
                         ✦ OpenChat
+                        {p.context && (
+                          <span className="muted" style={{ marginLeft: 4 }}>
+                            · {p.context.chat}
+                          </span>
+                        )}
                       </span>
                     )}
                     {r.ok ? r.value.summary : "⚠ invalid draft"}
@@ -1022,6 +1129,20 @@ export function SheetPage() {
             aria-modal="true"
           >
             <h3>{modal.entryId != null ? "Edit entry" : "Add entry"}</h3>
+            {showRememberChat && (
+              <label
+                className="row muted small"
+                style={{ gap: 6, alignItems: "center", marginBottom: 8 }}
+                title={`Future drafts confirmed in ${pendingChatKey} will be offered on this sheet only`}
+              >
+                <input
+                  type="checkbox"
+                  checked={rememberChat}
+                  onChange={(e) => setRememberChat(e.target.checked)}
+                />
+                <span>Remember: always import this chat's drafts into this sheet</span>
+              </label>
+            )}
             <EntryForm
               enabledCurrencies={sheet.enabled_currencies}
               myPrincipal={me}
