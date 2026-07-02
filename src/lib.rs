@@ -313,9 +313,16 @@ impl Storable for RecoveryKey {
 //   MemoryId 15:    (was SHEET_ENTRIES_IDS in v1.3.0, orphaned
 //                since v1.3.2)
 //
+//   MemoryId 17: PARTNER_PUBKEYS (StableBTreeMap<Principal, Vec<u8>>)
+//     v1.4.0 solo sheets — canister-attested per-principal wrap pubkeys.
+//   MemoryId 18: CONSUMER_KEYPAIRS (StableBTreeMap<Principal, ConsumerKeypair>)
+//     v1.8.0 OpenChat per-user consumer keypair — opaque wrapped
+//     private-key blob + public key PEM, wrapped client-side under the
+//     vetkd-derived user key (the canister never sees the plaintext).
+//
 //   DO NOT re-use these orphaned MemoryIds for a new structure
 //   with a different key/value type — see issue #7. If you need
-//   a new region, use the next free number (currently 17+).
+//   a new region, use the next free number (currently 19+).
 
 // v1.5.0 (schema v3 -> v4): added optional encrypted name fields to Pair,
 // Sheet, PairSummary, CreateSheetReq.
@@ -393,6 +400,19 @@ thread_local! {
     static PARTNER_PUBKEYS: RefCell<StableBTreeMap<Principal, Vec<u8>, Memory>> =
         RefCell::new(StableBTreeMap::init(
             MEMORY_MANAGER.with(|m| m.borrow().get(MemoryId::new(17)))
+        ));
+
+    // v1.8.0 (OpenChat multi-user keys): each principal's action-inbox
+    // consumer keypair, stored as an OPAQUE wrapped private-key blob +
+    // the matching public key PEM. Wrapped client-side under the
+    // vetkd-derived user key (dev sim: self-ECDH user key; prod:
+    // vetkd_wrap_consumer_key), so any of the user's devices can
+    // recover it — the canister never sees the plaintext private key.
+    // Fresh MemoryId (18) — additive, no migration. Lives in stable
+    // memory, so it survives in-place upgrades like everything else.
+    static CONSUMER_KEYPAIRS: RefCell<StableBTreeMap<Principal, ConsumerKeypair, Memory>> =
+        RefCell::new(StableBTreeMap::init(
+            MEMORY_MANAGER.with(|m| m.borrow().get(MemoryId::new(18)))
         ));
 
     // V6: cache the result of vetkd_public_key after first derivation.
@@ -759,6 +779,10 @@ fn inspect_message() {
         "grant_partner_access",
         "register_sheet_pubkey",
         "get_sheet_pubkey",
+        // v1.8.0: OpenChat per-user consumer keypair
+        "set_consumer_keypair",
+        "get_consumer_keypair",
+        "vetkd_wrap_consumer_key",
     ];
     if !allowed.contains(&method_name.as_str()) {
         ic_cdk::trap(format!(
@@ -795,6 +819,8 @@ fn inspect_message() {
         "set_pair_name",
         "set_sheet_name",
         "set_member_name",
+        "set_consumer_keypair",
+        "vetkd_wrap_consumer_key",
     ];
     if require_auth_methods.contains(&method_name.as_str())
         && caller == candid::Principal::anonymous()
@@ -1815,6 +1841,118 @@ async fn vetkd_wrap_sheet_key(
     res.encrypted_key
 }
 
+/// vetkd_wrap_consumer_key: per-CALLER analogue of vetkd_wrap_sheet_key,
+/// used to wrap the OpenChat action-inbox consumer keypair (see
+/// set_consumer_keypair below). Same vetkd mechanism, but the IBE input
+/// is scoped to the caller's principal instead of a sheet id:
+///
+///   input:   b"iou-consumer:" + caller principal text
+///   context: b"iou-vetkd-symmetric-v1"   (unchanged)
+///
+/// The PWA HKDFs the decrypted vetKey into the 32-byte wrap key it uses
+/// to AES-GCM the consumer private key before storing it here. Because
+/// the input is the caller's own principal, no consent gate beyond
+/// require_authed is needed — a caller can only ever derive THEIR key.
+#[ic_cdk::update]
+async fn vetkd_wrap_consumer_key(transport_public_key: Vec<u8>) -> Vec<u8> {
+    require_authed();
+    if transport_public_key.is_empty() {
+        ic_cdk::trap("transport_public_key must not be empty");
+    }
+    // BLS12-381 G1 compressed, exactly like vetkd_wrap_sheet_key.
+    if transport_public_key.len() != 48 {
+        ic_cdk::trap("transport_public_key must be 48 bytes (BLS12-381 G1, compressed)");
+    }
+    let caller_text = ic_cdk::api::msg_caller().to_text();
+    let mut input = Vec::with_capacity(13 + caller_text.len());
+    input.extend_from_slice(b"iou-consumer:");
+    input.extend_from_slice(caller_text.as_bytes());
+    let request = VetKDDeriveKeyArgs {
+        input,
+        context: b"iou-vetkd-symmetric-v1".to_vec(),
+        key_id: vetkd_key_id(),
+        transport_public_key,
+    };
+    let res: VetKDDeriveKeyResult =
+        ic_cdk_management_canister::vetkd_derive_key(&request)
+            .await
+            .expect("call to vetkd_derive_key failed");
+    res.encrypted_key
+}
+
+// ───────────── v1.8.0: OpenChat per-user consumer keypair ─────────────
+//
+// The action-inbox consumer keypair (P-256; the public half is what the
+// user registers with OpenChat as their per-user delivery key) becomes
+// canister-backed so any of the user's devices can recover it — device
+// localStorage is only a cache. The canister stores an OPAQUE blob: the
+// PWA wraps the private key client-side (AES-GCM under the vetkd-derived
+// user key — dev sim uses the self-ECDH user key, prod uses
+// vetkd_wrap_consumer_key above), so the canister never sees plaintext
+// key material. Mirrors the PARTNER_PUBKEYS per-principal registry
+// pattern (v1.4.0).
+
+#[derive(Clone, CandidType, Deserialize)]
+pub struct ConsumerKeypair {
+    pub wrapped_private_key: Vec<u8>,
+    pub public_key_pem: String,
+}
+
+impl Storable for ConsumerKeypair {
+    fn to_bytes(&self) -> Cow<'_, [u8]> {
+        Cow::Owned(Encode!(self).unwrap())
+    }
+    fn from_bytes(bytes: Cow<[u8]>) -> Self {
+        Decode!(bytes.as_ref(), Self).unwrap()
+    }
+    const BOUND: Bound = Bound::Unbounded;
+}
+
+/// set_consumer_keypair: caller-keyed upsert of the wrapped consumer
+/// keypair. `wrapped_private_key` is the opaque client-side AES-GCM blob
+/// (iv || ciphertext, wrapped under the vetkd-derived user key);
+/// `public_key_pem` is the matching P-256 SPKI PEM OpenChat encrypts
+/// confirmed actions to. Validation mirrors OpenChat's key checks so a
+/// bad PEM fails here, before it ever reaches a registration.
+#[ic_cdk::update]
+fn set_consumer_keypair(wrapped_private_key: Vec<u8>, public_key_pem: String) {
+    require_authed();
+    if wrapped_private_key.is_empty() {
+        ic_cdk::trap("wrapped_private_key is empty");
+    }
+    if wrapped_private_key.len() > 8_192 {
+        ic_cdk::trap("wrapped_private_key too large (max 8192 bytes)");
+    }
+    if public_key_pem.is_empty() || public_key_pem.len() > 2_000 {
+        ic_cdk::trap("public_key_pem length out of range (1..=2000 chars)");
+    }
+    if !public_key_pem.contains("BEGIN PUBLIC KEY") {
+        ic_cdk::trap("public_key_pem must be a SPKI PEM (missing 'BEGIN PUBLIC KEY')");
+    }
+    let caller = ic_cdk::api::msg_caller();
+    CONSUMER_KEYPAIRS.with(|m| {
+        m.borrow_mut().insert(
+            caller,
+            ConsumerKeypair {
+                wrapped_private_key,
+                public_key_pem,
+            },
+        )
+    });
+}
+
+/// get_consumer_keypair: the caller's stored consumer keypair (or None).
+/// Caller-keyed — a principal can only ever read their own record; the
+/// anonymous principal never has one.
+#[ic_cdk::query]
+fn get_consumer_keypair() -> Option<ConsumerKeypair> {
+    let caller = ic_cdk::api::msg_caller();
+    if caller == Principal::anonymous() {
+        return None;
+    }
+    CONSUMER_KEYPAIRS.with(|m| m.borrow().get(&caller))
+}
+
 // ────────────────────── v1.1.2: replace-member (offline sig + QR) ──────────────────────
 //
 // The flow:
@@ -1941,6 +2079,7 @@ pub struct SheetRewrap {
 ///     idempotent / replay-safe (a second grant fails) and prevents
 ///     overwriting a real partner's wrapped_key_b. Closed-before-grant
 ///     sheets are skipped, matching the prod sheet_is_active gate.
+///
 /// The canister never sees plaintext K_sheet — only the opaque blob.
 #[ic_cdk::update]
 fn grant_partner_access(

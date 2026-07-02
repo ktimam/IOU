@@ -20,6 +20,7 @@ import { ErrorBoundary } from "./ErrorBoundary";
 import { PreferencesProvider } from "../features/settings/usePreferences";
 import { SettingsPage } from "../features/settings/SettingsPage";
 import { TemplatesProvider } from "../features/templates/TemplatesContext";
+import { ConsumerKeypairSync } from "../features/openchat/ConsumerKeypairSync";
 import { useDeepLinks } from "../features/deeplinks/deepLink";
 
 // Registers the native deep-link listener (no-op on web). Lives inside the
@@ -39,6 +40,7 @@ export function App() {
           <Layout>
             <ErrorBoundary>
             <DeepLinks />
+            <ConsumerKeypairSync />
             <Routes>
               <Route path="/" element={<Hello />} />
               <Route path="/me" element={<ProfilePage />} />

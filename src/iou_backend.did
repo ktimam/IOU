@@ -176,6 +176,15 @@ type SheetRewrap = record {
     wrapped_key_for_partner : vec nat8;
 };
 
+// v1.8.0: OpenChat per-user consumer keypair. The canister stores an
+// OPAQUE wrapped private-key blob (AES-GCM iv || ciphertext, wrapped
+// client-side under the vetkd-derived user key) plus the matching P-256
+// SPKI public key PEM. Caller-keyed; localStorage is only a cache.
+type ConsumerKeypair = record {
+    wrapped_private_key : vec nat8;
+    public_key_pem : text;
+};
+
 service : {
     // Phase 1
     whoami : () -> (opt text) query;
@@ -228,4 +237,9 @@ service : {
     register_sheet_pubkey : (vec nat8) -> ();
     get_sheet_pubkey : (principal) -> (opt vec nat8) query;
     grant_partner_access : (text, principal, vec SheetRewrap) -> (nat32);
+
+    // v1.8.0: OpenChat per-user consumer keypair
+    set_consumer_keypair : (vec nat8, text) -> ();
+    get_consumer_keypair : () -> (opt ConsumerKeypair) query;
+    vetkd_wrap_consumer_key : (vec nat8) -> (vec nat8);
 }

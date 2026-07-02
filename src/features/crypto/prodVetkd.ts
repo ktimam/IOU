@@ -154,6 +154,37 @@ export async function unwrapSheetKeyProd(
 }
 
 /**
+ * Unwrap the per-user consumer WRAP key (32 bytes) from the IBE result
+ * of `vetkd_wrap_consumer_key`. Mirrors {@link unwrapSheetKeyProd}, but
+ * the IBE input is scoped to the caller's principal instead of a sheet
+ * id (the canister builds b"iou-consumer:" + caller principal text).
+ * The result is the AES wrap key consumerKeypair.ts seals the OpenChat
+ * consumer private key under — identical on every device of the same
+ * user, which is the whole point.
+ */
+export async function deriveConsumerWrapKeyProd(
+  principalText: string,
+  transport: VetkdTransportKey,
+  masterPubKey: Uint8Array,
+  encVetKeyBytes: Uint8Array,
+): Promise<Uint8Array> {
+  const dpk = DerivedPublicKey.deserialize(masterPubKey);
+  const tsk = tskFromBytes(transport.secretKey);
+  // Must byte-match the canister's IBE input (vetkd_wrap_consumer_key).
+  const input = new TextEncoder().encode("iou-consumer:" + principalText);
+  const encKey = EncryptedVetKey.deserialize(encVetKeyBytes);
+  const vetKey: VetKey = encKey.decryptAndVerify(tsk, dpk, input);
+  const kdf = hkdf(
+    sha256,
+    vetKey.signatureBytes(),
+    undefined,
+    "iou-consumer-key-v1:" + principalText,
+    32,
+  );
+  return new Uint8Array(kdf);
+}
+
+/**
  * Derive K_sheet for a given sheet id and transport key, using the
  * canister's master vetkd public key + the IBE-encrypted vetKey
  * (the result of vetkd_wrap_sheet_key).
