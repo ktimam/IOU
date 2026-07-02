@@ -21,6 +21,7 @@ import { PreferencesProvider } from "../features/settings/usePreferences";
 import { SettingsPage } from "../features/settings/SettingsPage";
 import { TemplatesProvider } from "../features/templates/TemplatesContext";
 import { ConsumerKeypairSync } from "../features/openchat/ConsumerKeypairSync";
+import { EmbeddedBanner } from "../features/openchat/EmbeddedBanner";
 import { LinkChatPage } from "../features/openchat/LinkChatPage";
 import { useDeepLinks } from "../features/deeplinks/deepLink";
 
@@ -42,6 +43,7 @@ export function App() {
             <ErrorBoundary>
             <DeepLinks />
             <ConsumerKeypairSync />
+            <EmbeddedBanner />
             <Routes>
               <Route path="/" element={<Hello />} />
               <Route path="/me" element={<ProfilePage />} />
