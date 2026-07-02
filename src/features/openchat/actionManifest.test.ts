@@ -60,6 +60,14 @@ describe("iouActionManifest", () => {
     expect(s!.url).toMatch(/^https?:\/\/[^/]+\/settings#openchat-connect$/);
   });
 
+  it("declares a home surface (the app's webpage, embedded in OpenChat)", () => {
+    const s = iouActionManifest.surfaces.find((x) => x.kind === "home");
+    expect(s).toBeDefined();
+    // Embedded in OpenChat's in-window browser; needs no session (shows the landing state).
+    expect(s!.display).toBe("sheet");
+    expect(s!.url).toMatch(/^https?:\/\/[^/]+$/);
+  });
+
   it("surface URL parses once the placeholder is substituted", () => {
     const s = iouActionManifest.surfaces.find((x) => x.kind === "chat_link")!;
     const substituted = s.url.replace("{chatKey}", "group:aaaaa-aa");

@@ -224,6 +224,16 @@ export const iouActionManifest: IouActionManifest = {
       url: `${resolvePublicOrigin()}/settings#openchat-connect`,
       display: "external",
     },
+    // "home": the app's own webpage, offered from OpenChat's app-directory detail sheet.
+    // display: "sheet" embeds it INSIDE the OpenChat window (its iframe host). Note the embedded
+    // copy is storage-partitioned by the OpenChat origin, so it shows the signed-OUT landing
+    // state — fine for a look around; the host's "Open in browser" escape hatch reaches the full
+    // signed-in app.
+    {
+      kind: "home",
+      url: resolvePublicOrigin(),
+      display: "sheet",
+    },
   ],
 };
 
