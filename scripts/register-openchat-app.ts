@@ -8,6 +8,13 @@
 // button). Re-running upserts by (owner, name), so this is the post-deploy step of a deploy
 // pipeline (pnpm deploy:local chains it; CI should do the same).
 //
+// PUBLISHING (OpenChat Directory Phase B): a registration starts UNPUBLISHED — visible only to
+// its owner (this script's registrar), so it will NOT appear in chats' Apps lists or the explorer
+// for users until published. Re-registering preserves the published flag, so this is a one-time
+// step per environment. Publication is governance-gated on OpenChat (test_mode: also open over
+// msgpack); on a local replica the dfx `default` identity IS governance:
+//   dfx canister call <user_index> publish_ai_app '(record { app_id = <id> : nat32 })'
+//
 // Run:   pnpm register:openchat [-- --dry-run] [-- --key-file <pem-path>]
 //
 // Env:
