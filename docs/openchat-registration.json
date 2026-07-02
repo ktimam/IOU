@@ -1,0 +1,130 @@
+{
+  "name": "iou.entry.import",
+  "description": "Extracts a single money transaction (a settlement that already happened, or an IOU / future obligation) from a chat message or image, and on confirm delivers an encrypted entry draft to the IOU app.",
+  "promptTemplate": "You are extracting a single money transaction for a 2-person\nshared ledger. The input is a chat message: plain text, an image (for example a receipt, a bank\ntransfer screenshot, or a booking confirmation), or both. Respond with ONLY one compact JSON\nobject and nothing else - no prose, no code fences, and do not repeat the schema.\nThe object may contain these fields:\n- \"kind\": \"iou\" when the money is a future obligation (a reservation, a booking, rent, an\n  instalment, or money owed to be paid later); \"settlement\" when the money has already moved\n  (already paid, sent, transferred, or received).\n- \"amount\": the amount in major currency units, as a JSON number (never a string).\n- \"currency\": the 3-letter ISO currency code.\n- \"direction\": \"credit\" when the amount is owed TO the user; \"debt\" when the user owes it.\n- \"date\": the transaction or due date, formatted YYYY-MM-DD.\n- \"note\": a short description taken from the input.\nInclude a field only when the input supports it; omit any field you are unsure of. Never invent\nan amount, a counterparty, or any other value that is not present in the input.",
+  "responseSchema": {
+    "type": "object",
+    "properties": {
+      "kind": {
+        "enum": [
+          "settlement",
+          "iou"
+        ]
+      },
+      "amount": {
+        "type": "number"
+      },
+      "currency": {
+        "type": "string",
+        "pattern": "^[A-Za-z]{3}$"
+      },
+      "direction": {
+        "enum": [
+          "credit",
+          "debt"
+        ]
+      },
+      "date": {
+        "type": "string",
+        "pattern": "^\\d{4}-\\d{2}-\\d{2}$"
+      },
+      "note": {
+        "type": "string"
+      }
+    },
+    "required": [
+      "amount",
+      "currency"
+    ]
+  },
+  "card": {
+    "title": "Add to IOU",
+    "rows": [
+      {
+        "label": "Amount",
+        "valueKey": "amount"
+      },
+      {
+        "label": "Currency",
+        "valueKey": "currency"
+      },
+      {
+        "label": "Type",
+        "valueKey": "kind"
+      },
+      {
+        "label": "Direction",
+        "valueKey": "direction"
+      },
+      {
+        "label": "Date",
+        "valueKey": "date"
+      },
+      {
+        "label": "Note",
+        "valueKey": "note"
+      }
+    ],
+    "confirmLabel": "Add to IOU",
+    "cancelLabel": "Cancel",
+    "disclosure": "On confirm, an encrypted draft is delivered to your IOU app."
+  },
+  "endpoint": "https://example.com/hook",
+  "perUserKeys": true,
+  "rules": [
+    {
+      "kind": "keyword_map",
+      "field": "kind",
+      "mode": "override",
+      "map": [
+        {
+          "value": "iou",
+          "keywords": [
+            "reservation",
+            "booking",
+            "rent",
+            "due",
+            "owed",
+            "owes",
+            "instalment",
+            "installment"
+          ]
+        },
+        {
+          "value": "settlement",
+          "keywords": [
+            "paid",
+            "sent",
+            "transferred",
+            "settled",
+            "received"
+          ]
+        }
+      ]
+    },
+    {
+      "kind": "from_message",
+      "field": "note",
+      "maxLength": 200
+    },
+    {
+      "kind": "normalize",
+      "field": "amount",
+      "ops": [
+        "k_m_suffix"
+      ]
+    },
+    {
+      "kind": "normalize",
+      "field": "currency",
+      "ops": [
+        "uppercase",
+        "trim"
+      ]
+    },
+    {
+      "kind": "instruction",
+      "text": "Amounts like '26k' mean 26000."
+    }
+  ]
+}

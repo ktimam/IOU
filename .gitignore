@@ -30,6 +30,10 @@ android/keystore.properties
 # OpenChat stand-in test keys (local full-cycle check) — never commit
 scripts/iou-relay/.standin-*.pem
 
+# Persistent OpenChat registrar identity (scripts/register-openchat-app.ts) — it OWNS the
+# registered "iou" app (upsert key = owner + name), so it is a secret; never commit
+.openchat-registrar.json
+
 # TypeScript / Vite build output
 *.tsbuildinfo
 vite.config.d.ts

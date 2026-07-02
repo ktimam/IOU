@@ -11,7 +11,7 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "e2e": "playwright test",
-    "deploy:local": "dfx deploy iou_backend && pnpm build && dfx deploy iou_assets",
+    "deploy:local": "dfx deploy iou_backend && pnpm build && dfx deploy iou_assets && pnpm register:openchat",
     "deploy:ic": "bash scripts/deploy-prod.sh",
     "cap:sync": "pnpm build && cap sync android",
     "cap:open:android": "cap open android",
@@ -31,6 +31,7 @@
     "openchat:standin": "pnpm exec tsx scripts/iou-relay/openchat-standin.ts",
     "ocbot:serve": "pnpm exec tsx scripts/iou-openchat-bot/server.ts",
     "ocbot:selftest": "pnpm exec tsx scripts/iou-openchat-bot/selftest.ts",
+    "register:openchat": "pnpm exec tsx scripts/register-openchat-app.ts",
     "postinstall": "node scripts/patch-vetkeys-esm.mjs"
   },
   "dependencies": {
