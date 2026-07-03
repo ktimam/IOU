@@ -17,9 +17,41 @@
 
 import { Actor, HttpAgent, type Identity } from "@dfinity/agent";
 import { IDL } from "@dfinity/candid";
+import { Principal } from "@dfinity/principal";
 import { iouActionManifest } from "./actionManifest";
 import type { AiActionRule } from "./actionManifest";
 import registrationJson from "../../../docs/openchat-registration.json";
+
+// Canonical revoke challenge, byte-for-byte identical to the canister's
+// `revoke_challenge_preimage` (user_index revoke_ai_app_user_key.rs). Order MUST match exactly:
+//   domain || user_index canister-id raw bytes || public-key PEM bytes || timestamp (u64 LE).
+const REVOKE_CHALLENGE_DOMAIN = new TextEncoder().encode("oc-revoke-ai-app-user-key-v1");
+
+function u64LeBytes(value: bigint): Uint8Array {
+  const out = new Uint8Array(8);
+  let v = value;
+  for (let i = 0; i < 8; i++) {
+    out[i] = Number(v & 0xffn);
+    v >>= 8n;
+  }
+  return out;
+}
+
+function buildRevokeChallengePreimage(userIndexCanisterId: string, publicKeyPem: string, timestamp: bigint): Uint8Array {
+  const canisterIdBytes = Principal.fromText(userIndexCanisterId).toUint8Array();
+  const pemBytes = new TextEncoder().encode(publicKeyPem);
+  const tsBytes = u64LeBytes(timestamp);
+  const preimage = new Uint8Array(REVOKE_CHALLENGE_DOMAIN.length + canisterIdBytes.length + pemBytes.length + tsBytes.length);
+  let off = 0;
+  preimage.set(REVOKE_CHALLENGE_DOMAIN, off);
+  off += REVOKE_CHALLENGE_DOMAIN.length;
+  preimage.set(canisterIdBytes, off);
+  off += canisterIdBytes.length;
+  preimage.set(pemBytes, off);
+  off += pemBytes.length;
+  preimage.set(tsBytes, off);
+  return preimage;
+}
 
 // ---------------------------------------------------------------------------------------------
 // Candid IDL — hand-written per the fixed Phase A wire contract (user_index/api/can.did).
@@ -90,6 +122,10 @@ export function buildIdl() {
     name: IDL.Text,
     description: IDL.Text,
     icon_url: IDL.Opt(IDL.Text),
+    // The app's own canister — OpenChat c2c-calls its c2c_verify_ai_app at publish to confirm we
+    // control it (anti-squatting). `#[serde(default)] Option` on the Rust side; candid requires the
+    // field on encode, so buildManifestWire always sends it ([] when not supplied).
+    app_canister_id: IDL.Opt(IDL.Principal),
     consumer_public_key: IDL.Text,
     // Multi-user delivery: when true, OpenChat delivers each user's confirmed actions to THAT
     // user's own registered key (paired via claim_ai_app_link_code) instead of the app key.
@@ -131,9 +167,15 @@ export function buildIdl() {
     InvalidRequest: IDL.Text,
     Error: OCError,
   });
-  // One-sided disconnect, app side: presenting the EXACT registered PEM is the authorization
-  // (only OpenChat and this app ever hold it), so no caller guard and an anonymous agent works.
-  const RevokeAiAppUserKeyArgs = IDL.Record({ public_key: IDL.Text });
+  // One-sided disconnect, app side: proof-of-possession. The caller signs a canister- and key-bound
+  // challenge with the private key matching public_key; OpenChat verifies before dropping the key.
+  // signature is the raw 64-byte P-256 r||s; timestamp (ms) bounds the replay window. No caller
+  // guard — the signature is the authorization — so an anonymous agent works.
+  const RevokeAiAppUserKeyArgs = IDL.Record({
+    public_key: IDL.Text,
+    signature: IDL.Vec(IDL.Nat8),
+    timestamp: IDL.Nat64,
+  });
   const RevokeAiAppUserKeyResponse = IDL.Variant({
     Success: IDL.Null,
     KeyNotFound: IDL.Null,
@@ -158,6 +200,18 @@ export type CandidOpt<T> = [] | [T];
 const some = <T>(v: T): CandidOpt<T> => [v];
 const none = <T>(): CandidOpt<T> => [];
 const opt = <T>(v: T | undefined | null): CandidOpt<T> => (v == null ? none() : some(v));
+
+// Parse a canister-id text into a Principal, tolerating a non-principal value (e.g. the local dfx
+// alias "iou_backend"): returns undefined so the caller sends [] rather than throwing.
+function parseCanisterId(id: string | undefined): Principal | undefined {
+  if (!id) return undefined;
+  try {
+    return Principal.fromText(id);
+  } catch {
+    console.warn(`[registerAiApp] app_canister_id "${id}" is not a valid principal — omitting (publish will be blocked)`);
+    return undefined;
+  }
+}
 
 // The candid wire labels equal the TS manifest's snake_case names: the Rust enums carry per-variant
 // #[serde(rename)] which BOTH candid_derive and serde honor, so candid and msgpack agree. The label
@@ -246,6 +300,7 @@ type PasteJson = {
  */
 export function buildManifestWire(
   consumerPublicKeyPem: string,
+  appCanisterId?: string,
   onPromptDrift: () => void = () => {
     console.warn("[registerAiApp] WARNING: docs/openchat-registration.json promptTemplate has drifted from");
     console.warn("[registerAiApp]          actionManifest.ts — registering the actionManifest.ts prompt.");
@@ -286,6 +341,11 @@ export function buildManifestWire(
     name: "iou",
     description: iouActionManifest.title,
     icon_url: opt(iouActionManifest.iconUrl),
+    // Our own backend canister, so OpenChat can verify we control it before publishing (its
+    // c2c_verify_ai_app query vouches for name "iou"). Deployment-specific, so it's supplied at
+    // registration (not in the static manifest); [] when unknown/unparseable (a local dfx alias
+    // like "iou_backend" isn't a principal) — publish then stays blocked but registration works.
+    app_canister_id: opt(parseCanisterId(appCanisterId)),
     consumer_public_key: consumerPublicKeyPem,
     // Per-user delivery: OpenChat routes each user's confirmed actions to that user's OWN
     // registered key (paired once via the 6-digit link code); the app-level key above is
@@ -318,6 +378,11 @@ export type RegisterAiAppOptions = {
    * (the IOU manifest sets perUserKeys=true, so "" is the norm — the app key is unused there).
    */
   consumerPublicKeyPem: string;
+  /**
+   * IOU's own backend canister id (text). OpenChat c2c-calls its c2c_verify_ai_app at publish to
+   * confirm we control it. Deployment-specific; omit only if publishing is not needed.
+   */
+  appCanisterId?: string;
   /** Caller identity; omit for anonymous (accepted by test_mode local deployments). */
   identity?: Identity;
 };
@@ -333,7 +398,7 @@ export type RegisterAiAppOutcome =
  * failures still throw.
  */
 export async function registerAiApp(opts: RegisterAiAppOptions): Promise<RegisterAiAppOutcome> {
-  const manifest = buildManifestWire(opts.consumerPublicKeyPem);
+  const manifest = buildManifestWire(opts.consumerPublicKeyPem, opts.appCanisterId);
   const { service } = buildIdl();
 
   const agent = new HttpAgent({ host: opts.host, ...(opts.identity ? { identity: opts.identity } : {}) });
@@ -426,7 +491,13 @@ export type RevokeUserKeyOptions = {
   userIndexCanisterId: string;
   /** The exact P-256 SPKI PEM currently registered on OpenChat for this user. */
   publicKeyPem: string;
-  /** Caller identity; optional — the PEM itself is the authorization, so anonymous works. */
+  /**
+   * Signs the canonical revoke challenge with the consumer PRIVATE key (proof of possession).
+   * Wire `signRevokeChallenge` from consumerKeypair here; called while the key still exists (before
+   * clearConsumerKeypair). Returns the raw 64-byte P-256 r||s signature.
+   */
+  sign: (preimage: Uint8Array) => Promise<Uint8Array>;
+  /** Caller identity; optional — the signature is the authorization, so anonymous works. */
   identity?: Identity;
 };
 
@@ -451,7 +522,16 @@ export async function revokeAiAppUserKey(opts: RevokeUserKeyOptions): Promise<Re
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const actor: any = Actor.createActor(() => service, { agent, canisterId: opts.userIndexCanisterId });
 
-  const response = await actor.revoke_ai_app_user_key({ public_key: opts.publicKeyPem });
+  // Sign the canister- and key-bound challenge; the signature proves we hold the private key.
+  const timestamp = BigInt(Date.now());
+  const preimage = buildRevokeChallengePreimage(opts.userIndexCanisterId, opts.publicKeyPem, timestamp);
+  const signature = await opts.sign(preimage);
+
+  const response = await actor.revoke_ai_app_user_key({
+    public_key: opts.publicKeyPem,
+    signature: Array.from(signature),
+    timestamp,
+  });
   if ("Success" in response) {
     return { kind: "success" };
   }

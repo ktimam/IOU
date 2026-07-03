@@ -19,10 +19,12 @@
 
 import { useEffect, useRef, useState } from "react";
 import { useAuth } from "../auth/AuthProvider";
+import { canisterId as iouBackendCanisterId } from "../auth/config";
 import {
   clearConsumerKeypair,
   consumerPublicKeyPem,
   loadOrCreateConsumerKeypair,
+  signRevokeChallenge,
 } from "./consumerKeypair";
 import { claimAiAppLinkCode, registerAiApp, revokeAiAppUserKey } from "./registerAiApp";
 
@@ -113,6 +115,8 @@ export function ActionInboxSettings() {
         host: OC_IC_URL,
         userIndexCanisterId: OC_USER_INDEX_CANISTER_ID,
         consumerPublicKeyPem: "",
+        // Our own backend canister so OpenChat can verify us at publish time (c2c_verify_ai_app).
+        appCanisterId: iouBackendCanisterId,
         identity,
       });
       if (outcome.kind === "success") {
@@ -204,6 +208,8 @@ export function ActionInboxSettings() {
             host: OC_IC_URL,
             userIndexCanisterId: OC_USER_INDEX_CANISTER_ID,
             publicKeyPem: pubKeyPem,
+            // Signs with the still-present consumer private key (revoke runs before the delete).
+            sign: signRevokeChallenge,
             identity,
           });
           revoked = outcome.kind === "success" || outcome.kind === "key_not_found";

@@ -293,6 +293,29 @@ export async function consumerPublicKeyPem(): Promise<string> {
 }
 
 /**
+ * Sign OpenChat's canonical revoke challenge with the consumer PRIVATE key — proof of possession so
+ * revoke_ai_app_user_key will drop the matching public key. The stored JWK was generated for ECDH
+ * (deriveBits), but the same P-256 point is a valid ECDSA key: we re-import a usage-stripped clone
+ * for signing (the ECDH CryptoKey in memory is non-extractable and usage-locked, so we go back to
+ * the stored JWK). WebCrypto returns a raw 64-byte r||s signature — exactly what the canister's
+ * `Signature::from_slice` expects, no DER unwrap. Only the public key + this signature ever leave
+ * the device; the private key is never exported beyond this local re-import, so E2E is preserved.
+ */
+export async function signRevokeChallenge(preimage: Uint8Array): Promise<Uint8Array> {
+  const stored = load();
+  if (!stored) throw new Error("no consumer keypair available to sign the revoke challenge");
+  const subtle = getSubtle();
+  // Clone + strip usage metadata so WebCrypto accepts the ECDH-generated JWK as an ECDSA sign key.
+  const jwk: JsonWebKey = { ...stored.privateKeyJwk };
+  delete jwk.key_ops;
+  delete (jwk as { use?: string }).use;
+  delete (jwk as { alg?: string }).alg;
+  const signKey = await subtle.importKey("jwk", jwk, { name: "ECDSA", namedCurve: "P-256" }, false, ["sign"]);
+  const sig = await subtle.sign({ name: "ECDSA", hash: "SHA-256" }, signKey, toBuf(preimage));
+  return new Uint8Array(sig);
+}
+
+/**
  * clearConsumerKeypair: the app-side half of a one-sided OpenChat disconnect. Deletes the
  * canister-backed wrapped keypair (delete_consumer_keypair) and the device cache, so NO device of
  * this account can decrypt action-inbox envelopes any more — importing stops even though nothing

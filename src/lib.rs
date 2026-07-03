@@ -948,6 +948,37 @@ fn get_config() -> Config {
     CONFIG.with(|c| c.borrow().get().clone())
 }
 
+// Generic OpenChat manifest-verification contract (the app side). OpenChat's user_index c2c-calls
+// this at publish time to confirm the registrant controls the canister the manifest points at:
+// because only THIS canister answers here, a squatter who registers the name "iou" pointing at a
+// bogus/absent canister can never get it published. We vouch for our own name only (option A —
+// name attestation; `owner` is accepted but not required, since OpenChat's owner is a user-canister
+// principal we don't know out of band). Pure identity attestation: no private-key material, so the
+// E2E crypto invariant is untouched. Kept a QUERY so the c2c is cheap and side-effect-free.
+#[derive(CandidType, Deserialize)]
+struct VerifyAiAppArgs {
+    name: String,
+    #[allow(dead_code)]
+    owner: Principal,
+}
+
+#[derive(CandidType, Deserialize)]
+struct VerifyAiAppResponse {
+    vouched: bool,
+    name: Option<String>,
+    owner: Option<Principal>,
+}
+
+#[ic_cdk::query]
+fn c2c_verify_ai_app(args: VerifyAiAppArgs) -> VerifyAiAppResponse {
+    let creator = CONFIG.with(|c| c.borrow().get().creator_principal);
+    VerifyAiAppResponse {
+        vouched: args.name == "iou",
+        name: Some("iou".to_string()),
+        owner: Some(creator),
+    }
+}
+
 #[ic_cdk::update]
 fn set_creator_principal(p: Principal) {
     require_authed();

@@ -10,26 +10,36 @@ describe("buildManifestWire", () => {
     // Precondition of the whole zero-input flow: IOU's manifest uses per-user delivery keys.
     expect(iouActionManifest.perUserKeys).toBe(true);
 
-    const manifest = buildManifestWire("", () => {});
+    const manifest = buildManifestWire("", undefined, () => {});
     expect(manifest.consumer_public_key).toBe("");
     expect(manifest.per_user_keys).toBe(true);
   });
 
   it("still carries an explicit app-level key when one is supplied (legacy path)", () => {
-    const manifest = buildManifestWire(FAKE_PEM, () => {});
+    const manifest = buildManifestWire(FAKE_PEM, undefined, () => {});
     expect(manifest.consumer_public_key).toBe(FAKE_PEM);
     expect(manifest.per_user_keys).toBe(true);
   });
 
+  it("sends app_canister_id as an opt principal when a valid one is supplied, [] otherwise", () => {
+    const withId = buildManifestWire("", "aaaaa-aa", () => {});
+    expect(withId.app_canister_id).toHaveLength(1);
+    const withoutId = buildManifestWire("", undefined, () => {});
+    expect(withoutId.app_canister_id).toEqual([]);
+    // A non-principal (e.g. the local dfx alias) is tolerated and omitted, not thrown.
+    const aliasId = buildManifestWire("", "iou_backend", () => {});
+    expect(aliasId.app_canister_id).toEqual([]);
+  });
+
   it("candid-encodes the empty-key manifest against the register_ai_app IDL", () => {
-    const manifest = buildManifestWire("", () => {});
+    const manifest = buildManifestWire("", undefined, () => {});
     const { RegisterAiAppArgs } = buildIdl();
     const encoded = IDL.encode([RegisterAiAppArgs], [{ manifest }]);
     expect(encoded.byteLength).toBeGreaterThan(0);
   });
 
   it("carries the chat_link + connect + home surfaces with snake-label display variants", () => {
-    const manifest = buildManifestWire("", () => {});
+    const manifest = buildManifestWire("", undefined, () => {});
     const surfaces = manifest.surfaces as { kind: string; url: string; display: Record<string, null> }[];
     expect(surfaces).toHaveLength(3);
     const chatLink = surfaces.find((s) => s.kind === "chat_link")!;

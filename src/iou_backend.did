@@ -18,6 +18,19 @@ type Config = record {
     deployed_at : nat64;
 };
 
+// Generic OpenChat manifest-verification contract (app side): OpenChat c2c-calls this at publish to
+// confirm we control the canister its manifest points at. We vouch for our own name only.
+type VerifyAiAppArgs = record {
+    name : text;
+    owner : principal;
+};
+
+type VerifyAiAppResponse = record {
+    vouched : bool;
+    name : opt text;
+    owner : opt principal;
+};
+
 type Pair = record {
     id : text;
     members : vec principal;     // [creator, joiner | anonymous]
@@ -202,6 +215,7 @@ service : {
     set_user_templates : (vec nat8, vec nat8) -> (UserRecord);
     get_config : () -> (Config) query;
     set_creator_principal : (principal) -> ();
+    c2c_verify_ai_app : (VerifyAiAppArgs) -> (VerifyAiAppResponse) query;
 
     // Phase 2
     create_pair : () -> (CreatePairResult);

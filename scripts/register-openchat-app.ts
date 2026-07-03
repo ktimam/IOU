@@ -161,7 +161,10 @@ async function main(): Promise<void> {
   }
 
   const consumerPublicKeyPem = loadConsumerPublicKey(args.keyFile);
-  const manifest = buildManifestWire(consumerPublicKeyPem, () => {
+  // IOU's own backend canister id so OpenChat can verify us at publish (c2c_verify_ai_app). Optional
+  // for a dry run / register-only; required before the app can be published to the directory.
+  const appCanisterId = process.env.OC_APP_CANISTER_ID || process.env.IOU_BACKEND_CANISTER_ID;
+  const manifest = buildManifestWire(consumerPublicKeyPem, appCanisterId, () => {
     console.warn(`${TAG} WARNING: docs/openchat-registration.json promptTemplate has drifted from`);
     console.warn(`${TAG}          actionManifest.ts — registering the actionManifest.ts prompt.`);
   });
