@@ -67,6 +67,36 @@ function markInboxDraftHandled(id: string): void {
     /* best-effort: the in-memory set still applies for this session */
   }
 }
+
+// A single chat message can, in a rare double-confirm race, produce two on-chain
+// deposits with the SAME context.messageId (different confirmedBy). The draft-id
+// guard only catches an ALREADY-WRITTEN entry, so both cards could still be
+// accepted before the first entry lands. We dedupe by messageId as well: once a
+// messageId has been imported we treat any sibling card as already-added. Persist
+// it (same rationale as handledInboxIds) so the guard survives a reload.
+const IMPORTED_MSG_KEY = "iou.openchat.importedMessageIds.v1";
+const IMPORTED_MSG_CAP = 1000;
+function loadImportedMessageIds(): Set<string> {
+  try {
+    const raw = localStorage.getItem(IMPORTED_MSG_KEY);
+    const parsed: unknown = raw === null ? [] : JSON.parse(raw);
+    return new Set(Array.isArray(parsed) ? parsed.filter((v): v is string => typeof v === "string") : []);
+  } catch {
+    return new Set();
+  }
+}
+const importedMessageIds = loadImportedMessageIds();
+function markMessageImported(messageId: string): void {
+  importedMessageIds.add(messageId);
+  try {
+    localStorage.setItem(
+      IMPORTED_MSG_KEY,
+      JSON.stringify([...importedMessageIds].slice(-IMPORTED_MSG_CAP)),
+    );
+  } catch {
+    /* best-effort: the in-memory set still applies for this session */
+  }
+}
 import {
   readCachedLinks,
   writeCachedLinks,
@@ -225,6 +255,9 @@ export function SheetPage() {
   const [pending, setPending] = useState<PendingDraft[]>([]);
   const [inboxPending, setInboxPending] = useState<PendingDraft[]>([]);
   const [pendingRelayId, setPendingRelayId] = useState<string | null>(null);
+  // messageId of the draft under review (openchat v2 wrapper only) — recorded on
+  // a successful write so a sibling double-confirm card can't be imported twice.
+  const [pendingMessageId, setPendingMessageId] = useState<string | null>(null);
   // Chat → sheet mapping (delivery provenance): canister-backed, cache-first.
   const [chatLinks, setChatLinks] = useState<ChatSheetLinks>(() => readCachedLinks());
   // The chat key of the draft currently being reviewed (openchat drafts only),
@@ -265,6 +298,7 @@ export function SheetPage() {
     setModal(null);
     setPendingRelayId(null);
     setPendingChatKey(null);
+    setPendingMessageId(null);
   };
   const importFromRelay = (p: PendingDraft) => {
     const res = parseDraft(p.draft);
@@ -277,9 +311,20 @@ export function SheetPage() {
       void clearRelay(p.id);
       return;
     }
+    // Double-confirm race guard: a sibling card with the same messageId was
+    // already imported. The draft-id check above only fires once the entry has
+    // been written; this closes the window where both cards are opened first.
+    // Wrapper-less drafts (no messageId) fall through to the draft-id path.
+    const mid = p.context?.messageId;
+    if (mid && importedMessageIds.has(mid)) {
+      toasts.show({ kind: "info", text: "Already added — clearing it from chat" });
+      void clearRelay(p.id);
+      return;
+    }
     setPendingRelayId(p.id);
     // Track the source chat so confirming can remember chat → sheet.
     setPendingChatKey(p.context?.chat ?? null);
+    setPendingMessageId(mid ?? null);
     setRememberChat(true);
     openAdd(res.value.initial);
   };
@@ -535,6 +580,9 @@ export function SheetPage() {
       });
       toasts.show({ kind: "success", text: "Entry added" });
       if (pendingRelayId) await clearRelay(pendingRelayId);
+      // Remember this messageId so a sibling double-confirm card is caught by
+      // the accept-path guard even before the new entry is re-fetched.
+      if (pendingMessageId) markMessageImported(pendingMessageId);
       // First import from a chat that isn't mapped yet: honour the
       // "remember" checkbox (default on) by pinning chat → this sheet.
       if (pendingRelayId && pendingChatKey && rememberChat && !chatLinks[pendingChatKey]) {
@@ -543,6 +591,7 @@ export function SheetPage() {
     }
     setPendingRelayId(null);
     setPendingChatKey(null);
+    setPendingMessageId(null);
     setModal(null);
     await reload();
   }
@@ -658,9 +707,22 @@ export function SheetPage() {
   // Inbox drafts whose source chat is pinned to a DIFFERENT sheet are hidden
   // here — they show up on their mapped sheet's page instead. Drafts without
   // context (wrapper-less deposits) and unmapped chats stay visible.
-  const visibleInbox = inboxPending.filter(
-    (p) => !p.context?.chat || !chatLinks[p.context.chat] || chatLinks[p.context.chat] === sheetId,
-  );
+  //
+  // A double-confirm race can surface two cards for the same messageId; collapse
+  // them by keeping the first (earliest — poll appends in order). Drafts with no
+  // messageId (wrapper-less) are never collapsed — each undefined stays distinct.
+  const seenMessageIds = new Set<string>();
+  const visibleInbox = inboxPending
+    .filter(
+      (p) => !p.context?.chat || !chatLinks[p.context.chat] || chatLinks[p.context.chat] === sheetId,
+    )
+    .filter((p) => {
+      const m = p.context?.messageId;
+      if (!m) return true;
+      if (seenMessageIds.has(m)) return false;
+      seenMessageIds.add(m);
+      return true;
+    });
   // The draft under review came from a chat with no mapping yet → offer to
   // remember the chat → sheet link on confirm.
   const showRememberChat = pendingRelayId != null && !!pendingChatKey && !chatLinks[pendingChatKey];
