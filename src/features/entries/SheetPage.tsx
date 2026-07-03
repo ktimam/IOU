@@ -39,6 +39,11 @@ import {
   type PendingDraft,
 } from "../relay/relay";
 import { pollActionInbox, getActionInboxConfig } from "../openchat/actionInboxClient";
+import {
+  collapseByMessageId,
+  parseImportedMessageIds,
+  serializeImportedMessageIds,
+} from "../openchat/inboxDedupe";
 
 // Dismissed/imported on-chain inbox drafts, persisted so they stay gone across refreshes — the
 // inbox itself is append-only and the poll cursor is in-memory, so without this every handled
@@ -76,23 +81,19 @@ function markInboxDraftHandled(id: string): void {
 // it (same rationale as handledInboxIds) so the guard survives a reload.
 const IMPORTED_MSG_KEY = "iou.openchat.importedMessageIds.v1";
 const IMPORTED_MSG_CAP = 1000;
-function loadImportedMessageIds(): Set<string> {
-  try {
-    const raw = localStorage.getItem(IMPORTED_MSG_KEY);
-    const parsed: unknown = raw === null ? [] : JSON.parse(raw);
-    return new Set(Array.isArray(parsed) ? parsed.filter((v): v is string => typeof v === "string") : []);
-  } catch {
-    return new Set();
-  }
-}
-const importedMessageIds = loadImportedMessageIds();
+const importedMessageIds = parseImportedMessageIds(
+  (() => {
+    try {
+      return localStorage.getItem(IMPORTED_MSG_KEY);
+    } catch {
+      return null;
+    }
+  })(),
+);
 function markMessageImported(messageId: string): void {
   importedMessageIds.add(messageId);
   try {
-    localStorage.setItem(
-      IMPORTED_MSG_KEY,
-      JSON.stringify([...importedMessageIds].slice(-IMPORTED_MSG_CAP)),
-    );
+    localStorage.setItem(IMPORTED_MSG_KEY, serializeImportedMessageIds(importedMessageIds, IMPORTED_MSG_CAP));
   } catch {
     /* best-effort: the in-memory set still applies for this session */
   }
@@ -711,18 +712,11 @@ export function SheetPage() {
   // A double-confirm race can surface two cards for the same messageId; collapse
   // them by keeping the first (earliest — poll appends in order). Drafts with no
   // messageId (wrapper-less) are never collapsed — each undefined stays distinct.
-  const seenMessageIds = new Set<string>();
-  const visibleInbox = inboxPending
-    .filter(
+  const visibleInbox = collapseByMessageId(
+    inboxPending.filter(
       (p) => !p.context?.chat || !chatLinks[p.context.chat] || chatLinks[p.context.chat] === sheetId,
-    )
-    .filter((p) => {
-      const m = p.context?.messageId;
-      if (!m) return true;
-      if (seenMessageIds.has(m)) return false;
-      seenMessageIds.add(m);
-      return true;
-    });
+    ),
+  );
   // The draft under review came from a chat with no mapping yet → offer to
   // remember the chat → sheet link on confirm.
   const showRememberChat = pendingRelayId != null && !!pendingChatKey && !chatLinks[pendingChatKey];
