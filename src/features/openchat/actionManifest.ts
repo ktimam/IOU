@@ -78,10 +78,17 @@ export function resolvePublicOrigin(): string {
   return (fromVite ?? fromNode ?? "http://127.0.0.1:3000").trim().replace(/\/+$/, "");
 }
 
+// The IOU app icon OpenChat's directory renders, inlined as a base64 data: URI (favicon.svg) so
+// nothing is fetched cross-origin — no IP/timing leak to IOU's host, no CSP surprise.
+export const IOU_ICON_DATA_URI =
+  "data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCA2NCA2NCI+CiAgPHJlY3QgeD0iMS41IiB5PSIxLjUiIHdpZHRoPSI2MSIgaGVpZ2h0PSI2MSIgcng9IjE1IiBmaWxsPSIjMTEyNjFGIiBzdHJva2U9IiM1RkUzQjMiIHN0cm9rZS13aWR0aD0iMiIvPgogIDxjaXJjbGUgY3g9IjMyIiBjeT0iMzAiIHI9IjE0IiBmaWxsPSJub25lIiBzdHJva2U9IiM1RkUzQjMiIHN0cm9rZS13aWR0aD0iNSIvPgogIDxjaXJjbGUgY3g9IjMyIiBjeT0iMjYuNSIgcj0iMy4zIiBmaWxsPSIjNUZFM0IzIi8+CiAgPHBhdGggZD0iTTMwIDI5IEwyOC41IDM3IEwzNS41IDM3IEwzNCAyOSBaIiBmaWxsPSIjNUZFM0IzIi8+Cjwvc3ZnPg==";
+
 export type IouActionManifest = {
   id: string;
   version: string;
   title: string;
+  // App icon shown in OpenChat's directory (a data: URI — see IOU_ICON_DATA_URI).
+  iconUrl: string;
   trigger: { on: "image_message"; command?: string };
   prompt: string;
   // JSON-schema-ish description of the draft OpenChat must produce. Mirrors
@@ -170,6 +177,7 @@ export const iouActionManifest: IouActionManifest = {
   id: "iou.entry.import",
   version: "1",
   title: "Add to IOU",
+  iconUrl: IOU_ICON_DATA_URI,
   trigger: { on: "image_message", command: "iou" },
   prompt: IOU_EXTRACTION_PROMPT,
   outputSchema: {

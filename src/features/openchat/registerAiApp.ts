@@ -285,7 +285,7 @@ export function buildManifestWire(
   return {
     name: "iou",
     description: iouActionManifest.title,
-    icon_url: none<string>(),
+    icon_url: opt(iouActionManifest.iconUrl),
     consumer_public_key: consumerPublicKeyPem,
     // Per-user delivery: OpenChat routes each user's confirmed actions to that user's OWN
     // registered key (paired once via the 6-digit link code); the app-level key above is
