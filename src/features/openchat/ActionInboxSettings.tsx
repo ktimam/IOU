@@ -1,6 +1,6 @@
 // Settings card for the ON-CHAIN action inbox path (the successor to the relay).
 //
-// Three flows live here:
+// Two flows live here:
 //   1. ADMIN — "Link to OpenChat" registers the app manifest (with per_user_keys=true) at the
 //      user_index's register_ai_app in one tap (registerAiApp.ts). Delivery always uses per-user
 //      keys, so registration sends an EMPTY app-level key — no key dependency at all. The SPKI
@@ -10,8 +10,9 @@
 //      6-digit code OpenChat displays (its consent sheet); we push this account's public key via
 //      claim_ai_app_link_code. The keypair itself is canister-backed (consumerKeypair.ts): wrapped
 //      via the same vetkd mechanism as sheet keys, so any of the user's devices can decrypt.
-//   3. Point the app at the action_inbox canister (id + host) so SheetPage's poll activates.
-//      We persist that to the same localStorage key getActionInboxConfig() reads.
+// The inbox canister id is NOT entered here: getActionInboxConfig() auto-derives it from this app's
+// registered manifest in OpenChat's user_index (the id OpenChat routes deposits to). It's shown
+// read-only below, and any legacy hand-entered localStorage override is purged on mount.
 //
 // The private key exists in plaintext only on the user's devices (the canister stores an opaque
 // wrapped blob); decryption happens here on poll. Nothing is written to a sheet until the user
@@ -27,13 +28,11 @@ import {
   signRevokeChallenge,
 } from "./consumerKeypair";
 import { claimAiAppLinkCode, registerAiApp, revokeAiAppUserKey } from "./registerAiApp";
+import { getActionInboxConfig } from "./actionInboxClient";
+import { useTemplates } from "../templates/TemplatesContext";
+import { OC_ACTION_INBOX_CANISTER_ID, OC_IC_URL, OC_LINKED_KEY, OC_USER_INDEX_CANISTER_ID } from "./ocConfig";
 
 const LS_INBOX = "iou.openchat.actionInbox.v1";
-
-// The OpenChat user_index lives on a DIFFERENT replica than IOU's backend — never reuse the
-// app's own agent/host for it. Host defaults to OpenChat's local dfx gateway.
-const OC_IC_URL = (import.meta.env.VITE_OC_IC_URL as string | undefined) ?? "http://127.0.0.1:8080";
-const OC_USER_INDEX_CANISTER_ID = (import.meta.env.VITE_OC_USER_INDEX_CANISTER_ID as string | undefined)?.trim();
 
 type LinkStatus =
   | { kind: "idle" }
@@ -41,23 +40,12 @@ type LinkStatus =
   | { kind: "ok"; message: string }
   | { kind: "err"; message: string };
 
-function loadCfg(): { canisterId: string; host: string } {
-  try {
-    const raw = globalThis.localStorage?.getItem(LS_INBOX);
-    if (raw) return JSON.parse(raw);
-  } catch {
-    /* ignore */
-  }
-  return { canisterId: "", host: "http://127.0.0.1:4943" };
-}
-
 export function ActionInboxSettings() {
   const { identity } = useAuth();
+  const { templates } = useTemplates();
   const [pubKeyPem, setPubKeyPem] = useState<string>("");
   const [fingerprint, setFingerprint] = useState<string>("");
-  const [canisterId, setCanisterId] = useState(loadCfg().canisterId);
-  const [host, setHost] = useState(loadCfg().host);
-  const [saved, setSaved] = useState(false);
+  const [inbox, setInbox] = useState<{ canisterId: string; host: string } | null>(null);
   const [link, setLink] = useState<LinkStatus>({ kind: "idle" });
   const [linkCode, setLinkCode] = useState("");
   const [connect, setConnect] = useState<LinkStatus>({ kind: "idle" });
@@ -75,6 +63,24 @@ export function ActionInboxSettings() {
         /* WebCrypto unavailable */
       }
     })();
+  }, []);
+
+  // The inbox canister id is auto-derived from this app's OpenChat manifest — not entered here.
+  // Resolve it read-only for display, and purge any legacy hand-entered override that used to live
+  // in localStorage (getActionInboxConfig no longer reads it, but clear it so nothing stale lingers).
+  useEffect(() => {
+    try {
+      globalThis.localStorage?.removeItem(LS_INBOX);
+    } catch {
+      /* ignore */
+    }
+    let cancelled = false;
+    void getActionInboxConfig().then((cfg) => {
+      if (!cancelled) setInbox(cfg);
+    });
+    return () => {
+      cancelled = true;
+    };
   }, []);
 
   // OpenChat's consent sheet links here as <origin>/settings#openchat-connect (the manifest's
@@ -117,9 +123,19 @@ export function ActionInboxSettings() {
         consumerPublicKeyPem: "",
         // Our own backend canister so OpenChat can verify us at publish time (c2c_verify_ai_app).
         appCanisterId: iouBackendCanisterId,
+        // Route deposits to IOU's own inbox — MUST be sent on every upsert or deposits go NotConfigured.
+        inboxCanisterId: OC_ACTION_INBOX_CANISTER_ID,
         identity,
+        // Register the user's saved types too, so the manifest can route chat messages to them.
+        templates,
       });
       if (outcome.kind === "success") {
+        // Remember we're linked (scoped to this principal) so a later template edit auto-re-registers.
+        try {
+          if (identity) localStorage.setItem(OC_LINKED_KEY, identity.getPrincipal().toText());
+        } catch {
+          /* best-effort */
+        }
         setLink({ kind: "ok", message: "Linked to OpenChat — now enable IOU in a chat's Apps settings." });
       } else if (outcome.kind === "invalid_request") {
         setLink({ kind: "err", message: `OpenChat rejected the manifest: ${outcome.message}` });
@@ -234,24 +250,14 @@ export function ActionInboxSettings() {
     }
   };
 
-  const save = () => {
-    try {
-      globalThis.localStorage?.setItem(LS_INBOX, JSON.stringify({ canisterId: canisterId.trim(), host: host.trim() }));
-      setSaved(true);
-      setTimeout(() => setSaved(false), 1500);
-    } catch {
-      /* ignore */
-    }
-  };
-
   return (
     <div className="card">
       <h2>OpenChat action inbox (on-chain)</h2>
       <p className="muted small">
         Receive OpenChat-confirmed actions <em>on-chain</em>, end-to-end encrypted — no relay. Register this
-        device's public key with the OpenChat action as its <code>recipient_public_key</code>, then point the
-        app at the inbox canister. Confirmed actions appear under “Pending from chat”; the encrypted entry is
-        still written on <em>this device</em> when you Accept.
+        device's public key with the OpenChat action as its <code>recipient_public_key</code>. Confirmed
+        actions appear under “Pending from chat”; the encrypted entry is still written on <em>this device</em>
+        when you Accept.
       </p>
 
       <p className="muted small" style={{ marginTop: 8 }}>
@@ -348,25 +354,11 @@ export function ActionInboxSettings() {
       )}
 
       <p className="muted small" style={{ marginTop: 12 }}>
-        action_inbox canister:
+        action_inbox canister (auto-derived from your OpenChat registration — nothing to configure):
       </p>
-      <div className="row" style={{ gap: 8, flexWrap: "wrap" }}>
-        <input
-          placeholder="canister id (e.g. uxrrr-…-cai)"
-          value={canisterId}
-          onChange={(e) => setCanisterId(e.target.value)}
-          style={{ flex: "1 1 220px", fontFamily: "monospace" }}
-        />
-        <input
-          placeholder="host"
-          value={host}
-          onChange={(e) => setHost(e.target.value)}
-          style={{ flex: "1 1 160px", fontFamily: "monospace" }}
-        />
-        <button type="button" onClick={save} disabled={!canisterId.trim()}>
-          {saved ? "Saved ✓" : "Save"}
-        </button>
-      </div>
+      <p className="small" style={{ fontFamily: "monospace", wordBreak: "break-all" }}>
+        {inbox ? `${inbox.canisterId} @ ${inbox.host}` : "resolving from OpenChat…"}
+      </p>
 
       <span className="lock-cue" style={{ marginTop: 8 }}>
         🔒 your private key is end-to-end encrypted — the canister only ever stores a wrapped blob

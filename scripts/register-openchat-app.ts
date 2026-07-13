@@ -164,10 +164,18 @@ async function main(): Promise<void> {
   // IOU's own backend canister id so OpenChat can verify us at publish (c2c_verify_ai_app). Optional
   // for a dry run / register-only; required before the app can be published to the directory.
   const appCanisterId = process.env.OC_APP_CANISTER_ID || process.env.IOU_BACKEND_CANISTER_ID;
-  const manifest = buildManifestWire(consumerPublicKeyPem, appCanisterId, () => {
-    console.warn(`${TAG} WARNING: docs/openchat-registration.json promptTemplate has drifted from`);
-    console.warn(`${TAG}          actionManifest.ts — registering the actionManifest.ts prompt.`);
-  });
+  // Per-app inbox override: route IOU's confirmed-action deposits to its OWN action_inbox canister
+  // (escapes shared-inbox throttle contention). Unset => OpenChat's global inbox.
+  const inboxCanisterId = process.env.OC_ACTION_INBOX_CANISTER_ID;
+  const manifest = buildManifestWire(
+    consumerPublicKeyPem,
+    appCanisterId,
+    () => {
+      console.warn(`${TAG} WARNING: docs/openchat-registration.json promptTemplate has drifted from`);
+      console.warn(`${TAG}          actionManifest.ts — registering the actionManifest.ts prompt.`);
+    },
+    inboxCanisterId,
+  );
   const { RegisterAiAppArgs, service } = buildIdl();
 
   // Encode eagerly: proves the manifest conforms to the candid contract before (and without)

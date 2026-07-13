@@ -20,6 +20,10 @@ import {
 } from "../crypto/devVetkd";
 import { unwrap } from "../flows/useActor";
 import type { Direction, TxnType } from "../entries/types";
+import type { Identity } from "@dfinity/agent";
+import { registerAiApp } from "../openchat/registerAiApp";
+import { OC_ACTION_INBOX_CANISTER_ID, OC_IC_URL, OC_LINKED_KEY, OC_USER_INDEX_CANISTER_ID } from "../openchat/ocConfig";
+import { canisterId as iouBackendCanisterId } from "../auth/config";
 
 // How a template portion's due date is anchored, relative to the
 // transaction date (so the template stays reusable):
@@ -46,6 +50,10 @@ export type TxnTemplate = {
   fee_fixed_minor?: number; // IOU flat fee
   schedule?: TemplatePortion[]; // IOU default due schedule (relative)
   note?: string;
+  // Trigger words that route on-device extraction to this template's id: IOU folds them into the
+  // registered OpenChat manifest (a keyword_map on a `template` field), so a chat message matching
+  // one is classified as this type. Absent === not routable from chat.
+  keywords?: string[];
 };
 
 type Ctx = {
@@ -62,6 +70,39 @@ const TemplatesContext = createContext<Ctx | null>(null);
 function optBytes(o: any): Uint8Array | null {
   const v = Array.isArray(o) ? o[0] : o;
   return v == null ? null : new Uint8Array(v);
+}
+
+// Fire-and-forget: if this device has linked to OpenChat (as THIS principal), re-register the IOU
+// manifest so it reflects the current templates — each template's trigger words become a `template`
+// keyword_map mapping, so a chat message matching them routes to that template. Guarded by an
+// owner-scoped flag so a template edit never hijacks the global "iou" registry entry for a user who
+// didn't link. Errors are swallowed — a slow/unreachable user_index must never block a template save.
+async function reRegisterOpenChatIfLinked(
+  identity: Identity | undefined,
+  templates: TxnTemplate[],
+): Promise<void> {
+  if (!identity || !OC_USER_INDEX_CANISTER_ID) return;
+  let linked: string | null = null;
+  try {
+    linked = localStorage.getItem(OC_LINKED_KEY);
+  } catch {
+    return;
+  }
+  if (linked !== identity.getPrincipal().toText()) return;
+  try {
+    await registerAiApp({
+      host: OC_IC_URL,
+      userIndexCanisterId: OC_USER_INDEX_CANISTER_ID,
+      consumerPublicKeyPem: "",
+      appCanisterId: iouBackendCanisterId,
+      // Preserve IOU's inbox override on this upsert; without it deposits fail with NotConfigured.
+      inboxCanisterId: OC_ACTION_INBOX_CANISTER_ID,
+      identity,
+      templates,
+    });
+  } catch {
+    /* best-effort: re-registers again on the next template edit or an explicit re-link */
+  }
 }
 
 export function TemplatesProvider({ children }: { children: ReactNode }) {
@@ -125,8 +166,10 @@ export function TemplatesProvider({ children }: { children: ReactNode }) {
       const next = [...templates, { ...t, id }];
       await persist(next);
       setTemplates(next);
+      // Keep the registered OpenChat manifest in lock-step with the user's types (no-op if unlinked).
+      void reRegisterOpenChatIfLinked(identity, next);
     },
-    [templates, persist],
+    [templates, persist, identity],
   );
 
   const updateTemplate = useCallback(
@@ -134,8 +177,10 @@ export function TemplatesProvider({ children }: { children: ReactNode }) {
       const next = templates.map((x) => (x.id === t.id ? t : x));
       await persist(next);
       setTemplates(next);
+      // Keep the registered OpenChat manifest in lock-step with the user's types (no-op if unlinked).
+      void reRegisterOpenChatIfLinked(identity, next);
     },
-    [templates, persist],
+    [templates, persist, identity],
   );
 
   const removeTemplate = useCallback(
@@ -143,8 +188,10 @@ export function TemplatesProvider({ children }: { children: ReactNode }) {
       const next = templates.filter((t) => t.id !== id);
       await persist(next);
       setTemplates(next);
+      // Keep the registered OpenChat manifest in lock-step with the user's types (no-op if unlinked).
+      void reRegisterOpenChatIfLinked(identity, next);
     },
-    [templates, persist],
+    [templates, persist, identity],
   );
 
   return (

@@ -30,6 +30,7 @@ export function TemplatesManager({ onSaved }: { onSaved?: () => void } = {}) {
   const [feeFixed, setFeeFixed] = useState("");
   const [amount, setAmount] = useState("");
   const [note, setNote] = useState("");
+  const [keywords, setKeywords] = useState(""); // comma-separated in the form; stored as string[]
   const [sched, setSched] = useState<SchedRow[]>([
     { anchor: "in_days", days: 0, percent: 100 },
   ]);
@@ -60,6 +61,7 @@ export function TemplatesManager({ onSaved }: { onSaved?: () => void } = {}) {
     setFeeFixed("");
     setAmount("");
     setNote("");
+    setKeywords("");
     setSched([{ anchor: "in_days", days: 0, percent: 100 }]);
     setErr(null);
   }
@@ -74,6 +76,7 @@ export function TemplatesManager({ onSaved }: { onSaved?: () => void } = {}) {
     setFeeFixed(t.fee_fixed_minor ? (t.fee_fixed_minor / 100).toFixed(2) : "");
     setAmount(t.amount_minor ? (t.amount_minor / 100).toFixed(2) : "");
     setNote(t.note ?? "");
+    setKeywords((t.keywords ?? []).join(", "));
     setSched(
       t.schedule && t.schedule.length
         ? t.schedule.map((p) => ({
@@ -124,6 +127,16 @@ export function TemplatesManager({ onSaved }: { onSaved?: () => void } = {}) {
           : undefined,
       schedule,
       note: note.trim() || undefined,
+      // Split the comma list into trigger words; drop empties and any >64 chars, cap at 50 — the
+      // OpenChat register_ai_app validator rejects a manifest with an over-long keyword or too many
+      // mappings, and this rule feeds one keyword_map mapping per template.
+      keywords: keywords.trim()
+        ? keywords
+            .split(",")
+            .map((s) => s.trim())
+            .filter((s) => s.length > 0 && s.length <= 64)
+            .slice(0, 50)
+        : undefined,
     };
     setBusy(true);
     setErr(null);
@@ -191,7 +204,12 @@ export function TemplatesManager({ onSaved }: { onSaved?: () => void } = {}) {
               </button>{" "}
               <button
                 className="secondary small"
-                onClick={() => void removeTemplate(t.id)}
+                onClick={() => {
+                  if (window.confirm(`Delete the “${t.name}” type? This can't be undone.`)) {
+                    void removeTemplate(t.id);
+                    if (editingId === t.id) resetForm();
+                  }
+                }}
               >
                 Remove
               </button>
@@ -350,6 +368,19 @@ export function TemplatesManager({ onSaved }: { onSaved?: () => void } = {}) {
           <label style={{ flex: 1 }}>
             <span className="muted small">Note (optional)</span>
             <input value={note} onChange={(e) => setNote(e.target.value)} />
+          </label>
+        </div>
+        <div style={{ display: "flex", gap: 12, flexWrap: "wrap" }}>
+          <label style={{ flex: 1 }}>
+            <span className="muted small">Trigger words (optional)</span>
+            <input
+              value={keywords}
+              onChange={(e) => setKeywords(e.target.value)}
+              placeholder="reservation, deposit, booking"
+            />
+            <span className="muted small">
+              Comma-separated. A chat message matching one is routed to this type via OpenChat.
+            </span>
           </label>
         </div>
         {err && <p className="err">{err}</p>}

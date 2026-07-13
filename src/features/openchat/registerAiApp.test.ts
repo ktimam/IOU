@@ -31,6 +31,20 @@ describe("buildManifestWire", () => {
     expect(aliasId.app_canister_id).toEqual([]);
   });
 
+  it("sends inbox_canister_id as an opt principal when supplied, [] otherwise", () => {
+    // Regression guard: register_ai_app is an UPSERT, so every (re)registration must carry the per-app
+    // inbox override. Dropping it (the browser registerAiApp once hard-coded `undefined`) makes OpenChat
+    // route confirmed-action deposits nowhere — confirms then fail deposit with `NotConfigured` and the
+    // action never reaches IOU's inbox. The 4th positional arg is the inbox canister id.
+    const withInbox = buildManifestWire("", undefined, () => {}, "aaaaa-aa");
+    expect(withInbox.inbox_canister_id).toHaveLength(1);
+    const withoutInbox = buildManifestWire("", undefined, () => {});
+    expect(withoutInbox.inbox_canister_id).toEqual([]);
+    // A non-principal (e.g. the local dfx alias) is tolerated and omitted, not thrown.
+    const aliasInbox = buildManifestWire("", undefined, () => {}, "iou_backend");
+    expect(aliasInbox.inbox_canister_id).toEqual([]);
+  });
+
   it("candid-encodes the empty-key manifest against the register_ai_app IDL", () => {
     const manifest = buildManifestWire("", undefined, () => {});
     const { RegisterAiAppArgs } = buildIdl();

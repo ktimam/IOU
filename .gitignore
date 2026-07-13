@@ -57,3 +57,6 @@ Thumbs.db
 # Local Claude Code MCP registration — machine-specific (absolute paths + wsl.exe).
 # Portable setup instructions live in scripts/iou-mcp/README.md.
 .mcp.json
+
+# per-app action_inbox deploy state (deploy:inbox)
+.openchat-inbox/

@@ -31,7 +31,7 @@ import { useToasts } from "../ui/Toasts";
 import { usePreferences } from "../settings/usePreferences";
 import { useTemplates, type TxnTemplate } from "../templates/TemplatesContext";
 import { TemplatesManager } from "../templates/TemplatesManager";
-import { parseDraft, isDuplicateDraft } from "./draft";
+import { parseDraft, isDuplicateDraft, extractTs } from "./draft";
 import {
   getRelayConfig,
   fetchPending,
@@ -107,19 +107,21 @@ import {
 } from "../openchat/chatSheetLinks";
 
 // Build entry-form defaults from a template.
-function templateToInitial(t: TxnTemplate): Partial<EntryPayload> {
+function templateToInitial(t: TxnTemplate, anchorTs?: number): Partial<EntryPayload> {
   const gross = t.amount_minor ?? 0;
   const feePct = t.fee_percent ?? 0;
   const feeFixed = t.fee_fixed_minor ?? 0;
   const hasFee = t.txn_type === "iou" && (feePct > 0 || feeFixed > 0);
-  // Convert the template's relative schedule (days from today) to absolute
-  // due dates anchored at today (UTC midnight, matching the entry form).
+  // Convert the template's RELATIVE schedule (offset days / next-month anchor) to absolute due dates,
+  // anchored at `anchorTs` (UTC midnight) — TODAY by default (manual "+ Add"), or the reservation's
+  // transaction date when a chat draft carried one, so a portion "due in 0 days" lands on that date
+  // rather than today.
   let schedule: EntryPayload["schedule"];
   if (t.txn_type === "iou" && t.schedule && t.schedule.length) {
-    const now = new Date();
-    const y = now.getUTCFullYear();
-    const m = now.getUTCMonth();
-    const base = Date.UTC(y, m, now.getUTCDate());
+    const anchor = new Date(anchorTs ?? Date.now());
+    const y = anchor.getUTCFullYear();
+    const m = anchor.getUTCMonth();
+    const base = Date.UTC(y, m, anchor.getUTCDate());
     schedule = t.schedule.map((p) => ({
       due_ts:
         p.anchor === "start_of_next_month"
@@ -225,6 +227,24 @@ export function SheetPage() {
   // Import an AI-extracted draft (chat bridge, Milestone 0): parse the pasted
   // JSON, dedupe by draft_id, then open the prefilled EntryForm to confirm.
   // Nothing is written until the user confirms in the form (no auto-write).
+  // Resolve the template a chat message was routed to (the manifest keyword_map / model sets
+  // `raw.template` to the template's NAME — see actionManifest buildTemplateRules) into a defaults
+  // baseline, so parseDraft can fill gaps the extraction left. Matched case-insensitively by name,
+  // with an id fallback for any older id-based manifest. Unknown/deleted/renamed → no match →
+  // undefined → parseDraft behaves as before.
+  const resolveTemplateBase = (raw: unknown): Partial<EntryPayload> | undefined => {
+    if (raw == null || typeof raw !== "object") return undefined;
+    const ref = (raw as { template?: unknown }).template;
+    if (typeof ref !== "string" || ref.trim() === "") return undefined;
+    const key = ref.trim().toLowerCase();
+    const t =
+      templates.find((x) => x.name.trim().toLowerCase() === key) ??
+      templates.find((x) => x.id === ref);
+    // Anchor the template's due schedule at the draft's transaction date (same date the entry gets),
+    // so "due in 0 days" lands on the reservation date, not today.
+    return t ? templateToInitial(t, extractTs(raw as { note?: unknown; date?: unknown })) : undefined;
+  };
+
   const openFromDraft = () => {
     setDraftErrors([]);
     let parsed: unknown;
@@ -234,7 +254,7 @@ export function SheetPage() {
       setDraftErrors(["not valid JSON — paste the JSON your assistant produced"]);
       return;
     }
-    const res = parseDraft(parsed);
+    const res = parseDraft(parsed, resolveTemplateBase(parsed));
     if (!res.ok) {
       setDraftErrors(res.errors);
       return;
@@ -302,22 +322,22 @@ export function SheetPage() {
     setPendingMessageId(null);
   };
   const importFromRelay = (p: PendingDraft) => {
-    const res = parseDraft(p.draft);
+    const res = parseDraft(p.draft, resolveTemplateBase(p.draft));
     if (!res.ok) {
       toasts.show({ kind: "error", text: "Invalid draft from chat: " + res.errors.join("; ") });
       return;
     }
-    if (isDuplicateDraft(entries, res.value.draftId)) {
-      toasts.show({ kind: "info", text: "Already added — clearing it from chat" });
-      void clearRelay(p.id);
-      return;
-    }
-    // Double-confirm race guard: a sibling card with the same messageId was
-    // already imported. The draft-id check above only fires once the entry has
-    // been written; this closes the window where both cards are opened first.
-    // Wrapper-less drafts (no messageId) fall through to the draft-id path.
+    // Idempotency: a chat draft carries a UNIQUE messageId per card, so that is the reliable dedup
+    // key — key off it and do NOT also content-dedup. Two legitimately-distinct entries can share
+    // amount/currency/date/note (two same-price bookings, or repeated same-day drafts before the
+    // date is parsed), which the content hash (draftId) would wrongly flag as "already added" and
+    // permanently suppress WITHOUT importing. Fall back to the content hash only for wrapper-less
+    // pastes that have no messageId.
     const mid = p.context?.messageId;
-    if (mid && importedMessageIds.has(mid)) {
+    const alreadyAdded = mid
+      ? importedMessageIds.has(mid)
+      : isDuplicateDraft(entries, res.value.draftId);
+    if (alreadyAdded) {
       toasts.show({ kind: "info", text: "Already added — clearing it from chat" });
       void clearRelay(p.id);
       return;
@@ -385,41 +405,47 @@ export function SheetPage() {
   // "Pending from OpenChat": confirmed actions OpenChat deposited on-chain. We pull them from the action_inbox
   // canister, verify OpenChat's provenance signature + decrypt locally, then feed each through the same seam.
   useEffect(() => {
-    const cfg = getActionInboxConfig();
-    if (!cfg) return;
     let cancelled = false;
-    let since = 0n;
-    const load = async () => {
-      try {
-        const drafts = await pollActionInbox({ config: cfg, sinceId: since });
-        if (cancelled || drafts.length === 0) return;
-        for (const d of drafts) if (d.id >= since) since = d.id + 1n;
-        setInboxPending((prev) => {
-          const seen = new Set(prev.map((p) => p.id));
-          const add: PendingDraft[] = drafts
-            .filter((d) => !seen.has(`oc-${d.id}`) && !handledInboxIds.has(`oc-${d.id}`))
-            .map((d) => ({
-              id: `oc-${d.id}`,
-              draft: d.draft,
-              // action_inbox stores TimestampMillis — no nanosecond conversion.
-              created_at: Number(d.created_at),
-              source: "openchat",
-              // Real delivery provenance from the v2 envelope wrapper; older
-              // wrapper-less deposits have no context and keep the fallback.
-              provenance: { openchat_user: d.context?.confirmedBy ?? "action-inbox" },
-              ...(d.context ? { context: d.context } : {}),
-            }));
-          return add.length ? [...prev, ...add] : prev;
-        });
-      } catch {
-        /* inbox unreachable — leave as-is */
-      }
-    };
-    void load();
-    const iv = setInterval(() => void load(), 15000);
+    let iv: ReturnType<typeof setInterval> | undefined;
+    // The inbox canister id is auto-derived from OpenChat's registered manifest (getActionInboxConfig
+    // is async), so the fetch + null-guard live inside this IIFE; the effect callback stays sync.
+    void (async () => {
+      const cfg = await getActionInboxConfig();
+      if (cancelled || !cfg) return;
+      let since = 0n;
+      const load = async () => {
+        try {
+          const drafts = await pollActionInbox({ config: cfg, sinceId: since });
+          if (cancelled || drafts.length === 0) return;
+          for (const d of drafts) if (d.id >= since) since = d.id + 1n;
+          setInboxPending((prev) => {
+            const seen = new Set(prev.map((p) => p.id));
+            const add: PendingDraft[] = drafts
+              .filter((d) => !seen.has(`oc-${d.id}`) && !handledInboxIds.has(`oc-${d.id}`))
+              .map((d) => ({
+                id: `oc-${d.id}`,
+                draft: d.draft,
+                // action_inbox stores TimestampMillis — no nanosecond conversion.
+                created_at: Number(d.created_at),
+                source: "openchat",
+                // Real delivery provenance from the v2 envelope wrapper; older
+                // wrapper-less deposits have no context and keep the fallback.
+                provenance: { openchat_user: d.context?.confirmedBy ?? "action-inbox" },
+                ...(d.context ? { context: d.context } : {}),
+              }));
+            return add.length ? [...prev, ...add] : prev;
+          });
+        } catch {
+          /* inbox unreachable — leave as-is */
+        }
+      };
+      await load();
+      if (cancelled) return;
+      iv = setInterval(() => void load(), 15000);
+    })();
     return () => {
       cancelled = true;
-      clearInterval(iv);
+      if (iv) clearInterval(iv);
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
@@ -873,7 +899,7 @@ export function SheetPage() {
           </p>
           <ul style={{ listStyle: "none", padding: 0, margin: 0 }}>
             {[...pending, ...visibleInbox].map((p) => {
-              const r = parseDraft(p.draft);
+              const r = parseDraft(p.draft, resolveTemplateBase(p.draft));
               return (
                 <li
                   key={p.id}

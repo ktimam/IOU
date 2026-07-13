@@ -81,7 +81,7 @@ async function exportPublicKeyRaw(pub: CryptoKey): Promise<Uint8Array> {
 async function importPublicKeyRaw(raw: Uint8Array): Promise<CryptoKey> {
   return getSubtle().importKey(
     "raw",
-    raw,
+    raw as BufferSource,
     { name: "ECDH", namedCurve: "P-256" },
     false,
     [],
@@ -212,7 +212,7 @@ async function deriveAesKey(
     myPrivateKey,
     256,
   );
-  const hkdfKey = await subtle.importKey("raw", toBuf(shared), "HKDF", false, ["deriveKey"]);
+  const hkdfKey = await subtle.importKey("raw", toBuf(new Uint8Array(shared)), "HKDF", false, ["deriveKey"]);
   return subtle.deriveKey(
     {
       name: "HKDF",

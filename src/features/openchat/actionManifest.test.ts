@@ -1,6 +1,41 @@
 import { describe, it, expect } from "vitest";
-import { iouActionManifest, renderManifestJson, IOU_EXTRACTION_PROMPT } from "./actionManifest";
+import {
+  iouActionManifest,
+  renderManifestJson,
+  IOU_EXTRACTION_PROMPT,
+  buildIouRules,
+  buildIouOutputSchema,
+} from "./actionManifest";
 import { parseDraft } from "../entries/draft";
+
+describe("template routing", () => {
+  const templates = [
+    { id: "z9-abc123", name: "Reservation", keywords: ["reservation", "booking"] },
+    { id: "y8-def456", name: "No Triggers", keywords: [] },
+  ];
+
+  it("routes by template NAME (not id) so it reads on the action card", () => {
+    const rules = buildIouRules(templates);
+    const km = rules.find((r) => r.kind === "keyword_map" && r.field === "template");
+    expect(km, "a keyword_map on the `template` field").toBeDefined();
+    if (km && km.kind === "keyword_map") {
+      // The trigger-word-bearing template routes; its VALUE is the human name, and the keyword-less
+      // one is omitted (nothing to route).
+      expect(km.map).toEqual([{ value: "Reservation", keywords: ["reservation", "booking"] }]);
+    }
+  });
+
+  it("advertises the `template` field in the schema only when something is routable", () => {
+    expect((buildIouOutputSchema(templates).properties as Record<string, unknown>).template).toEqual({
+      type: "string",
+    });
+    // No routable templates -> no `template` property (nothing would ever set it).
+    expect(
+      (buildIouOutputSchema([{ id: "x", name: "X", keywords: [] }]).properties as Record<string, unknown>)
+        .template,
+    ).toBeUndefined();
+  });
+});
 
 describe("iouActionManifest", () => {
   it("declares an output the IOU draft parser accepts", () => {

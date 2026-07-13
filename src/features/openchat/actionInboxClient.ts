@@ -7,6 +7,7 @@
 import { Actor, HttpAgent, type Identity } from "@dfinity/agent";
 import { decryptInboxEnvelope, verifyOpenChatSignature } from "./actionInboxCrypto";
 import { loadOrCreateConsumerKeypair, type ConsumerKeypair } from "./consumerKeypair";
+import { getRegisteredInboxCanisterId } from "./registerAiApp";
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 type IDL = any;
@@ -170,20 +171,49 @@ function readEnv(name: string): string | undefined {
   return undefined;
 }
 
-/** Inbox config from env/localStorage, or null if OpenChat inbox integration isn't configured. */
-export function getActionInboxConfig(): ActionInboxConfig | null {
-  let canisterId = readEnv("VITE_ACTION_INBOX_CANISTER_ID");
-  let host = readEnv("VITE_OPENCHAT_HOST");
-  try {
-    const raw = globalThis.localStorage?.getItem("iou.openchat.actionInbox.v1");
-    if (raw) {
-      const cfg = JSON.parse(raw);
-      canisterId = cfg.canisterId ?? canisterId;
-      host = cfg.host ?? host;
-    }
-  } catch {
-    /* ignore */
+// Cache the manifest-derived inbox id so the 15s poll (and StrictMode double-mounts) don't re-query
+// user_index. Keyed by host|userIndex; ~5min TTL; in-flight dedup. A cached null ("no per-app inbox
+// registered") is memoized too — the caller then uses the VITE_ACTION_INBOX_CANISTER_ID fallback.
+const INBOX_TTL_MS = 5 * 60 * 1000;
+let inboxCache: { key: string; canisterId: string | null; at: number } | null = null;
+let inboxInflight: Promise<string | null> | null = null;
+
+async function resolveInboxFromManifest(host: string, userIndexId: string): Promise<string | null> {
+  const key = `${host}|${userIndexId}`;
+  if (inboxCache && inboxCache.key === key && Date.now() - inboxCache.at < INBOX_TTL_MS) {
+    return inboxCache.canisterId;
   }
+  if (inboxInflight) return inboxInflight;
+  const appCanisterId = readEnv("VITE_IOU_BACKEND_CANISTER_ID")?.trim();
+  inboxInflight = getRegisteredInboxCanisterId({ host, userIndexCanisterId: userIndexId, appName: "iou", appCanisterId })
+    .then((id) => {
+      inboxCache = { key, canisterId: id, at: Date.now() };
+      return id;
+    })
+    .finally(() => {
+      inboxInflight = null;
+    });
+  return inboxInflight;
+}
+
+/**
+ * Resolve the inbox config. The canister id is AUTO-DERIVED from OpenChat's registered manifest —
+ * the source of truth OpenChat routes deposits to — so the user never configures it by hand. Falls
+ * back to the VITE_ACTION_INBOX_CANISTER_ID env (self-host / offline) and then null. Host comes from
+ * VITE_OPENCHAT_HOST (the same replica the user_index is queried on, so registry and inbox agree).
+ */
+export async function getActionInboxConfig(): Promise<ActionInboxConfig | null> {
+  const host = readEnv("VITE_OPENCHAT_HOST") ?? "http://127.0.0.1:4943";
+  const userIndexId = readEnv("VITE_OC_USER_INDEX_CANISTER_ID")?.trim();
+  let canisterId: string | undefined;
+  if (userIndexId) {
+    try {
+      canisterId = (await resolveInboxFromManifest(host, userIndexId)) ?? undefined;
+    } catch {
+      /* user_index unreachable — fall back to env below */
+    }
+  }
+  canisterId = canisterId ?? readEnv("VITE_ACTION_INBOX_CANISTER_ID")?.trim();
   if (!canisterId) return null;
-  return { canisterId, host: host ?? "http://127.0.0.1:4943" };
+  return { canisterId, host };
 }

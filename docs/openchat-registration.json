@@ -53,6 +53,10 @@
         "valueKey": "kind"
       },
       {
+        "label": "Template",
+        "valueKey": "template"
+      },
+      {
         "label": "Direction",
         "valueKey": "direction"
       },

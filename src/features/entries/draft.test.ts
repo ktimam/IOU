@@ -1,5 +1,17 @@
 import { describe, it, expect } from "vitest";
-import { parseDraft, isDuplicateDraft } from "./draft";
+import { parseDraft, isDuplicateDraft, extractTs } from "./draft";
+
+describe("extractTs — the date a template schedule anchors on", () => {
+  const iso = (ms: number) => new Date(ms).toISOString().slice(0, 10);
+  it("recovers the transaction date: note-range START, then the date field, then today", () => {
+    expect(iso(extractTs({ note: "reservation 1-5 July" }))).toMatch(/-07-01$/);
+    expect(iso(extractTs({ date: "2026-03-09" }))).toBe("2026-03-09");
+    // The model copies today's date into `date`, but the note carries the real one → note wins.
+    expect(iso(extractTs({ date: "2026-07-13", note: "reservation 1-5 July" }))).toMatch(/-07-01$/);
+    // Nothing parseable → today (so a "due in 0 days" portion still resolves).
+    expect(iso(extractTs({ note: "no date here" }))).toBe(new Date().toISOString().slice(0, 10));
+  });
+});
 
 // Helper: assert ok and return the parsed value.
 function ok(input: unknown) {
@@ -94,8 +106,25 @@ describe("parseDraft — validation (untrusted input)", () => {
   });
 
   it("rejects a bad date and a bad direction", () => {
-    expect(parseDraft({ amount: 5, currency: "USD", date: "20/06/2026" }).ok).toBe(false);
+    expect(parseDraft({ amount: 5, currency: "USD", date: "whenever" }).ok).toBe(false);
     expect(parseDraft({ amount: 5, currency: "USD", direction: "owed" }).ok).toBe(false);
+  });
+
+  it("loose-parses common date phrases and recovers the date from the message text", () => {
+    const isoOf = (p: unknown): string => {
+      const r = parseDraft(p);
+      if (!r.ok) throw new Error("expected ok: " + r.errors.join("; "));
+      return new Date(r.value.initial.ts!).toISOString().slice(0, 10);
+    };
+    expect(isoOf({ amount: 5, currency: "USD", date: "20/06/2026" })).toBe("2026-06-20"); // day-first D/M/Y
+    expect(isoOf({ amount: 5, currency: "USD", date: "July 1" })).toMatch(/-07-01$/); // Month D
+    expect(isoOf({ amount: 5, currency: "USD", date: "1 July" })).toMatch(/-07-01$/); // D Month
+    // No date field → recover from the note; a range "1-12 July" resolves to the START day.
+    expect(isoOf({ amount: 5, currency: "USD", note: "reservation 1-12 July" })).toMatch(/-07-01$/);
+    // The model copied today's date into the date field, but the note carries the real one → note wins.
+    expect(isoOf({ amount: 5, currency: "USD", date: "2026-07-12", note: "reservation 1-12 July" })).toMatch(
+      /-07-01$/,
+    );
   });
 
   it("rejects an IOU schedule whose percents don't total 100", () => {

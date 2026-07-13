@@ -30,6 +30,9 @@ export type EntryDraft = {
   fee_fixed?: number | string; // IOU only, MAJOR units
   schedule?: DraftSchedulePortion[]; // IOU only
   draft_id?: string; // idempotency key; derived deterministically if absent
+  // Template id the manifest keyword_map (or the model) chose for this message. The caller resolves
+  // it to a defaults baseline and passes it to parseDraft as `base`; parseDraft itself ignores it.
+  template?: string;
 };
 
 export type ParsedDraft = {
@@ -62,8 +65,65 @@ function dateToTs(d: string): number | null {
   return Number.isFinite(ts) ? ts : null;
 }
 
+const MONTHS: Record<string, number> = {
+  jan: 0, january: 0, feb: 1, february: 1, mar: 2, march: 2, apr: 3, april: 3,
+  may: 4, jun: 5, june: 5, jul: 6, july: 6, aug: 7, august: 7, sep: 8, sept: 8,
+  september: 8, oct: 9, october: 9, nov: 10, november: 10, dec: 11, december: 11,
+};
+const MONTH_RE =
+  "jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|jul(?:y)?|aug(?:ust)?|sep(?:t)?(?:ember)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?";
+
+function mkUtcDate(y: number, mo: number, day: number): number | null {
+  if (mo < 0 || mo > 11 || day < 1 || day > 31) return null;
+  const ts = Date.UTC(y, mo, day);
+  return Number.isFinite(ts) ? ts : null;
+}
+
+/**
+ * Deterministically parse a loose date phrase from free text → ms epoch at UTC midnight, or null.
+ * The small on-device model reliably fails to emit YYYY-MM-DD (and the schema pattern then drops
+ * it), so we recover the date from the raw message text (captured in `note` via a from_message
+ * rule). Handles: an embedded YYYY-MM-DD; "Month D" / "D Month"; a range "D-D Month" / "Month D-D"
+ * (→ the START day); "D/M[/Y]" day-first. Year defaults to the current UTC year when absent; the
+ * range end and any time-of-day are ignored.
+ */
+function looseDateToTs(text: string): number | null {
+  const s = text.toLowerCase();
+  const iso = s.match(/\b(\d{4})-(\d{2})-(\d{2})\b/);
+  if (iso) return dateToTs(`${iso[1]}-${iso[2]}-${iso[3]}`);
+  const nowY = new Date().getUTCFullYear();
+  let m = s.match(new RegExp(`\\b(${MONTH_RE})\\.?\\s+(\\d{1,2})\\b`)); // "Month D" / "Month D-D"
+  if (m) return mkUtcDate(nowY, MONTHS[m[1]], parseInt(m[2], 10));
+  m = s.match(new RegExp(`\\b(\\d{1,2})(?:\\s*[-–]\\s*\\d{1,2})?\\s+(${MONTH_RE})\\b`)); // "D Month" / "D-D Month"
+  if (m) return mkUtcDate(nowY, MONTHS[m[2]], parseInt(m[1], 10));
+  m = s.match(/\b(\d{1,2})[/.](\d{1,2})(?:[/.](\d{2,4}))?\b/); // "D/M[/Y]" day-first
+  if (m) {
+    let y = m[3] ? parseInt(m[3], 10) : nowY;
+    if (y < 100) y += 2000;
+    return mkUtcDate(y, parseInt(m[2], 10) - 1, parseInt(m[1], 10));
+  }
+  return null;
+}
+
 function todayTsUtc(): number {
   return Date.parse(new Date().toISOString().slice(0, 10) + "T00:00:00Z");
+}
+
+/**
+ * The transaction date (UTC-midnight ms) a draft resolves to: the date embedded in the message text
+ * (captured in `note`; a "1-5 July" range → its START) wins over the model's `date` field (the
+ * on-device model tends to copy "Today is …"); then the `date` field; then today. Exported so a
+ * matched template's due schedule anchors on the SAME date the entry gets — otherwise a portion
+ * "due in 0 days" lands on today instead of the reservation date.
+ */
+export function extractTs(d: { note?: unknown; date?: unknown }): number {
+  const noteDate = typeof d.note === "string" ? looseDateToTs(d.note) : null;
+  if (noteDate != null) return noteDate;
+  if (typeof d.date === "string") {
+    const t = dateToTs(d.date) ?? looseDateToTs(d.date);
+    if (t != null) return t;
+  }
+  return todayTsUtc();
 }
 
 // Small, stable, synchronous (non-crypto) hash for a deterministic idempotency
@@ -82,7 +142,7 @@ function fnv1a(s: string): string {
  * Validate + normalize an untrusted draft into EntryForm defaults.
  * Returns typed form defaults + a stable draftId, or a list of errors.
  */
-export function parseDraft(input: unknown): ParseResult {
+export function parseDraft(input: unknown, base?: Partial<EntryPayload>): ParseResult {
   const errors: string[] = [];
   if (input == null || typeof input !== "object" || Array.isArray(input)) {
     return { ok: false, errors: ["draft must be a JSON object"] };
@@ -94,42 +154,52 @@ export function parseDraft(input: unknown): ParseResult {
   if (d.kind === "settlement" || d.kind === "iou") {
     kind = d.kind;
   } else if (d.kind == null) {
+    // A matched template's type wins over the fee/schedule heuristic when the model omitted kind.
     kind =
-      d.schedule != null || d.fee_percent != null || d.fee_fixed != null
+      base?.txn_type ??
+      (d.schedule != null || d.fee_percent != null || d.fee_fixed != null
         ? "iou"
-        : "settlement";
+        : "settlement");
   } else {
     errors.push('kind must be "settlement" or "iou"');
     kind = "settlement";
   }
 
-  // amount (gross/face value, major → minor)
-  const grossMinor = toMinor(d.amount);
+  // amount (gross/face value, major → minor); fall back to the template's default amount
+  const grossMinor = d.amount != null ? toMinor(d.amount) : (base?.amount_minor ?? null);
   if (grossMinor == null || grossMinor <= 0) {
     errors.push("amount must be a positive number");
   }
 
-  // currency (3 ASCII letters → upper)
+  // currency (3 ASCII letters → upper); fall back to the template's default currency
   let currency = "";
   if (typeof d.currency === "string" && /^[A-Za-z]{3}$/.test(d.currency.trim())) {
     currency = d.currency.trim().toUpperCase();
+  } else if (typeof base?.currency === "string" && /^[A-Za-z]{3}$/.test(base.currency)) {
+    currency = base.currency.toUpperCase();
   } else {
     errors.push("currency must be a 3-letter code (e.g. USD)");
   }
 
-  // direction (hint, user confirms/flips)
-  let direction: Direction = "credit";
+  // direction (hint, user confirms/flips); default from the template, else credit
+  let direction: Direction = base?.direction ?? "credit";
   if (d.direction === "credit" || d.direction === "debt") direction = d.direction;
   else if (d.direction != null) errors.push('direction must be "credit" or "debt"');
 
-  // date (default today, UTC)
-  let ts: number = todayTsUtc();
-  if (typeof d.date === "string") {
-    const t = dateToTs(d.date);
-    if (t == null) errors.push("date must be YYYY-MM-DD");
-    else ts = t;
-  } else if (d.date != null) {
-    errors.push("date must be a YYYY-MM-DD string");
+  // date (default today, UTC). The small on-device model reliably copies "Today is …" into the date
+  // field instead of parsing phrases like "1-12 July" (verified: it emits today's date), so for a
+  // TEXT message the raw message text — captured in `note` via a from_message rule — is more
+  // trustworthy than the model's date field; parse it FIRST. For an image (no note text) fall back
+  // to the model's date field (from vision), then to today.
+  const ts = extractTs(d);
+  // Surface a malformed `date` only when the note didn't already supply the date (note wins in extractTs).
+  const noteDate = typeof d.note === "string" ? looseDateToTs(d.note) : null;
+  if (noteDate == null) {
+    if (typeof d.date === "string") {
+      if (dateToTs(d.date) == null && looseDateToTs(d.date) == null) errors.push("date must be YYYY-MM-DD");
+    } else if (d.date != null) {
+      errors.push("date must be a YYYY-MM-DD string");
+    }
   }
 
   // note (+ counterparty folded in for visibility; there is no counterparty
@@ -139,13 +209,20 @@ export function parseDraft(input: unknown): ParseResult {
   if (typeof d.counterparty === "string" && d.counterparty.trim()) {
     noteParts.push(`(${d.counterparty.trim()})`);
   }
-  const note = noteParts.join(" ");
+  // Use the template's default note when the message carried none.
+  const note = noteParts.length > 0 ? noteParts.join(" ") : (base?.note ?? "");
 
   // IOU fee + schedule
   let feePercent = 0;
   let feeFixedMinor = 0;
   let schedule: DuePortion[] | undefined;
   if (kind === "iou") {
+    // Seed fee/schedule from the template (base); an explicit extracted value overrides below.
+    if (base?.fee) {
+      feePercent = base.fee.percent ?? 0;
+      feeFixedMinor = base.fee.fixed_minor ?? 0;
+    }
+    if (base?.schedule && base.schedule.length) schedule = base.schedule;
     if (d.fee_percent != null) {
       const fp = Number(d.fee_percent);
       if (!Number.isFinite(fp) || fp < 0 || fp > 100) errors.push("fee_percent must be 0..100");

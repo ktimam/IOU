@@ -114,6 +114,9 @@ export type IouActionManifest = {
   // encrypted to THAT user's own registered key (paired once per user via a 6-digit link code —
   // see ActionInboxSettings "Connect to OpenChat") instead of the single app-level key.
   perUserKeys: boolean;
+  // When true, OpenChat auto-proposes this action on IMAGE messages (its on-device vision model
+  // extracts the receipt/photo). Maps to the action's `accepts_image` capability in the wire.
+  acceptsImage: boolean;
   // Pages of this app OpenChat can open (see IouAppSurface above). Registered alongside the
   // actions; OpenChat treats a missing list as empty.
   surfaces: IouAppSurface[];
@@ -133,7 +136,9 @@ The object may contain these fields:
 - "amount": the amount in major currency units, as a JSON number (never a string).
 - "currency": the 3-letter ISO currency code.
 - "direction": "credit" when the amount is owed TO the user; "debt" when the user owes it.
-- "date": the transaction or due date, formatted YYYY-MM-DD.
+- "date": the transaction or due date as YYYY-MM-DD. Infer the year from "Today is" below. For a
+  date RANGE like "1-7 July" or "July 1-7", use the START date (for example 2026-07-01). For a
+  relative date like "tomorrow" or "next Friday", resolve it against today.
 - "note": a short description taken from the input.
 Include a field only when the input supports it; omit any field you are unsure of. Never invent
 an amount, a counterparty, or any other value that is not present in the input.`;
@@ -157,6 +162,18 @@ export const IOU_EXTRACTION_RULES: AiActionRule[] = [
           "due",
           "owed",
           "owes",
+          // Present-tense "owe": bare "owe" is too noisy a substring ("power", "shower", "flower"),
+          // so match the natural pronoun phrasings instead. Keywords are trimmed then substring-
+          // matched (case-insensitive), so internal spaces survive but leading/trailing ones don't.
+          "i owe",
+          "you owe",
+          "we owe",
+          "they owe",
+          "owe me",
+          "owe you",
+          "owe him",
+          "owe her",
+          "owe them",
           "instalment",
           "installment",
         ],
@@ -210,6 +227,8 @@ export const iouActionManifest: IouActionManifest = {
   callback: { path: "/v1/openchat/drafts", auth: "openchat-provenance" },
   delivery: { mode: "action_inbox" },
   perUserKeys: true,
+  // IOU extracts from receipt images, so opt into OpenChat's auto-propose-on-image chip.
+  acceptsImage: true,
   // Surfaces: pages of IOU that OpenChat can open on our behalf. display: "external" opens them as
   // a FIRST-PARTY tab in the OS browser — an embedded iframe would get storage-partitioned by the
   // OpenChat host origin (WebView2/modern browsers partition third-party frame storage), so it
@@ -244,6 +263,53 @@ export const iouActionManifest: IouActionManifest = {
     },
   ],
 };
+
+// ── Template-driven extraction (Design A) ──────────────────────────────────────────────────────
+// A user's saved "types" (TxnTemplate) drive OpenChat extraction: IOU folds each template's trigger
+// words into the REGISTERED manifest as a keyword_map on a `template` field, so a chat message that
+// matches routes to that template's id. OpenChat stays generic — it runs whatever rules/schema the
+// manifest carries. Only a minimal structural view is needed here (no React import; this module is
+// also loaded by the Node CLI in scripts/).
+export type ManifestTemplate = { id: string; name: string; keywords?: string[] };
+
+// The backend register_ai_app validator caps a manifest (≤50 keyword mappings, ≤50 keywords each,
+// ≤1000-char instruction). Enforce them here so a fire-and-forget re-register never silently fails.
+function buildTemplateRules(templates: ManifestTemplate[]): AiActionRule[] {
+  const routable = templates.filter((t) => (t.keywords ?? []).length > 0).slice(0, 50);
+  if (routable.length === 0) return [];
+  // Route to the template NAME (not its opaque id) so it reads on the action card ("Template =
+  // Reservation") and stays human-meaningful end-to-end; IOU resolves the entry's base by name.
+  const map = routable.map((t) => ({ value: t.name, keywords: (t.keywords ?? []).slice(0, 50) }));
+  // Roster instruction so the image/vision path (which skips the keyword_map post-pass) can still
+  // pick a template by name. Truncated to the 1000-char instruction cap.
+  let roster =
+    'If the transaction matches one of these saved types, set "template" to its exact name — ' +
+    routable.map((t) => `${t.name} (${(t.keywords ?? []).join(", ")})`).join("; ") +
+    '. Otherwise omit "template".';
+  if (roster.length > 1000) roster = roster.slice(0, 997) + "...";
+  return [
+    { kind: "keyword_map", field: "template", mode: "override", map },
+    { kind: "instruction", text: roster },
+  ];
+}
+
+/** Full rule set for the registered manifest: the static IOU vocabulary first, then template routing. */
+export function buildIouRules(templates: ManifestTemplate[]): AiActionRule[] {
+  return [...IOU_EXTRACTION_RULES, ...buildTemplateRules(templates)];
+}
+
+/** Output schema with an optional free-form `template` string (advertised only when routable). */
+export function buildIouOutputSchema(templates: ManifestTemplate[]): Record<string, unknown> {
+  const schema = JSON.parse(JSON.stringify(iouActionManifest.outputSchema)) as {
+    properties: Record<string, unknown>;
+    [k: string]: unknown;
+  };
+  if (templates.some((t) => (t.keywords ?? []).length > 0)) {
+    // Free-form string (NOT an enum of ids): an enum would strip a model-emitted id on the image path.
+    schema.properties.template = { type: "string" };
+  }
+  return schema;
+}
 
 /** Serialize the manifest for registration with OpenChat's integration hook. */
 export function renderManifestJson(): string {

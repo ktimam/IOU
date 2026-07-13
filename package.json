@@ -32,6 +32,7 @@
     "ocbot:serve": "pnpm exec tsx scripts/iou-openchat-bot/server.ts",
     "ocbot:selftest": "pnpm exec tsx scripts/iou-openchat-bot/selftest.ts",
     "register:openchat": "pnpm exec tsx scripts/register-openchat-app.ts",
+    "deploy:inbox": "bash scripts/deploy-openchat-inbox.sh",
     "postinstall": "node scripts/patch-vetkeys-esm.mjs"
   },
   "dependencies": {

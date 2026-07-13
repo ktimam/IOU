@@ -18,8 +18,8 @@
 import { Actor, HttpAgent, type Identity } from "@dfinity/agent";
 import { IDL } from "@dfinity/candid";
 import { Principal } from "@dfinity/principal";
-import { iouActionManifest } from "./actionManifest";
-import type { AiActionRule } from "./actionManifest";
+import { buildIouOutputSchema, buildIouRules, iouActionManifest } from "./actionManifest";
+import type { AiActionRule, ManifestTemplate } from "./actionManifest";
 import registrationJson from "../../../docs/openchat-registration.json";
 
 // Canonical revoke challenge, byte-for-byte identical to the canister's
@@ -109,6 +109,7 @@ export function buildIdl() {
     endpoint: IDL.Text,
     consumer_public_key: IDL.Opt(IDL.Text),
     rules: IDL.Vec(AiActionRuleIdl),
+    accepts_image: IDL.Bool,
   });
   // App surfaces: pages of the app OpenChat can open (e.g. the chat_link chat → sheet page).
   // display uses per-variant #[serde(rename)] snake labels, same rule as the enums above.
@@ -126,6 +127,9 @@ export function buildIdl() {
     // control it (anti-squatting). `#[serde(default)] Option` on the Rust side; candid requires the
     // field on encode, so buildManifestWire always sends it ([] when not supplied).
     app_canister_id: IDL.Opt(IDL.Principal),
+    // Per-app inbox override: route this app's confirmed-action deposits to its own action_inbox
+    // canister ([] => OpenChat's global inbox). Mirrors AiAppManifest.inbox_canister_id in OpenChat.
+    inbox_canister_id: IDL.Opt(IDL.Principal),
     consumer_public_key: IDL.Text,
     // Multi-user delivery: when true, OpenChat delivers each user's confirmed actions to THAT
     // user's own registered key (paired via claim_ai_app_link_code) instead of the app key.
@@ -305,6 +309,10 @@ export function buildManifestWire(
     console.warn("[registerAiApp] WARNING: docs/openchat-registration.json promptTemplate has drifted from");
     console.warn("[registerAiApp]          actionManifest.ts — registering the actionManifest.ts prompt.");
   },
+  inboxCanisterId?: string,
+  // The user's saved types drive the registered schema+rules (see actionManifest buildIou*). [] =
+  // base manifest (the Node CLI has no per-user templates, so it always registers the base).
+  templates: ManifestTemplate[] = [],
 ): Record<string, unknown> {
   const paste = registrationJson as PasteJson;
 
@@ -323,7 +331,7 @@ export function buildManifestWire(
     name: iouActionManifest.id,
     description: paste.description,
     prompt_template: iouActionManifest.prompt,
-    response_schema: JSON.stringify(iouActionManifest.outputSchema),
+    response_schema: JSON.stringify(buildIouOutputSchema(templates)),
     card: {
       title: paste.card.title,
       confirm_label: paste.card.confirmLabel,
@@ -334,7 +342,9 @@ export function buildManifestWire(
     endpoint: paste.endpoint,
     // No per-action key: the app-level consumer_public_key below is the effective delivery key.
     consumer_public_key: none<string>(),
-    rules: iouActionManifest.rules.map(ruleToWire),
+    rules: buildIouRules(templates).map(ruleToWire),
+    // Opt into OpenChat's auto-propose-on-image chip (this action extracts from receipt images).
+    accepts_image: iouActionManifest.acceptsImage,
   };
 
   return {
@@ -346,6 +356,8 @@ export function buildManifestWire(
     // registration (not in the static manifest); [] when unknown/unparseable (a local dfx alias
     // like "iou_backend" isn't a principal) — publish then stays blocked but registration works.
     app_canister_id: opt(parseCanisterId(appCanisterId)),
+    // Per-app inbox override (see the IDL note): [] => OpenChat's global inbox.
+    inbox_canister_id: opt(parseCanisterId(inboxCanisterId)),
     consumer_public_key: consumerPublicKeyPem,
     // Per-user delivery: OpenChat routes each user's confirmed actions to that user's OWN
     // registered key (paired once via the 6-digit link code); the app-level key above is
@@ -383,8 +395,21 @@ export type RegisterAiAppOptions = {
    * confirm we control it. Deployment-specific; omit only if publishing is not needed.
    */
   appCanisterId?: string;
+  /**
+   * IOU's own action_inbox canister id (text) — the per-app inbox override written into the manifest
+   * so OpenChat routes confirmed-action deposits to IOU's inbox rather than its global one. MUST be
+   * supplied on EVERY (re)registration: register_ai_app is an upsert, so omitting it drops the inbox
+   * override and later confirms fail deposit with `NotConfigured` (nothing reaches IOU). Omit only to
+   * intentionally use OpenChat's global inbox.
+   */
+  inboxCanisterId?: string;
   /** Caller identity; omit for anonymous (accepted by test_mode local deployments). */
   identity?: Identity;
+  /**
+   * The user's current saved types (templates). Folded into the manifest as a keyword_map on a
+   * `template` field so chat messages route to a template id. Omit/[] for the base manifest.
+   */
+  templates?: ManifestTemplate[];
 };
 
 export type RegisterAiAppOutcome =
@@ -398,7 +423,14 @@ export type RegisterAiAppOutcome =
  * failures still throw.
  */
 export async function registerAiApp(opts: RegisterAiAppOptions): Promise<RegisterAiAppOutcome> {
-  const manifest = buildManifestWire(opts.consumerPublicKeyPem, opts.appCanisterId);
+  const manifest = buildManifestWire(
+    opts.consumerPublicKeyPem,
+    opts.appCanisterId,
+    undefined,
+    // Preserve the per-app inbox override on every upsert — dropping it makes deposits NotConfigured.
+    opts.inboxCanisterId,
+    opts.templates ?? [],
+  );
   const { service } = buildIdl();
 
   const agent = new HttpAgent({ host: opts.host, ...(opts.identity ? { identity: opts.identity } : {}) });
@@ -418,6 +450,53 @@ export async function registerAiApp(opts: RegisterAiAppOptions): Promise<Registe
   }
   const registration = response.Success as { id: number; owner: { toText(): string } };
   return { kind: "success", appId: Number(registration.id), owner: registration.owner.toText() };
+}
+
+export type QueryAiAppsOptions = {
+  /** IC gateway serving the OpenChat user_index. */
+  host: string;
+  /** OpenChat user_index canister id. */
+  userIndexCanisterId: string;
+  /** Caller identity; omit for anonymous — `ai_apps` is a query and returns published apps. */
+  identity?: Identity;
+};
+
+/**
+ * Read this app's registered `inbox_canister_id` straight from OpenChat's user_index — the SINGLE
+ * SOURCE OF TRUTH for where confirmed-action deposits land (OpenChat routes them to exactly this
+ * id). So the app never needs the inbox id configured by hand: it reads back what it registered.
+ * Returns the inbox canister id (text), or null when the app isn't registered, declares no per-app
+ * inbox (`inbox_canister_id == []` → OpenChat's global inbox), or can't be matched. When
+ * `appCanisterId` is supplied it is preferred as a tie-break (anti-squatting: a different owner
+ * can't shadow the "iou" name).
+ */
+export async function getRegisteredInboxCanisterId(
+  opts: QueryAiAppsOptions & { appName?: string; appCanisterId?: string },
+): Promise<string | null> {
+  const { service } = buildIdl();
+  const agent = new HttpAgent({ host: opts.host, ...(opts.identity ? { identity: opts.identity } : {}) });
+  if (opts.host.includes("127.0.0.1") || opts.host.includes("localhost")) {
+    await agent.fetchRootKey();
+  }
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const actor: any = Actor.createActor(() => service, { agent, canisterId: opts.userIndexCanisterId });
+  const resp = await actor.ai_apps({});
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const apps: any[] = resp?.Success?.apps ?? [];
+  const name = opts.appName ?? "iou";
+  const named = apps.filter((a) => a?.manifest?.name === name);
+  const byCanister = opts.appCanisterId
+    ? named.find((a) => {
+        const c = a?.manifest?.app_canister_id as CandidOpt<Principal> | undefined;
+        const p = c && c.length > 0 ? c[0] : undefined;
+        return p !== undefined && p.toText() === opts.appCanisterId;
+      })
+    : undefined;
+  const app = byCanister ?? named[0];
+  if (!app) return null;
+  const inbox = app.manifest.inbox_canister_id as CandidOpt<Principal>;
+  const inboxPrincipal = inbox && inbox.length > 0 ? inbox[0] : undefined;
+  return inboxPrincipal !== undefined ? inboxPrincipal.toText() : null;
 }
 
 // ---------------------------------------------------------------------------------------------
