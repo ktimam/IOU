@@ -28,11 +28,13 @@ export function Pair() {
   const [renameBusy, setRenameBusy] = useState(false);
 
   useEffect(() => {
-    if (state.kind !== "authenticated") {
+    // Redirect only when DEFINITIVELY anonymous — never during "loading" (avoids the refresh /
+    // deep-link bounce through /sign-in). While loading, fall through and wait.
+    if (state.kind === "anonymous") {
       nav("/sign-in", { replace: true });
       return;
     }
-    if (!actor || !pairId) return;
+    if (state.kind !== "authenticated" || !actor || !pairId) return;
     setLoading(true);
     (async () => {
       try {

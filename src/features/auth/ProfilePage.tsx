@@ -12,10 +12,11 @@ export function ProfilePage() {
   const [who, setWho] = useState<string | null>(null);
 
   useEffect(() => {
-    if (state.kind !== "authenticated") {
+    if (state.kind === "anonymous") {
       nav("/", { replace: true });
       return;
     }
+    if (state.kind !== "authenticated") return; // "loading" — wait for auth to resolve, don't bounce
     setWho(state.principal);
   }, [state, nav]);
 

@@ -35,10 +35,11 @@ export function Pairs() {
   const [loading, setLoading] = useState(false);
 
   useEffect(() => {
-    if (state.kind !== "authenticated") {
+    if (state.kind === "anonymous") {
       nav("/sign-in", { replace: true });
       return;
     }
+    if (state.kind !== "authenticated") return; // "loading" — wait for auth to resolve, don't bounce
     if (!actor) return;
     setLoading(true);
     (async () => {

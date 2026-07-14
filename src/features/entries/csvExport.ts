@@ -8,6 +8,7 @@
 // and the column types are inferred from the data).
 
 import type { EntryPayload } from "./types";
+import { orientDirection } from "./balance";
 
 const COLUMNS = [
   "date", // YYYY-MM-DD
@@ -48,7 +49,8 @@ export function entriesToCsv(
       p.fee ? (p.fee.gross_amount_minor / 100).toFixed(2) : "",
       p.fee ? String(p.fee.percent) : "",
       p.fee && p.fee.fixed_minor ? (p.fee.fixed_minor / 100).toFixed(2) : "",
-      p.direction === "credit" ? "Credit" : "Debit",
+      // Orient the stored (author-relative) direction to the exporting viewer, matching the UI.
+      orientDirection(p.direction, r.created_by_me) === "credit" ? "Credit" : "Debit",
       dueDatesCsv(p),
       p.note,
       p.convert?.from_currency ?? "",

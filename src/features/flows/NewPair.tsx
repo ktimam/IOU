@@ -22,7 +22,9 @@ export function NewPair() {
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
-    if (state.kind !== "authenticated") {
+    // Only redirect once auth is DEFINITIVELY anonymous — never during "loading", or a refresh /
+    // deep-link bounces through /sign-in back to /pairs before the session hydrates.
+    if (state.kind === "anonymous") {
       nav("/sign-in", { replace: true });
     }
   }, [state, nav]);

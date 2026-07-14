@@ -24,7 +24,8 @@ export function NewSheet() {
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
-    if (state.kind !== "authenticated") {
+    // Redirect only when definitively anonymous — never during "loading" (avoids the refresh bounce).
+    if (state.kind === "anonymous") {
       nav("/sign-in", { replace: true });
     }
   }, [state, nav]);

@@ -22,6 +22,9 @@ import {
   endOfPrevMonth,
   formatMinor,
   portionsOf,
+  orientPayload,
+  orientDirection,
+  flipDirection,
   type Balance,
 } from "./balance";
 import { EntryForm } from "./EntryForm";
@@ -202,6 +205,9 @@ export function SheetPage() {
   const [modal, setModal] = useState<null | {
     initial: Partial<EntryPayload> | null;
     entryId: number | null;
+    // For an EDIT: did the current viewer author this entry? The form shows/edits direction in the
+    // viewer's frame; on save we orient back to the author's frame so storage stays author-relative.
+    createdByMe?: boolean;
   }>(null);
   const [sortKey, setSortKey] = useState<SortKey>("newest");
   const { templates } = useTemplates();
@@ -588,9 +594,14 @@ export function SheetPage() {
 
   async function onSubmit(p: EntryPayload) {
     if (!actor) return;
+    // Direction is stored in the entry author's frame. The form works in the viewer's frame, so when
+    // editing a PARTNER's entry (createdByMe === false), orient back before storing. Adds are always
+    // authored by me → my frame IS the author frame → no change.
+    const toStore: EntryPayload =
+      modal?.createdByMe === false ? { ...p, direction: flipDirection(p.direction) } : p;
     const K_sheet = get(sheetId) ?? (await unwrapFor(sheetId));
     const enc = await encryptEntryPayload(
-      new TextEncoder().encode(JSON.stringify(p)),
+      new TextEncoder().encode(JSON.stringify(toStore)),
       K_sheet,
     );
     if (modal?.entryId != null) {
@@ -713,8 +724,12 @@ export function SheetPage() {
   if (err) return <p className="err">{err}</p>;
   if (!sheet) return <p>Not found.</p>;
 
-  // Balances ignore deleted entries.
-  const payloads = entries.filter((e) => !e.deleted).map((e) => e.payload);
+  // Balances ignore deleted entries. Direction is stored in the AUTHOR's frame ("credit" = the OTHER
+  // member owes the author), so orient each entry to the CURRENT viewer — otherwise both members see
+  // the same sign and each thinks the other owes them. A partner sees the mirror of what was entered.
+  const payloads = entries
+    .filter((e) => !e.deleted)
+    .map((e) => orientPayload(e.payload, e.created_by === myPrincipal));
   const overall = computeBalances(payloads);
   const thisMonth = computeBalancesAsOf(payloads, Date.now());
   const prevMonth = computeBalancesAsOf(payloads, endOfPrevMonth(Date.now()));
@@ -1069,7 +1084,9 @@ export function SheetPage() {
           <ul>
             {sorted.map((e) => {
               const mine = e.created_by === me;
-              const sign = e.payload.direction === "credit" ? "+" : "−";
+              // Orient the stored (author-relative) direction to this viewer for display.
+              const dir = orientDirection(e.payload.direction, mine);
+              const sign = dir === "credit" ? "+" : "−";
               return (
                 <li key={e.id}>
                   <div
@@ -1091,7 +1108,7 @@ export function SheetPage() {
                         {" · "}
                         {mine ? "you" : themShort}
                         {" · "}
-                        {e.payload.direction === "credit" ? "Credit" : "Debit"}
+                        {dir === "credit" ? "Credit" : "Debit"}
                         {" · "}
                         {e.payload.txn_type === "settlement" ? "settlement" : "IOU"}
                         {e.history.length > 0 ? ` · edited ${e.history.length}×` : ""}
@@ -1102,7 +1119,7 @@ export function SheetPage() {
                         "row-2" +
                         (e.deleted
                           ? ""
-                          : e.payload.direction === "credit"
+                          : dir === "credit"
                             ? " amt-credit"
                             : " amt-debt")
                       }
@@ -1175,7 +1192,14 @@ export function SheetPage() {
                         <>
                           <button
                             className="small"
-                            onClick={() => setModal({ initial: e.payload, entryId: e.id })}
+                            onClick={() =>
+                              setModal({
+                                // Show the entry in the viewer's frame (orient the stored author-relative direction).
+                                initial: orientPayload(e.payload, e.created_by === me),
+                                entryId: e.id,
+                                createdByMe: e.created_by === me,
+                              })
+                            }
                           >
                             edit
                           </button>
@@ -1201,7 +1225,7 @@ export function SheetPage() {
                         <div key={i}>
                           changed {new Date(v.replacedAt / 1_000_000).toISOString().slice(0, 10)} — was:{" "}
                           {v.payload.note || "(no note)"} ·{" "}
-                          {v.payload.direction === "credit" ? "+" : "−"}
+                          {orientDirection(v.payload.direction, mine) === "credit" ? "+" : "−"}
                           {formatMinor(v.payload.amount_minor, v.payload.currency)}
                         </div>
                       ))}

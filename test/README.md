@@ -147,9 +147,9 @@ links), and leaves the windows open for manual inspection (profiles under `.pw-p
 It uses per-user solo sheets (no cross-user grant), so it stays robust regardless of machine load; the
 shared-sheet / cross-user decryption path is exercised by the spec above.
 
-> Note: both members currently see the balance from the *authoring* frame (the app doesn't flip
-> "owes you"/"you owe" per viewer), so the UI test asserts the shared net **magnitude**, not the
-> ownership wording.
+The balance is oriented **per viewer** (direction is stored author-relative, then flipped for the
+partner), so Alice sees "… owes you 30.00 USD" and Bob sees the mirror "you owe … 30.00 USD" — the
+test asserts both. (See `balance.orientDirection`/`orientPayload` + `balance.orient.test.ts`.)
 
 ### Layer 3 — on-device model (`open-chat` repo, branch `feat/on-device-model-manager`)
 

@@ -19,6 +19,22 @@ export type Balance = {
   amount_minor: number; // signed: positive = they owe me
 };
 
+// Direction is stored in the ENTRY AUTHOR's frame: "credit" = the OTHER member owes the author,
+// "debt" = the author owes the other member. For a 2-person sheet where BOTH members add entries,
+// a viewer who is NOT the author sees the mirror image, so their view must flip the direction. These
+// helpers orient a stored (author-relative) direction to a given viewer, and are their own inverse
+// (so an edit can orient-in and orient-out losslessly). `sameAuthor` = the viewer authored the entry.
+export function flipDirection(d: Direction): Direction {
+  return d === "credit" ? "debt" : "credit";
+}
+export function orientDirection(d: Direction, sameAuthor: boolean): Direction {
+  return sameAuthor ? d : flipDirection(d);
+}
+/** Orient a whole entry payload's direction to the viewer (used for balance computation + display). */
+export function orientPayload(p: EntryPayload, sameAuthor: boolean): EntryPayload {
+  return sameAuthor ? p : { ...p, direction: flipDirection(p.direction) };
+}
+
 // A dated slice of an entry's amount. Settlements yield one portion due at
 // the entry's `ts`; IOUs yield one portion per `schedule` row (or a single
 // portion due at `ts` when no schedule is set / for legacy entries).

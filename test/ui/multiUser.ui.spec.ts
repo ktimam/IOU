@@ -43,6 +43,7 @@ test("3 users · 3 sheets · cross-user shared view · chat links", async ({ bro
   const aliceAB = await balancesText(alice);
   console.log("[alice AB]", aliceAB);
   expect(aliceAB).toContain("30.00 USD");
+  expect(aliceAB).toMatch(/owes you/i); // Alice is owed (she entered credit 50 − debt 20)
 
   // Bob opens the SAME sheet (his only account) and decrypts it via the granted shared key.
   // A just-granted partner's first query can race the deposit's propagation, so re-open until it lands.
@@ -56,6 +57,7 @@ test("3 users · 3 sheets · cross-user shared view · chat links", async ({ bro
   }
   console.log("[bob AB]", bobAB);
   expect(bobAB).toContain("30.00 USD"); // cross-user E2E: same net from the shared sheet
+  expect(bobAB).toMatch(/you owe/i); // the MIRROR (fix #2): Bob owes Alice — not "owes you"
   await expect(bob.getByText("Bob repaid lunch")).toBeVisible(); // Bob sees Alice's entry
 
   // ── Pair 2: Alice & Carol (sheet "Trip") ─────────────────────────────────
@@ -82,6 +84,15 @@ test("3 users · 3 sheets · cross-user shared view · chat links", async ({ bro
   await alice.goto("/pairs");
   await expect(alice.getByText("Alice & Bob")).toBeVisible();
   await expect(alice.getByText("Alice & Carol")).toBeVisible();
+
+  // ── Fix #1: a fresh deep-link / refresh of a guarded page must NOT bounce to /pairs ──────
+  // (guards now redirect only when definitively anonymous, never during auth "loading").
+  await alice.goto(`/sheet/${sheetAB}`);
+  await expect(alice).toHaveURL(new RegExp(`/sheet/${sheetAB}$`));
+  await expect(alice.getByRole("heading", { name: "Balances" })).toBeVisible();
+  await alice.goto("/pair/new"); // a redirect-guarded page
+  await expect(alice).toHaveURL(/\/pair\/new$/);
+  await expect(alice.getByRole("heading", { name: "New account" })).toBeVisible();
 
   // ── Multiple chats: Alice links two chats to two different sheets ─────────
   await linkChatToSheet(alice, "group:aaaaa-aa", "Rent 2026");
