@@ -60,14 +60,26 @@ export function portionsOf(e: EntryPayload): Portion[] {
       direction: e.direction,
     });
   }
-  // Deduct the fee from the final installment, cascading backward only if
-  // the last one can't absorb it.
+  // Deduct the entry-currency fee (percent + any SAME-currency fixed) from the final installment(s),
+  // cascading backward only if the last can't absorb it. `gross − amount_minor` is exactly that
+  // entry-currency fee — a fixed fee in another currency is not folded into `amount_minor`.
   if (e.fee) {
     let remainingFee = gross - e.amount_minor;
     for (let i = portions.length - 1; i >= 0 && remainingFee > 0; i--) {
       const take = Math.min(portions[i].amount_minor, remainingFee);
       portions[i].amount_minor -= take;
       remainingFee -= take;
+    }
+    // A fixed fee charged in a DIFFERENT currency is its own balance line: a deduction (opposite
+    // direction), due with the final installment, totalled with other entries of that currency.
+    const fc = e.fee.fixed_currency;
+    if (fc && fc !== e.currency && (e.fee.fixed_minor ?? 0) > 0) {
+      portions.push({
+        currency: fc,
+        due_ts: sched[sched.length - 1].due_ts,
+        amount_minor: e.fee.fixed_minor!,
+        direction: e.direction === "credit" ? "debt" : "credit",
+      });
     }
   }
   return portions;

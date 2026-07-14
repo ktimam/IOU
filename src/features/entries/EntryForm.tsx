@@ -22,6 +22,7 @@ import type {
 import { fetchRate, type FxRate } from "./fx";
 import { netAfterFee, formatMinor } from "./balance";
 import { usePreferences } from "../settings/usePreferences";
+import { orderedCurrencies } from "../settings/currencies";
 
 type SchedRow = { date: string; percent: number };
 
@@ -51,13 +52,14 @@ export function EntryForm({
   const [date, setDate] = useState(
     new Date(initial?.ts ?? Date.now()).toISOString().slice(0, 10),
   );
+  // The dropdown now offers every ISO currency (not just the sheet's enabled set),
+  // so the default is simply the user's preferred currency.
   const [currency, setCurrency] = useState(
-    initial?.currency ??
-      (enabledCurrencies.includes(prefs.defaultCurrency)
-        ? prefs.defaultCurrency
-        : enabledCurrencies[0]) ??
-      "USD",
+    initial?.currency ?? prefs.defaultCurrency ?? enabledCurrencies[0] ?? "USD",
   );
+  // Default first, then USD/EUR/GBP, then the rest alphabetically; the sheet's own
+  // codes are folded in so anything already in use never drops out.
+  const currencyOptions = orderedCurrencies(prefs.defaultCurrency, enabledCurrencies);
   // The amount field holds the GROSS (face value). For an entry with a fee
   // the stored amount_minor is the net, so seed from the fee's gross.
   // Templates may carry no amount at all → leave it blank.
@@ -79,6 +81,11 @@ export function EntryForm({
   const [feePercent, setFeePercent] = useState<number>(initial?.fee?.percent ?? 0);
   const [feeFixed, setFeeFixed] = useState(
     initial?.fee?.fixed_minor ? (initial.fee.fixed_minor / 100).toFixed(2) : "",
+  );
+  // The fixed fee may be charged in a different currency than the entry. When it is, it doesn't
+  // reduce the entry amount — it becomes its own balance line in that currency (see balance.ts).
+  const [feeFixedCurrency, setFeeFixedCurrency] = useState(
+    initial?.fee?.fixed_currency ?? initial?.currency ?? "",
   );
   const initialDate = new Date(initial?.ts ?? Date.now()).toISOString().slice(0, 10);
   const [schedule, setSchedule] = useState<SchedRow[]>(
@@ -135,6 +142,9 @@ export function EntryForm({
 
   const amountMinor = Math.round((parseFloat(amount) || 0) * 100);
   const feeFixedMinor = Math.round((parseFloat(feeFixed) || 0) * 100);
+  const feeCcy = feeFixedCurrency || currency;
+  // A fixed fee in a different currency doesn't reduce the entry amount; it's its own balance line.
+  const feeForeign = feeFixedMinor > 0 && feeCcy !== currency;
   const convertedMinor = rate
     ? Math.round(amountMinor * rate.rate)
     : null;
@@ -180,17 +190,29 @@ export function EntryForm({
     // balance + splits across due dates); the gross is kept on the fee
     // sub-payload so the UI can show before/after.
     const baseMinor = convert ? convertedMinor! : amountMinor;
+    const entryCurrency = convert ? convertTo : currency;
     const useFee = txnType === "iou" && (feePercent > 0 || feeFixedMinor > 0);
+    // A fixed fee in a currency other than the entry's is NOT netted against the amount — it becomes
+    // its own balance line (balance.ts). Only a same-currency fixed fee (and the percent) reduce the net.
+    const feeCurrency = feeFixedCurrency || entryCurrency;
+    const fixedForeign = feeFixedMinor > 0 && feeCurrency !== entryCurrency;
     const fee: FeePayload | undefined = useFee
-      ? { percent: feePercent, fixed_minor: feeFixedMinor, gross_amount_minor: baseMinor }
+      ? {
+          percent: feePercent,
+          fixed_minor: feeFixedMinor,
+          ...(fixedForeign ? { fixed_currency: feeCurrency } : {}),
+          gross_amount_minor: baseMinor,
+        }
       : undefined;
     setSubmitting(true);
     try {
       const payload: EntryPayload = {
         ts,
         kind: txnType === "settlement" ? "payment" : "expense",
-        currency: convert ? convertTo : currency,
-        amount_minor: useFee ? netAfterFee(baseMinor, feePercent, feeFixedMinor) : baseMinor,
+        currency: entryCurrency,
+        amount_minor: useFee
+          ? netAfterFee(baseMinor, feePercent, fixedForeign ? 0 : feeFixedMinor)
+          : baseMinor,
         direction,
         note,
         txn_type: txnType,
@@ -232,7 +254,7 @@ export function EntryForm({
             onChange={(e) => setCurrency(e.target.value)}
             required
           >
-            {enabledCurrencies.map((c) => (
+            {currencyOptions.map((c) => (
               <option key={c} value={c}>{c}</option>
             ))}
           </select>
@@ -324,18 +346,36 @@ export function EntryForm({
                 style={{ width: 100 }}
               />
             </label>
+            <label style={{ flex: "0 0 auto" }}>
+              <span className="muted small">Fee currency</span>
+              <select
+                value={feeCcy}
+                onChange={(e) => setFeeFixedCurrency(e.target.value)}
+              >
+                {currencyOptions.map((c) => (
+                  <option key={c} value={c}>
+                    {c}
+                  </option>
+                ))}
+              </select>
+            </label>
             {(feePercent > 0 || feeFixedMinor > 0) && amountMinor > 0 && (
               <span className="muted small">
                 {formatMinor(amountMinor, currency)}
                 {feePercent > 0 ? ` − ${feePercent}%` : ""}
-                {feeFixedMinor > 0 ? ` − ${formatMinor(feeFixedMinor, currency)}` : ""}
+                {feeFixedMinor > 0 && !feeForeign
+                  ? ` − ${formatMinor(feeFixedMinor, currency)}`
+                  : ""}
                 {" = "}
                 <strong>
                   {formatMinor(
-                    netAfterFee(amountMinor, feePercent, feeFixedMinor),
+                    netAfterFee(amountMinor, feePercent, feeForeign ? 0 : feeFixedMinor),
                     currency,
                   )}
                 </strong>
+                {feeForeign
+                  ? ` + a ${formatMinor(feeFixedMinor, feeCcy)} fee on its own ${feeCcy} line`
+                  : ""}
               </span>
             )}
           </div>
@@ -420,7 +460,7 @@ export function EntryForm({
                 value={convertTo}
                 onChange={(e) => setConvertTo(e.target.value)}
               >
-                {enabledCurrencies
+                {currencyOptions
                   .filter((c) => c !== currency)
                   .map((c) => (
                     <option key={c} value={c}>{c}</option>

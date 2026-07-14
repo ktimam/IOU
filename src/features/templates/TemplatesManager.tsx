@@ -3,7 +3,7 @@
 // encrypted on-chain, so they're available across every sheet).
 
 import { useState } from "react";
-import { COMMON_CURRENCIES } from "../settings/currencies";
+import { orderedCurrencies } from "../settings/currencies";
 import {
   useTemplates,
   type TxnTemplate,
@@ -28,6 +28,7 @@ export function TemplatesManager({ onSaved }: { onSaved?: () => void } = {}) {
   const [currency, setCurrency] = useState(""); // "" = use default
   const [feePercent, setFeePercent] = useState(0);
   const [feeFixed, setFeeFixed] = useState("");
+  const [feeFixedCurrency, setFeeFixedCurrency] = useState(""); // "" = same as the entry currency
   const [amount, setAmount] = useState("");
   const [note, setNote] = useState("");
   const [keywords, setKeywords] = useState(""); // comma-separated in the form; stored as string[]
@@ -59,6 +60,7 @@ export function TemplatesManager({ onSaved }: { onSaved?: () => void } = {}) {
     setCurrency("");
     setFeePercent(0);
     setFeeFixed("");
+    setFeeFixedCurrency("");
     setAmount("");
     setNote("");
     setKeywords("");
@@ -74,6 +76,7 @@ export function TemplatesManager({ onSaved }: { onSaved?: () => void } = {}) {
     setCurrency(t.currency ?? "");
     setFeePercent(t.fee_percent ?? 0);
     setFeeFixed(t.fee_fixed_minor ? (t.fee_fixed_minor / 100).toFixed(2) : "");
+    setFeeFixedCurrency(t.fee_fixed_currency ?? "");
     setAmount(t.amount_minor ? (t.amount_minor / 100).toFixed(2) : "");
     setNote(t.note ?? "");
     setKeywords((t.keywords ?? []).join(", "));
@@ -125,6 +128,9 @@ export function TemplatesManager({ onSaved }: { onSaved?: () => void } = {}) {
         txnType === "iou" && feeFixed
           ? Math.round(parseFloat(feeFixed) * 100)
           : undefined,
+      // Only meaningful with a fixed fee; "" (same as entry currency) stays undefined.
+      fee_fixed_currency:
+        txnType === "iou" && feeFixed && feeFixedCurrency ? feeFixedCurrency : undefined,
       schedule,
       note: note.trim() || undefined,
       // Split the comma list into trigger words; drop empties and any >64 chars, cap at 50 — the
@@ -161,7 +167,10 @@ export function TemplatesManager({ onSaved }: { onSaved?: () => void } = {}) {
     if (t.amount_minor) parts.push(fmtMajor(t.amount_minor));
     const fee: string[] = [];
     if (t.fee_percent) fee.push(`${t.fee_percent}%`);
-    if (t.fee_fixed_minor) fee.push(`${fmtMajor(t.fee_fixed_minor)} fixed`);
+    if (t.fee_fixed_minor)
+      fee.push(
+        `${fmtMajor(t.fee_fixed_minor)}${t.fee_fixed_currency ? ` ${t.fee_fixed_currency}` : ""} fixed`,
+      );
     if (fee.length) parts.push(`fee ${fee.join(" + ")}`);
     if (t.schedule && t.schedule.length) {
       const sd = t.schedule
@@ -253,7 +262,7 @@ export function TemplatesManager({ onSaved }: { onSaved?: () => void } = {}) {
             <span className="muted small">Currency</span>
             <select value={currency} onChange={(e) => setCurrency(e.target.value)}>
               <option value="">(default)</option>
-              {COMMON_CURRENCIES.map((c) => (
+              {orderedCurrencies().map((c) => (
                 <option key={c} value={c}>
                   {c}
                 </option>
@@ -285,6 +294,21 @@ export function TemplatesManager({ onSaved }: { onSaved?: () => void } = {}) {
                 onChange={(e) => setFeeFixed(e.target.value)}
                 style={{ width: 100 }}
               />
+            </label>
+            <label>
+              <span className="muted small">Fee currency</span>
+              <select
+                value={feeFixedCurrency}
+                onChange={(e) => setFeeFixedCurrency(e.target.value)}
+                title="Currency of the fixed fee. A different currency becomes its own balance line."
+              >
+                <option value="">(same as entry)</option>
+                {orderedCurrencies().map((c) => (
+                  <option key={c} value={c}>
+                    {c}
+                  </option>
+                ))}
+              </select>
             </label>
           </div>
         )}

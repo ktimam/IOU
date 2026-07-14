@@ -43,9 +43,18 @@ export type DuePortion = {
 // split across the due schedule). Either component may be zero.
 // e.g. gross 1000, percent 20, fixed 0 ⇒ net 800; gross 5000, percent 20,
 // fixed 1000 ⇒ net 3000.
+//
+// `fixed_currency`: the fixed fee may be charged in a DIFFERENT currency than the
+// entry. When it is, the fixed fee cannot net against the entry's amount — it
+// becomes a separate balance line in `fixed_currency` (opposite direction, i.e. a
+// deduction) that totals with other entries of that currency, and `amount_minor`
+// is then only the percent-net (gross − percent%). The `percent` fee always
+// deducts from the entry currency. Absent/equal-to-entry ⇒ classic same-currency
+// behaviour (both components fold into `amount_minor`).
 export type FeePayload = {
   percent: number; // 0..100 of the gross
-  fixed_minor?: number; // flat amount deducted (entry currency); absent ⇒ 0
+  fixed_minor?: number; // flat fee amount; absent ⇒ 0
+  fixed_currency?: string; // currency of `fixed_minor` when it differs from the entry; absent ⇒ entry currency
   gross_amount_minor: number; // face value before the fee
 };
 

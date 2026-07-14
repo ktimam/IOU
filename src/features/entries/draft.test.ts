@@ -77,6 +77,25 @@ describe("parseDraft — IOU (reservation)", () => {
     ]);
   });
 
+  it("carries the template's foreign fixed-fee currency onto the imported entry", () => {
+    // Template base = a USD IOU whose fixed fee is charged in EGP. The chat draft carries no
+    // fee-currency field, so the entry's fee must inherit EGP from the template — not default to USD.
+    const base = {
+      txn_type: "iou" as const,
+      currency: "USD",
+      fee: { percent: 0, fixed_minor: 100000, fixed_currency: "EGP", gross_amount_minor: 0 },
+    };
+    const r = parseDraft({ amount: 600, currency: "USD", note: "reservation 1-5 july" }, base);
+    if (!r.ok) throw new Error("expected ok, got: " + r.errors.join("; "));
+    expect(r.value.initial.currency).toBe("USD");
+    expect(r.value.initial.fee).toEqual({
+      percent: 0,
+      fixed_minor: 100000,
+      fixed_currency: "EGP",
+      gross_amount_minor: 60000,
+    });
+  });
+
   it("infers iou when fee/schedule present and absent kind", () => {
     const v = ok({ amount: 50, currency: "USD", schedule: [{ due_date: "2026-09-01" }] });
     expect(v.initial.txn_type).toBe("iou");

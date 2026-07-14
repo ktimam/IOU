@@ -140,6 +140,70 @@ describe("portionsOf with a fee (deducted from the final due)", () => {
   });
 });
 
+describe("portionsOf with a cross-currency fixed fee", () => {
+  it("keeps the foreign fixed fee as its own opposite-direction line (entry amount unreduced)", () => {
+    // IOU 1000 USD, fee 1000 EGP: the EGP fee doesn't touch the USD amount.
+    const ps = portionsOf(
+      entry({
+        txn_type: "iou",
+        direction: "credit",
+        currency: "USD",
+        amount_minor: 100000, // net = gross (percent 0, foreign fixed not deducted here)
+        fee: {
+          percent: 0,
+          fixed_minor: 100000,
+          fixed_currency: "EGP",
+          gross_amount_minor: 100000,
+        },
+        ts: JUN1,
+      }),
+    );
+    expect(ps).toEqual([
+      { currency: "USD", due_ts: JUN1, amount_minor: 100000, direction: "credit" },
+      { currency: "EGP", due_ts: JUN1, amount_minor: 100000, direction: "debt" },
+    ]);
+  });
+
+  it("percent still deducts from the entry currency; only the fixed fee crosses currencies", () => {
+    // IOU 1000 USD, 20% + 1000 EGP fixed → 800 USD net, plus a 1000 EGP line.
+    const ps = portionsOf(
+      entry({
+        txn_type: "iou",
+        direction: "debt",
+        currency: "USD",
+        amount_minor: 80000, // gross − 20% (foreign fixed not netted)
+        fee: {
+          percent: 20,
+          fixed_minor: 100000,
+          fixed_currency: "EGP",
+          gross_amount_minor: 100000,
+        },
+        ts: JUN1,
+      }),
+    );
+    expect(ps).toEqual([
+      { currency: "USD", due_ts: JUN1, amount_minor: 80000, direction: "debt" },
+      { currency: "EGP", due_ts: JUN1, amount_minor: 100000, direction: "credit" },
+    ]);
+  });
+
+  it("totals the foreign fee with other entries of that currency, separate from the entry currency", () => {
+    const iou = entry({
+      txn_type: "iou",
+      direction: "credit",
+      currency: "USD",
+      amount_minor: 100000,
+      fee: { percent: 0, fixed_minor: 50000, fixed_currency: "EGP", gross_amount_minor: 100000 },
+      ts: JUN1,
+    });
+    // A plain EGP credit rolls up with the fee's EGP line: +500 − 500 = 0 → drops out.
+    const egpCredit = entry({ currency: "EGP", direction: "credit", amount_minor: 50000, ts: JUN1 });
+    expect(computeBalances([iou, egpCredit])).toEqual([
+      { currency: "USD", amount_minor: 100000 },
+    ]);
+  });
+});
+
 describe("computeBalancesAsOf (maturity buckets)", () => {
   const split = entry({
     txn_type: "iou",

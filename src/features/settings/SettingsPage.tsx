@@ -7,7 +7,7 @@
 import { useState } from "react";
 import { Link } from "react-router-dom";
 import { usePreferences } from "./usePreferences";
-import { COMMON_CURRENCIES } from "./currencies";
+import { orderedCurrencies } from "./currencies";
 import { RelaySettings } from "../relay/RelaySettings";
 import { OpenChatSettings } from "../openchat/OpenChatSettings";
 
@@ -66,7 +66,7 @@ export function SettingsPage() {
           value={prefs.defaultCurrency}
           onChange={(e) => setDefaultCurrency(e.target.value)}
         >
-          {COMMON_CURRENCIES.map((c) => (
+          {orderedCurrencies(prefs.defaultCurrency).map((c) => (
             <option key={c} value={c}>
               {c}
             </option>

@@ -48,6 +48,10 @@ export type TxnTemplate = {
   amount_minor?: number; // optional default face/gross amount
   fee_percent?: number; // IOU fee %
   fee_fixed_minor?: number; // IOU flat fee
+  // Currency of the fixed fee, when it differs from the entry currency. Absent ⇒ the fixed fee is in
+  // the entry currency (folds into the net). When set to a different currency, the fixed fee becomes
+  // its own balance line in that currency (see FeePayload.fixed_currency / balance.ts).
+  fee_fixed_currency?: string;
   schedule?: TemplatePortion[]; // IOU default due schedule (relative)
   note?: string;
   // Trigger words that route on-device extraction to this template's id: IOU folds them into the

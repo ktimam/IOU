@@ -45,11 +45,41 @@ import {
   serializeImportedMessageIds,
 } from "../openchat/inboxDedupe";
 
-// Dismissed/imported on-chain inbox drafts, persisted so they stay gone across refreshes — the
-// inbox itself is append-only and the poll cursor is in-memory, so without this every handled
-// draft would reappear on reload. localStorage is per-device; a cross-device "handled" store can
-// ride the canister later if it ever matters (dismissals are cosmetic).
-const HANDLED_INBOX_KEY = "iou.openchat.handledInboxDrafts.v1";
+// The two inbox dedup sets below (dismissed inbox ids; imported messageIds) persist so a handled
+// draft stays gone across refreshes — the inbox is append-only and the poll cursor is in-memory.
+// But they are SPECIFIC TO ONE OpenChat deployment: inbox action ids (`oc-<id>`) restart from 1 on
+// every clean redeploy, and messageIds come from a specific OpenChat instance. A set carried over
+// from an EARLIER deployment would wrongly suppress a fresh deployment's low-/reused-id deposits —
+// the "confirmed in OpenChat but never imported after an environment restart" bug. So we SCOPE both
+// by the OpenChat user_index canister id, which changes on every clean redeploy: a new deployment
+// reads empty sets, and keys from other deployments (and the pre-scoping legacy key) are purged.
+function deployTag(): string {
+  try {
+    const env = (import.meta as unknown as { env?: Record<string, string> }).env;
+    const id = env?.VITE_OC_USER_INDEX_CANISTER_ID;
+    return (id && id.trim()) || "default";
+  } catch {
+    return "default";
+  }
+}
+const DEPLOY_TAG = deployTag();
+function scopedInboxKey(prefix: string, legacyKey: string): string {
+  const keep = `${prefix}.${DEPLOY_TAG}`;
+  try {
+    localStorage.removeItem(legacyKey); // pre-scoping key: never consulted again
+    for (let i = localStorage.length - 1; i >= 0; i--) {
+      const k = localStorage.key(i);
+      if (k && k.startsWith(`${prefix}.`) && k !== keep) localStorage.removeItem(k);
+    }
+  } catch {
+    /* ignore (no localStorage in tests/Node) */
+  }
+  return keep;
+}
+const HANDLED_INBOX_KEY = scopedInboxKey(
+  "iou.openchat.handledInboxDrafts.v2",
+  "iou.openchat.handledInboxDrafts.v1",
+);
 const HANDLED_INBOX_CAP = 1000;
 function loadHandledInboxIds(): Set<string> {
   try {
@@ -79,7 +109,10 @@ function markInboxDraftHandled(id: string): void {
 // accepted before the first entry lands. We dedupe by messageId as well: once a
 // messageId has been imported we treat any sibling card as already-added. Persist
 // it (same rationale as handledInboxIds) so the guard survives a reload.
-const IMPORTED_MSG_KEY = "iou.openchat.importedMessageIds.v1";
+const IMPORTED_MSG_KEY = scopedInboxKey(
+  "iou.openchat.importedMessageIds.v2",
+  "iou.openchat.importedMessageIds.v1",
+);
 const IMPORTED_MSG_CAP = 1000;
 const importedMessageIds = parseImportedMessageIds(
   (() => {
@@ -137,7 +170,13 @@ function templateToInitial(t: TxnTemplate, anchorTs?: number): Partial<EntryPayl
     note: t.note ?? "",
     txn_type: t.txn_type,
     fee: hasFee
-      ? { percent: feePct, fixed_minor: feeFixed, gross_amount_minor: gross }
+      ? {
+          percent: feePct,
+          fixed_minor: feeFixed,
+          // Only a foreign fixed fee carries a currency; same-currency (absent) folds into the net.
+          ...(feeFixed > 0 && t.fee_fixed_currency ? { fixed_currency: t.fee_fixed_currency } : {}),
+          gross_amount_minor: gross,
+        }
       : undefined,
     ...(schedule ? { schedule } : {}),
   };
@@ -1106,17 +1145,25 @@ export function SheetPage() {
                       {sign}
                       {formatMinor(e.payload.amount_minor, e.payload.currency)}
                     </div>
-                    {e.payload.fee && (
-                      <div className="muted small">
-                        {formatMinor(e.payload.fee.gross_amount_minor, e.payload.currency)}
-                        {e.payload.fee.percent > 0 ? ` − ${e.payload.fee.percent}%` : ""}
-                        {e.payload.fee.fixed_minor
-                          ? ` − ${formatMinor(e.payload.fee.fixed_minor, e.payload.currency)}`
-                          : ""}
-                        {" fee → net "}
-                        {formatMinor(e.payload.amount_minor, e.payload.currency)}
-                      </div>
-                    )}
+                    {e.payload.fee &&
+                      (() => {
+                        const f = e.payload.fee;
+                        const cur = e.payload.currency;
+                        const fx = f.fixed_minor ?? 0;
+                        // A foreign fixed fee is its OWN currency line — it doesn't reduce the entry
+                        // net (only the percent does), so show it as a separate note, not in the chain.
+                        const foreign = fx > 0 && !!f.fixed_currency && f.fixed_currency !== cur;
+                        const gross = formatMinor(f.gross_amount_minor, cur);
+                        const pct = f.percent > 0 ? ` − ${f.percent}%` : "";
+                        const net = formatMinor(e.payload.amount_minor, cur);
+                        return (
+                          <div className="muted small">
+                            {foreign
+                              ? `${gross}${pct} → net ${net} (+ ${formatMinor(fx, f.fixed_currency!)} fee)`
+                              : `${gross}${pct}${fx > 0 ? ` − ${formatMinor(fx, cur)}` : ""} fee → net ${net}`}
+                          </div>
+                        );
+                      })()}
                     {(() => {
                       const lines = dueDisplayLines(e.payload);
                       if (!lines) return null;

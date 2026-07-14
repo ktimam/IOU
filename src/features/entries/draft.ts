@@ -215,12 +215,16 @@ export function parseDraft(input: unknown, base?: Partial<EntryPayload>): ParseR
   // IOU fee + schedule
   let feePercent = 0;
   let feeFixedMinor = 0;
+  // The fixed fee's currency comes ONLY from the template (a chat draft carries no fee-currency
+  // field), so it's never overridden below — carry it straight through to the entry's fee.
+  let feeFixedCurrency: string | undefined;
   let schedule: DuePortion[] | undefined;
   if (kind === "iou") {
     // Seed fee/schedule from the template (base); an explicit extracted value overrides below.
     if (base?.fee) {
       feePercent = base.fee.percent ?? 0;
       feeFixedMinor = base.fee.fixed_minor ?? 0;
+      feeFixedCurrency = base.fee.fixed_currency;
     }
     if (base?.schedule && base.schedule.length) schedule = base.schedule;
     if (d.fee_percent != null) {
@@ -283,6 +287,9 @@ export function parseDraft(input: unknown, base?: Partial<EntryPayload>): ParseR
           fee: {
             percent: feePercent,
             fixed_minor: feeFixedMinor,
+            // A foreign fixed fee (currency ≠ the entry currency) is its own balance line; carry the
+            // template's fee currency so the confirm form shows it instead of defaulting to the entry's.
+            ...(feeFixedMinor > 0 && feeFixedCurrency ? { fixed_currency: feeFixedCurrency } : {}),
             gross_amount_minor: grossMinor!,
           },
         }
