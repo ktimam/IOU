@@ -1,5 +1,16 @@
-import { describe, it, expect } from "vitest";
-import { parseInboxPlaintext } from "./actionInboxClient";
+import { describe, it, expect, vi, beforeEach } from "vitest";
+
+// Mock the network resolver so we can assert the cache/invalidation behaviour without a replica.
+const { getRegisteredInboxCanisterId } = vi.hoisted(() => ({
+  getRegisteredInboxCanisterId: vi.fn(),
+}));
+vi.mock("./registerAiApp", () => ({ getRegisteredInboxCanisterId }));
+
+import {
+  parseInboxPlaintext,
+  getActionInboxConfig,
+  invalidateInboxCache,
+} from "./actionInboxClient";
 
 // The v2 envelope plaintext wrapper OpenChat's local_user_index builds around the confirm payload:
 //   { context: { chat, messageId, confirmedBy, confirmedAt }, payload: <original confirm-payload JSON> }
@@ -60,5 +71,34 @@ describe("parseInboxPlaintext (v2 envelope wrapper)", () => {
 
   it("throws on non-JSON input (caller drops the envelope)", () => {
     expect(() => parseInboxPlaintext("not json")).toThrow();
+  });
+});
+
+describe("inbox resolver cache + invalidateInboxCache (stale-manifest fix)", () => {
+  beforeEach(() => {
+    getRegisteredInboxCanisterId.mockReset();
+    invalidateInboxCache();
+    process.env.VITE_OPENCHAT_HOST = "http://127.0.0.1:8080";
+    process.env.VITE_OC_USER_INDEX_CANISTER_ID = "uxrrr-q7777-77774-qaaaq-cai";
+    process.env.VITE_IOU_BACKEND_CANISTER_ID = "ll5dv-z7777-77777-aaaca-cai";
+  });
+
+  it("memoizes the resolved inbox — repeated calls hit user_index once", async () => {
+    getRegisteredInboxCanisterId.mockResolvedValue("lc6ij-px777-77777-aaadq-cai");
+    const a = await getActionInboxConfig();
+    const b = await getActionInboxConfig();
+    expect(a?.canisterId).toBe("lc6ij-px777-77777-aaadq-cai");
+    expect(b?.canisterId).toBe("lc6ij-px777-77777-aaadq-cai");
+    expect(getRegisteredInboxCanisterId).toHaveBeenCalledTimes(1);
+  });
+
+  it("re-queries after invalidateInboxCache — a re-registration takes effect immediately", async () => {
+    getRegisteredInboxCanisterId.mockResolvedValueOnce("old-inbox-canister-cai");
+    expect((await getActionInboxConfig())?.canisterId).toBe("old-inbox-canister-cai");
+    // A re-register moved the routed inbox; without the bust the poll would keep using the old one.
+    getRegisteredInboxCanisterId.mockResolvedValueOnce("new-inbox-canister-cai");
+    invalidateInboxCache();
+    expect((await getActionInboxConfig())?.canisterId).toBe("new-inbox-canister-cai");
+    expect(getRegisteredInboxCanisterId).toHaveBeenCalledTimes(2);
   });
 });

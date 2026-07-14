@@ -172,11 +172,26 @@ function readEnv(name: string): string | undefined {
 }
 
 // Cache the manifest-derived inbox id so the 15s poll (and StrictMode double-mounts) don't re-query
-// user_index. Keyed by host|userIndex; ~5min TTL; in-flight dedup. A cached null ("no per-app inbox
-// registered") is memoized too — the caller then uses the VITE_ACTION_INBOX_CANISTER_ID fallback.
-const INBOX_TTL_MS = 5 * 60 * 1000;
+// user_index on every tick. Keyed by host|userIndex; in-flight dedup. A cached null ("no per-app
+// inbox registered") is memoized too — the caller then uses the VITE_ACTION_INBOX_CANISTER_ID fallback.
+//
+// TTL is deliberately SHORT (30s): the inbox_canister_id only changes on a (re)registration, and this
+// app busts the cache itself right after it re-registers (invalidateInboxCache below). The TTL is just
+// the ceiling for a registration done ELSEWHERE (the CLI, or another device) to take effect — a stale
+// resolution otherwise routed the poll at the OLD inbox for up to 5 minutes ("stale-manifest-cache").
+const INBOX_TTL_MS = 30 * 1000;
 let inboxCache: { key: string; canisterId: string | null; at: number } | null = null;
 let inboxInflight: Promise<string | null> | null = null;
+
+/**
+ * Drop the memoized manifest→inbox resolution so the NEXT getActionInboxConfig re-queries user_index.
+ * Call this right after (re)registering this app's manifest: the inbox_canister_id may have changed,
+ * and without it the app keeps polling the previously-resolved inbox until the TTL lapses.
+ */
+export function invalidateInboxCache(): void {
+  inboxCache = null;
+  inboxInflight = null;
+}
 
 async function resolveInboxFromManifest(host: string, userIndexId: string): Promise<string | null> {
   const key = `${host}|${userIndexId}`;

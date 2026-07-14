@@ -22,6 +22,7 @@ import { unwrap } from "../flows/useActor";
 import type { Direction, TxnType } from "../entries/types";
 import type { Identity } from "@dfinity/agent";
 import { registerAiApp } from "../openchat/registerAiApp";
+import { invalidateInboxCache } from "../openchat/actionInboxClient";
 import { OC_ACTION_INBOX_CANISTER_ID, OC_IC_URL, OC_LINKED_KEY, OC_USER_INDEX_CANISTER_ID } from "../openchat/ocConfig";
 import { canisterId as iouBackendCanisterId } from "../auth/config";
 
@@ -104,6 +105,8 @@ async function reRegisterOpenChatIfLinked(
       identity,
       templates,
     });
+    // A re-register may change the routed inbox — drop the resolver cache so the poll picks it up now.
+    invalidateInboxCache();
   } catch {
     /* best-effort: re-registers again on the next template edit or an explicit re-link */
   }

@@ -28,7 +28,7 @@ import {
   signRevokeChallenge,
 } from "./consumerKeypair";
 import { claimAiAppLinkCode, registerAiApp, revokeAiAppUserKey } from "./registerAiApp";
-import { getActionInboxConfig } from "./actionInboxClient";
+import { getActionInboxConfig, invalidateInboxCache } from "./actionInboxClient";
 import { useTemplates } from "../templates/TemplatesContext";
 import { OC_ACTION_INBOX_CANISTER_ID, OC_IC_URL, OC_LINKED_KEY, OC_USER_INDEX_CANISTER_ID } from "./ocConfig";
 
@@ -130,6 +130,9 @@ export function ActionInboxSettings() {
         templates,
       });
       if (outcome.kind === "success") {
+        // The manifest (and its routed inbox) just changed — drop the resolver cache so the next poll
+        // resolves the fresh inbox instead of a stale one.
+        invalidateInboxCache();
         // Remember we're linked (scoped to this principal) so a later template edit auto-re-registers.
         try {
           if (identity) localStorage.setItem(OC_LINKED_KEY, identity.getPrincipal().toText());
