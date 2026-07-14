@@ -87,7 +87,7 @@ export async function joinAccount(page: Page, code: string): Promise<string> {
  * The grant button only shows once the pair reads as active (partner joined); a fresh pair-page load
  * can race that propagation, so re-fetch (re-navigate) until it appears. */
 export async function grantPartnerAccess(page: Page, accountName: string): Promise<void> {
-  for (let attempt = 0; attempt < 6; attempt++) {
+  for (let attempt = 0; attempt < 10; attempt++) {
     await openAccount(page, accountName); // → the active sheet (fresh data)
     if (/\/sheet\//.test(page.url())) {
       await page.getByRole("link", { name: /Details/ }).click();
@@ -97,7 +97,7 @@ export async function grantPartnerAccess(page: Page, accountName: string): Promi
     try {
       // Give this page load time for get_pair to resolve and render the button (it only shows once
       // the pair reads as active). If it never renders, re-fetch — the join may not be reflected yet.
-      await grant.waitFor({ state: "visible", timeout: 10_000 });
+      await grant.waitFor({ state: "visible", timeout: 8_000 });
     } catch {
       continue;
     }

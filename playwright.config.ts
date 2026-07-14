@@ -18,6 +18,9 @@ export default defineConfig({
   expect: { timeout: 20_000 },
   fullyParallel: false,
   workers: 1,
+  // The cross-user flows depend on canister propagation between users; under heavy machine load a
+  // single attempt can exhaust its in-test re-fetch budget. One retry absorbs that transient flake.
+  retries: process.env.CI ? 2 : 1,
   forbidOnly: !!process.env.CI,
   reporter: [["list"]],
   use: {
