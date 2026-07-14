@@ -44,7 +44,9 @@ pnpm test:e2e        # (= vitest run --config vitest.e2e.config.ts). ~16 tests, 
 pnpm test:ui         # (= playwright test). Multiple users/sheets/chats via the UI, headless. ~55s.
 HEADED=1 pnpm test:ui   # watch it drive.
 pnpm ui:demo         # NOT a test: opens one persistent Chromium window PER USER (Alice/Bob/Carol),
-                     # sets up 3 pairs/sheets + entries + chat links, and LEAVES them open to inspect.
+                     # gives each user their own sheets + entries (+ Alice's chat links), and LEAVES
+                     # the windows open to inspect. (Per-user setup, so it's robust; the shared-sheet
+                     # cross-user view is the reliable `pnpm test:ui`.)
 ```
 
 The unit config (`vitest.config.ts`) includes only `src/**/*.test.ts`; the E2E config
@@ -140,7 +142,10 @@ via in-app clicks).
 | `flows.ts` | reusable actions: dev sign-in, create/join account, read invite code, grant partner access, open sheet, add entry, link chat, read balances |
 
 `scripts/ui-multiuser-demo.ts` (`pnpm ui:demo`) reuses the same flows to open **one persistent Chromium
-window per user** and leaves them open for manual inspection (profiles under `.pw-profiles/`, gitignored).
+window per user** (Alice/Bob/Carol), gives each their own accounts/sheets/entries (+ Alice's chat
+links), and leaves the windows open for manual inspection (profiles under `.pw-profiles/`, gitignored).
+It uses per-user solo sheets (no cross-user grant), so it stays robust regardless of machine load; the
+shared-sheet / cross-user decryption path is exercised by the spec above.
 
 > Note: both members currently see the balance from the *authoring* frame (the app doesn't flip
 > "owes you"/"you owe" per viewer), so the UI test asserts the shared net **magnitude**, not the
