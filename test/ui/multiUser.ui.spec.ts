@@ -49,7 +49,7 @@ test("3 users · 3 sheets · cross-user shared view · chat links", async ({ bro
   let bobSheetAB = await openSheet(bob);
   expect(bobSheetAB).toBe(sheetAB);
   let bobAB = await balancesText(bob);
-  for (let i = 0; i < 4 && !bobAB.includes("30.00 USD"); i++) {
+  for (let i = 0; i < 8 && !bobAB.includes("30.00 USD"); i++) {
     await bob.waitForTimeout(2500);
     bobSheetAB = await openSheet(bob); // fresh actor + re-fetch
     bobAB = await balancesText(bob);

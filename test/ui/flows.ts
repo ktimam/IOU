@@ -58,11 +58,13 @@ export async function readInviteFromSheet(page: Page): Promise<{ pairId: string;
   await page.getByRole("link", { name: /Details/ }).click();
   await page.waitForURL("**/pair/**", { timeout: T });
   const pairId = page.url().split("/pair/")[1];
-  const code = (
-    await page.locator("h2").filter({ hasText: /^[A-Z0-9]{4}-[A-Z0-9]{4}$/ }).first().innerText()
-  ).trim();
+  const codeEl = page.locator("h2").filter({ hasText: /^[A-Z0-9]{4}-[A-Z0-9]{4}$/ }).first();
+  await codeEl.waitFor({ timeout: T });
+  const code = (await codeEl.innerText()).trim();
   return { pairId, code };
 }
+
+const isRealPair = (u: URL) => /\/pair\/[^/]+$/.test(u.pathname) && !u.pathname.endsWith("/pair/new");
 
 /** Join an existing account with an invite code (SPA: /pairs → + New account → Join). Returns pairId. */
 export async function joinAccount(page: Page, code: string): Promise<string> {
@@ -72,21 +74,38 @@ export async function joinAccount(page: Page, code: string): Promise<string> {
   await page.getByRole("button", { name: "Join", exact: true }).click();
   await page.locator("#invite").fill(code);
   await page.getByRole("button", { name: "Join account" }).click();
-  await page.waitForURL("**/pair/**", { timeout: T });
+  // Success navigates to /pair/<id>; a failed join stays on /pair/new with an error → surface it
+  // instead of falsely matching the loose "**/pair/**".
+  await page.waitForURL(isRealPair, { timeout: T }).catch(async () => {
+    const errs = (await page.locator("p").filter({ hasText: /error|invalid|not found|already|expired/i }).allInnerTexts().catch(() => [])).join(" | ");
+    throw new Error(`join failed with code "${code}" (still on ${new URL(page.url()).pathname}): ${errs || "no error shown"}`);
+  });
   return page.url().split("/pair/")[1];
 }
 
-/** As the creator, grant the partner access to the active sheet (rewraps the key). By account name. */
+/** As the creator, grant the partner access to the active sheet (rewraps the key). By account name.
+ * The grant button only shows once the pair reads as active (partner joined); a fresh pair-page load
+ * can race that propagation, so re-fetch (re-navigate) until it appears. */
 export async function grantPartnerAccess(page: Page, accountName: string): Promise<void> {
-  await openAccount(page, accountName); // → the active sheet (fresh data reflects the partner's join)
-  if (/\/sheet\//.test(page.url())) {
-    await page.getByRole("link", { name: /Details/ }).click();
-    await page.waitForURL("**/pair/**", { timeout: T });
+  for (let attempt = 0; attempt < 6; attempt++) {
+    await openAccount(page, accountName); // → the active sheet (fresh data)
+    if (/\/sheet\//.test(page.url())) {
+      await page.getByRole("link", { name: /Details/ }).click();
+      await page.waitForURL("**/pair/**", { timeout: T });
+    }
+    const grant = page.getByRole("button", { name: "Grant partner access" });
+    try {
+      // Give this page load time for get_pair to resolve and render the button (it only shows once
+      // the pair reads as active). If it never renders, re-fetch — the join may not be reflected yet.
+      await grant.waitFor({ state: "visible", timeout: 10_000 });
+    } catch {
+      continue;
+    }
+    await grant.click();
+    await page.getByText(/now has access/i).first().waitFor({ timeout: T });
+    return;
   }
-  const grant = page.getByRole("button", { name: "Grant partner access" });
-  await grant.waitFor({ timeout: T });
-  await grant.click();
-  await page.getByText(/now has access/i).first().waitFor({ timeout: T });
+  throw new Error(`grant button never appeared for "${accountName}" (partner join not reflected)`);
 }
 
 /** Open a user's sheet by account name (creator) or the only account (joiner). Returns sheet id. */
