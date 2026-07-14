@@ -10,6 +10,7 @@ self-skipping.
 |------|------|-------|--------|-------|
 | **1. Unit** | IOU client logic + crypto, exhaustive incl. negative/tamper/boundary | `src/features/**/*.test.ts` (this repo) | vitest (node) | nothing |
 | **2. E2E** | Consumer-side black-box against the LIVE canisters, multi-identity | `test/e2e/**/*.e2e.test.ts` (this repo) | vitest (node) | local replica up |
+| **2b. UI E2E** | The real app in a browser: multiple users, sheets, chat links | `test/ui/**/*.ui.spec.ts` (this repo) | Playwright | dev server + replica |
 | **3. On-device model** | tauri-plugin-oc (Rust) + TS facade | `open-chat` repo (see below) | cargo / vitest | optional GGUF |
 | **4. OpenChat canisters** | action_inbox, registry, link-codes, revoke/throttle, two-phase confirm, per-user-key isolation | `open-chat-cycle/backend/integration_tests` | pocket-ic (WSL) | prebuilt wasms + pocket-ic |
 
@@ -22,6 +23,7 @@ Layers 1–2 live in **this** repo and are green here. Layers 3–4 live in thei
 |---|---|
 | 1 — IOU unit | **238 pass / 26 files**, `tsc --noEmit` clean |
 | 2 — IOU E2E (live `:8080`) | **16 pass / 3 files** |
+| 2b — IOU UI E2E (Playwright) | **green** — 3 users · 3 sheets · cross-user shared view · 2 chat links (~55s) |
 | 3a — TS facade (open-chat) | **25 pass / 2 files** (vitest, jsdom) |
 | 3b — tauri-plugin-oc (Rust) | **7 hermetic pass** on the default build; real-model smoke gated |
 | 4 — OpenChat canisters | **16 pass** — compile-clean on Windows + run green under WSL pocket-ic (~95s) |
@@ -37,6 +39,12 @@ pnpm exec tsc --noEmit   # type-check (must be clean)
 
 # Layer 2 — E2E against the LIVE local replica. Self-skips with a message if the replica is down.
 pnpm test:e2e        # (= vitest run --config vitest.e2e.config.ts). ~16 tests, ~45s (real round-trips).
+
+# Layer 2b — UI E2E: drives the REAL app in a browser (needs `pnpm dev` on :3000, reused if running).
+pnpm test:ui         # (= playwright test). Multiple users/sheets/chats via the UI, headless. ~55s.
+HEADED=1 pnpm test:ui   # watch it drive.
+pnpm ui:demo         # NOT a test: opens one persistent Chromium window PER USER (Alice/Bob/Carol),
+                     # sets up 3 pairs/sheets + entries + chat links, and LEAVES them open to inspect.
 ```
 
 The unit config (`vitest.config.ts`) includes only `src/**/*.test.ts`; the E2E config
@@ -118,6 +126,25 @@ wsl -d Ubuntu bash -lc 'source ~/.cargo/env; \
 authoritatively by **Layer 4** on these same canisters (it needs the OpenChat group/user client +
 msgpack transport). Layer 2 proves the **consumer** half end-to-end: registration/read-back, the live
 inbox query + decrypt path, and the IOU import into the linked sheet.
+
+### Layer 2b — UI E2E (this repo, `test/ui/`, Playwright)
+
+Drives the real app in a browser with **three distinct users** (isolated browser contexts = distinct
+dev identities via the `Sign in (dev)` button). Shared flow helpers (`flows.ts`) navigate bounce-safely
+(guarded pages redirect during auth-loading, so all navigation lands on `/pairs` and reaches deep pages
+via in-app clicks).
+
+| Test | Proves (real clicks against the live app) |
+|---|---|
+| `multiUser.ui.spec.ts` | 3 users sign in; **3 pairs/sheets** created + joined (Alice↔Bob, Alice↔Carol, Bob↔Carol; each user in 2); entries added through the real `EntryForm` (settlement + IOU, multiple currencies); the creator's balance reflects them; **cross-user shared view** — a granted partner opens the SAME sheet and decrypts the same net (retries through deposit propagation); **2 chat→sheet links** via `/openchat/link-chat`; Alice's two accounts both listed |
+| `flows.ts` | reusable actions: dev sign-in, create/join account, read invite code, grant partner access, open sheet, add entry, link chat, read balances |
+
+`scripts/ui-multiuser-demo.ts` (`pnpm ui:demo`) reuses the same flows to open **one persistent Chromium
+window per user** and leaves them open for manual inspection (profiles under `.pw-profiles/`, gitignored).
+
+> Note: both members currently see the balance from the *authoring* frame (the app doesn't flip
+> "owes you"/"you owe" per viewer), so the UI test asserts the shared net **magnitude**, not the
+> ownership wording.
 
 ### Layer 3 — on-device model (`open-chat` repo, branch `feat/on-device-model-manager`)
 

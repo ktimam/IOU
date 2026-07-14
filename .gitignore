@@ -60,3 +60,8 @@ Thumbs.db
 
 # per-app action_inbox deploy state (deploy:inbox)
 .openchat-inbox/
+
+# Playwright UI-test scratch
+.pw-profiles/
+test-results/
+playwright-report/
