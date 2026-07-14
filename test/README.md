@@ -23,7 +23,7 @@ Layers 1–2 live in **this** repo and are green here. Layers 3–4 live in thei
 |---|---|
 | 1 — IOU unit | **238 pass / 26 files**, `tsc --noEmit` clean |
 | 2 — IOU E2E (live `:8080`) | **16 pass / 3 files** |
-| 2b — IOU UI E2E (Playwright) | **green** — 3 users · 3 sheets · cross-user shared view · 2 chat links (~55s) |
+| 2b — IOU UI E2E (Playwright) | **green** — `multiUser` (3 users · 3 sheets · cross-user mirror · chat links) + `openchat` (settings/consumer-key, chat link/unlink/isolation, ✨ Import) |
 | 3a — TS facade (open-chat) | **25 pass / 2 files** (vitest, jsdom) |
 | 3b — tauri-plugin-oc (Rust) | **7 hermetic pass** on the default build; real-model smoke gated |
 | 4 — OpenChat canisters | **16 pass** — compile-clean on Windows + run green under WSL pocket-ic (~95s) |
@@ -138,8 +138,9 @@ via in-app clicks).
 
 | Test | Proves (real clicks against the live app) |
 |---|---|
-| `multiUser.ui.spec.ts` | 3 users sign in; **3 pairs/sheets** created + joined (Alice↔Bob, Alice↔Carol, Bob↔Carol; each user in 2); entries added through the real `EntryForm` (settlement + IOU, multiple currencies); the creator's balance reflects them; **cross-user shared view** — a granted partner opens the SAME sheet and decrypts the same net (retries through deposit propagation); **2 chat→sheet links** via `/openchat/link-chat`; Alice's two accounts both listed |
-| `flows.ts` | reusable actions: dev sign-in, create/join account, read invite code, grant partner access, open sheet, add entry, link chat, read balances |
+| `multiUser.ui.spec.ts` | 3 users sign in; **3 pairs/sheets** created + joined (Alice↔Bob, Alice↔Carol, Bob↔Carol; each user in 2); entries added through the real `EntryForm` (settlement + IOU, multiple currencies); the creator's balance reflects them; **cross-user shared view** — a granted partner opens the SAME sheet and decrypts the same net, and sees the **per-viewer mirror** (Alice "…owes you", Bob "you owe…" — fix #2); a fresh **deep-link/refresh** of a guarded page renders instead of bouncing (fix #1); **2 chat→sheet links** |
+| `openchat.ui.spec.ts` | The IOU-app side of the OpenChat confirmable-action feature, multi-user: the **action-inbox settings card** (per-user consumer key + distinct fingerprints, auto-derived inbox `<id> @ <host>`, connect-code validation incl. a live-`user_index` `CodeNotFound`); **chat→sheet link / (current) / unlink / per-user isolation**; and the **✨ Import** chat-draft flow (paste JSON → parseDraft → EntryForm → written). SAFE-BY-DESIGN: never clicks "Link to OpenChat" (that upsert would clobber the shared live "iou" registration — the full loop is the api-e2e + Rust integration tests) |
+| `flows.ts` | reusable actions: dev sign-in, create/join account, read invite code, grant partner access, open sheet, add entry, link/unlink chat, import draft, open settings, read consumer fingerprint, connect-with-code, read balances |
 
 `scripts/ui-multiuser-demo.ts` (`pnpm ui:demo`) reuses the same flows to open **one persistent Chromium
 window per user** (Alice/Bob/Carol), gives each their own accounts/sheets/entries (+ Alice's chat

@@ -14,7 +14,7 @@ import { chromium, type BrowserContext, type Page } from "@playwright/test";
 import { rmSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { signInDev, createAccount, addEntry, linkChatToSheet } from "../test/ui/flows";
+import { signInDev, createAccount, addEntry, linkChatToSheet, importDraft } from "../test/ui/flows";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const PROFILES = path.resolve(HERE, "..", ".pw-profiles");
@@ -67,6 +67,8 @@ async function setup(
   await createAccount(alice.page, "Rent (Alice)", "Rent 2026");
   await addEntry(alice.page, { currency: "USD", amount: 50, direction: "credit", type: "settlement", note: "Roommate repaid lunch" });
   await addEntry(alice.page, { currency: "USD", amount: 20, direction: "debt", type: "iou", note: "I owe for utilities" });
+  // OpenChat chat-bridge: import a draft "from chat" into the Rent sheet.
+  await importDraft(alice.page, JSON.stringify({ kind: "settlement", amount: 25, currency: "USD", direction: "credit", note: "coffee (from chat)" }));
   await createAccount(alice.page, "Trip (Alice)", "Trip");
   await addEntry(alice.page, { currency: "EUR", amount: 100, direction: "credit", type: "iou", note: "Owed for flights" });
 

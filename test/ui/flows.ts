@@ -162,3 +162,43 @@ export async function balancesText(page: Page): Promise<string> {
   await section.waitFor({ timeout: T });
   return (await section.innerText()).replace(/\s+/g, " ").trim();
 }
+
+// ── OpenChat / chat-bridge helpers ──────────────────────────────────────────────────────────────
+
+/** Open Settings and wait for the OpenChat action-inbox card. */
+export async function openSettings(page: Page): Promise<void> {
+  await page.goto("/settings", { waitUntil: "domcontentloaded" });
+  await page.getByRole("heading", { name: /OpenChat action inbox/i }).waitFor({ timeout: T });
+}
+
+/** The per-account consumer-key fingerprint shown on the OpenChat settings card. */
+export async function consumerFingerprint(page: Page): Promise<string> {
+  const fp = page.getByText(/fingerprint:/i).first();
+  await fp.waitFor({ timeout: T });
+  return (await fp.innerText()).trim();
+}
+
+/** Enter a code in the "Connect to OpenChat" box and submit. */
+export async function connectWithCode(page: Page, code: string): Promise<void> {
+  await page.locator('input[placeholder="6-digit code"]').fill(code);
+  await page.getByRole("button", { name: /^Connect$/ }).click();
+}
+
+/** Unlink a chat→sheet mapping via the link-chat page. */
+export async function unlinkChat(page: Page, chatKey: string): Promise<void> {
+  await page.goto(`/openchat/link-chat?chat=${encodeURIComponent(chatKey)}`, { waitUntil: "domcontentloaded" });
+  await page.getByRole("button", { name: "Unlink this chat" }).click();
+  await page.getByText(/no longer linked/i).first().waitFor({ timeout: T });
+}
+
+/** Import a chat-bridge draft (paste JSON → Review in form → confirm) into the open sheet. */
+export async function importDraft(page: Page, json: string): Promise<void> {
+  await page.getByRole("button", { name: /Import/ }).click();
+  await page.getByRole("dialog").getByRole("heading", { name: "Import" }).waitFor({ timeout: T });
+  await page.getByRole("dialog").locator("textarea").fill(json);
+  await page.getByRole("dialog").getByRole("button", { name: "Review in form" }).click();
+  // The Import modal closes and the pre-filled EntryForm ("Add entry") opens — confirm it.
+  await page.getByRole("dialog").getByRole("heading", { name: "Add entry" }).waitFor({ timeout: T });
+  await page.getByRole("dialog").getByRole("button", { name: "Add entry" }).click();
+  await page.getByRole("dialog").waitFor({ state: "detached", timeout: T });
+}
