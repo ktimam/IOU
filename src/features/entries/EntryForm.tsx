@@ -11,16 +11,10 @@
 //     converted amount
 
 import { useEffect, useState } from "react";
-import type {
-  EntryPayload,
-  Direction,
-  ConvertPayload,
-  TxnType,
-  DuePortion,
-  FeePayload,
-} from "./types";
+import type { EntryPayload, Direction, TxnType } from "./types";
 import { fetchRate, type FxRate } from "./fx";
 import { netAfterFee, formatMinor } from "./balance";
+import { buildEntryPayload } from "./entryMath";
 import { usePreferences } from "../settings/usePreferences";
 import { orderedCurrencies } from "../settings/currencies";
 
@@ -152,79 +146,32 @@ export function EntryForm({
   async function submit(e: React.FormEvent) {
     e.preventDefault();
     setErr(null);
-    if (!amountMinor || amountMinor <= 0) {
-      setErr("amount must be > 0");
+    // The net/convert/fee/schedule math lives in the pure buildEntryPayload helper (entryMath.ts)
+    // so it can be unit-tested; the form only wires state in and handles the async submit.
+    const result = buildEntryPayload({
+      amountStr: amount,
+      currency,
+      direction,
+      note,
+      dateYmd: date,
+      txnType,
+      feePercent,
+      feeFixedStr: feeFixed,
+      feeFixedCurrency,
+      schedule,
+      convert:
+        convertEnabled && rate && convertedMinor != null
+          ? { to: convertTo, rate: rate.rate, rateSource: rate.source, rateFetchedAt: rate.fetchedAt }
+          : null,
+      draftId: initial?.draft_id,
+    });
+    if (!result.ok) {
+      setErr(result.error);
       return;
     }
-    // IOU: validate the due-date schedule. A single due date is implicitly
-    // 100%; multiple portions must total 100%.
-    let schedulePayload: DuePortion[] | undefined;
-    if (txnType === "iou") {
-      if (schedule.length === 0) {
-        setErr("add at least one due date");
-        return;
-      }
-      if (schedule.length > 1 && percentTotal !== 100) {
-        setErr("due-date percentages must total 100%");
-        return;
-      }
-      schedulePayload = schedule.map((r) => ({
-        due_ts: new Date(r.date + "T00:00:00Z").getTime(),
-        percent: schedule.length === 1 ? 100 : Number(r.percent) || 0,
-      }));
-    }
-    const ts = new Date(date + "T00:00:00Z").getTime();
-    let convert: ConvertPayload | undefined;
-    if (convertEnabled && rate && convertedMinor != null) {
-      convert = {
-        from_currency: currency,
-        from_amount_minor: amountMinor,
-        to_currency: convertTo,
-        to_amount_minor: convertedMinor,
-        rate: rate.rate,
-        rate_source: rate.source,
-        rate_fetched_at: rate.fetchedAt,
-      };
-    }
-    // Apply the IOU fee: amount_minor stores the NET (what counts toward the
-    // balance + splits across due dates); the gross is kept on the fee
-    // sub-payload so the UI can show before/after.
-    const baseMinor = convert ? convertedMinor! : amountMinor;
-    const entryCurrency = convert ? convertTo : currency;
-    const useFee = txnType === "iou" && (feePercent > 0 || feeFixedMinor > 0);
-    // A fixed fee in a currency other than the entry's is NOT netted against the amount — it becomes
-    // its own balance line (balance.ts). Only a same-currency fixed fee (and the percent) reduce the net.
-    const feeCurrency = feeFixedCurrency || entryCurrency;
-    const fixedForeign = feeFixedMinor > 0 && feeCurrency !== entryCurrency;
-    const fee: FeePayload | undefined = useFee
-      ? {
-          percent: feePercent,
-          fixed_minor: feeFixedMinor,
-          ...(fixedForeign ? { fixed_currency: feeCurrency } : {}),
-          gross_amount_minor: baseMinor,
-        }
-      : undefined;
     setSubmitting(true);
     try {
-      const payload: EntryPayload = {
-        ts,
-        kind: txnType === "settlement" ? "payment" : "expense",
-        currency: entryCurrency,
-        amount_minor: useFee
-          ? netAfterFee(baseMinor, feePercent, fixedForeign ? 0 : feeFixedMinor)
-          : baseMinor,
-        direction,
-        note,
-        txn_type: txnType,
-        ...(schedulePayload ? { schedule: schedulePayload } : {}),
-        ...(fee ? { fee } : {}),
-        convert,
-        // Carry the idempotency key through when the form was pre-filled from
-        // an imported draft (chat bridge). Invisible to the user; lets a
-        // re-imported draft dedupe to one entry.
-        ...(initial?.draft_id ? { draft_id: initial.draft_id } : {}),
-      };
-      await onSubmit(payload);
+      await onSubmit(result.payload);
     } catch (e) {
       setErr((e as Error).message);
     } finally {

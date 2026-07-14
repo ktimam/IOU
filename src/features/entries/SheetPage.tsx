@@ -29,8 +29,9 @@ import { CloseSheetButton } from "./CloseSheetButton";
 import { downloadCsv, entriesToCsv } from "./csvExport";
 import { useToasts } from "../ui/Toasts";
 import { usePreferences } from "../settings/usePreferences";
-import { useTemplates, type TxnTemplate } from "../templates/TemplatesContext";
+import { useTemplates } from "../templates/TemplatesContext";
 import { TemplatesManager } from "../templates/TemplatesManager";
+import { templateToInitial } from "../templates/templateBase";
 import { parseDraft, isDuplicateDraft, extractTs } from "./draft";
 import {
   getRelayConfig,
@@ -43,6 +44,8 @@ import {
   collapseByMessageId,
   parseImportedMessageIds,
   serializeImportedMessageIds,
+  deriveDeployTag,
+  planScopedInboxKey,
 } from "../openchat/inboxDedupe";
 
 // The two inbox dedup sets below (dismissed inbox ids; imported messageIds) persist so a handled
@@ -56,25 +59,26 @@ import {
 function deployTag(): string {
   try {
     const env = (import.meta as unknown as { env?: Record<string, string> }).env;
-    const id = env?.VITE_OC_USER_INDEX_CANISTER_ID;
-    return (id && id.trim()) || "default";
+    return deriveDeployTag(env?.VITE_OC_USER_INDEX_CANISTER_ID);
   } catch {
     return "default";
   }
 }
 const DEPLOY_TAG = deployTag();
 function scopedInboxKey(prefix: string, legacyKey: string): string {
-  const keep = `${prefix}.${DEPLOY_TAG}`;
   try {
-    localStorage.removeItem(legacyKey); // pre-scoping key: never consulted again
-    for (let i = localStorage.length - 1; i >= 0; i--) {
+    const existing: string[] = [];
+    for (let i = 0; i < localStorage.length; i++) {
       const k = localStorage.key(i);
-      if (k && k.startsWith(`${prefix}.`) && k !== keep) localStorage.removeItem(k);
+      if (k) existing.push(k);
     }
+    const { keep, remove } = planScopedInboxKey(prefix, DEPLOY_TAG, legacyKey, existing);
+    for (const k of remove) localStorage.removeItem(k); // legacy + other-deployment keys
+    return keep;
   } catch {
-    /* ignore (no localStorage in tests/Node) */
+    /* no localStorage in tests/Node */
+    return `${prefix}.${DEPLOY_TAG}`;
   }
-  return keep;
 }
 const HANDLED_INBOX_KEY = scopedInboxKey(
   "iou.openchat.handledInboxDrafts.v2",
@@ -140,47 +144,8 @@ import {
 } from "../openchat/chatSheetLinks";
 
 // Build entry-form defaults from a template.
-function templateToInitial(t: TxnTemplate, anchorTs?: number): Partial<EntryPayload> {
-  const gross = t.amount_minor ?? 0;
-  const feePct = t.fee_percent ?? 0;
-  const feeFixed = t.fee_fixed_minor ?? 0;
-  const hasFee = t.txn_type === "iou" && (feePct > 0 || feeFixed > 0);
-  // Convert the template's RELATIVE schedule (offset days / next-month anchor) to absolute due dates,
-  // anchored at `anchorTs` (UTC midnight) — TODAY by default (manual "+ Add"), or the reservation's
-  // transaction date when a chat draft carried one, so a portion "due in 0 days" lands on that date
-  // rather than today.
-  let schedule: EntryPayload["schedule"];
-  if (t.txn_type === "iou" && t.schedule && t.schedule.length) {
-    const anchor = new Date(anchorTs ?? Date.now());
-    const y = anchor.getUTCFullYear();
-    const m = anchor.getUTCMonth();
-    const base = Date.UTC(y, m, anchor.getUTCDate());
-    schedule = t.schedule.map((p) => ({
-      due_ts:
-        p.anchor === "start_of_next_month"
-          ? Date.UTC(y, m + 1, 1) // rolls over in December correctly
-          : base + p.offset_days * 86_400_000,
-      percent: p.percent,
-    }));
-  }
-  return {
-    currency: t.currency,
-    amount_minor: t.amount_minor,
-    direction: t.direction,
-    note: t.note ?? "",
-    txn_type: t.txn_type,
-    fee: hasFee
-      ? {
-          percent: feePct,
-          fixed_minor: feeFixed,
-          // Only a foreign fixed fee carries a currency; same-currency (absent) folds into the net.
-          ...(feeFixed > 0 && t.fee_fixed_currency ? { fixed_currency: t.fee_fixed_currency } : {}),
-          gross_amount_minor: gross,
-        }
-      : undefined,
-    ...(schedule ? { schedule } : {}),
-  };
-}
+// templateToInitial (template → entry defaults, incl. relative-schedule anchoring) is extracted to
+// ../templates/templateBase for unit testing; imported above.
 
 // Unwrap a Candid opt<vec nat8> to a Uint8Array (or null).
 function optBytes(o: any): Uint8Array | null {

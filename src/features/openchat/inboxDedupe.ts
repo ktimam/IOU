@@ -43,3 +43,33 @@ export function parseImportedMessageIds(raw: string | null): Set<string> {
 export function serializeImportedMessageIds(ids: Iterable<string>, cap: number): string {
   return JSON.stringify([...ids].slice(-cap));
 }
+
+// ── Deployment-scoped dedup keys ──────────────────────────────────────────────────────────────
+// Both inbox dedup sets (dismissed inbox ids; imported messageIds) persist across reloads, but they
+// are SPECIFIC TO ONE OpenChat deployment: inbox action ids (`oc-<id>`) restart from 1 on every
+// clean redeploy, and messageIds come from a specific OpenChat instance. A set carried over from an
+// EARLIER deployment would wrongly suppress a fresh deployment's low-/reused-id deposits — the
+// "confirmed in OpenChat but never imported after an environment restart" bug. So both are SCOPED by
+// the OpenChat user_index canister id (which changes on every clean redeploy).
+
+/** The scope tag: the user_index canister id (trimmed) or "default" when unknown. */
+export function deriveDeployTag(userIndexId: string | undefined | null): string {
+  const id = typeof userIndexId === "string" ? userIndexId.trim() : "";
+  return id || "default";
+}
+
+/**
+ * Plan the deployment-scoped localStorage key. Pure so it is unit-testable; the caller performs the
+ * removals. Returns the key to KEEP (`prefix.tag`) and the keys to REMOVE — the pre-scoping legacy
+ * key plus any `prefix.*` key from a DIFFERENT deployment. A fresh deployment thus reads an empty set.
+ */
+export function planScopedInboxKey(
+  prefix: string,
+  deployTag: string,
+  legacyKey: string,
+  existingKeys: string[],
+): { keep: string; remove: string[] } {
+  const keep = `${prefix}.${deployTag}`;
+  const remove = [legacyKey, ...existingKeys.filter((k) => k.startsWith(`${prefix}.`) && k !== keep)];
+  return { keep, remove: [...new Set(remove)] };
+}
