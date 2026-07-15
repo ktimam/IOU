@@ -143,6 +143,41 @@ export async function addEntry(page: Page, e: EntryInput): Promise<void> {
   await dialog.waitFor({ state: "detached", timeout: T });
 }
 
+/** Set the global username in Settings; it eagerly publishes to every existing account. */
+export async function setUsername(page: Page, username: string): Promise<void> {
+  await page.goto("/settings", { waitUntil: "domcontentloaded" });
+  await page.getByRole("heading", { name: "Username", exact: true }).waitFor({ timeout: T });
+  const input = page.locator('input[placeholder="e.g. Alice"]');
+  await input.fill(username);
+  await page.getByRole("button", { name: /Save username/ }).click();
+  // Status line confirms local save + eager publish ("Saved…" / "…published to N of M…").
+  await page.getByText(/Saved|published|Cleared/i).first().waitFor({ timeout: T });
+}
+
+/** From a /sheet/<id> page, "Close & start new": archive this sheet, carry the balance forward
+ * to a fresh sheet, and land on it. Returns the NEW sheet id. Requires ≥1 entry (button is
+ * disabled on an empty sheet). */
+export async function closeAndStartNewSheet(page: Page): Promise<string> {
+  const oldId = page.url().split("/sheet/")[1];
+  await page.getByRole("button", { name: /Close .* start new/ }).click();
+  const dialog = page.getByRole("dialog");
+  await dialog.getByRole("heading", { name: "Close this sheet?" }).waitFor({ timeout: T });
+  await dialog.getByRole("button", { name: /Yes, close & start new/ }).click();
+  // Close + fresh-sheet creation + carry-forward entries = several canister calls + crypto,
+  // then a replace-nav to the NEW sheet. We're already on /sheet/<old>, so wait for the id
+  // to actually CHANGE (not just any /sheet/ URL, which is already true).
+  await page
+    .waitForURL((url) => /\/sheet\//.test(url.pathname) && !url.pathname.endsWith(oldId), {
+      timeout: T * 2,
+    })
+    .catch(async () => {
+      const err = (await page.locator("[role='alert'], .toast").allInnerTexts().catch(() => [])).join(" | ");
+      throw new Error(`close & start did not rotate the sheet (still ${oldId})${err ? ": " + err : ""}`);
+    });
+  await page.getByRole("heading", { name: "Balances" }).waitFor({ timeout: T });
+  return page.url().split("/sheet/")[1];
+}
+
 /** Link an OpenChat chat key to a sheet (by the sheet's display name) via /openchat/link-chat. */
 export async function linkChatToSheet(page: Page, chatKey: string, sheetName: string): Promise<void> {
   await page.goto(`/openchat/link-chat?chat=${encodeURIComponent(chatKey)}`, { waitUntil: "domcontentloaded" });

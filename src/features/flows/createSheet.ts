@@ -88,3 +88,35 @@ export async function publishAccountNames(
     await actor.set_member_name(opts.pairId, enc, iv);
   }
 }
+
+/**
+ * EAGERLY publish the caller's username as their member name to EVERY account they're in — one
+ * set_member_name per active sheet, encrypted under that sheet's K_sheet (so only the partner can
+ * read it). This is what makes "set your username once" propagate globally (instead of the lazy
+ * publish-on-next-open in SheetPage). Best-effort per pair: a pair whose sheet key can't be unwrapped
+ * (e.g. archived-only, or a transient decrypt failure) is skipped, not fatal. Returns counts so the
+ * UI can report "published to N of M accounts".
+ */
+export async function publishUsernameToAllPairs(
+  actor: any,
+  unwrapFor: (sheetId: string) => Promise<Uint8Array>,
+  username: string,
+): Promise<{ published: number; total: number }> {
+  const name = username.trim();
+  const pairs: Array<{ id: string; active_sheet_id?: [] | [string] }> = await actor.get_my_pairs();
+  if (!name) return { published: 0, total: pairs.length };
+  let published = 0;
+  for (const p of pairs) {
+    const sheetId = p.active_sheet_id && p.active_sheet_id.length > 0 ? p.active_sheet_id[0] : undefined;
+    if (!sheetId) continue;
+    try {
+      const K_sheet = await unwrapFor(sheetId);
+      const { enc, iv } = await encryptName(K_sheet, name);
+      await actor.set_member_name(p.id, enc, iv);
+      published++;
+    } catch {
+      // best-effort: skip pairs we can't currently key/reach
+    }
+  }
+  return { published, total: pairs.length };
+}

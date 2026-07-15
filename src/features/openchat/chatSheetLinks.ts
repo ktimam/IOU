@@ -33,6 +33,28 @@ export function nat64ToSheetId(v: bigint): string {
   return v.toString(16).padStart(16, "0");
 }
 
+/**
+ * Routing predicate: should a chat-delivered draft be shown/importable on the
+ * sheet with id `sheetId`?  A draft belongs on this sheet iff
+ *   - it has no source chat key (wrapper-less deposit — visible everywhere), OR
+ *   - its chat isn't pinned to any sheet yet (unmapped — visible everywhere so
+ *     the user can pick where it lands), OR
+ *   - its chat is pinned to THIS sheet.
+ * A draft whose chat is pinned to a DIFFERENT sheet is routed away from here.
+ * This is the single source of truth for "each chat's messages head to the
+ * correct sheet" — SheetPage's visible-inbox filter calls it.
+ */
+export function draftBelongsOnSheet(
+  chatKey: string | null | undefined,
+  links: ChatSheetLinks,
+  sheetId: string,
+): boolean {
+  if (!chatKey) return true;
+  const mapped = links[chatKey];
+  if (!mapped) return true;
+  return mapped === sheetId;
+}
+
 export function readCachedLinks(): ChatSheetLinks {
   try {
     const raw = globalThis.localStorage?.getItem(LS_KEY);

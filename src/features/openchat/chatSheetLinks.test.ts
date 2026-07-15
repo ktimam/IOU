@@ -1,5 +1,12 @@
 import { describe, it, expect } from "vitest";
-import { sheetIdToNat64, nat64ToSheetId, readCachedLinks, writeCachedLinks } from "./chatSheetLinks";
+import {
+  sheetIdToNat64,
+  nat64ToSheetId,
+  readCachedLinks,
+  writeCachedLinks,
+  draftBelongsOnSheet,
+  type ChatSheetLinks,
+} from "./chatSheetLinks";
 
 // IOU sheet ids are 16 hex chars (8 raw_rand bytes from now_id()), so the
 // canister can store them as a nat64. These tests pin the loss-free mapping.
@@ -47,5 +54,54 @@ describe("chatSheetLinks local cache", () => {
       JSON.stringify({ good: "1234567890abcdef", bad: 42, worse: "nope" }),
     );
     expect(readCachedLinks()).toEqual({ good: "1234567890abcdef" });
+  });
+});
+
+// The routing guarantee the user asked to pin: ONE user with MULTIPLE sheets and
+// MULTIPLE chats — each chat's drafts must land on (only) its own mapped sheet.
+// draftBelongsOnSheet is the exact predicate SheetPage's visible-inbox uses.
+describe("chatSheetLinks routing — each chat → its own sheet", () => {
+  const SHEET_WIFE = "aaaaaaaaaaaaaaaa";
+  const SHEET_CHILD = "bbbbbbbbbbbbbbbb";
+  const CHAT_WIFE = "direct:wife-user-id";
+  const CHAT_CHILD = "direct:child-user-id";
+  // father pinned wife's chat → wife sheet, child's chat → child sheet.
+  const links: ChatSheetLinks = { [CHAT_WIFE]: SHEET_WIFE, [CHAT_CHILD]: SHEET_CHILD };
+
+  it("a chat's draft shows ONLY on its mapped sheet, not the other", () => {
+    // wife's message is visible on the wife sheet…
+    expect(draftBelongsOnSheet(CHAT_WIFE, links, SHEET_WIFE)).toBe(true);
+    // …and hidden on the child sheet.
+    expect(draftBelongsOnSheet(CHAT_WIFE, links, SHEET_CHILD)).toBe(false);
+    // child's message: mirror image.
+    expect(draftBelongsOnSheet(CHAT_CHILD, links, SHEET_CHILD)).toBe(true);
+    expect(draftBelongsOnSheet(CHAT_CHILD, links, SHEET_WIFE)).toBe(false);
+  });
+
+  it("partitions a mixed inbox so no draft crosses sheets", () => {
+    const inbox = [
+      { chat: CHAT_WIFE, amount: 50 },
+      { chat: CHAT_CHILD, amount: 30 },
+      { chat: CHAT_WIFE, amount: 20 },
+    ];
+    const onWife = inbox.filter((d) => draftBelongsOnSheet(d.chat, links, SHEET_WIFE));
+    const onChild = inbox.filter((d) => draftBelongsOnSheet(d.chat, links, SHEET_CHILD));
+    expect(onWife.map((d) => d.amount)).toEqual([50, 20]);
+    expect(onChild.map((d) => d.amount)).toEqual([30]);
+    // Every draft lands on exactly one sheet — none dropped, none duplicated.
+    expect(onWife.length + onChild.length).toBe(inbox.length);
+  });
+
+  it("an UNMAPPED chat's draft is visible on every sheet (so the user can pick)", () => {
+    const unmapped = "direct:someone-new";
+    expect(draftBelongsOnSheet(unmapped, links, SHEET_WIFE)).toBe(true);
+    expect(draftBelongsOnSheet(unmapped, links, SHEET_CHILD)).toBe(true);
+  });
+
+  it("a wrapper-less draft (no chat key) is visible everywhere", () => {
+    for (const key of [null, undefined, ""]) {
+      expect(draftBelongsOnSheet(key, links, SHEET_WIFE)).toBe(true);
+      expect(draftBelongsOnSheet(key, links, SHEET_CHILD)).toBe(true);
+    }
   });
 });

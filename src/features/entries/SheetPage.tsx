@@ -143,6 +143,7 @@ import {
   writeCachedLinks,
   fetchChatSheetLinks,
   storeChatSheetLink,
+  draftBelongsOnSheet,
   type ChatSheetLinks,
 } from "../openchat/chatSheetLinks";
 
@@ -758,9 +759,7 @@ export function SheetPage() {
   // them by keeping the first (earliest — poll appends in order). Drafts with no
   // messageId (wrapper-less) are never collapsed — each undefined stays distinct.
   const visibleInbox = collapseByMessageId(
-    inboxPending.filter(
-      (p) => !p.context?.chat || !chatLinks[p.context.chat] || chatLinks[p.context.chat] === sheetId,
-    ),
+    inboxPending.filter((p) => draftBelongsOnSheet(p.context?.chat, chatLinks, sheetId)),
   );
   // The draft under review came from a chat with no mapping yet → offer to
   // remember the chat → sheet link on confirm.
@@ -1021,7 +1020,12 @@ export function SheetPage() {
               pairId={pairId}
               currencies={sheet.enabled_currencies}
               closingDays={Number(sheet.closing_window_days)}
-              entries={entries.filter((e) => !e.deleted).map((e) => e.payload)}
+              // Pass VIEWER-ORIENTED payloads (same as the displayed balances): the closing
+              // user authors the carry-forward entries, so the outstanding balance — and thus
+              // the debt/credit direction carried forward — must be in the closer's frame.
+              // Passing raw author-relative payloads inverts the sign for partner-authored
+              // entries (carry-forward would flip who owes whom).
+              entries={payloads}
             />
           </>
         )}
