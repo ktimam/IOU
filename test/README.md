@@ -21,9 +21,9 @@ Layers 1–2 live in **this** repo and are green here. Layers 3–4 live in thei
 
 | Layer | Result |
 |---|---|
-| 1 — IOU unit | **238 pass / 26 files**, `tsc --noEmit` clean |
+| 1 — IOU unit | **257 pass / 28 files**, `tsc --noEmit` clean |
 | 2 — IOU E2E (live `:8080`) | **16 pass / 3 files** |
-| 2b — IOU UI E2E (Playwright) | **green** — `multiUser` (3 users · 3 sheets · cross-user mirror · chat links) + `openchat` (settings/consumer-key, chat link/unlink/isolation, ✨ Import) |
+| 2b — IOU UI E2E (Playwright) | **green** — `multiUser` (3 users · 3 sheets · cross-user mirror · chat links) + `openchat` (settings/consumer-key, chat link/unlink/isolation, ✨ Import) + `closeAndName` (global-username eager-publish to an existing account · close-&-start carries balance forward in the correct direction · persists across reload) |
 | 3a — TS facade (open-chat) | **25 pass / 2 files** (vitest, jsdom) |
 | 3b — tauri-plugin-oc (Rust) | **7 hermetic pass** on the default build; real-model smoke gated |
 | 4 — OpenChat canisters | **16 pass** — compile-clean on Windows + run green under WSL pocket-ic (~95s) |
@@ -33,7 +33,7 @@ Layers 1–2 live in **this** repo and are green here. Layers 3–4 live in thei
 ## Running
 
 ```bash
-# Layer 1 — unit (deterministic, no replica). 238 tests across 26 files, ~2s.
+# Layer 1 — unit (deterministic, no replica). 257 tests across 28 files, ~2s.
 pnpm test            # (= pnpm exec vitest run) OR: pnpm test:unit
 pnpm exec tsc --noEmit   # type-check (must be clean)
 
@@ -106,7 +106,8 @@ wsl -d Ubuntu bash -lc 'source ~/.cargo/env; \
 | `registerAiApp.ts` — manifest wire + registry client | `openchat/registerAiApp.test.ts`, `openchat/registerAiApp.outcomes.test.ts` | `buildManifestWire` (empty key for per-user, `app_canister_id`/**`inbox_canister_id` opt principal**, surfaces, IDL encode); `registerAiApp`/`claimAiAppLinkCode`/`revokeAiAppUserKey` outcome decode; **revoke challenge preimage** (domain‖canisterId‖pem‖ts LE, ts bound); `getRegisteredInboxCanisterId` (opt principal, null, tie-break) |
 | `actionManifest.ts` — extraction manifest + template routing | `openchat/actionManifest.test.ts`, `openchat/actionManifest.caps.test.ts` | schema/prompt/surfaces; template routing by NAME; schema advertises `template` only when routable; **validator caps** (≤50 mappings, ≤50 keywords each, ≤1000-char roster w/ ellipsis, keyword-less excluded); static rules precede template rules; `resolvePublicOrigin` default + trailing-slash strip |
 | `inboxDedupe.ts` — dedup + **deployment-scoped keys** | `openchat/inboxDedupe.test.ts`, `openchat/inboxDedupe.scope.test.ts` | `collapseByMessageId` (first-wins, undefined never collapsed), tolerant parse, capped serialize; **`deriveDeployTag`/`planScopedInboxKey`** — the restart-safe fix: a stale set from another `user_index` deployment is purged and a fresh deployment reads empty (would-regress the "never imports after a restart" bug). `SheetPage.tsx` delegates to these |
-| `chatSheetLinks.ts` | `openchat/chatSheetLinks.test.ts` | 16-hex ↔ nat64 loss-free, range/shape rejects, cache filter |
+| `chatSheetLinks.ts` — chat→sheet mapping + **routing** | `openchat/chatSheetLinks.test.ts` | 16-hex ↔ nat64 loss-free, range/shape rejects, cache filter; **`draftBelongsOnSheet` routing** (the predicate `SheetPage`'s visible-inbox uses): one user · many chats/sheets → each chat's drafts land ONLY on their pinned sheet; mixed inbox partitions with none crossed / dropped / duplicated; an UNMAPPED chat + a wrapper-less draft (no chat key) show on every sheet |
+| chat→ledger SCENARIOS (real `parseDraft` → stored payload → `computeBalances`/`orientPayload`) | `entries/chatToLedger.scenario.test.ts` | end-to-end confirmable-action → balance, numbers only ASSERTED (no hand-rolled math): S1 owner+manager share ONE sheet (owed = rent − expenses − transfers, exact mirror per viewer); S2 father keeps TWO independent SAR sheets (wife settled, child owes 50, ledgers never net together); **S3 routing** — one father, two chats, two sheets: a single mixed inbox is routed with the real `draftBelongsOnSheet`, each sheet gets only its chat's drafts, routed balances match the hand-partitioned S2, and a mis-pin structurally strips the other sheet |
 | `consumerKeypair`/crypto ECIES producer (shared test kit) | `openchat/ecTestKit.ts` | builds real signed+encrypted inbox envelopes matching the Rust wire format (used by crypto + poll specs) |
 | `devVetkd.ts` / `prodVetkd.ts` | `crypto/devVetkd.test.ts`, `crypto/prod-path.test.ts` | sheet-key wrap/unwrap self-ECDH, name enc/dec (wrong key → ""); prod adapter gated off by default; transport key sizes |
 | `mnemonic.ts` | `recovery/mnemonic.test.ts` | BIP-39 24-word gen/validate, deterministic seed |
