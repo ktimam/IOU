@@ -62,16 +62,9 @@ export function Pairs() {
         style={{ justifyContent: "space-between", marginBottom: 16 }}
       >
         <h1>Your accounts</h1>
-        <div className="row" style={{ gap: 8 }}>
-          <button
-            className="secondary"
-            onClick={() => nav("/me")}
-            title="Settings & profile"
-          >
-            ⚙ Settings
-          </button>
-          <button onClick={() => nav("/pair/new")}>+ New account</button>
-        </div>
+        {/* Settings/profile now live behind the username badge (top-right of
+            every page — see Layout), so no Settings button here. */}
+        <button onClick={() => nav("/pair/new")}>+ New account</button>
       </div>
 
       {err && <p style={{ color: "var(--debt)" }}>Actor error: {err}</p>}

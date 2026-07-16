@@ -3,7 +3,6 @@ import { AuthProvider} from "../features/auth/AuthProvider";
 import {SignIn} from "../features/auth/SignIn";
 import {SetDisplayName} from "../features/auth/SetDisplayName";
 import {Hello} from "../features/auth/Hello";
-import {ProfilePage} from "../features/auth/ProfilePage";
 import {Layout} from "./Layout";
 import {Pairs} from "../features/flows/Pairs";
 import {NewPair} from "../features/flows/NewPair";
@@ -46,7 +45,9 @@ export function App() {
             <EmbeddedBanner />
             <Routes>
               <Route path="/" element={<Hello />} />
-              <Route path="/me" element={<ProfilePage />} />
+              {/* /me is merged into /settings — keep the path (deep link iou://me)
+                  as a redirect. */}
+              <Route path="/me" element={<Navigate to="/settings" replace />} />
               <Route path="/sign-in" element={<SignIn />} />
               <Route path="/set-name" element={<SetDisplayName />} />
               <Route path="/pairs" element={<Pairs />} />

@@ -1,29 +1,40 @@
-// /settings — browser-local preferences.
+// /settings — the profile & settings hub (merged with the former /me page).
 //
-// Default currency + username. The username is your single, global name: on
-// save it publishes EAGERLY to every account you're in (E2E under each
-// K_sheet, one set_member_name per active sheet) so every partner immediately
-// sees "manager" instead of your principal — and future accounts pick it up on
-// create/open. Transaction types/templates are managed from the "Add type"
-// button on a sheet, not here.
+// Sign-out, your principal and recovery key (formerly /me), plus your username
+// and default currency. The username is your single, global name: on save it
+// publishes EAGERLY to every account you're in (E2E under each K_sheet, one
+// set_member_name per active sheet) so every partner immediately sees "manager"
+// instead of your principal — and future accounts pick it up on create/open.
+// Reached from the username badge in the top-right of every page. Transaction
+// types/templates are managed from the "Add type" button on a sheet, not here.
 
-import { useState } from "react";
-import { Link } from "react-router-dom";
+import { useEffect, useState } from "react";
+import { Link, useNavigate } from "react-router-dom";
 import { usePreferences } from "./usePreferences";
 import { orderedCurrencies } from "./currencies";
+import { useAuth } from "../auth/AuthProvider";
 import { useActor } from "../flows/useActor";
 import { useSheetKey } from "../flows/SheetKeyContext";
 import { publishUsernameToAllPairs } from "../flows/createSheet";
+import { IOUMark } from "../ui/Logo";
 import { RelaySettings } from "../relay/RelaySettings";
 import { OpenChatSettings } from "../openchat/OpenChatSettings";
 
 export function SettingsPage() {
+  const { state, signOut } = useAuth();
   const { prefs, setDefaultCurrency, setProfileName } = usePreferences();
   const { actor } = useActor();
   const { unwrapFor } = useSheetKey();
+  const nav = useNavigate();
   const [name, setName] = useState(prefs.profileName);
   const [status, setStatus] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+
+  // Guarded like the former /me: bounce only when definitively anonymous; wait
+  // out "loading" without redirecting (Fix #1).
+  useEffect(() => {
+    if (state.kind === "anonymous") nav("/", { replace: true });
+  }, [state, nav]);
 
   async function saveUsername() {
     const trimmed = name.trim();
@@ -59,12 +70,26 @@ export function SettingsPage() {
     }
   }
 
+  if (state.kind !== "authenticated") return null; // loading / anonymous
+
   return (
     <div>
-      <Link to="/me" className="muted">
-        ← Back
+      <div
+        className="row"
+        style={{ justifyContent: "space-between", marginBottom: 16 }}
+      >
+        <div className="row" style={{ gap: 10 }}>
+          <IOUMark size={28} />
+          <h1 style={{ margin: 0 }}>Settings</h1>
+        </div>
+        <button className="secondary" onClick={() => void signOut()}>
+          Sign out
+        </button>
+      </div>
+
+      <Link to="/pairs" className="muted">
+        ← Accounts
       </Link>
-      <h1>Settings</h1>
 
       <div className="card">
         <h2>Username</h2>
@@ -106,6 +131,21 @@ export function SettingsPage() {
             </option>
           ))}
         </select>
+      </div>
+
+      <div className="card">
+        <h3>You are signed in</h3>
+        <p
+          className="muted"
+          style={{ wordBreak: "break-all", fontFamily: "monospace" }}
+        >
+          {state.principal}
+        </p>
+        <div className="cta-row" style={{ marginTop: 12 }}>
+          <Link to="/settings/recovery-key">
+            <button className="secondary">Recovery key (optional)</button>
+          </Link>
+        </div>
       </div>
 
       <RelaySettings />
