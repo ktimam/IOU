@@ -12,9 +12,8 @@ import { test, expect } from "@playwright/test";
 import {
   signInDev,
   createAccount,
-  readInviteFromSheet,
-  joinAccount,
-  grantPartnerAccess,
+  inviteLinkFromSheet,
+  acceptInvite,
   openSheet,
   addEntry,
   balancesText,
@@ -34,15 +33,14 @@ test("username eager-publishes to an existing account · close & start carries b
   await signInDev(manager);
   await setUsername(owner, "owner"); // owner names himself up front (0 pairs yet)
 
-  // ── Shared account: owner creates "Owner & Manager", manager joins, owner grants key ──
+  // ── Shared account: owner creates "Owner & Manager", manager accepts the invite link ──
   const sheet1 = await createAccount(owner, "Owner & Manager", "August 2026");
-  const { code } = await readInviteFromSheet(owner);
-  await joinAccount(manager, code);
-  await grantPartnerAccess(owner, "Owner & Manager");
+  const link = await inviteLinkFromSheet(owner);
+  await acceptInvite(manager, link); // manager is IN immediately — no owner grant step
 
-  // Manager (still UNNAMED) posts rent the owner is owed. Opening + adding requires key
-  // access, which the grant above provided. The manager JOINED, so their card isn't
-  // labeled with the owner-set account name — open their sole account with no filter.
+  // Manager (still UNNAMED) posts rent the owner is owed. Accepting the invite already gave
+  // the manager key access. The manager JOINED, so their card isn't labeled with the
+  // owner-set account name — open their sole account with no filter.
   await openSheet(manager);
   await addEntry(manager, {
     currency: "EGP",

@@ -281,6 +281,65 @@ export async function unwrapSheetKey(
   return new Uint8Array(pt);
 }
 
+// ─────────────── tagged cross-wrap (self-describing sender) ───────────────
+//
+// A plain wrap ([IV|ct], wrapSheetKey) can only be unwrapped by a reader who already
+// knows the SENDER's public key. For a self-wrap that's fine (reader == sender). But
+// a CROSS-wrap — the creator sealing a sheet slot for the OTHER member — is read by
+// someone who must resolve who the sender was, and that breaks once the sender leaves
+// the pair and their member slot is anonymized (or rotates their key). A TAGGED wrap
+// embeds the sender's raw public key in the blob: [MAGIC|pubLen|senderPubRaw|IV|ct].
+// The reader can then always cross-unwrap it without any external lookup — it survives
+// the sender leaving and pins the exact key used at seal time. Self-wraps stay plain,
+// so the read path tries self-unwrap first and only parses the tag on failure.
+
+const CROSS_WRAP_MAGIC = 0x01;
+
+/** Cross-wrap K_sheet for `recipientPublicKey`, embedding the sender's raw public key
+ *  (`senderPublicKeyB64`, as returned by deriveUserKeypair) so the recipient can unwrap
+ *  it without knowing who the sender was. We take the b64 (not the CryptoKey) because a
+ *  keypair loaded from storage imports its public key as non-extractable. */
+export async function wrapSheetKeyTagged(
+  K_sheet: Uint8Array,
+  recipientPublicKey: CryptoKey,
+  senderPrivateKey: CryptoKey,
+  senderPublicKeyB64: string,
+  info: Uint8Array = new TextEncoder().encode(VETKD_CONTEXT),
+): Promise<Uint8Array> {
+  const body = await wrapSheetKey(K_sheet, recipientPublicKey, senderPrivateKey, info);
+  const senderRaw = b64ToBytes(senderPublicKeyB64);
+  if (senderRaw.length === 0 || senderRaw.length > 255) {
+    throw new Error("sender pubkey length out of range to tag");
+  }
+  return concatBytes(
+    new Uint8Array([CROSS_WRAP_MAGIC, senderRaw.length]),
+    senderRaw,
+    body,
+  );
+}
+
+/** If `blob` is a tagged cross-wrap, unwrap it with the recipient's private key + the
+ *  EMBEDDED sender pubkey. Returns null if `blob` is not a tagged cross-wrap (the
+ *  caller should fall back to / have already tried self-unwrap). */
+export async function unwrapTaggedSheetKey(
+  blob: Uint8Array,
+  recipientPrivateKey: CryptoKey,
+  info: Uint8Array = new TextEncoder().encode(VETKD_CONTEXT),
+): Promise<Uint8Array | null> {
+  if (blob.length < 2 || blob[0] !== CROSS_WRAP_MAGIC) return null;
+  const len = blob[1];
+  if (blob.length < 2 + len + 12 + 16) return null;
+  const senderRaw = blob.subarray(2, 2 + len);
+  const body = blob.subarray(2 + len);
+  let senderPublicKey: CryptoKey;
+  try {
+    senderPublicKey = await importPublicKeyRaw(senderRaw);
+  } catch {
+    return null;
+  }
+  return unwrapSheetKey(body, recipientPrivateKey, senderPublicKey, info);
+}
+
 // ─────────────── entry-level encryption ───────────────
 //
 // Each entry is encrypted with a per-entry AES key, derived as

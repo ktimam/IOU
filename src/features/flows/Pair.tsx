@@ -2,30 +2,33 @@ import { useEffect, useState } from "react";
 import { Link, useNavigate, useParams } from "react-router-dom";
 import { useAuth } from "../auth/AuthProvider";
 import { useActor, unwrap } from "./useActor";
-import { useMyKeypair } from "./useMyKeypair";
 import { useSheetKey } from "./SheetKeyContext";
-import { grantPartnerAccess } from "./grantPartnerAccess";
 import { usePreferences } from "../settings/usePreferences";
+import { useToasts } from "../ui/Toasts";
 import { encryptName } from "../crypto/devVetkd";
+
+const ANON = "2vxsx-fae";
 
 export function Pair() {
   const { pairId } = useParams<{ pairId: string }>();
   const { state } = useAuth();
   const { actor } = useActor();
-  const { keypair: myKp } = useMyKeypair();
-  const { registerPartnerKey, unwrapFor } = useSheetKey();
+  const { unwrapFor } = useSheetKey();
   const { prefs, cacheAccountName } = usePreferences();
+  const toasts = useToasts();
   const nav = useNavigate();
   const [pair, setPair] = useState<any | null>(null);
   const [activeSheetId, setActiveSheetId] = useState<string | null>(null);
   const [archivedCount, setArchivedCount] = useState<number>(0);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
-  const [grantBusy, setGrantBusy] = useState(false);
-  const [grantMsg, setGrantMsg] = useState<string | null>(null);
   const [renaming, setRenaming] = useState(false);
   const [nameDraft, setNameDraft] = useState("");
   const [renameBusy, setRenameBusy] = useState(false);
+  // Lifecycle confirmations (leave / archive / delete).
+  const [confirm, setConfirm] = useState<null | "leave" | "delete">(null);
+  const [actionBusy, setActionBusy] = useState(false);
+  const [deleteText, setDeleteText] = useState("");
 
   useEffect(() => {
     // Redirect only when DEFINITIVELY anonymous — never during "loading" (avoids the refresh /
@@ -44,51 +47,10 @@ export function Pair() {
           setPair(null);
         } else {
           setPair(p);
-          // Find the active sheet for this pair (if any).
+          // Find the active sheet + archived count for this pair (if any).
           const summaries = await actor.get_my_pairs();
           const sum = (summaries as any[]).find((s) => s.id === pairId);
-          const sid = sum ? unwrap(sum.active_sheet_id) : null;
-          setActiveSheetId(sid);
-          // Publish my wrap pubkey on-canister so the other member can fetch
-          // it (used to grant / to read a granted sheet).
-          if (myKp) {
-            try {
-              await actor.register_sheet_pubkey(
-                Array.from(new TextEncoder().encode(myKp.publicKeyB64)),
-              );
-            } catch {
-              /* non-fatal */
-            }
-          }
-          // Cache the wrap-sender for the active sheet. The creator (member_a)
-          // self-wrapped it; a granted partner (member_b) must use the
-          // creator's attested key as the wrap-sender.
-          const meText =
-            state.kind === "authenticated"
-              ? state.identity.getPrincipal().toText()
-              : "";
-          const creator = p.members?.[0];
-          const creatorText =
-            creator && typeof creator.toText === "function"
-              ? creator.toText()
-              : String(creator ?? "");
-          if (sid) {
-            if (meText === creatorText && myKp) {
-              registerPartnerKey(sid, myKp.publicKeyB64);
-            } else if (meText !== creatorText) {
-              try {
-                const raw = unwrap(await actor.get_sheet_pubkey(creator));
-                if (raw) {
-                  registerPartnerKey(
-                    sid,
-                    new TextDecoder().decode(new Uint8Array(raw as number[])),
-                  );
-                }
-              } catch {
-                /* partner key not published yet */
-              }
-            }
-          }
+          setActiveSheetId(sum ? unwrap(sum.active_sheet_id) : null);
           setArchivedCount(Number(sum?.archived_sheet_count ?? 0));
         }
       } catch (e) {
@@ -98,7 +60,7 @@ export function Pair() {
       }
     })();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [actor, state, nav, pairId, myKp?.publicKeyB64]);
+  }, [actor, state, nav, pairId]);
 
   if (loading) return <p className="muted">Loading…</p>;
   if (error) {
@@ -111,56 +73,15 @@ export function Pair() {
   }
   if (!pair) return <p className="muted">No pair.</p>;
 
-  // A pair is only "active" once a second member has joined. Until then
-  // members[1] is the anonymous principal (2vxsx-fae) and the backend
-  // rejects create_sheet ("pair is not active"). Detect it so we offer the
-  // invite flow instead of a button that traps.
-  const ANON = "2vxsx-fae";
+  // A pair is only "shared" once a second member has joined. Until then
+  // members[1] is the anonymous principal (2vxsx-fae).
   const partner = pair.members?.[1];
   const partnerText =
     partner && typeof partner.toText === "function"
       ? partner.toText()
       : String(partner ?? "");
-  const pairActive = partnerText !== "" && partnerText !== ANON;
-  const meText =
-    state.kind === "authenticated"
-      ? state.identity.getPrincipal().toText()
-      : "";
-  const creatorText =
-    pair.members?.[0] && typeof pair.members[0].toText === "function"
-      ? pair.members[0].toText()
-      : String(pair.members?.[0] ?? "");
-  const iAmCreator = meText !== "" && meText === creatorText;
-
-  async function doGrant() {
-    if (!actor || !activeSheetId || state.kind !== "authenticated") return;
-    setGrantBusy(true);
-    setGrantMsg(null);
-    try {
-      const n = await grantPartnerAccess({
-        actor,
-        identity: state.identity,
-        pairId: pairId ?? "",
-        partnerPrincipalText: partnerText,
-        activeSheetId,
-        getKSheet: (s) => unwrapFor(s),
-      });
-      setGrantMsg(
-        n > 0
-          ? "Done — your partner now has access to this sheet."
-          : "Nothing to grant.",
-      );
-    } catch (e) {
-      const m = (e as Error).message;
-      setGrantMsg(
-        m.includes("already has a partner")
-          ? "Your partner already has access to this sheet."
-          : m,
-      );
-    } finally {
-      setGrantBusy(false);
-    }
-  }
+  const hasPartner = partnerText !== "" && partnerText !== ANON;
+  const isArchived = unwrap(pair.archived_at) != null;
 
   async function saveAccountName() {
     if (!actor || !activeSheetId || !pairId) return;
@@ -176,6 +97,54 @@ export function Pair() {
       setError((e as Error).message);
     } finally {
       setRenameBusy(false);
+    }
+  }
+
+  async function doArchive(archived: boolean) {
+    if (!actor || !pairId) return;
+    setActionBusy(true);
+    try {
+      await (actor as any)[archived ? "archive_pair" : "unarchive_pair"](pairId);
+      toasts.show({
+        kind: "success",
+        text: archived ? "Account archived" : "Account unarchived",
+      });
+      if (archived) nav("/pairs", { replace: true });
+      else setPair({ ...pair, archived_at: [] });
+    } catch (e) {
+      toasts.show({ kind: "error", text: (e as Error).message });
+    } finally {
+      setActionBusy(false);
+    }
+  }
+
+  async function doLeave() {
+    if (!actor || !pairId) return;
+    setActionBusy(true);
+    try {
+      await (actor as any).leave_pair(pairId);
+      toasts.show({ kind: "success", text: "You left the account" });
+      nav("/pairs", { replace: true });
+    } catch (e) {
+      toasts.show({ kind: "error", text: (e as Error).message });
+    } finally {
+      setActionBusy(false);
+      setConfirm(null);
+    }
+  }
+
+  async function doDelete() {
+    if (!actor || !pairId) return;
+    setActionBusy(true);
+    try {
+      await (actor as any).delete_pair(pairId);
+      toasts.show({ kind: "success", text: "Account deleted permanently" });
+      nav("/pairs", { replace: true });
+    } catch (e) {
+      toasts.show({ kind: "error", text: (e as Error).message });
+    } finally {
+      setActionBusy(false);
+      setConfirm(null);
     }
   }
 
@@ -214,6 +183,7 @@ export function Pair() {
       ) : (
         <div className="row" style={{ gap: 8, alignItems: "center" }}>
           <h1 style={{ margin: 0 }}>{accountName}</h1>
+          {isArchived && <span className="pill muted">📦 Archived</span>}
           {activeSheetId && (
             <button
               className="secondary small"
@@ -227,13 +197,11 @@ export function Pair() {
           )}
         </div>
       )}
-      <div className="card">
-        <p className="muted">Invite code</p>
-        <h2>{pair.invite_code}</h2>
-        <p className="muted" style={{ fontSize: "0.875rem" }}>
-          Created {new Date(Number(pair.created_at) / 1_000_000).toLocaleString()}
-        </p>
-      </div>
+      <p className="muted" style={{ fontSize: "0.875rem" }}>
+        Created {new Date(Number(pair.created_at) / 1_000_000).toLocaleString()}
+        {hasPartner ? " · 2 members" : " · solo"}
+      </p>
+
       {activeSheetId ? (
         <div className="cta">
           <Link to={`/sheet/${activeSheetId}`}>
@@ -247,35 +215,13 @@ export function Pair() {
               <button>+ New sheet</button>
             </Link>
           </div>
-          {!pairActive && (
-            <p className="muted" style={{ marginTop: 8 }}>
-              Solo mode — start sheets now and invite a partner anytime with
-              the invite code above. When they join you can grant them access
-              to everything.
-            </p>
-          )}
-        </div>
-      )}
-      {pairActive && activeSheetId && iAmCreator && (
-        <div className="card">
-          <p className="muted" style={{ fontSize: "0.875rem" }}>
-            Your partner has joined. Grant them access to the current sheet —
-            they'll be able to read its full history.
+          <p className="muted" style={{ marginTop: 8 }}>
+            Start a sheet, then invite a partner from the sheet itself — they'll
+            join instantly from your invite link.
           </p>
-          <button
-            className="secondary"
-            disabled={grantBusy}
-            onClick={() => void doGrant()}
-          >
-            {grantBusy ? "Granting…" : "Grant partner access"}
-          </button>
-          {grantMsg && (
-            <p className="muted" style={{ marginTop: 8 }}>
-              {grantMsg}
-            </p>
-          )}
         </div>
       )}
+
       {archivedCount > 0 && (
         <p className="muted" style={{ marginTop: 8 }}>
           <Link to={`/pair/${pairId}/archived`}>
@@ -284,20 +230,135 @@ export function Pair() {
           </Link>
         </p>
       )}
-      <div className="card small">
-        <p className="muted">Your public key (share with partner if needed)</p>
-        <code style={{ wordBreak: "break-all", fontSize: "0.75rem" }}>
-          {myKp?.publicKeyB64 ?? "(loading…)"}
-        </code>
+
+      {/* Account lifecycle controls. */}
+      <div className="cta-row" style={{ marginTop: 24 }}>
+        {isArchived ? (
+          <>
+            <button
+              className="secondary"
+              disabled={actionBusy}
+              onClick={() => void doArchive(false)}
+            >
+              Unarchive
+            </button>
+            {hasPartner && (
+              <button
+                className="secondary"
+                disabled={actionBusy}
+                onClick={() => setConfirm("leave")}
+              >
+                Leave
+              </button>
+            )}
+            {!hasPartner && (
+              <button
+                className="danger"
+                disabled={actionBusy}
+                onClick={() => {
+                  setDeleteText("");
+                  setConfirm("delete");
+                }}
+              >
+                Delete forever
+              </button>
+            )}
+          </>
+        ) : (
+          <>
+            {hasPartner && (
+              <button
+                className="secondary"
+                disabled={actionBusy}
+                onClick={() => setConfirm("leave")}
+              >
+                Leave
+              </button>
+            )}
+            <button
+              className="secondary"
+              disabled={actionBusy}
+              onClick={() => void doArchive(true)}
+            >
+              Archive
+            </button>
+          </>
+        )}
       </div>
-      <div className="cta-row">
-        <Link to={`/pair/${pairId}/replace`}>
-          <button className="secondary">Replace member (leaving)</button>
-        </Link>
-        <Link to={`/pair/${pairId}/accept-replace`}>
-          <button className="secondary">Accept replacement (staying)</button>
-        </Link>
-      </div>
+
+      {confirm === "leave" && (
+        <div className="modal-backdrop" onClick={() => setConfirm(null)}>
+          <div
+            className="modal"
+            onClick={(e) => e.stopPropagation()}
+            role="dialog"
+            aria-modal="true"
+          >
+            <h2>Leave this account?</h2>
+            <p className="muted">
+              You'll lose access to its sheets. The other member keeps
+              everything. This can't be undone (you'd need a fresh invite to
+              rejoin).
+            </p>
+            <div className="cta-row">
+              <button
+                className="secondary"
+                onClick={() => setConfirm(null)}
+                disabled={actionBusy}
+              >
+                Cancel
+              </button>
+              <button
+                className="danger"
+                onClick={() => void doLeave()}
+                disabled={actionBusy}
+              >
+                {actionBusy ? "Leaving…" : "Leave account"}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {confirm === "delete" && (
+        <div className="modal-backdrop" onClick={() => setConfirm(null)}>
+          <div
+            className="modal"
+            onClick={(e) => e.stopPropagation()}
+            role="dialog"
+            aria-modal="true"
+          >
+            <h2>Delete this account forever?</h2>
+            <p className="muted">
+              This permanently erases the account and every sheet, entry, and
+              record in it. It cannot be recovered. Type <b>DELETE</b> to
+              confirm.
+            </p>
+            <input
+              value={deleteText}
+              onChange={(e) => setDeleteText(e.target.value)}
+              placeholder="DELETE"
+              autoFocus
+            />
+            <div className="cta-row">
+              <button
+                className="secondary"
+                onClick={() => setConfirm(null)}
+                disabled={actionBusy}
+              >
+                Cancel
+              </button>
+              <button
+                className="danger"
+                onClick={() => void doDelete()}
+                disabled={actionBusy || deleteText.trim() !== "DELETE"}
+              >
+                {actionBusy ? "Deleting…" : "Delete forever"}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

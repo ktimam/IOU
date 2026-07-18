@@ -26,8 +26,7 @@ const SCHEME = "iou:";
  *   iou://pair/xyz            → /pair/xyz
  *   iou://pairs               → /pairs
  *   iou://settings            → /settings
- *   iou://join/ABCD-1234      → /pair/new?join=ABCD-1234
- *   iou://join?code=ABCD-1234 → /pair/new?join=ABCD-1234
+ *   iou://invite#c=ABCD-1234&s=<sheetId>&k=<key> → /pair/accept#c=…&s=…&k=…
  */
 export function deepLinkToPath(rawUrl: string): string | null {
   let url: URL;
@@ -60,11 +59,11 @@ export function deepLinkToPath(rawUrl: string): string | null {
       return "/settings";
     case "me":
       return "/me";
-    case "join": {
-      // code may be in the path (iou://join/CODE) or query (?code=CODE)
-      const code = rest || url.searchParams.get("code") || "";
-      const clean = code.trim().toUpperCase();
-      return clean ? `/pair/new?join=${encodeURIComponent(clean)}` : "/pair/new";
+    case "invite": {
+      // The invite secret rides in the URL fragment (#c=…&s=…&k=…), which the
+      // URL parser exposes as `url.hash` (leading "#"). Preserve it verbatim so
+      // AcceptInvitePage can read the code/sheet/key client-side.
+      return `/pair/accept${url.hash}`;
     }
     default:
       return null;

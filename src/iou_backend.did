@@ -51,6 +51,7 @@ type PairSummary = record {
     active_sheet_id : opt text;
     archived_sheet_count : nat32;
     created_at : nat64;
+    archived_at : opt nat64;        // v1.10.0: account-level archive flag
     name_enc : opt vec nat8;        // E2E-encrypted account name
     name_iv : opt vec nat8;
     other_name_enc : opt vec nat8;  // the other member's encrypted name
@@ -220,6 +221,13 @@ service : {
     // Phase 2
     create_pair : () -> (CreatePairResult);
     join_pair : (text) -> (text);
+    // v1.10.0: invite-link auto-join + account lifecycle
+    issue_invite : (text) -> (text);
+  accept_invite : (text, vec SheetRewrap, vec nat8) -> (Pair);
+    leave_pair : (text) -> (Pair);
+    archive_pair : (text) -> (Pair);
+    unarchive_pair : (text) -> (Pair);
+    delete_pair : (text) -> ();
     get_my_pairs : () -> (vec PairSummary) query;
     get_pair : (text) -> (opt Pair) query;
     create_sheet : (CreateSheetReq) -> (Sheet);

@@ -9,6 +9,7 @@ interface PairSummary {
   other_principal: any;
   active_sheet_id?: any;
   archived_sheet_count: number;
+  archived_at?: any; // opt nat64 — set when the whole account is archived
   created_at: bigint;
 }
 
@@ -55,6 +56,9 @@ export function Pairs() {
     })();
   }, [actor, state, nav]);
 
+  const active = (pairs ?? []).filter((p) => unwrap(p.archived_at) == null);
+  const archived = (pairs ?? []).filter((p) => unwrap(p.archived_at) != null);
+
   return (
     <div>
       <div
@@ -77,56 +81,70 @@ export function Pairs() {
           </p>
         </div>
       )}
-      {pairs && pairs.length > 0 && (
-        <div className="col">
-          {pairs.map((p) => {
-            const other = principalToText(p.other_principal);
-            const activeSheet = optToString(p.active_sheet_id);
-            const accountName = prefs.accountNames[p.id] || "";
-            const partnerName = prefs.partnerNames[p.id] || "";
-            // Account name if known; else partner's name; else principal.
-            const title = accountName || partnerName || `${other.slice(0, 12)}…`;
-            const subtitle = accountName
-              ? partnerName || other
-              : partnerName
-                ? other
-                : "";
-            // Opening an account jumps straight to its active sheet; if
-            // there's none yet (e.g. joiner awaiting access), open details.
-            const to = activeSheet ? `/sheet/${activeSheet}` : `/pair/${p.id}`;
-            return (
-              <Link
-                key={p.id}
-                to={to}
-                style={{ textDecoration: "none", color: "inherit" }}
-              >
-                <div className="card" style={{ cursor: "pointer" }}>
-                  <div className="row" style={{ justifyContent: "space-between" }}>
-                    <div>
-                      <h3>{title}</h3>
-                      {subtitle && (
-                        <p className="muted" style={{ fontSize: "0.875rem" }}>
-                          {subtitle}
-                        </p>
-                      )}
-                    </div>
-                    <div style={{ textAlign: "right" }}>
-                      <span className="muted">
-                        {activeSheet ? "Open →" : "No active sheet"}
-                      </span>
-                      {p.archived_sheet_count > 0 && (
-                        <p className="muted" style={{ fontSize: "0.875rem" }}>
-                          + {p.archived_sheet_count} archived
-                        </p>
-                      )}
-                    </div>
-                  </div>
-                </div>
-              </Link>
-            );
-          })}
-        </div>
+
+      {active.length > 0 && (
+        <div className="col">{active.map(renderCard)}</div>
+      )}
+
+      {archived.length > 0 && (
+        <>
+          <h2 style={{ marginTop: 32 }}>📦 Archived</h2>
+          <div className="col">{archived.map(renderCard)}</div>
+        </>
       )}
     </div>
   );
+
+  function renderCard(p: PairSummary) {
+    const other = principalToText(p.other_principal);
+    const activeSheet = optToString(p.active_sheet_id);
+    const accountName = prefs.accountNames[p.id] || "";
+    const partnerName = prefs.partnerNames[p.id] || "";
+    // Account name if known; else partner's name; else principal.
+    const title = accountName || partnerName || `${other.slice(0, 12)}…`;
+    const subtitle = accountName
+      ? partnerName || other
+      : partnerName
+        ? other
+        : "";
+    const isArchived = unwrap(p.archived_at) != null;
+    // Archived accounts always open the details page (Unarchive/Leave/Delete
+    // controls live there). Active accounts jump straight to their sheet.
+    const to =
+      !isArchived && activeSheet ? `/sheet/${activeSheet}` : `/pair/${p.id}`;
+    return (
+      <Link
+        key={p.id}
+        to={to}
+        style={{ textDecoration: "none", color: "inherit" }}
+      >
+        <div className="card" style={{ cursor: "pointer" }}>
+          <div className="row" style={{ justifyContent: "space-between" }}>
+            <div>
+              <h3>{title}</h3>
+              {subtitle && (
+                <p className="muted" style={{ fontSize: "0.875rem" }}>
+                  {subtitle}
+                </p>
+              )}
+            </div>
+            <div style={{ textAlign: "right" }}>
+              <span className="muted">
+                {isArchived
+                  ? "Manage →"
+                  : activeSheet
+                    ? "Open →"
+                    : "No active sheet"}
+              </span>
+              {p.archived_sheet_count > 0 && (
+                <p className="muted" style={{ fontSize: "0.875rem" }}>
+                  + {p.archived_sheet_count} archived
+                </p>
+              )}
+            </div>
+          </div>
+        </div>
+      </Link>
+    );
+  }
 }

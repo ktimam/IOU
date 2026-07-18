@@ -21,24 +21,24 @@ Layers 1–2 live in **this** repo and are green here. Layers 3–4 live in thei
 
 | Layer | Result |
 |---|---|
-| 1 — IOU unit | **262 pass / 29 files**, `tsc --noEmit` clean |
-| 2 — IOU E2E (live `:8080`) | **16 pass / 3 files** |
+| 1 — IOU unit | **264 pass / 29 files**, `tsc --noEmit` clean |
+| 2 — IOU E2E (live `:8080`) | **27 pass / 5 files** |
 | 2b — IOU UI E2E (Playwright) | **green** — `multiUser` (3 users · 3 sheets · cross-user mirror · chat links) + `openchat` (settings/consumer-key, chat link/unlink/isolation, ✨ Import) + `closeAndName` (global-username eager-publish to an existing account · close-&-start carries balance forward in the correct direction · persists across reload) |
-| 3a — TS facade (open-chat) | **25 pass / 2 files** (vitest, jsdom) |
+| 3a — TS facade (open-chat) | **25 pass / 2 files** (vitest, jsdom); + **38 pass** `aiAction.test.ts` (open-chat-cycle, incl. fan-out card fields) |
 | 3b — tauri-plugin-oc (Rust) | **7 hermetic pass** on the default build; real-model smoke gated |
-| 4 — OpenChat canisters | **16 pass** — compile-clean on Windows + run green under WSL pocket-ic (~95s) |
+| 4 — OpenChat canisters | **20 pass** — compile-clean on Windows + run green under WSL pocket-ic (~95s); incl. **fan-out delivery** (`fan_out_delivery_tests.rs`: partner-confirm deposits to BOTH members' buckets with cross-key isolation; repeated-key dedupe; `ai_app_user_keys` lookup scoping) |
 
 ---
 
 ## Running
 
 ```bash
-# Layer 1 — unit (deterministic, no replica). 262 tests across 29 files, ~2s.
+# Layer 1 — unit (deterministic, no replica). 264 tests across 29 files, ~2s.
 pnpm test            # (= pnpm exec vitest run) OR: pnpm test:unit
 pnpm exec tsc --noEmit   # type-check (must be clean)
 
 # Layer 2 — E2E against the LIVE local replica. Self-skips with a message if the replica is down.
-pnpm test:e2e        # (= vitest run --config vitest.e2e.config.ts). ~16 tests, ~45s (real round-trips).
+pnpm test:e2e        # (= vitest run --config vitest.e2e.config.ts). ~27 tests, ~130s (real round-trips).
 
 # Layer 2b — UI E2E: drives the REAL app in a browser (needs `pnpm dev` on :3000, reused if running).
 pnpm test:ui         # (= playwright test). Multiple users/sheets/chats via the UI, headless. ~55s.
@@ -84,7 +84,7 @@ wsl -d Ubuntu bash -lc 'source ~/.cargo/env; \
   export POCKET_IC_BIN=/mnt/c/Kiko/MyProjects/Blockchain/ICP/open-chat-cycle/backend/integration_tests/pocket-ic; \
   cd /mnt/c/Kiko/MyProjects/Blockchain/ICP/open-chat-cycle; \
   CARGO_TARGET_DIR=$HOME/oc-linux-target cargo test --package integration_tests -- \
-    ai_app_ per_user_key_isolation two_phase_confirm_idempotency --test-threads 4'
+    ai_app_ per_user_key_isolation two_phase_confirm_idempotency fan_out_ action_card_inbox_routing --test-threads 4'
 ```
 
 ---
@@ -112,8 +112,8 @@ wsl -d Ubuntu bash -lc 'source ~/.cargo/env; \
 | `consumerKeypair`/crypto ECIES producer (shared test kit) | `openchat/ecTestKit.ts` | builds real signed+encrypted inbox envelopes matching the Rust wire format (used by crypto + poll specs) |
 | `devVetkd.ts` / `prodVetkd.ts` | `crypto/devVetkd.test.ts`, `crypto/prod-path.test.ts` | sheet-key wrap/unwrap self-ECDH, name enc/dec (wrong key → ""); prod adapter gated off by default; transport key sizes |
 | `mnemonic.ts` | `recovery/mnemonic.test.ts` | BIP-39 24-word gen/validate, deterministic seed |
-| `replaceMember.ts` | `replaceMember/replaceMember.test.ts` | Ed25519 canonical bytes, sign/verify, tamper reject, QR round-trip |
-| `deepLink.ts` | `deeplinks/deepLink.test.ts` | host allowlist → route, join-code, encode, reject unknown/bad |
+| `inviteLink.ts` — invite-link build/parse + dev self-wrap | `flows/inviteLink.test.ts` | round-trips `code`+`sheetId`+`K_sheet` through the URL **fragment** (never sent to a server); omits the key for prod-style links; rejects a fragment missing `c`/`s`; strips trailing slash; url-safe base64; **dev accept-flow crypto** — the joiner self-wraps `K` from the link under their own key and it unwraps back to `K` (wrong key rejects) |
+| `deepLink.ts` | `deeplinks/deepLink.test.ts` | host allowlist → route, **`invite` → `/pair/accept` preserving the fragment**, encode, reject unknown/bad |
 | `csvExport.ts` | `entries/csvExport.test.ts` | header, net+gross+fee, cross-cell escaping, convert cells |
 
 ### Layer 2 — E2E, consumer perspective (this repo, `test/e2e/`)
@@ -122,6 +122,8 @@ wsl -d Ubuntu bash -lc 'source ~/.cargo/env; \
 |---|---|---|
 | Env gate | `env.ts` | reads ids from `.env.local` + `canister_ids.json`; reachability; `describeE2E` skips cleanly when down |
 | IOU backend, two users | `iouBackend.e2e.test.ts` | pair→join→shared sheet; **A encrypts an entry, B unwraps the shared K_sheet and decrypts it** (E2E encryption); cross-currency fee → correct balance; **consumer keypair is caller-keyed + deletable in isolation** (+ canister guards: PEM/iv validation); chat→sheet links caller-scoped + loss-free round-trip; template blob round-trip; **import loop** (decrypted draft → parseDraft → encrypt → add_entry → lands in the linked sheet, draft_id survives) |
+| Invite-link auto-join + lifecycle | `inviteLifecycle.e2e.test.ts` | **`accept_invite`: the invitee self-joins AND seals K_sheet to itself in one message — NO creator grant** (reads its wrapped copy, recovers the same K); the invite is **single-use** (2nd accept rejected); both members read/write; **`delete_pair` guards** (refused while 2 members, refused until archived); **`archive_pair`/`unarchive_pair`** flip `archived_at` (visible in `get_my_pairs`); **`leave_pair`** — the partner leaves → locked out, the creator retains the account solo; **`delete_pair`** erases a solo, archived account (pair + sheets gone) |
+| Invite reissue + re-seal (stale-invite fix) | `inviteReissue.e2e.test.ts` | reproduces the **"invalid or already-consumed invite code"** trap and proves the repairs: **`issue_invite` mints a FRESH code and retires the previous one** (the stored `pair.invite_code` goes stale on consume); **re-invite after a partner LEAVES** works (old code was consumed on join); a **legacy "joined but not granted" pair self-heals** — an already-member caller re-accepts a fresh link and gets their sheet key sealed (fixes "no wrapped key"); a **stranger still can't take a filled slot** even with a fresh code |
 | Registry | `registry.e2e.test.ts` + `registryIdl.ts` | live `iou` inbox read-back (non-destructive); throwaway app **register/upsert/read-back/explore/delete**; claim bad code → CodeNotFound; **revoke unpaired key → KeyNotFound after on-chain proof-of-possession verify**; **per-caller throttle** after repeated failed claims |
 | Action inbox | `actionInbox.e2e.test.ts` | `openchat_public_key` PEM; `actions(fingerprint, since_id)` empty for a fresh key (exact-match, no error on miss); `pollActionInbox` full verify+decrypt path; two fingerprints isolated |
 
@@ -133,16 +135,17 @@ inbox query + decrypt path, and the IOU import into the linked sheet.
 
 ### Layer 2b — UI E2E (this repo, `test/ui/`, Playwright)
 
-Drives the real app in a browser with **three distinct users** (isolated browser contexts = distinct
-dev identities via the `Sign in (dev)` button). Shared flow helpers (`flows.ts`) navigate bounce-safely
+Drives the real app in a browser with **up to three distinct users** (isolated browser contexts =
+distinct dev identities via the `Sign in (dev)` button). Shared flow helpers (`flows.ts`) navigate bounce-safely
 (guarded pages redirect during auth-loading, so all navigation lands on `/pairs` and reaches deep pages
 via in-app clicks).
 
 | Test | Proves (real clicks against the live app) |
 |---|---|
-| `multiUser.ui.spec.ts` | 3 users sign in; **3 pairs/sheets** created + joined (Alice↔Bob, Alice↔Carol, Bob↔Carol; each user in 2); entries added through the real `EntryForm` (settlement + IOU, multiple currencies); the creator's balance reflects them; **cross-user shared view** — a granted partner opens the SAME sheet and decrypts the same net, and sees the **per-viewer mirror** (Alice "…owes you", Bob "you owe…" — fix #2); a fresh **deep-link/refresh** of a guarded page renders instead of bouncing (fix #1); **2 chat→sheet links** |
+| `multiUser.ui.spec.ts` | 3 users sign in; **3 pairs/sheets** created + partner joins via **invite LINK → Accept (no grant step)** (Alice↔Bob, Alice↔Carol, Bob↔Carol; each user in 2); entries added through the real `EntryForm` (settlement + IOU, multiple currencies); the creator's balance reflects them; **cross-user shared view** — the accepted partner opens the SAME sheet and decrypts the same net, and sees the **per-viewer mirror** (Alice "…owes you", Bob "you owe…" — fix #2); a fresh **deep-link/refresh** of a guarded page renders instead of bouncing (fix #1); **2 chat→sheet links** |
+| `membership.ui.spec.ts` | The v1.10.0 membership lifecycle end-to-end (2 users): the creator hits **🔗 Invite** on the sheet, the invitee opens the LINK and clicks **Accept** → lands on the SAME shared sheet **immediately, no grant**; both read/write (invitee writes, creator decrypts); **Archive** moves the account to the "📦 Archived" section, **Unarchive** brings it back; the partner **Leaves** → is locked out while the creator keeps the account solo; the creator **Archives** then **Deletes forever** (typed `DELETE` confirm) the solo account → it's gone |
 | `openchat.ui.spec.ts` | The IOU-app side of the OpenChat confirmable-action feature, multi-user: the **action-inbox settings card** (per-user consumer key + distinct fingerprints, auto-derived inbox `<id> @ <host>`, connect-code validation incl. a live-`user_index` `CodeNotFound`); **chat→sheet link / (current) / unlink / per-user isolation**; and the **✨ Import** chat-draft flow (paste JSON → parseDraft → EntryForm → written). SAFE-BY-DESIGN: never clicks "Link to OpenChat" (that upsert would clobber the shared live "iou" registration — the full loop is the api-e2e + Rust integration tests) |
-| `flows.ts` | reusable actions: dev sign-in, create/join account, read invite code, grant partner access, open sheet, add entry, link/unlink chat, import draft, open settings, read consumer fingerprint, connect-with-code, read balances |
+| `flows.ts` | reusable actions: dev sign-in, create account, **read the sheet's invite link**, **accept an invite link**, **leave / archive / unarchive / delete** an account, open sheet, add entry, link/unlink chat, import draft, open settings, read consumer fingerprint, connect-with-code, read balances |
 
 `scripts/ui-multiuser-demo.ts` (`pnpm ui:demo`) reuses the same flows to open **one persistent Chromium
 window per user** (Alice/Bob/Carol), gives each their own accounts/sheets/entries (+ Alice's chat

@@ -114,6 +114,13 @@ function asBytes(v: number[] | Uint8Array): Uint8Array {
 /**
  * Poll the inbox once. Returns decrypted, provenance-verified drafts with `id > sinceId`. Envelopes that fail
  * signature verification or decryption (e.g. not addressed to us) are dropped silently.
+ *
+ * Shared-account visibility note (v1.11.0): each member polls with ONLY their own
+ * key. Both members see a draft because OpenChat FANS OUT each confirmed action —
+ * one envelope per chat member with a registered key — at deposit time (delivery-
+ * side change in the OpenChat fork). Never poll with another member's key: sharing
+ * the user-global consumer key was reviewed and rejected (it leaks the sharer's
+ * OTHER accounts' drafts to a co-member).
  */
 export async function pollActionInbox(opts: {
   config: ActionInboxConfig;

@@ -104,6 +104,9 @@ pub struct PairSummary {
     pub active_sheet_id: Option<String>,
     pub archived_sheet_count: Nat32_,
     pub created_at: u64,
+    // v1.10.0: account-level archive flag (set by archive_pair) so the accounts
+    // list can split active vs archived. None = active.
+    pub archived_at: Option<u64>,
     // v1.5.0: encrypted account name + the OTHER member's encrypted name
     // (resolved server-side relative to the caller) so the accounts list
     // can show names once K_sheet is cached.
@@ -325,10 +328,16 @@ impl Storable for RecoveryKey {
 //     chat_link_key(). Caller-keyed; chat_key is the opaque OpenChat
 //     context.chat string; sheet_id is the 16-hex-char sheet id
 //     encoded as a u64.
+//   MemoryId 20:    (was ACCOUNT_INBOX_KEYS for ~1 day during v1.11.0
+//                development, never released; orphaned. The shared-inbox
+//                review feature was REDESIGNED to OpenChat-side fan-out
+//                delivery after an adversarial review showed wrapping the
+//                user-global consumer key under K_sheet leaks a member's
+//                OTHER accounts' drafts to a co-member.)
 //
 //   DO NOT re-use these orphaned MemoryIds for a new structure
 //   with a different key/value type — see issue #7. If you need
-//   a new region, use the next free number (currently 20+).
+//   a new region, use the next free number (currently 21+).
 
 // v1.5.0 (schema v3 -> v4): added optional encrypted name fields to Pair,
 // Sheet, PairSummary, CreateSheetReq.
@@ -767,6 +776,13 @@ fn inspect_message() {
         "join_pair",
         "get_my_pairs",
         "get_pair",
+        // v1.10.0: invite-link auto-join + account lifecycle
+        "issue_invite",
+        "accept_invite",
+        "leave_pair",
+        "archive_pair",
+        "unarchive_pair",
+        "delete_pair",
         // Phase 3: sheet lifecycle
         "create_sheet",
         "get_sheet",
@@ -828,6 +844,12 @@ fn inspect_message() {
         "set_creator_principal",
         "create_pair",
         "join_pair",
+        "issue_invite",
+        "accept_invite",
+        "leave_pair",
+        "archive_pair",
+        "unarchive_pair",
+        "delete_pair",
         "create_sheet",
         "add_currency",
         "close_sheet",
@@ -1133,6 +1155,7 @@ fn get_my_pairs() -> Vec<PairSummary> {
                     active_sheet_id: active_sheet,
                     archived_sheet_count: archived,
                     created_at: pair.created_at,
+                    archived_at: pair.archived_at,
                     name_enc: pair.name_enc.clone(),
                     name_iv: pair.name_iv.clone(),
                     other_name_enc,
@@ -2319,6 +2342,310 @@ fn grant_partner_access(
         }
     }
     count
+}
+
+// ───────────────────── v1.10.0: invite-link auto-join + account lifecycle ─────────────────────
+
+/// issue_invite: mint a FRESH, single-use invite code for a pair and return it.
+///
+/// WHY: the previous design reused `pair.invite_code`, but that stored string goes
+/// STALE the moment the first invitee accepts (accept_invite/join_pair remove the
+/// code from the INVITES map but never clear the field) — and it is never re-minted
+/// when the second slot frees up again (leave_pair). So a link built from the stored
+/// code hit "invalid or already-consumed invite code". Minting a fresh code on every
+/// invite-modal open guarantees the shareable link always carries a LIVE code, and
+/// invalidates any older link (single-use hygiene).
+///
+/// Any member may call it. Allowed whether the second slot is open (invite a NEW
+/// partner) or already filled (re-share the key to the EXISTING, ungranted partner —
+/// see accept_invite's re-seal path); a stranger with the code still can't take a
+/// filled slot (accept_invite rejects that).
+#[ic_cdk::update]
+async fn issue_invite(pair_id: String) -> String {
+    require_authed();
+    let caller = ic_cdk::api::msg_caller();
+    {
+        let pair = match PAIRS.with(|p| p.borrow().get(&pair_id).clone()) {
+            Some(p) => p,
+            None => ic_cdk::trap("pair not found"),
+        };
+        if !is_member_of(&pair, caller) {
+            ic_cdk::trap("not a member of this pair");
+        }
+        if pair.archived_at.is_some() {
+            ic_cdk::trap("pair is archived");
+        }
+    }
+    // Mint the code (async raw_rand) BEFORE touching any map — never await across a borrow.
+    let code = gen_invite_code().await;
+    PAIRS.with(|p| {
+        let mut map = p.borrow_mut();
+        let mut pair = match map.remove(&pair_id) {
+            Some(x) => x,
+            None => ic_cdk::trap("pair not found"),
+        };
+        if !is_member_of(&pair, caller) {
+            map.insert(pair_id.clone(), pair);
+            ic_cdk::trap("not a member of this pair");
+        }
+        // Swap in the fresh code and drop the previous one from INVITES so at most one
+        // live code exists per pair.
+        let old = std::mem::replace(&mut pair.invite_code, code.clone());
+        map.insert(pair_id.clone(), pair);
+        INVITES.with(|i| {
+            let mut inv = i.borrow_mut();
+            if !old.is_empty() {
+                inv.remove(&old);
+            }
+            inv.insert(code.clone(), pair_id.clone());
+        });
+    });
+    code
+}
+
+/// accept_invite: the pull-model self-join that REPLACES `join_pair` + the
+/// creator's manual `grant_partner_access`. The invitee (holder of a valid
+/// invite code) joins the pair AND seals K_sheet to themselves in ONE
+/// authorized message — no creator involvement.
+///
+/// Authorization is by **possession of the (single-use) invite code**, not
+/// creator identity: this is the bearer-capability model that makes invite
+/// LINKS work (the link carries the code + — in dev — K_sheet in its fragment,
+/// so the invitee can produce `rewraps` client-side). Prod (vetkd) passes empty
+/// `rewraps` and works purely by flipping `member_b`.
+///
+/// Two accept modes, chosen by caller identity:
+///   - NEW JOIN — the open slot (`members[1] == anonymous`) is claimed by the
+///     caller (must not be the creator).
+///   - RE-SEAL  — the caller is ALREADY `members[1]` but a sheet key was never
+///     sealed to them (a legacy "joined but not granted" pair, or an access
+///     re-share). Membership is unchanged; we just (re)seal their `wrapped_key_b`.
+///
+/// Guards (all validated before any write — atomic, single sync message):
+///   - caller authed; `pubkey` a plausible P-256 wrap key;
+///   - invite resolves to a pair; pair not archived;
+///   - new-join only: `members[1] == anonymous` and `caller != members[0]`;
+///   - each rewrap sheet belongs to the pair, is Active, and its `member_b` is
+///     either anonymous (solo) or already the caller (idempotent re-seal) — a
+///     sheet sealed to a DIFFERENT partner is never overwritten.
+#[ic_cdk::update]
+fn accept_invite(invite_code: String, rewraps: Vec<SheetRewrap>, pubkey: Vec<u8>) -> Pair {
+    require_authed();
+    let caller = ic_cdk::api::msg_caller();
+    if pubkey.is_empty() || pubkey.len() > 256 {
+        ic_cdk::trap("pubkey length out of range");
+    }
+    let pair_id = match INVITES.with(|i| i.borrow().get(&invite_code).clone()) {
+        Some(p) => p,
+        None => ic_cdk::trap("invalid or already-consumed invite code"),
+    };
+    let pair = match PAIRS.with(|p| p.borrow().get(&pair_id).clone()) {
+        Some(p) => p,
+        None => ic_cdk::trap("pair not found"),
+    };
+    if pair.archived_at.is_some() {
+        ic_cdk::trap("pair is archived");
+    }
+    // The caller is either claiming the open slot (new join) or is already the
+    // partner and only needs their key (re)sealed.
+    let is_reseal = pair.members[1] == caller;
+    if !is_reseal {
+        if pair.members[1] != Principal::anonymous() {
+            ic_cdk::trap("this account already has a partner");
+        }
+        if pair.members[0] == caller {
+            ic_cdk::trap("creator cannot accept their own invite");
+        }
+    }
+    // Validate the whole batch before mutating (atomic).
+    let mut validated: Vec<(String, Vec<u8>)> = Vec::with_capacity(rewraps.len());
+    SHEETS.with(|s| {
+        let map = s.borrow();
+        for rw in &rewraps {
+            let sheet = match map.get(&rw.sheet_id) {
+                Some(sh) => sh,
+                None => ic_cdk::trap("sheet not found"),
+            };
+            if sheet.pair_id != pair_id {
+                ic_cdk::trap("sheet does not belong to this pair");
+            }
+            // Solo (anonymous) for a new join, or already ours for an idempotent re-seal.
+            // Never overwrite a key sealed to a different partner.
+            if sheet.member_b != Principal::anonymous() && sheet.member_b != caller {
+                ic_cdk::trap("sheet already has a different partner");
+            }
+            if !matches!(sheet.state, SheetState::Active) {
+                ic_cdk::trap("cannot join a closed sheet");
+            }
+            validated.push((rw.sheet_id.clone(), rw.wrapped_key_for_partner.clone()));
+        }
+    });
+    // Mutate: claim the slot (new join only, re-checked under the lock), store pubkey,
+    // seal each sheet, consume the invite.
+    let updated = PAIRS.with(|p| {
+        let mut map = p.borrow_mut();
+        let mut pair = match map.remove(&pair_id) {
+            Some(p) => p,
+            None => ic_cdk::trap("pair not found"),
+        };
+        if !is_reseal {
+            if pair.members[1] != Principal::anonymous() {
+                map.insert(pair_id.clone(), pair);
+                ic_cdk::trap("this account already has a partner");
+            }
+            pair.members[1] = caller;
+        }
+        map.insert(pair_id.clone(), pair.clone());
+        pair
+    });
+    PARTNER_PUBKEYS.with(|m| m.borrow_mut().insert(caller, pubkey));
+    for (sid, blob) in validated {
+        update_sheet_field(&sid, |sheet| {
+            sheet.member_b = caller;
+            sheet.wrapped_key_b = blob.clone();
+        });
+    }
+    INVITES.with(|i| i.borrow_mut().remove(&invite_code));
+    updated
+}
+
+/// leave_pair: the caller leaves a 2-member account; the other member becomes
+/// the sole member. Replaces the old replace-member flow for the "I want out"
+/// case. Only allowed when there are two REAL members (`members[1]` is not the
+/// anonymous placeholder) — a solo account is deleted, not left.
+///
+/// The leaver is removed from `pair.members` (if the creator leaves, the staying
+/// member is promoted into slot 0 so the owner invariant holds). On every sheet
+/// the leaver's member slot + wrapped key are cleared, revoking their key. When
+/// the creator (member_a) leaves, the staying member (member_b) is promoted to
+/// member_a and their wrapped key moves to `wrapped_key_a`.
+///
+/// NOTE (dev/P-256 only): a promoted member_a's key was ECDH-sealed under the
+/// departed creator's pubkey, so the pure-dev build can't re-derive it without
+/// a client re-key; in prod (vetkd) the IC re-derives K_sheet for any member, so
+/// the transfer is fully clean. The common case (member_b leaving) is clean in
+/// both builds. Tests exercise the member_b-leaving path.
+#[ic_cdk::update]
+fn leave_pair(pair_id: String) -> Pair {
+    require_authed();
+    let caller = ic_cdk::api::msg_caller();
+    let (updated, staying) = PAIRS.with(|p| {
+        let mut map = p.borrow_mut();
+        let mut pair = match map.remove(&pair_id) {
+            Some(x) => x,
+            None => ic_cdk::trap("pair not found"),
+        };
+        if !is_member_of(&pair, caller) {
+            map.insert(pair_id.clone(), pair);
+            ic_cdk::trap("not a member of this pair");
+        }
+        if pair.members[1] == Principal::anonymous() {
+            map.insert(pair_id.clone(), pair);
+            ic_cdk::trap("cannot leave a solo account; delete it instead");
+        }
+        let leaving_is_a = pair.members[0] == caller;
+        let staying = if leaving_is_a { pair.members[1] } else { pair.members[0] };
+        pair.members[0] = staying;
+        pair.members[1] = Principal::anonymous();
+        map.insert(pair_id.clone(), pair.clone());
+        (pair, staying)
+    });
+    // Rewrite every sheet: clear the leaver, promote the staying member if needed.
+    let sheet_ids: Vec<String> = SHEETS.with(|s| {
+        s.borrow()
+            .iter()
+            .filter_map(|(id, sh)| if sh.pair_id == pair_id { Some(id) } else { None })
+            .collect()
+    });
+    for sid in sheet_ids {
+        update_sheet_field(&sid, |sh| {
+            if sh.member_a == caller {
+                // Creator left: promote the staying member into slot A (moving key).
+                sh.member_a = staying;
+                sh.wrapped_key_a = std::mem::take(&mut sh.wrapped_key_b);
+                sh.member_b = Principal::anonymous();
+                sh.wrapped_key_b = Vec::new();
+            } else if sh.member_b == caller {
+                // Partner left: clear slot B, member_a keeps reading.
+                sh.member_b = Principal::anonymous();
+                sh.wrapped_key_b = Vec::new();
+            }
+        });
+    }
+    updated
+}
+
+/// archive_pair / unarchive_pair: any member flips the account's organizational
+/// `archived_at` flag. Archived accounts move to the "Archived" section of the
+/// accounts list but stay fully readable; any member can unarchive.
+#[ic_cdk::update]
+fn archive_pair(pair_id: String) -> Pair {
+    require_authed();
+    let caller = ic_cdk::api::msg_caller();
+    set_pair_archived(&pair_id, caller, true)
+}
+
+#[ic_cdk::update]
+fn unarchive_pair(pair_id: String) -> Pair {
+    require_authed();
+    let caller = ic_cdk::api::msg_caller();
+    set_pair_archived(&pair_id, caller, false)
+}
+
+fn set_pair_archived(pair_id: &str, caller: Principal, archived: bool) -> Pair {
+    PAIRS.with(|p| {
+        let mut map = p.borrow_mut();
+        let mut pair = match map.remove(&pair_id.to_string()) {
+            Some(x) => x,
+            None => ic_cdk::trap("pair not found"),
+        };
+        if !is_member_of(&pair, caller) {
+            map.insert(pair_id.to_string(), pair);
+            ic_cdk::trap("not a member of this pair");
+        }
+        pair.archived_at = if archived { Some(now_nanos()) } else { None };
+        map.insert(pair_id.to_string(), pair.clone());
+        pair
+    })
+}
+
+/// delete_pair: permanently removes a SINGLE-MEMBER, ARCHIVED account and all of
+/// its sheets/entries/counters/invite from stable memory. Restricted so there is
+/// never a partner's data at stake (`members[1] == anonymous`), and only after
+/// the account was archived (a deliberate two-step guard for an irreversible op).
+#[ic_cdk::update]
+fn delete_pair(pair_id: String) {
+    require_authed();
+    let caller = ic_cdk::api::msg_caller();
+    let pair = match PAIRS.with(|p| p.borrow().get(&pair_id).clone()) {
+        Some(p) => p,
+        None => ic_cdk::trap("pair not found"),
+    };
+    if !is_member_of(&pair, caller) {
+        ic_cdk::trap("not a member of this pair");
+    }
+    if pair.archived_at.is_none() {
+        ic_cdk::trap("archive the account before deleting it");
+    }
+    if pair.members[1] != Principal::anonymous() {
+        ic_cdk::trap("cannot delete an account that still has another member; leave first");
+    }
+    // Collect this pair's sheet ids, then purge their entries + counters + the sheets.
+    let sheet_ids: Vec<String> = SHEETS.with(|s| {
+        s.borrow()
+            .iter()
+            .filter_map(|(id, sh)| if sh.pair_id == pair_id { Some(id) } else { None })
+            .collect()
+    });
+    for sid in &sheet_ids {
+        for e in sheet_entries_iter(sid) {
+            sheet_entries_remove(sid, e.id);
+        }
+        ENTRY_COUNTERS.with(|m| m.borrow_mut().remove(sid));
+        SHEETS.with(|s| s.borrow_mut().remove(sid));
+    }
+    INVITES.with(|i| i.borrow_mut().remove(&pair.invite_code));
+    PAIRS.with(|p| p.borrow_mut().remove(&pair_id));
 }
 
 /// Compute the stable-map key for a (pair_id, nonce) pair. Used by

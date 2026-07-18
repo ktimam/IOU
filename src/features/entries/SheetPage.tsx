@@ -31,6 +31,8 @@ import { EntryForm } from "./EntryForm";
 import { CloseSheetButton } from "./CloseSheetButton";
 import { downloadCsv, entriesToCsv } from "./csvExport";
 import { useToasts } from "../ui/Toasts";
+import { buildInviteLink } from "../flows/inviteLink";
+import { isProdVetkd } from "../crypto/devVetkd";
 import { usePreferences } from "../settings/usePreferences";
 import { useTemplates } from "../templates/TemplatesContext";
 import { TemplatesManager } from "../templates/TemplatesManager";
@@ -231,6 +233,30 @@ export function SheetPage() {
   const [draftOpen, setDraftOpen] = useState(false);
   const [draftText, setDraftText] = useState("");
   const [draftErrors, setDraftErrors] = useState<string[]>([]);
+  // Invite link (share modal): builds <origin>/pair/accept#c/s/k — the key rides
+  // in the fragment (dev) so the invitee self-joins with no creator "grant".
+  const [inviteOpen, setInviteOpen] = useState(false);
+  const [inviteLink, setInviteLink] = useState<string | null>(null);
+  const [inviteBusy, setInviteBusy] = useState(false);
+  async function openInvite() {
+    if (!actor) return;
+    setInviteBusy(true);
+    try {
+      // Mint a FRESH, live single-use code every time (the stored pair.invite_code
+      // goes stale once consumed and after a partner leaves — see issue_invite).
+      const code = (await (actor as any).issue_invite(sheet.pair_id)) as string;
+      let kSheet: Uint8Array | undefined;
+      if (!isProdVetkd()) {
+        kSheet = get(sheetId) ?? (await unwrapFor(sheetId));
+      }
+      setInviteLink(buildInviteLink(window.location.origin, { code, sheetId, kSheet }));
+      setInviteOpen(true);
+    } catch (e) {
+      toasts.show({ kind: "error", text: (e as Error).message });
+    } finally {
+      setInviteBusy(false);
+    }
+  }
   const openAdd = (initial: Partial<EntryPayload> | null) => {
     setModal({ initial, entryId: null });
     setAddOpen(false);
@@ -1027,6 +1053,16 @@ export function SheetPage() {
               // entries (carry-forward would flip who owes whom).
               entries={payloads}
             />
+            {isSolo && (
+              <button
+                className="secondary"
+                onClick={() => void openInvite()}
+                disabled={inviteBusy}
+                title="Invite someone to share this account"
+              >
+                {inviteBusy ? "…" : "🔗 Invite"}
+              </button>
+            )}
           </>
         )}
         {entries.length > 0 && (
@@ -1048,6 +1084,48 @@ export function SheetPage() {
           </button>
         )}
       </div>
+
+      {inviteOpen && inviteLink && (
+        <div className="modal-backdrop" onClick={() => setInviteOpen(false)}>
+          <div
+            className="modal"
+            onClick={(e) => e.stopPropagation()}
+            role="dialog"
+            aria-modal="true"
+          >
+            <h3>Invite to this account</h3>
+            <p className="muted small">
+              Send this link. When they open it and sign in, they join instantly
+              with full access — no extra step from you.
+              <br />
+              🔒 Anyone with the link can join once — share it privately.
+            </p>
+            <textarea
+              readOnly
+              value={inviteLink}
+              rows={3}
+              onClick={(e) => (e.target as HTMLTextAreaElement).select()}
+              style={{ width: "100%", fontFamily: "monospace", fontSize: "0.75rem" }}
+            />
+            <div className="cta-row">
+              <button
+                className="secondary"
+                onClick={() => setInviteOpen(false)}
+              >
+                Close
+              </button>
+              <button
+                onClick={() => {
+                  navigator.clipboard?.writeText(inviteLink);
+                  toasts.show({ kind: "success", text: "Invite link copied" });
+                }}
+              >
+                Copy link
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       <section className="history">
         <div className="history-head">

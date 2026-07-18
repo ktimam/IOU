@@ -292,6 +292,13 @@ export async function consumerPublicKeyPem(): Promise<string> {
   return (await loadOrCreateConsumerKeypair()).publicKeySpkiPem;
 }
 
+// NOTE (v1.11.0 design decision): do NOT add helpers that wrap this keypair
+// under a SHARED key (e.g. K_sheet). The consumer keypair is user-global —
+// sharing it with a co-member leaks the sharer's OTHER accounts' OpenChat
+// drafts (adversarially reviewed, medium severity). Shared-account visibility
+// is solved delivery-side instead: OpenChat fans out each confirmed action to
+// every chat member's OWN registered key.
+
 /**
  * Sign OpenChat's canonical revoke challenge with the consumer PRIVATE key — proof of possession so
  * revoke_ai_app_user_key will drop the matching public key. The stored JWK was generated for ECDH

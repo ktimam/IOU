@@ -71,6 +71,7 @@ export const idlFactory = ({ IDL: idl }: { IDL: IDL }) => {
     active_sheet_id: idl.Opt(idl.Text),
     archived_sheet_count: idl.Nat32,
     created_at: idl.Nat64,
+    archived_at: idl.Opt(idl.Nat64),
     name_enc: idl.Opt(idl.Vec(idl.Nat8)),
     name_iv: idl.Opt(idl.Vec(idl.Nat8)),
     other_name_enc: idl.Opt(idl.Vec(idl.Nat8)),
@@ -185,6 +186,13 @@ export const idlFactory = ({ IDL: idl }: { IDL: IDL }) => {
     // Phase 2
     create_pair: idl.Func([], [CreatePairResult], []),
     join_pair: idl.Func([idl.Text], [idl.Text], []),
+    // v1.10.0: invite-link auto-join + account lifecycle
+    issue_invite: idl.Func([idl.Text], [idl.Text], []),
+    accept_invite: idl.Func([idl.Text, idl.Vec(SheetRewrap), idl.Vec(idl.Nat8)], [Pair], []),
+    leave_pair: idl.Func([idl.Text], [Pair], []),
+    archive_pair: idl.Func([idl.Text], [Pair], []),
+    unarchive_pair: idl.Func([idl.Text], [Pair], []),
+    delete_pair: idl.Func([idl.Text], [], []),
     get_my_pairs: idl.Func([], [idl.Vec(PairSummary)], ["query"]),
     get_pair: idl.Func([idl.Text], [idl.Opt(Pair)], ["query"]),
     create_sheet: idl.Func([CreateSheetReq], [Sheet], []),

@@ -44,68 +44,84 @@ export async function createAccount(page: Page, accountName: string, sheetName: 
   await gotoHome(page);
   await page.getByRole("button", { name: "+ New account" }).click();
   await page.getByRole("heading", { name: "New account" }).waitFor({ timeout: T });
-  await page.getByRole("button", { name: "Create", exact: true }).click(); // ensure Create mode
   await page.locator("#accountName").fill(accountName);
   await page.locator("#sheetName").fill(sheetName);
   await page.getByRole("button", { name: "Create account" }).click();
-  // create_pair + first-sheet creation is several canister calls + crypto; give it room.
-  await page.waitForURL("**/sheet/**", { timeout: T * 2 });
+  // create_pair + first-sheet creation + name publish is ~5 update calls + crypto; under
+  // multi-context replica contention this can stall for a while, so give it generous room.
+  await page.waitForURL("**/sheet/**", { timeout: T * 4 });
   return page.url().split("/sheet/")[1];
 }
 
-/** From a /sheet/<id> page, open the pair detail and read {pairId, inviteCode}. */
-export async function readInviteFromSheet(page: Page): Promise<{ pairId: string; code: string }> {
-  await page.getByRole("link", { name: /Details/ }).click();
-  await page.waitForURL("**/pair/**", { timeout: T });
-  const pairId = page.url().split("/pair/")[1];
-  const codeEl = page.locator("h2").filter({ hasText: /^[A-Z0-9]{4}-[A-Z0-9]{4}$/ }).first();
-  await codeEl.waitFor({ timeout: T });
-  const code = (await codeEl.innerText()).trim();
-  return { pairId, code };
+/** From a solo /sheet/<id> page, open the Invite modal and read the shareable invite link.
+ * The "🔗 Invite" button only shows while the sheet is solo (no partner yet). */
+export async function inviteLinkFromSheet(page: Page): Promise<string> {
+  await page.getByRole("button", { name: /Invite/ }).click();
+  const dialog = page.getByRole("dialog");
+  await dialog.getByRole("heading", { name: "Invite to this account" }).waitFor({ timeout: T });
+  const link = await dialog.locator("textarea").inputValue();
+  await dialog.getByRole("button", { name: "Close" }).click();
+  if (!/\/pair\/accept#/.test(link)) throw new Error(`invite link looks wrong: ${link}`);
+  return link;
 }
 
-const isRealPair = (u: URL) => /\/pair\/[^/]+$/.test(u.pathname) && !u.pathname.endsWith("/pair/new");
-
-/** Join an existing account with an invite code (SPA: /pairs → + New account → Join). Returns pairId. */
-export async function joinAccount(page: Page, code: string): Promise<string> {
-  await gotoHome(page);
-  await page.getByRole("button", { name: "+ New account" }).click();
-  await page.getByRole("heading", { name: "New account" }).waitFor({ timeout: T });
-  await page.getByRole("button", { name: "Join", exact: true }).click();
-  await page.locator("#invite").fill(code);
-  await page.getByRole("button", { name: "Join account" }).click();
-  // Success navigates to /pair/<id>; a failed join stays on /pair/new with an error → surface it
-  // instead of falsely matching the loose "**/pair/**".
-  await page.waitForURL(isRealPair, { timeout: T }).catch(async () => {
-    const errs = (await page.locator("p").filter({ hasText: /error|invalid|not found|already|expired/i }).allInnerTexts().catch(() => [])).join(" | ");
-    throw new Error(`join failed with code "${code}" (still on ${new URL(page.url()).pathname}): ${errs || "no error shown"}`);
+/** Accept an invite LINK as the current profile: sign in (idempotent), open the link, click Accept,
+ * and land immediately on the shared sheet — no creator grant. Returns the sheet id. */
+export async function acceptInvite(page: Page, link: string): Promise<string> {
+  await signInDev(page); // ensure authenticated first, so the fragment survives (no sign-in bounce)
+  await page.goto(link, { waitUntil: "domcontentloaded" });
+  await page.getByRole("heading", { name: /You've been invited/ }).waitFor({ timeout: T });
+  await page.getByRole("button", { name: /Accept invite/ }).click();
+  await page.waitForURL("**/sheet/**", { timeout: T * 3 }).catch(async () => {
+    const errs = (await page.locator("p.err").allInnerTexts().catch(() => [])).join(" | ");
+    throw new Error(`accept invite failed (still on ${new URL(page.url()).pathname}): ${errs || "no error shown"}`);
   });
-  return page.url().split("/pair/")[1];
+  return page.url().split("/sheet/")[1];
 }
 
-/** As the creator, grant the partner access to the active sheet (rewraps the key). By account name.
- * The grant button only shows once the pair reads as active (partner joined); a fresh pair-page load
- * can race that propagation, so re-fetch (re-navigate) until it appears. */
-export async function grantPartnerAccess(page: Page, accountName: string): Promise<void> {
-  for (let attempt = 0; attempt < 10; attempt++) {
-    await openAccount(page, accountName); // → the active sheet (fresh data)
-    if (/\/sheet\//.test(page.url())) {
-      await page.getByRole("link", { name: /Details/ }).click();
-      await page.waitForURL("**/pair/**", { timeout: T });
-    }
-    const grant = page.getByRole("button", { name: "Grant partner access" });
-    try {
-      // Give this page load time for get_pair to resolve and render the button (it only shows once
-      // the pair reads as active). If it never renders, re-fetch — the join may not be reflected yet.
-      await grant.waitFor({ state: "visible", timeout: 8_000 });
-    } catch {
-      continue;
-    }
-    await grant.click();
-    await page.getByText(/now has access/i).first().waitFor({ timeout: T });
-    return;
+/** Navigate to an account's DETAILS page (/pair/<id>), where the lifecycle controls live.
+ * Active accounts open their sheet first (→ click Details); archived accounts open details directly. */
+async function openAccountDetails(page: Page, accountName?: string): Promise<void> {
+  await openAccount(page, accountName);
+  if (/\/sheet\//.test(page.url())) {
+    await page.getByRole("link", { name: /Details/ }).click();
+    await page.waitForURL("**/pair/**", { timeout: T });
   }
-  throw new Error(`grant button never appeared for "${accountName}" (partner join not reflected)`);
+}
+
+/** Leave a 2-member account (Pair page → Leave → confirm). Lands back on /pairs. */
+export async function leaveAccount(page: Page, accountName?: string): Promise<void> {
+  await openAccountDetails(page, accountName);
+  await page.getByRole("button", { name: "Leave", exact: true }).click();
+  const dialog = page.getByRole("dialog");
+  await dialog.getByRole("heading", { name: "Leave this account?" }).waitFor({ timeout: T });
+  await dialog.getByRole("button", { name: "Leave account" }).click();
+  await page.waitForURL("**/pairs", { timeout: T });
+}
+
+/** Archive an account (Pair page → Archive). Lands back on /pairs (now in the Archived section). */
+export async function archiveAccount(page: Page, accountName?: string): Promise<void> {
+  await openAccountDetails(page, accountName);
+  await page.getByRole("button", { name: "Archive", exact: true }).click();
+  await page.waitForURL("**/pairs", { timeout: T });
+}
+
+/** Unarchive an archived account (Pair page → Unarchive). Stays on the details page. */
+export async function unarchiveAccount(page: Page, accountName?: string): Promise<void> {
+  await openAccountDetails(page, accountName);
+  await page.getByRole("button", { name: "Unarchive", exact: true }).click();
+  await page.getByText(/unarchived/i).first().waitFor({ timeout: T });
+}
+
+/** Permanently delete a solo, archived account (Pair page → Delete forever → type DELETE → confirm). */
+export async function deleteAccount(page: Page, accountName?: string): Promise<void> {
+  await openAccountDetails(page, accountName);
+  await page.getByRole("button", { name: "Delete forever" }).click();
+  const dialog = page.getByRole("dialog");
+  await dialog.getByRole("heading", { name: "Delete this account forever?" }).waitFor({ timeout: T });
+  await dialog.locator("input").fill("DELETE");
+  await dialog.getByRole("button", { name: "Delete forever" }).click();
+  await page.waitForURL("**/pairs", { timeout: T });
 }
 
 /** Open a user's sheet by account name (creator) or the only account (joiner). Returns sheet id. */

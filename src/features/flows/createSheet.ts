@@ -11,11 +11,34 @@ import {
   deriveUserKeypair,
   newSheetKey,
   wrapSheetKey,
+  wrapSheetKeyTagged,
   encryptName,
+  importPublicKeyB64Wrap,
+  isProdVetkd,
 } from "../crypto/devVetkd";
 import { unwrap } from "./useActor";
 
 const ANON = "2vxsx-fae";
+
+/** Register the caller's own P-256 wrap pubkey (best-effort) so a partner's read
+ *  path can cross-unwrap a sheet slot the caller sealed for them. */
+async function registerMyWrapPubkey(actor: any, publicKeyB64: string): Promise<void> {
+  try {
+    await actor.register_sheet_pubkey(
+      Array.from(new TextEncoder().encode(publicKeyB64)),
+    );
+  } catch {
+    // best-effort: a transient failure just means the partner may need a retry
+  }
+}
+
+/** Fetch + import a member's registered P-256 wrap pubkey, or null if unregistered. */
+async function fetchWrapPubkey(actor: any, principal: any): Promise<CryptoKey | null> {
+  const raw = unwrap(await actor.get_sheet_pubkey(principal)) as number[] | null;
+  if (!raw || raw.length === 0) return null;
+  const b64 = new TextDecoder().decode(new Uint8Array(raw));
+  return importPublicKeyB64Wrap(b64);
+}
 
 export type CreateSheetOpts = {
   pairId: string;
@@ -30,24 +53,66 @@ export async function createSheetForPair(
   identity: Identity,
   opts: CreateSheetOpts,
 ): Promise<{ sheet: any; K_sheet: Uint8Array }> {
-  const pair = unwrap(await actor.get_pair(opts.pairId));
+  const pair = unwrap(await actor.get_pair(opts.pairId)) as any;
   if (!pair) throw new Error("Pair not found or not a member.");
+  const asText = (p: any) =>
+    p && typeof p.toText === "function" ? p.toText() : String(p ?? "");
+  const memberA = pair.members?.[0];
   const memberB = pair.members?.[1];
-  const memberBText =
-    memberB && typeof memberB.toText === "function"
-      ? memberB.toText()
-      : String(memberB ?? "");
+  const memberAText = asText(memberA);
+  const memberBText = asText(memberB);
   const isSolo = memberBText === "" || memberBText === ANON;
 
   const myPrincipal = identity.getPrincipal().toText();
   const myKp = await deriveUserKeypair(myPrincipal);
   const K_sheet = newSheetKey();
-  // Dev collapse: wrap for both members with our own keypair (the partner
-  // re-derives via the same symmetric scheme). Solo ⇒ empty placeholder.
-  const wrapA = await wrapSheetKey(K_sheet, myKp.publicKey, myKp.privateKey);
-  const wrapB = isSolo
-    ? new Uint8Array(0)
-    : await wrapSheetKey(K_sheet, myKp.publicKey, myKp.privateKey);
+
+  // Wrap K_sheet for both member slots so each member can unwrap THEIR slot.
+  //
+  // Dev (P-256 ECDH): seal our own slot to ourselves (self-ECDH). For a shared
+  // pair, seal the OTHER member's slot under THEIR registered wrap pubkey as a
+  // TAGGED cross-wrap (embeds our pubkey) — a self-wrap would lock the partner out
+  // of any sheet created AFTER they joined (we don't hold their private key), and
+  // tagging keeps their slot readable even after we later leave and our member slot
+  // is anonymized. We also (re)register our own pubkey so we can be a cross-wrap
+  // RECIPIENT when the partner creates a sheet. Solo ⇒ empty placeholder for
+  // member_b (filled by accept_invite when a partner joins).
+  //
+  // Prod (vetkd): the wrapped blobs are unused (the IC re-derives K_sheet per
+  // member); keep a self-wrapped placeholder so create_sheet's non-empty
+  // wrapped_key_a guard passes.
+  let wrapA: Uint8Array;
+  let wrapB: Uint8Array;
+  if (isProdVetkd()) {
+    wrapA = await wrapSheetKey(K_sheet, myKp.publicKey, myKp.privateKey);
+    wrapB = isSolo
+      ? new Uint8Array(0)
+      : await wrapSheetKey(K_sheet, myKp.publicKey, myKp.privateKey);
+  } else {
+    await registerMyWrapPubkey(actor, myKp.publicKeyB64);
+    const selfWrap = await wrapSheetKey(K_sheet, myKp.publicKey, myKp.privateKey);
+    if (isSolo) {
+      wrapA = selfWrap;
+      wrapB = new Uint8Array(0);
+    } else {
+      const iAmMemberA = myPrincipal === memberAText;
+      const otherMember = iAmMemberA ? memberB : memberA;
+      const otherPub = await fetchWrapPubkey(actor, otherMember);
+      if (!otherPub) {
+        throw new Error(
+          "Your partner hasn't published their key yet — ask them to open this account once, then try again.",
+        );
+      }
+      const crossWrap = await wrapSheetKeyTagged(
+        K_sheet,
+        otherPub,
+        myKp.privateKey,
+        myKp.publicKeyB64,
+      );
+      wrapA = iAmMemberA ? selfWrap : crossWrap;
+      wrapB = iAmMemberA ? crossWrap : selfWrap;
+    }
+  }
 
   let encBytes: number[] | null = null;
   let ivBytes: number[] | null = null;

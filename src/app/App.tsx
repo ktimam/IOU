@@ -13,8 +13,6 @@ import { SheetPage } from "../features/entries/SheetPage";
 import { ArchivedSheetsPage } from "../features/entries/ArchivedSheetsPage";
 import { RecoveryKeyPage } from "../features/recovery/RecoveryKeyPage";
 import { ToastProvider } from "../features/ui/Toasts";
-import { ReplaceMemberPage } from "../features/replaceMember/ReplaceMemberPage";
-import { AcceptReplacePage } from "../features/replaceMember/AcceptReplacePage";
 import { ErrorBoundary } from "./ErrorBoundary";
 import { PreferencesProvider } from "../features/settings/usePreferences";
 import { SettingsPage } from "../features/settings/SettingsPage";
@@ -22,6 +20,7 @@ import { TemplatesProvider } from "../features/templates/TemplatesContext";
 import { ConsumerKeypairSync } from "../features/openchat/ConsumerKeypairSync";
 import { EmbeddedBanner } from "../features/openchat/EmbeddedBanner";
 import { LinkChatPage } from "../features/openchat/LinkChatPage";
+import { AcceptInvitePage } from "../features/invite/AcceptInvitePage";
 import { useDeepLinks } from "../features/deeplinks/deepLink";
 
 // Registers the native deep-link listener (no-op on web). Lives inside the
@@ -52,20 +51,14 @@ export function App() {
               <Route path="/set-name" element={<SetDisplayName />} />
               <Route path="/pairs" element={<Pairs />} />
               <Route path="/pair/new" element={<NewPair />} />
+              {/* invite-link accept surface (fragment carries the secret) */}
+              <Route path="/pair/accept" element={<AcceptInvitePage />} />
               <Route path="/pair/:pairId" element={<Pair />} />
               <Route path="/sheet/new" element={<NewSheet />} />
               <Route path="/sheet/:sheetId" element={<SheetPage />} />
               <Route
                 path="/pair/:pairId/archived"
                 element={<ArchivedSheetsPage />}
-              />
-              <Route
-                path="/pair/:pairId/replace"
-                element={<ReplaceMemberPage />}
-              />
-              <Route
-                path="/pair/:pairId/accept-replace"
-                element={<AcceptReplacePage />}
               />
               <Route path="/settings" element={<SettingsPage />} />
               <Route

@@ -21,7 +21,7 @@ import { Principal } from "@dfinity/principal";
 import { createActor } from "../../backend/declarations";
 import {
   unwrapSheetKey,
-  importPublicKeyB64Wrap,
+  unwrapTaggedSheetKey,
   deriveUserKeypair,
 } from "../crypto/devVetkd";
 import {
@@ -55,7 +55,10 @@ const SheetKeyContext = createContext<SheetKeyContextValue | null>(null);
 
 export function SheetKeyProvider({ children }: { children: React.ReactNode }) {
   const [keys, setKeys] = useState<SheetKeyMap>({});
-  const [partnerKeys, setPartnerKeys] = useState<PartnerKeyMap>({});
+  // v1.10.0: with self-wrapped keys, no partner-pubkey exchange is needed. The
+  // registerPartnerKey hook is retained (no-op cache) for source compatibility
+  // until its last caller is removed.
+  const [, setPartnerKeys] = useState<PartnerKeyMap>({});
   const { identity } = useAuth();
 
   const registerPartnerKey = useCallback((sheetId: string, publicKeyB64: string) => {
@@ -107,49 +110,35 @@ export function SheetKeyProvider({ children }: { children: React.ReactNode }) {
       return K_sheet;
     }
 
-    // Dev path: P-256 ECDH wrap (back-compat with v1.1.0).
-    let senderB64 = partnerKeys[sheetId];
-    if (!senderB64) {
-      // Fallback so the sheet page works on a fresh load without having
-      // visited the pair page first. The creator (member_a) self-wrapped
-      // K_sheet with their own key, so derive the wrap-sender from the
-      // sheet: my own pubkey if I'm the creator, else the creator's
-      // published pubkey (granted-partner case).
-      const sheet = unwrap(await actor.get_sheet(sheetId));
-      if (sheet) {
-        const me = identity.getPrincipal().toText();
-        const creatorText =
-          sheet.member_a && typeof sheet.member_a.toText === "function"
-            ? sheet.member_a.toText()
-            : String(sheet.member_a ?? "");
-        if (me === creatorText) {
-          const myKp = await deriveUserKeypair(me);
-          senderB64 = myKp.publicKeyB64;
-        } else {
-          const raw = unwrap(await actor.get_sheet_pubkey(sheet.member_a));
-          if (raw) {
-            senderB64 = new TextDecoder().decode(
-              new Uint8Array(raw as number[]),
-            );
-          }
-        }
-      }
-    }
-    if (!senderB64) {
-      throw new Error(
-        "missing partner public key for sheet " + sheetId +
-          " — visit the pair page first so it can be cached",
-      );
-    }
-    const wrapped = unwrap(await actor.get_sheet_wrapped_key(sheetId));
-    if (!wrapped) throw new Error("no wrapped key for this sheet");
-    const senderPub = await importPublicKeyB64Wrap(senderB64);
+    // Dev path (v1.10.0+): try SELF-unwrap first — works when I sealed my own slot
+    // (I created the sheet, or I joined via accept_invite, which self-wraps K_sheet
+    // under my key). If that throws, the blob was CROSS-wrapped by the other member
+    // (a sheet they created AFTER I joined — they can't self-wrap for me). Such blobs
+    // are TAGGED with the sealer's pubkey, so unwrapTaggedSheetKey needs no external
+    // lookup and stays readable even after that member leaves and their slot is
+    // anonymized / promoted.
     const myKp = await deriveUserKeypair(identity.getPrincipal().toText());
-    const K_sheet = await unwrapSheetKey(
-      new Uint8Array(wrapped),
-      myKp.privateKey,
-      senderPub,
-    );
+    const wrapped = unwrap(await actor.get_sheet_wrapped_key(sheetId));
+    if (!wrapped || wrapped.length === 0) {
+      throw new Error("no wrapped key for this sheet");
+    }
+    const blob = new Uint8Array(wrapped);
+    let K_sheet: Uint8Array;
+    try {
+      K_sheet = await unwrapSheetKey(blob, myKp.privateKey, myKp.publicKey);
+    } catch {
+      // Cross-wrapped by the other member — unwrap via the embedded sender pubkey.
+      // Map both "not a tagged blob" (null) and a decrypt failure (throw) to one
+      // friendly error.
+      let K: Uint8Array | null = null;
+      try {
+        K = await unwrapTaggedSheetKey(blob, myKp.privateKey);
+      } catch {
+        K = null;
+      }
+      if (!K) throw new Error("cannot unwrap sheet key");
+      K_sheet = K;
+    }
     setKeys((prev) => ({ ...prev, [sheetId]: K_sheet }));
     return K_sheet;
   }

@@ -8,9 +8,8 @@ import { test, expect } from "@playwright/test";
 import {
   signInDev,
   createAccount,
-  readInviteFromSheet,
-  joinAccount,
-  grantPartnerAccess,
+  inviteLinkFromSheet,
+  acceptInvite,
   openSheet,
   addEntry,
   linkChatToSheet,
@@ -31,16 +30,22 @@ test("3 users · 3 sheets · cross-user shared view · chat links", async ({ bro
 
   // ── Pair 1: Alice & Bob (sheet "Rent 2026") ──────────────────────────────
   const sheetAB = await createAccount(alice, "Alice & Bob", "Rent 2026");
-  const { code: codeAB } = await readInviteFromSheet(alice);
-  await joinAccount(bob, codeAB);
-  await grantPartnerAccess(alice, "Alice & Bob");
+  // Invite-link flow: Alice shares the link, Bob opens it and is IN immediately — no grant step.
+  const linkAB = await inviteLinkFromSheet(alice);
+  await acceptInvite(bob, linkAB);
 
   await openSheet(alice, "Alice & Bob");
   // From Alice's view: credit = Bob owes her; debt = she owes Bob. Net = 50 − 20 = 30 USD.
   await addEntry(alice, { currency: "USD", amount: 50, direction: "credit", type: "settlement", note: "Bob repaid lunch" });
   await addEntry(alice, { currency: "USD", amount: 20, direction: "debt", type: "iou", note: "Alice owes Bob (later)" });
 
-  const aliceAB = await balancesText(alice);
+  // The balance recomputes asynchronously after add_entry (re-fetch + decrypt), so poll for the
+  // net rather than reading once — the second entry can land a beat after the modal closes.
+  let aliceAB = await balancesText(alice);
+  for (let i = 0; i < 10 && !aliceAB.includes("30.00 USD"); i++) {
+    await alice.waitForTimeout(1500);
+    aliceAB = await balancesText(alice);
+  }
   console.log("[alice AB]", aliceAB);
   expect(aliceAB).toContain("30.00 USD");
   expect(aliceAB).toMatch(/owes you/i); // Alice is owed (she entered credit 50 − debt 20)
@@ -62,18 +67,16 @@ test("3 users · 3 sheets · cross-user shared view · chat links", async ({ bro
 
   // ── Pair 2: Alice & Carol (sheet "Trip") ─────────────────────────────────
   const sheetAC = await createAccount(alice, "Alice & Carol", "Trip");
-  const { code: codeAC } = await readInviteFromSheet(alice);
-  await joinAccount(carol, codeAC);
-  await grantPartnerAccess(alice, "Alice & Carol");
+  const linkAC = await inviteLinkFromSheet(alice);
+  await acceptInvite(carol, linkAC);
   await openSheet(alice, "Alice & Carol");
   await addEntry(alice, { currency: "EUR", amount: 100, direction: "credit", type: "iou", note: "Carol owes for flights" });
   console.log("[alice AC]", await balancesText(alice));
 
   // ── Pair 3: Bob & Carol (sheet "Groceries") ──────────────────────────────
   const sheetBC = await createAccount(bob, "Bob & Carol", "Groceries");
-  const { code: codeBC } = await readInviteFromSheet(bob);
-  await joinAccount(carol, codeBC);
-  await grantPartnerAccess(bob, "Bob & Carol");
+  const linkBC = await inviteLinkFromSheet(bob);
+  await acceptInvite(carol, linkBC);
   await openSheet(bob, "Bob & Carol");
   await addEntry(bob, { currency: "GBP", amount: 15, direction: "debt", type: "settlement", note: "Bob owes Carol" });
 

@@ -10,10 +10,13 @@ describe("deepLinkToPath", () => {
     expect(deepLinkToPath("iou://me")).toBe("/me");
   });
 
-  it("prefills the join code from path or query, uppercased", () => {
-    expect(deepLinkToPath("iou://join/abcd-1234")).toBe("/pair/new?join=ABCD-1234");
-    expect(deepLinkToPath("iou://join?code=abcd-1234")).toBe("/pair/new?join=ABCD-1234");
-    expect(deepLinkToPath("iou://join")).toBe("/pair/new");
+  it("maps invite links to the accept surface, preserving the fragment", () => {
+    expect(
+      deepLinkToPath("iou://invite#c=ABCD-1234&s=deadbeef&k=Zm9v"),
+    ).toBe("/pair/accept#c=ABCD-1234&s=deadbeef&k=Zm9v");
+    // a fragment-less invite still resolves to the accept page (which then
+    // reports the link is malformed)
+    expect(deepLinkToPath("iou://invite")).toBe("/pair/accept");
   });
 
   it("encodes path segments", () => {
