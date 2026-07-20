@@ -34,7 +34,13 @@
 - ✅ **P1 U29** — `deepLinkToPath` drops the `iou://openchat/...` host (OpenChat surfaces use HTTPS, not deep links).
 - ✅ **P1 U1** — `createSheetForPair` solo seal: self-wrap in slot A, empty placeholder in slot B.
 
-**P1 backlog started** (88 total: 30 vitest-unit, 21 rust, 17 vitest-e2e, 13 playwright, 7 scripted). Many manifest-sync/crypto P1s (U3, U16, U17, …) are already covered by the batch-1/2 seams. Remaining P0: register_ai_app ownership permutations (pocket-ic) · P0-30/32 cross-repo journeys.
+### Batch 7 (vitest-unit P1 wave — triaged in parallel)
+
+Triage of all 30 unit P1s vs the current suite: **8 already covered** by the batch-1/2/6 seams (U1, U3, U8, U9, U16, U17, U28, U29), **16 need React rendering** (node-env vitest can't — deferred to the Playwright/e2e waves: U5/U6/U7/U10-15/U18-20/U22-25), **2 uncovered + feasible → done**:
+- ✅ **U2** — createSheetForPair rotation: a new sheet on a shared pair mints a distinct key; each slot unwraps to its own sheet's key (per-sheet isolation).
+- ✅ **U4** — entryMath IOU→settlement edit drops the schedule + fee; amount is the gross.
+
+**P1 backlog** (88 total: 30 unit [done: 10 covered/2 new/16→other waves], 17 vitest-e2e, 13 playwright, 21 rust, 7 scripted). Remaining P0: register_ai_app ownership (pocket-ic) · P0-30/32 cross-repo.
 
 ---
 

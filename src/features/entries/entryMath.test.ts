@@ -56,6 +56,27 @@ describe("buildEntryPayload — basics + validation", () => {
     expect(p.schedule).toEqual([{ due_ts: Date.parse("2026-06-20T00:00:00Z"), percent: 100 }]);
   });
 
+  it("IOU→settlement edit drops the schedule AND fee; amount is the gross (U4)", () => {
+    // The form's type toggle on edit: an IOU carrying a fee + a multi-portion schedule is flipped to
+    // Settlement. Settlements have neither a fee nor a schedule, and the amount is the gross (no
+    // fee netting). The fee-drop is covered elsewhere; the SCHEDULE-drop is the missing assertion.
+    const p = okPayload({
+      txnType: "settlement",
+      feePercent: 20,
+      feeFixedStr: "10.00",
+      feeFixedCurrency: "USD",
+      schedule: [
+        { date: "2026-07-01", percent: 50 },
+        { date: "2026-08-01", percent: 50 },
+      ],
+    });
+    expect(p.kind).toBe("payment");
+    expect(p.txn_type).toBe("settlement");
+    expect(p.schedule).toBeUndefined();
+    expect(p.fee).toBeUndefined();
+    expect(p.amount_minor).toBe(10000); // gross, no fee netting
+  });
+
   it("rejects a non-positive amount", () => {
     expect(buildEntryPayload(base({ amountStr: "0" }))).toEqual({ ok: false, error: "amount must be > 0" });
     expect(buildEntryPayload(base({ amountStr: "" }))).toEqual({ ok: false, error: "amount must be > 0" });

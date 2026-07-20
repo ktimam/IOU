@@ -361,3 +361,37 @@ describe("createSheetForPair — solo account seal", () => {
     expect(Array.from(back)).toEqual(Array.from(K_sheet));
   });
 });
+
+// P1 (U2): rotating to a NEW sheet on an already-shared pair mints a DISTINCT key; each sheet's
+// slots unwrap independently (per-sheet key isolation). (The per-sheetId read CACHE lives in
+// SheetKeyContext.unwrapFor — a React context not renderable in this node suite; the crypto core is
+// covered here at the createSheetForPair seam.)
+describe("createSheetForPair — rotation (new sheet on an already-shared pair)", () => {
+  it("mints a distinct key per sheet; each slot unwraps to its own sheet's key", async () => {
+    const aKp = await deriveUserKeypair(A_PRINCIPAL);
+    const bKp = await deriveUserKeypair(B_PRINCIPAL);
+    const bPubBytes = Array.from(new TextEncoder().encode(bKp.publicKeyB64));
+    const { actor, captured } = makeSheetActor({ [B_PRINCIPAL]: bPubBytes });
+    const identity = { getPrincipal: () => principalLike(A_PRINCIPAL) } as any;
+    const opts = { pairId: "pair-1", currencies: ["USD"], closingDays: 30 };
+
+    const r1 = await createSheetForPair(actor as any, identity, opts);
+    const req1 = { ...captured.req }; // snapshot before the second call overwrites captured.req
+    const r2 = await createSheetForPair(actor as any, identity, opts);
+    const req2 = captured.req;
+
+    // Two rotations → two different keys (newSheetKey is random per call).
+    expect(Array.from(r1.K_sheet)).not.toEqual(Array.from(r2.K_sheet));
+
+    // Each sheet's B slot (tagged cross-wrap) recovers THAT sheet's key, independently.
+    const kb1 = await recoverSheetKey(new Uint8Array(req1.wrapped_key_b), bKp);
+    const kb2 = await recoverSheetKey(new Uint8Array(req2.wrapped_key_b), bKp);
+    expect(Array.from(kb1)).toEqual(Array.from(r1.K_sheet));
+    expect(Array.from(kb2)).toEqual(Array.from(r2.K_sheet));
+    expect(Array.from(kb1)).not.toEqual(Array.from(kb2));
+
+    // A's own (self-wrapped) slot recovers the matching key too.
+    const ka1 = await recoverSheetKey(new Uint8Array(req1.wrapped_key_a), aKp);
+    expect(Array.from(ka1)).toEqual(Array.from(r1.K_sheet));
+  });
+});
