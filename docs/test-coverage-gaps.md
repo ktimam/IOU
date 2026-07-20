@@ -15,7 +15,11 @@
 - ℹ️ **P0-33** poll-cursor scoping — **already-handled**: the cursor is in-memory (reset to 0n per mount), not persisted; dedup sets are deploy-scoped. No change.
 - ℹ️ **P0-21/22** fan-out post-time recipient keys — **by-design**: recipient keys are authored client-side into a self-contained card; the "zero recipients" case is already guarded (synchronous routing-less confirm). Pocket-ic lock-in tests pending.
 
-Remaining P0 (next up): route auth-guards (P0-23/24/25, playwright) · OpenChat Rust registry/ownership · cross-repo journeys (P0-30/31/32) · invite/leave lifecycle (P0-1/2/31) · P0-26 playwright test · P0-21/22 pocket-ic lock-in tests.
+### Batch 3 (e2e — live replica)
+
+- ✅ **P0-1/P0-2/P0-31** leave-time key reads — new `test/e2e/leaveTimeReads.e2e.test.ts`: the CREATOR leaves → the promoted member still recovers K from (a) the self-wrapped slot moved into member_a AND (b) a post-join TAGGED cross-wrap whose sealer is now gone (pubkey pinned in the blob). Complements inviteLifecycle's "member_b leaves → member_a retains". 4 tests, green on the live replica.
+
+Remaining P0 (heavier layers, need live env): route auth-guards (P0-23/24/25, playwright) · P0-26 playwright test · OpenChat Rust registry/ownership + P0-21/22 pocket-ic lock-in tests (WSL) · remaining cross-repo journeys (P0-30/32).
 
 ---
 
