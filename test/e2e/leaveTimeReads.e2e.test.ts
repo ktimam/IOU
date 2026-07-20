@@ -8,6 +8,7 @@
 //     (and their slot) is now gone. This is the exact scenario the tagged cross-wrap fix protects.
 
 import { it, expect, beforeAll } from "vitest";
+import { Principal } from "@dfinity/principal";
 import { describeE2E, freshIdentity, iouActor, optVal } from "./env";
 import {
   deriveUserKeypair,
@@ -103,5 +104,16 @@ describeE2E("Leave-time key reads — creator leaves, promoted member still read
     const blob = u8(optVal(await B.actor.get_sheet_wrapped_key(sheet2))!);
     const KB2 = await recoverSheetKey(blob, B.kp);
     expect(Array.from(KB2)).toEqual(Array.from(K2));
+  });
+
+  // E9 (P1): the promoted member's account summary reads as solo — partner anonymous, the active
+  // sheet is the post-join sheet2, and it isn't archived.
+  it("get_my_pairs shows the promoted member as solo (partner anonymous, active sheet2, not archived)", async () => {
+    const s = ((await B.actor.get_my_pairs()) as any[]).find((x) => x.id === pairId);
+    expect(s).toBeDefined();
+    const op = s.other_principal;
+    expect(typeof op.toText === "function" ? op.toText() : String(op)).toBe(Principal.anonymous().toText());
+    expect(optVal(s.active_sheet_id)).toBe(sheet2);
+    expect(optVal(s.archived_at)).toBeNull();
   });
 });

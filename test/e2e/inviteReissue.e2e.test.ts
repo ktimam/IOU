@@ -17,7 +17,10 @@ import {
   newSheetKey,
   wrapSheetKey,
   unwrapSheetKey,
+  encryptEntryPayload,
+  decryptEntryPayload,
 } from "../../src/features/crypto/devVetkd";
+import { encodeEntry, decodeEntry, type EntryPayload } from "../../src/features/entries/types";
 
 function u8(v: Uint8Array | number[]): Uint8Array {
   return v instanceof Uint8Array ? v : Uint8Array.from(v);
@@ -125,5 +128,158 @@ describeE2E("IOU invite reissue + re-seal (stale-invite fix)", () => {
     await expect(
       D.actor.accept_invite((await A.actor.issue_invite(pairId)) as string, [], pubkeyOf(D)),
     ).rejects.toThrow(/already has a partner/i);
+  });
+
+  // E2: the creator cannot accept their OWN invite code.
+  it("the creator cannot accept their own invite code", async () => {
+    const A = await member();
+    const { pairId } = await soloAccount(A);
+    const code = (await A.actor.issue_invite(pairId)) as string;
+    await expect(A.actor.accept_invite(code, [], pubkeyOf(A))).rejects.toThrow(
+      /creator cannot accept their own invite/i,
+    );
+  });
+
+  // E3: accept_invite is refused while the pair is archived.
+  it("accept_invite is refused while the pair is archived", async () => {
+    const A = await member();
+    const { pairId } = await soloAccount(A);
+    const code = (await A.actor.issue_invite(pairId)) as string;
+    await A.actor.archive_pair(pairId);
+    const B = await member();
+    await expect(B.actor.accept_invite(code, [], pubkeyOf(B))).rejects.toThrow(/pair is archived/i);
+  });
+
+  // E4: issue_invite is refused while the pair is archived.
+  it("issue_invite is refused while the pair is archived", async () => {
+    const A = await member();
+    const { pairId } = await soloAccount(A);
+    await A.actor.archive_pair(pairId);
+    await expect(A.actor.issue_invite(pairId)).rejects.toThrow(/pair is archived/i);
+  });
+
+  // E6: a SOLO account cannot be left (it must be deleted instead).
+  it("leave_pair is refused on a solo account (delete it instead)", async () => {
+    const A = await member();
+    const { pairId } = await soloAccount(A);
+    await expect(A.actor.leave_pair(pairId)).rejects.toThrow(/cannot leave a solo account/i);
+  });
+
+  // E1: after the CREATOR leaves, the promoted member can re-invite; the new partner joins + reads K.
+  it("a promoted member (creator left) can re-invite; the new partner joins and reads K", async () => {
+    const A = await member();
+    const { pairId, sheetId, K } = await soloAccount(A);
+    const B = await member();
+    await B.actor.accept_invite(
+      (await A.actor.issue_invite(pairId)) as string,
+      [await rewrapFor(B, sheetId, K)],
+      pubkeyOf(B),
+    );
+    await A.actor.leave_pair(pairId); // A (member_a) leaves → B promoted to slot 0
+    const pairB = optVal(await B.actor.get_pair(pairId)) as { members: { toText?: () => string }[] };
+    const m0 = pairB.members[0];
+    expect(typeof m0.toText === "function" ? m0.toText() : String(m0)).toBe(B.principal);
+
+    const C = await member();
+    await C.actor.accept_invite(
+      (await B.actor.issue_invite(pairId)) as string, // the PROMOTED member issues it
+      [await rewrapFor(C, sheetId, K)],
+      pubkeyOf(C),
+    );
+    const KC = await unwrapSheetKey(
+      u8(optVal(await C.actor.get_sheet_wrapped_key(sheetId))!),
+      C.kp.privateKey,
+      C.kp.publicKey,
+    );
+    expect(Array.from(KC)).toEqual(Array.from(K));
+  });
+
+  // E5: accept_invite seals ONLY the sheets in the rewrap batch; sheets not in it stay unreadable.
+  it("accept_invite seals only the rewrapped sheets; others stay anonymous to the joiner", async () => {
+    const A = await member();
+    const pairId = (await A.actor.create_pair()).pair_id as string;
+    // One active sheet per pair → make the 'other' sheet, close it, then the 'target' active sheet.
+    const mkSheet = async (K: Uint8Array) =>
+      (
+        await A.actor.create_sheet({
+          pair_id: pairId,
+          enabled_currencies: ["USD"],
+          closing_window_days: 30,
+          wrapped_key_a: Array.from(await wrapSheetKey(K, A.kp.publicKey, A.kp.privateKey)),
+          wrapped_key_b: [],
+          name_enc: [],
+          name_iv: [],
+        })
+      ).id as string;
+    const Ko = newSheetKey();
+    const other = await mkSheet(Ko);
+    await A.actor.close_sheet(other, []);
+    const Kt = newSheetKey();
+    const target = await mkSheet(Kt);
+
+    const B = await member();
+    await B.actor.accept_invite(
+      (await A.actor.issue_invite(pairId)) as string,
+      [await rewrapFor(B, target, Kt)], // rewrap the TARGET only
+      pubkeyOf(B),
+    );
+    // B reads the rewrapped target…
+    const KtB = await unwrapSheetKey(
+      u8(optVal(await B.actor.get_sheet_wrapped_key(target))!),
+      B.kp.privateKey,
+      B.kp.publicKey,
+    );
+    expect(Array.from(KtB)).toEqual(Array.from(Kt));
+    // …but the sheet NOT in the batch stays anonymous to B.
+    expect(optVal(await B.actor.get_sheet_wrapped_key(other))).toBeNull();
+  });
+
+  // E8: re-key continuity — an entry the departed partner wrote still decrypts for the replacement.
+  it("re-key continuity: an entry the departed partner wrote still decrypts for the replacement", async () => {
+    const A = await member();
+    const { pairId, sheetId, K } = await soloAccount(A);
+    const B = await member();
+    await B.actor.accept_invite(
+      (await A.actor.issue_invite(pairId)) as string,
+      [await rewrapFor(B, sheetId, K)],
+      pubkeyOf(B),
+    );
+    const payload: EntryPayload = {
+      ts: Date.UTC(2026, 6, 1),
+      kind: "expense",
+      currency: "USD",
+      amount_minor: 1500,
+      direction: "credit",
+      note: "B before leaving",
+      txn_type: "iou",
+    };
+    const enc = await encryptEntryPayload(encodeEntry(payload), K);
+    const entry = await B.actor.add_entry({
+      sheet_id: sheetId,
+      entry_key: Array.from(enc.entryKey),
+      ciphertext: Array.from(enc.ciphertext),
+      iv: Array.from(enc.iv),
+    });
+    await B.actor.leave_pair(pairId);
+
+    // Replacement C joins via a fresh invite (K unchanged — leave_pair doesn't rotate it).
+    const C = await member();
+    await C.actor.accept_invite(
+      (await A.actor.issue_invite(pairId)) as string,
+      [await rewrapFor(C, sheetId, K)],
+      pubkeyOf(C),
+    );
+    const KC = await unwrapSheetKey(
+      u8(optVal(await C.actor.get_sheet_wrapped_key(sheetId))!),
+      C.kp.privateKey,
+      C.kp.publicKey,
+    );
+    const listed = await C.actor.list_entries(sheetId, [], 100);
+    const mine = listed.entries.find((e: { id: bigint }) => e.id === entry.id);
+    expect(mine).toBeDefined();
+    const decoded = decodeEntry(
+      await decryptEntryPayload(u8(mine.entry_key), u8(mine.iv), u8(mine.ciphertext), KC),
+    );
+    expect(decoded).toEqual(payload); // B's pre-departure entry, readable by C
   });
 });

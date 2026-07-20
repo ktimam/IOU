@@ -40,7 +40,16 @@ Triage of all 30 unit P1s vs the current suite: **8 already covered** by the bat
 - ✅ **U2** — createSheetForPair rotation: a new sheet on a shared pair mints a distinct key; each slot unwraps to its own sheet's key (per-sheet isolation).
 - ✅ **U4** — entryMath IOU→settlement edit drops the schedule + fee; amount is the gross.
 
-**P1 backlog** (88 total: 30 unit [done: 10 covered/2 new/16→other waves], 17 vitest-e2e, 13 playwright, 21 rust, 7 scripted). Remaining P0: register_ai_app ownership (pocket-ic) · P0-30/32 cross-repo.
+### Batch 8 (vitest-e2e P1 wave — live replica)
+
+Triaged 17 e2e P1s: 2 covered, 13 need a live OpenChat 6-digit code (deferred), 8 feasible → done (all green live):
+- ✅ **E2/E3/E4/E6** invite/leave guards — creator can't accept own code; accept_invite + issue_invite refused while archived; leave refused on a solo account.
+- ✅ **E1** a promoted member (creator left) re-invites → new partner joins + reads K.
+- ✅ **E5** accept_invite seals only the rewrapped sheets (others stay anonymous).
+- ✅ **E8** re-key continuity — a departed partner's entry still decrypts for the replacement.
+- ✅ **E9** get_my_pairs shows the promoted member as solo (partner anon, active sheet2, not archived).
+
+**P1 backlog** (88: unit done, e2e wave done [8 new], playwright next, 21 rust review-only, 7+13 need live-drive). Remaining P0: register_ai_app ownership (pocket-ic) · P0-30/32 cross-repo.
 
 ---
 
