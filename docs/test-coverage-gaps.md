@@ -24,7 +24,11 @@
 - ✅ **P0-23/24/25** route auth-guards — new `test/ui/authGuards.ui.spec.ts`: anonymous visitor is redirected to /sign-in on the guarded pages (/pairs, /pair/new, /sheet/new, /set-name, /pair/:id), and gets INLINE sign-in with URL+hash/query preserved on /settings#openchat-connect and /openchat/link-chat. 7 tests.
 - ✅ **P0-26** signed-out invite — new `test/ui/inviteSignedOut.ui.spec.ts`: a fresh signed-out invitee opening the link gets inline sign-in on /pair/accept and, after signing in, is back on the accept surface (not bounced to /pairs) and completes onto the shared sheet. 1 test.
 
-Remaining P0 (heaviest): P0-15 connect→type→redeploy→route cross-repo journey (scripted-live) · OpenChat Rust registry/ownership + P0-21/22 pocket-ic lock-in tests (WSL) · remaining cross-repo journeys (P0-30/32).
+### Batch 5 (OpenChat Rust pocket-ic — fork repo, feat/confirmable-action-cycle)
+
+- ✅ **P0-21/22** fan-out lock-in — 3 tests in `backend/integration_tests/src/fan_out_delivery_tests.rs` (frozen recipient set is authoritative; empty-recipient card confirms safely with no deposit; late-link does not retroactively deliver). Mirror the existing green fan-out harness. **Run-caveat:** authored against the passing harness but not executed in-session — the OpenChat workspace builds via docker and no native cargo target was reachable; run via `scripts/run-integration-tests.sh fan_out`.
+
+Remaining P0 (heaviest): P0-15 connect→type→redeploy→route cross-repo journey (scripted-live) · OpenChat register_ai_app ownership/re-own permutations (pocket-ic) · remaining cross-repo journeys (P0-30/32).
 
 ---
 
