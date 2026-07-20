@@ -19,7 +19,12 @@
 
 - ✅ **P0-1/P0-2/P0-31** leave-time key reads — new `test/e2e/leaveTimeReads.e2e.test.ts`: the CREATOR leaves → the promoted member still recovers K from (a) the self-wrapped slot moved into member_a AND (b) a post-join TAGGED cross-wrap whose sealer is now gone (pubkey pinned in the blob). Complements inviteLifecycle's "member_b leaves → member_a retains". 4 tests, green on the live replica.
 
-Remaining P0 (heavier layers, need live env): route auth-guards (P0-23/24/25, playwright) · P0-26 playwright test · OpenChat Rust registry/ownership + P0-21/22 pocket-ic lock-in tests (WSL) · remaining cross-repo journeys (P0-30/32).
+### Batch 4 (Playwright-UI — live dev server + replica)
+
+- ✅ **P0-23/24/25** route auth-guards — new `test/ui/authGuards.ui.spec.ts`: anonymous visitor is redirected to /sign-in on the guarded pages (/pairs, /pair/new, /sheet/new, /set-name, /pair/:id), and gets INLINE sign-in with URL+hash/query preserved on /settings#openchat-connect and /openchat/link-chat. 7 tests.
+- ✅ **P0-26** signed-out invite — new `test/ui/inviteSignedOut.ui.spec.ts`: a fresh signed-out invitee opening the link gets inline sign-in on /pair/accept and, after signing in, is back on the accept surface (not bounced to /pairs) and completes onto the shared sheet. 1 test.
+
+Remaining P0 (heaviest): P0-15 connect→type→redeploy→route cross-repo journey (scripted-live) · OpenChat Rust registry/ownership + P0-21/22 pocket-ic lock-in tests (WSL) · remaining cross-repo journeys (P0-30/32).
 
 ---
 
