@@ -24,6 +24,7 @@ import {
   deriveUserKeypair,
   unwrapSheetKey,
   unwrapTaggedSheetKey,
+  wrapSheetKeyTagged,
 } from "../crypto/devVetkd";
 
 type Pair = { id: string; active_sheet_id?: [] | [string] };
@@ -144,8 +145,10 @@ function principalLike(text: string) {
   return { toText: () => text };
 }
 
-/** Mock IOU actor with an in-memory PARTNER_PUBKEYS map + captured create_sheet req. */
-function makeSheetActor(registered: Record<string, number[]>) {
+/** Mock IOU actor with an in-memory PARTNER_PUBKEYS map + captured create_sheet req.
+ *  `self` is the principal register_sheet_pubkey attributes the registration to (the
+ *  caller creating the sheet — A by default; pass B for the partner-creates case). */
+function makeSheetActor(registered: Record<string, number[]>, self: string = A_PRINCIPAL) {
   const pubkeys: Record<string, number[]> = { ...registered };
   const captured: { req?: any } = {};
   const actor = {
@@ -157,7 +160,7 @@ function makeSheetActor(registered: Record<string, number[]>) {
       return pubkeys[key] ? [pubkeys[key]] : [];
     },
     register_sheet_pubkey: async (bytes: number[]) => {
-      pubkeys[A_PRINCIPAL] = bytes; // caller is A in these tests
+      pubkeys[self] = bytes;
     },
     create_sheet: async (req: any) => {
       captured.req = req;
@@ -245,6 +248,71 @@ describe("createSheetForPair — partner can read a sheet created after they joi
       aKp.publicKey,
     );
     expect(Array.from(kFromB!)).toEqual(Array.from(kFromA));
+  });
+
+  it("member_a can read a sheet the PARTNER (member_b) created, even after member_b LEAVES", async () => {
+    // Mirror of the creator-leaves blocker. When B (member_b) creates a post-join sheet, it is
+    // member_A's slot (wrapped_key_a) that is the TAGGED cross-wrap (sealed for A, embedding B's
+    // pubkey). B leaves → leave_pair clears slot B and leaves wrapped_key_a UNTOUCHED, so A must
+    // still read it with only their own key (the sheet no longer references B at all).
+    const aKp = await deriveUserKeypair(A_PRINCIPAL);
+    const bKp = await deriveUserKeypair(B_PRINCIPAL);
+    // A has already published their wrap pubkey (opened the account); B is the creator here.
+    const aPubBytes = Array.from(new TextEncoder().encode(aKp.publicKeyB64));
+    const { actor, captured } = makeSheetActor({ [A_PRINCIPAL]: aPubBytes }, B_PRINCIPAL);
+
+    const identity = { getPrincipal: () => principalLike(B_PRINCIPAL) } as any;
+    await createSheetForPair(actor as any, identity, {
+      pairId: "pair-1",
+      currencies: ["USD"],
+      closingDays: 30,
+    });
+
+    const req = captured.req;
+    // B (creator, member_b) reads its own slot via self-unwrap.
+    const kFromB = await unwrapSheetKey(
+      new Uint8Array(req.wrapped_key_b),
+      bKp.privateKey,
+      bKp.publicKey,
+    );
+    // member_a's slot: plain self-unwrap FAILS (it was cross-wrapped by B)…
+    await expect(
+      unwrapSheetKey(new Uint8Array(req.wrapped_key_a), aKp.privateKey, aKp.publicKey),
+    ).rejects.toBeTruthy();
+    // …the TAGGED unwrap succeeds with only A's private key — identical after B leaves, since
+    // leave_pair leaves wrapped_key_a in place — yielding the SAME K_sheet.
+    const kFromA = await unwrapTaggedSheetKey(new Uint8Array(req.wrapped_key_a), aKp.privateKey);
+    expect(kFromA).not.toBeNull();
+    expect(Array.from(kFromA!)).toEqual(Array.from(kFromB));
+  });
+
+  it("a tagged cross-wrap is unwrapped via the PINNED sender key, not the sealer's current key (survives rotation/leave)", async () => {
+    // The tag embeds the EXACT sender pubkey used to seal; the recipient unwraps with only that
+    // pinned key + their own private key, never the sealer's *current* registered key — which is
+    // what lets a sheet survive the sealer rotating their key or leaving (slot anonymized).
+    const aKp = await deriveUserKeypair(A_PRINCIPAL); // sealer, at seal time
+    const bKp = await deriveUserKeypair(B_PRINCIPAL); // recipient
+    const rotatedKp = await deriveUserKeypair("ccccc-cc"); // the sealer's DIFFERENT key after rotating
+    expect(rotatedKp.publicKeyB64).not.toBe(aKp.publicKeyB64);
+
+    const K = newSheetKey();
+    const blob = await wrapSheetKeyTagged(K, bKp.publicKey, aKp.privateKey, aKp.publicKeyB64);
+
+    // Tagged unwrap recovers K using the pinned key alone — no registry/lookup involved.
+    const back = await unwrapTaggedSheetKey(blob, bKp.privateKey);
+    expect(back).not.toBeNull();
+    expect(Array.from(back!)).toEqual(Array.from(K));
+
+    // The pin is load-bearing: the SAME ciphertext body does NOT unwrap under the sealer's ROTATED
+    // key — so a read path that resolved the sealer's *current* registered key instead of the
+    // pinned tag would fail here. Blob layout: [MAGIC(1) | pubLen(1) | senderPubRaw(pubLen) | IV | ct].
+    const body = blob.subarray(2 + blob[1]);
+    await expect(
+      unwrapSheetKey(body, bKp.privateKey, rotatedKp.publicKey),
+    ).rejects.toBeTruthy();
+    // …and it DOES unwrap under the pinned (original) key, confirming that's the one the tag carries.
+    const viaPinned = await unwrapSheetKey(body, bKp.privateKey, aKp.publicKey);
+    expect(Array.from(viaPinned)).toEqual(Array.from(K));
   });
 
   it("fails loudly if the partner hasn't published their wrap pubkey yet", async () => {

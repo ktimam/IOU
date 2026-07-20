@@ -17,6 +17,7 @@
 import { useEffect, useState } from "react";
 import { useSearchParams } from "react-router-dom";
 import { useAuth } from "../auth/AuthProvider";
+import { SignInButtons } from "../auth/SignInButtons";
 import { useActor, unwrap } from "../flows/useActor";
 import { useSheetKey } from "../flows/SheetKeyContext";
 import { usePreferences } from "../settings/usePreferences";
@@ -71,7 +72,7 @@ export function LinkChatPage() {
         ? "The chat reference in this link is not valid — open the page from OpenChat again."
         : null;
 
-  const { state, signIn, signInDev } = useAuth();
+  const { state } = useAuth();
   const { actor, err: actorErr } = useActor();
   const { get, unwrapFor } = useSheetKey();
   const { prefs, cacheSheetName } = usePreferences();
@@ -218,35 +219,7 @@ export function LinkChatPage() {
         <p className="muted">
           Sign in to choose which sheet this OpenChat chat's drafts are imported into.
         </p>
-        <div className="cta-row" style={{ justifyContent: "center" }}>
-          <button
-            onClick={async () => {
-              try {
-                await signIn();
-              } catch (e) {
-                console.error(e);
-              }
-            }}
-          >
-            Sign in with Internet Identity
-          </button>
-        </div>
-        {import.meta.env.DEV && (
-          <div className="cta-row" style={{ justifyContent: "center", marginTop: 12 }}>
-            <button
-              className="secondary"
-              onClick={async () => {
-                try {
-                  await signInDev();
-                } catch (e) {
-                  console.error(e);
-                }
-              }}
-            >
-              Sign in (dev — local identity)
-            </button>
-          </div>
-        )}
+        <SignInButtons />
       </div>
     );
   }

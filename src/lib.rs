@@ -2520,11 +2520,14 @@ fn accept_invite(invite_code: String, rewraps: Vec<SheetRewrap>, pubkey: Vec<u8>
 /// the creator (member_a) leaves, the staying member (member_b) is promoted to
 /// member_a and their wrapped key moves to `wrapped_key_a`.
 ///
-/// NOTE (dev/P-256 only): a promoted member_a's key was ECDH-sealed under the
-/// departed creator's pubkey, so the pure-dev build can't re-derive it without
-/// a client re-key; in prod (vetkd) the IC re-derives K_sheet for any member, so
-/// the transfer is fully clean. The common case (member_b leaving) is clean in
-/// both builds. Tests exercise the member_b-leaving path.
+/// The staying member keeps read access in BOTH builds. Dev (P-256): their kept /
+/// promoted `wrapped_key_a` is either their OWN self-wrap (a sheet they created, or
+/// the first sheet self-wrapped at accept_invite) or a TAGGED cross-wrap that embeds
+/// the sealer's public key — so they unwrap it with only their own private key even
+/// though the departed member's slot is now anonymized (see devVetkd's
+/// wrapSheetKeyTagged / unwrapTaggedSheetKey and createSheet's read path). Prod
+/// (vetkd): the IC re-derives K_sheet for any member. Both leave directions are
+/// covered by createSheet.test.ts (creator-leaves and partner-leaves).
 #[ic_cdk::update]
 fn leave_pair(pair_id: String) -> Pair {
     require_authed();

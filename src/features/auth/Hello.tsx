@@ -3,7 +3,7 @@ import { Navigate, useNavigate } from "react-router-dom";
 import { IOUWordmark } from "../ui/Logo";
 
 // Landing route ("/"). When signed in, home IS the accounts page, so
-// redirect there. The profile/settings hub lives at /me.
+// redirect there. The profile/settings hub lives at /settings.
 export function Hello() {
   const { state } = useAuth();
   const nav = useNavigate();

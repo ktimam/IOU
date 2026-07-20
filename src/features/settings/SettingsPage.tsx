@@ -8,11 +8,12 @@
 // Reached from the username badge in the top-right of every page. Transaction
 // types/templates are managed from the "Add type" button on a sheet, not here.
 
-import { useEffect, useState } from "react";
-import { Link, useNavigate } from "react-router-dom";
+import { useState } from "react";
+import { Link } from "react-router-dom";
 import { usePreferences } from "./usePreferences";
 import { orderedCurrencies } from "./currencies";
 import { useAuth } from "../auth/AuthProvider";
+import { SignInButtons } from "../auth/SignInButtons";
 import { useActor } from "../flows/useActor";
 import { useSheetKey } from "../flows/SheetKeyContext";
 import { publishUsernameToAllPairs } from "../flows/createSheet";
@@ -25,16 +26,9 @@ export function SettingsPage() {
   const { prefs, setDefaultCurrency, setProfileName } = usePreferences();
   const { actor } = useActor();
   const { unwrapFor } = useSheetKey();
-  const nav = useNavigate();
   const [name, setName] = useState(prefs.profileName);
   const [status, setStatus] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
-
-  // Guarded like the former /me: bounce only when definitively anonymous; wait
-  // out "loading" without redirecting (Fix #1).
-  useEffect(() => {
-    if (state.kind === "anonymous") nav("/", { replace: true });
-  }, [state, nav]);
 
   async function saveUsername() {
     const trimmed = name.trim();
@@ -70,7 +64,22 @@ export function SettingsPage() {
     }
   }
 
-  if (state.kind !== "authenticated") return null; // loading / anonymous
+  if (state.kind === "loading") return <p className="muted">Loading…</p>;
+
+  if (state.kind !== "authenticated") {
+    // Render sign-in INLINE (like LinkChatPage) rather than redirecting to "/": a redirect drops
+    // the URL and its #openchat-connect hash, so an unsigned visitor — e.g. the OpenChat "Open the
+    // code page in IOU" button opening a fresh (or desktop-external) browser tab that isn't signed
+    // into IOU — would be bounced to the landing page instead of the Connect section. Signing in
+    // here keeps /settings#openchat-connect, so the page re-renders authenticated and scrolls to it.
+    return (
+      <div className="card" style={{ textAlign: "center", marginTop: 24 }}>
+        <h2>Settings</h2>
+        <p className="muted">Sign in to manage your account and connect OpenChat.</p>
+        <SignInButtons />
+      </div>
+    );
+  }
 
   return (
     <div>
