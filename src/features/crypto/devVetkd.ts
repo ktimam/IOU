@@ -340,6 +340,37 @@ export async function unwrapTaggedSheetKey(
   return unwrapSheetKey(body, recipientPrivateKey, senderPublicKey, info);
 }
 
+/**
+ * Recover K_sheet from a member's wrapped blob (dev/P-256 read path). Tries SELF-unwrap first —
+ * works when I sealed my own slot (I created the sheet, or I joined via accept_invite, which
+ * self-wraps K_sheet under my key). If that throws, the blob was CROSS-wrapped by the other member
+ * (a sheet they created after I joined — they can't self-wrap for me); such blobs are TAGGED with
+ * the sealer's pubkey, so unwrapTaggedSheetKey recovers them with no external lookup and stays
+ * readable even after that member leaves and their slot is anonymized/promoted. Throws
+ * "no wrapped key for this sheet" for an empty blob and "cannot unwrap sheet key" when neither the
+ * self nor the tagged path yields the key.
+ */
+export async function recoverSheetKey(
+  blob: Uint8Array,
+  myKp: { privateKey: CryptoKey; publicKey: CryptoKey },
+): Promise<Uint8Array> {
+  if (!blob || blob.length === 0) {
+    throw new Error("no wrapped key for this sheet");
+  }
+  try {
+    return await unwrapSheetKey(blob, myKp.privateKey, myKp.publicKey);
+  } catch {
+    let K: Uint8Array | null = null;
+    try {
+      K = await unwrapTaggedSheetKey(blob, myKp.privateKey);
+    } catch {
+      K = null;
+    }
+    if (!K) throw new Error("cannot unwrap sheet key");
+    return K;
+  }
+}
+
 // ─────────────── entry-level encryption ───────────────
 //
 // Each entry is encrypted with a per-entry AES key, derived as

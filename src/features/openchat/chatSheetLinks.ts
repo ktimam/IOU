@@ -55,6 +55,24 @@ export function draftBelongsOnSheet(
   return mapped === sheetId;
 }
 
+/**
+ * Re-point every chat mapping that targets `oldSheetId` onto `newSheetId`. Used when a sheet is
+ * closed & rotated ("Close & start new") so the next confirmed draft from a pinned chat imports into
+ * the fresh (active) sheet instead of the read-only archived one. Returns the updated map plus the
+ * chat keys that moved (empty + the SAME map reference when nothing pointed at oldSheetId).
+ */
+export function repointChatLinks(
+  links: ChatSheetLinks,
+  oldSheetId: string,
+  newSheetId: string,
+): { next: ChatSheetLinks; affected: string[] } {
+  const affected = Object.keys(links).filter((k) => links[k] === oldSheetId);
+  if (affected.length === 0) return { next: links, affected };
+  const next = { ...links };
+  for (const k of affected) next[k] = newSheetId;
+  return { next, affected };
+}
+
 export function readCachedLinks(): ChatSheetLinks {
   try {
     const raw = globalThis.localStorage?.getItem(LS_KEY);

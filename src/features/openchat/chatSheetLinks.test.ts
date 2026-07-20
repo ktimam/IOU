@@ -5,6 +5,7 @@ import {
   readCachedLinks,
   writeCachedLinks,
   draftBelongsOnSheet,
+  repointChatLinks,
   type ChatSheetLinks,
 } from "./chatSheetLinks";
 
@@ -103,5 +104,48 @@ describe("chatSheetLinks routing — each chat → its own sheet", () => {
       expect(draftBelongsOnSheet(key, links, SHEET_WIFE)).toBe(true);
       expect(draftBelongsOnSheet(key, links, SHEET_CHILD)).toBe(true);
     }
+  });
+});
+
+// P0-7: "Close & start new" archives sheet S1 and rotates to S2, but the chat→sheet link still
+// pinned to S1 would route the next confirmed draft onto the read-only archived sheet. repointChatLinks
+// moves those pins onto the new active sheet.
+describe("chatSheetLinks repoint on close-and-rotate (P0-7)", () => {
+  const S1 = "aaaaaaaaaaaaaaaa"; // closed/archived
+  const S2 = "cccccccccccccccc"; // new active
+  const OTHER = "bbbbbbbbbbbbbbbb";
+
+  it("moves a chat pinned to the closed sheet onto the new sheet", () => {
+    const { next, affected } = repointChatLinks({ "direct:wife": S1 }, S1, S2);
+    expect(affected).toEqual(["direct:wife"]);
+    expect(next["direct:wife"]).toBe(S2);
+  });
+
+  it("leaves chats pinned to OTHER sheets untouched", () => {
+    const { next, affected } = repointChatLinks({ "direct:wife": S1, "direct:child": OTHER }, S1, S2);
+    expect(affected).toEqual(["direct:wife"]);
+    expect(next["direct:wife"]).toBe(S2);
+    expect(next["direct:child"]).toBe(OTHER);
+  });
+
+  it("re-points MULTIPLE chats that shared the closed sheet in one call", () => {
+    const { next, affected } = repointChatLinks({ a: S1, b: S1, c: OTHER }, S1, S2);
+    expect(affected.sort()).toEqual(["a", "b"]);
+    expect(next.a).toBe(S2);
+    expect(next.b).toBe(S2);
+    expect(next.c).toBe(OTHER);
+  });
+
+  it("is a no-op (same reference, empty affected) when nothing targets the closed sheet", () => {
+    const links = { "direct:wife": OTHER };
+    const { next, affected } = repointChatLinks(links, S1, S2);
+    expect(affected).toEqual([]);
+    expect(next).toBe(links); // untouched reference — callers skip the canister write
+  });
+
+  it("after repoint, the next draft routes to the NEW sheet, not the archived one", () => {
+    const { next } = repointChatLinks({ "direct:wife": S1 }, S1, S2);
+    expect(draftBelongsOnSheet("direct:wife", next, S2)).toBe(true); // now lands on active S2
+    expect(draftBelongsOnSheet("direct:wife", next, S1)).toBe(false); // no longer on archived S1
   });
 });

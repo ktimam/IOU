@@ -19,11 +19,7 @@
 import { createContext, useContext, useState, useCallback } from "react";
 import { Principal } from "@dfinity/principal";
 import { createActor } from "../../backend/declarations";
-import {
-  unwrapSheetKey,
-  unwrapTaggedSheetKey,
-  deriveUserKeypair,
-} from "../crypto/devVetkd";
+import { recoverSheetKey, deriveUserKeypair } from "../crypto/devVetkd";
 import {
   isProdVetkd,
   loadOrCreateTransportKey,
@@ -119,26 +115,9 @@ export function SheetKeyProvider({ children }: { children: React.ReactNode }) {
     // anonymized / promoted.
     const myKp = await deriveUserKeypair(identity.getPrincipal().toText());
     const wrapped = unwrap(await actor.get_sheet_wrapped_key(sheetId));
-    if (!wrapped || wrapped.length === 0) {
-      throw new Error("no wrapped key for this sheet");
-    }
-    const blob = new Uint8Array(wrapped);
-    let K_sheet: Uint8Array;
-    try {
-      K_sheet = await unwrapSheetKey(blob, myKp.privateKey, myKp.publicKey);
-    } catch {
-      // Cross-wrapped by the other member — unwrap via the embedded sender pubkey.
-      // Map both "not a tagged blob" (null) and a decrypt failure (throw) to one
-      // friendly error.
-      let K: Uint8Array | null = null;
-      try {
-        K = await unwrapTaggedSheetKey(blob, myKp.privateKey);
-      } catch {
-        K = null;
-      }
-      if (!K) throw new Error("cannot unwrap sheet key");
-      K_sheet = K;
-    }
+    // recoverSheetKey (devVetkd) owns the branch logic: self-unwrap first, tagged cross-wrap
+    // fallback, and the empty/undecryptable errors. Unit-tested in recoverSheetKey.test.ts.
+    const K_sheet = await recoverSheetKey(new Uint8Array(wrapped ?? []), myKp);
     setKeys((prev) => ({ ...prev, [sheetId]: K_sheet }));
     return K_sheet;
   }

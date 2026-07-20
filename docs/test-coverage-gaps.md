@@ -7,7 +7,15 @@
 - ✅ **P0-8/10/11/12/13/14/17/18/27/28/29** manifest-sync — fixed: `shouldSyncOpenChatManifest` honors `connected`; new `readManifestSyncState`/`maybeSyncManifest` seams (unit-covered); sync now fires on Connect + type edit + app load (self-heals a base-manifest redeploy); `OC_CONNECTED_KEY` marker set on Connect, cleared on Disconnect.
 - ✅ **P0-34/4/5** fresh-device/recovery — resolved by **removing** the non-functional mnemonic recovery option (user decision): deleted `src/features/recovery/`, its route + settings link. (Data is device-local by design in the dev-crypto path; the misleading "recovery key" UI is gone.)
 
-Remaining P0 (next up): crypto read-path wiring (P0-3), close-&-rotate stale chat link (P0-7), fan-out post-time recipient keys (P0-21/22), poll-cursor deploy-scoping (P0-33), invite-accept return-to-destination (P0-26), route auth-guards (P0-23/24/25), OpenChat Rust registry/ownership, cross-repo journeys (P0-30/31/32), invite/leave lifecycle (P0-1/2/31).
+### Batch 2 (verified by parallel investigation against real code)
+
+- ✅ **P0-7** close-&-rotate stale chat link — **fixed**: `repointChatLinks` helper + `CloseSheetButton` re-points every chat pinned to the archived sheet onto the new active sheet (canister + cache). 5 unit tests.
+- ✅ **P0-3** sheet-key read-path — extracted pure `recoverSheetKey(blob, myKp)` from `SheetKeyContext.unwrapFor` (behavior-preserving) + 7 unit tests (self-unwrap-first, tagged fallback, empty/foreign/wrong-recipient/truncated errors, round-trip) — also first direct coverage of wrap/unwrapTaggedSheetKey.
+- ✅ **P0-26** invite-accept return-to-destination — **fixed**: `AcceptInvitePage` anonymous branch renders `SignInButtons` inline (like Settings/LinkChat) so `/pair/accept#…` survives sign-in. (Playwright test pending — needs live env.)
+- ℹ️ **P0-33** poll-cursor scoping — **already-handled**: the cursor is in-memory (reset to 0n per mount), not persisted; dedup sets are deploy-scoped. No change.
+- ℹ️ **P0-21/22** fan-out post-time recipient keys — **by-design**: recipient keys are authored client-side into a self-contained card; the "zero recipients" case is already guarded (synchronous routing-less confirm). Pocket-ic lock-in tests pending.
+
+Remaining P0 (next up): route auth-guards (P0-23/24/25, playwright) · OpenChat Rust registry/ownership · cross-repo journeys (P0-30/31/32) · invite/leave lifecycle (P0-1/2/31) · P0-26 playwright test · P0-21/22 pocket-ic lock-in tests.
 
 ---
 

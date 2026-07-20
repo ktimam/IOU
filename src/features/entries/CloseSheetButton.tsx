@@ -12,6 +12,13 @@ import { useAuth } from "../auth/AuthProvider";
 import { useSheetKey } from "../flows/SheetKeyContext";
 import { usePreferences } from "../settings/usePreferences";
 import { createSheetForPair, publishAccountNames } from "../flows/createSheet";
+import {
+  fetchChatSheetLinks,
+  storeChatSheetLink,
+  readCachedLinks,
+  writeCachedLinks,
+  repointChatLinks,
+} from "../openchat/chatSheetLinks";
 import { encryptEntryPayload } from "../crypto/devVetkd";
 import { useToasts } from "../ui/Toasts";
 import { useNavigate } from "react-router-dom";
@@ -67,6 +74,27 @@ export function CloseSheetButton({
         profileName: prefs.profileName,
       });
       cache(newSheet.id, K_sheet);
+
+      // 3b. Re-point any chat→sheet links from the just-archived sheet onto the new one, so the next
+      //     confirmed draft from a pinned chat imports into the ACTIVE sheet — not the read-only
+      //     archived one. Best-effort: a failure leaves LinkChatPage's manual re-link as the fallback.
+      try {
+        let links = readCachedLinks();
+        try {
+          links = await fetchChatSheetLinks(actor);
+        } catch {
+          /* canister unreachable — fall back to the cached copy */
+        }
+        const { next, affected } = repointChatLinks(links, sheetId, newSheet.id);
+        if (affected.length > 0) {
+          writeCachedLinks(next);
+          for (const chatKey of affected) {
+            await storeChatSheetLink(actor, chatKey, newSheet.id);
+          }
+        }
+      } catch {
+        /* best-effort: the manual re-link path in LinkChatPage remains as the fallback */
+      }
 
       // 4. Carry the outstanding balance forward as opening entries (one per
       //    currency), due now so they show in every balance bucket.

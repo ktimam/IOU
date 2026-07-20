@@ -10,6 +10,7 @@
 import { useMemo, useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
 import { useAuth } from "../auth/AuthProvider";
+import { SignInButtons } from "../auth/SignInButtons";
 import { useActor } from "../flows/useActor";
 import { useSheetKey } from "../flows/SheetKeyContext";
 import { useToasts } from "../ui/Toasts";
@@ -108,11 +109,10 @@ export function AcceptInvitePage() {
           Sign in (or create an account) to join this shared ledger. You'll come
           right back here to accept.
         </p>
-        <div className="cta">
-          <Link to="/sign-in">
-            <button>Sign in to accept</button>
-          </Link>
-        </div>
+        {/* Inline sign-in (like SettingsPage/LinkChatPage) so the /pair/accept#… URL — and the
+            invite it carries — survives; a redirect to /sign-in would land the invitee on /pairs
+            afterwards instead of back here to accept. */}
+        <SignInButtons />
       </div>
     );
   }
