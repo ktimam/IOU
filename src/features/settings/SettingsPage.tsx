@@ -1,6 +1,6 @@
 // /settings — the profile & settings hub (merged with the former /me page).
 //
-// Sign-out, your principal and recovery key (formerly /me), plus your username
+// Sign-out and your principal (formerly /me), plus your username
 // and default currency. The username is your single, global name: on save it
 // publishes EAGERLY to every account you're in (E2E under each K_sheet, one
 // set_member_name per active sheet) so every partner immediately sees "manager"
@@ -150,11 +150,6 @@ export function SettingsPage() {
         >
           {state.principal}
         </p>
-        <div className="cta-row" style={{ marginTop: 12 }}>
-          <Link to="/settings/recovery-key">
-            <button className="secondary">Recovery key (optional)</button>
-          </Link>
-        </div>
       </div>
 
       <RelaySettings />

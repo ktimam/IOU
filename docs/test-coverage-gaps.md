@@ -1,0 +1,1010 @@
+# Test coverage gap report
+
+## Progress log (test + fix, P0 first)
+
+- ✅ **P0-20** deep-link hash drop — fixed (`deepLinkToPath` preserves `#openchat-connect`) + regression test.
+- ✅ **P0-9** — test proving types reach the wire manifest as a `template` keyword_map (+ negative).
+- ✅ **P0-8/10/11/12/13/14/17/18/27/28/29** manifest-sync — fixed: `shouldSyncOpenChatManifest` honors `connected`; new `readManifestSyncState`/`maybeSyncManifest` seams (unit-covered); sync now fires on Connect + type edit + app load (self-heals a base-manifest redeploy); `OC_CONNECTED_KEY` marker set on Connect, cleared on Disconnect.
+- ✅ **P0-34/4/5** fresh-device/recovery — resolved by **removing** the non-functional mnemonic recovery option (user decision): deleted `src/features/recovery/`, its route + settings link. (Data is device-local by design in the dev-crypto path; the misleading "recovery key" UI is gone.)
+
+Remaining P0 (next up): crypto read-path wiring (P0-3), close-&-rotate stale chat link (P0-7), fan-out post-time recipient keys (P0-21/22), poll-cursor deploy-scoping (P0-33), invite-accept return-to-destination (P0-26), route auth-guards (P0-23/24/25), OpenChat Rust registry/ownership, cross-repo journeys (P0-30/31/32), invite/leave lifecycle (P0-1/2/31).
+
+---
+
+Generated from an adversarial multi-agent coverage sweep. **284 scenarios analyzed, 91 covered, 193 uncovered** (P0=34, P1=88, P2=71). P0 = catches a real/likely bug or a core happy path.
+
+
+## Invite-link membership lifecycle (create_pair / issue_invite / accept_invite re-seal / leave_pair promotion+anonymizatio
+
+- **[P0/ordering]** CREATOR (member_a) leaves -> staying member_b PROMOTED to slot 0 (live), wrapped_key_b moved to wrapped_key_a, member_b anonymized; promoted member reads K live via get_sheet_wrapped_key
+  - layer: `vitest-e2e`
+  - procedure: A create_pair+sheet (A self-wrap). B accept_invite (B self-wrap for the sheet). A leave_pair(pairId). Then B: get_sheet_wrapped_key(sheet) -> unwrap with only B's key -> K; A: get_pair/get_sheet_wrapped_key gone.
+  - expected: leave_pair promotes B into members[0]; on every sheet sh.member_a=B, sh.wrapped_key_a=old wrapped_key_b, member_b anon; B still reads K; A locked out. This whole creator-leave DIRECTION is only crypto-emulated (createSheet.test builds the blob leave_pair WOULD promote) and never driven through the real leave_pair on the live canister.
+  - sketch: In inviteLifecycle-style e2e: describe('creator leaves, member_b promoted'). A create_pair+create_sheet(self-wrap wrapped_key_a). B accept_invite with rewrapFor(B) so wrapped_key_b is B's self-wrap. A.leave_pair(pairId). assert optVal(A.get_pair)==null and A.get_sheet_wrapped_key==null; assert B.get_pair truthy with members[0]==B; wkB=B.get_sheet_wrapped_key(sheet); unwrapSheetKey(wkB,B.priv,B.pub) equals K (promotion moved B's self-wrap into slot A). Also assert get_my_pairs for B shows the pair with other_principal anonymous (solo).
+- **[P0/ordering]** Post-join CROSS-WRAPPED sheet survives the SEALER leaving, read live: A creates sheet2 after B joined (tagged cross-wrap for B) -> A leaves -> B reads sheet2 live on the canister with only B's key
+  - layer: `vitest-e2e`
+  - procedure: A create_pair+sheet1. B accept_invite(sheet1). A createSheetForPair -> sheet2 whose wrapped_key_b is a TAGGED cross-wrap for B. A leave_pair. B: get_sheet_wrapped_key(sheet2) live -> tagged-unwrap with only B's private key.
+  - expected: leave_pair promotes the tagged blob into wrapped_key_a; because it embeds A's pinned pubkey, B unwraps with zero reference to A (now gone). This exact 'joined-via-partner-cross-wrap then read after the OTHER member left' seam is only emulated in createSheet.test (it reads the captured req blob, never drives leave_pair + get_sheet_wrapped_key live).
+  - sketch: e2e: A create_pair+sheet1(self-wrap); B accept_invite(sheet1 rewrap). A register own pubkey + createSheetForPair(sheet2) so wrapped_key_b is wrapSheetKeyTagged(K2,Bpub,Apriv,Apub). A.leave_pair(pairId). wk=B.get_sheet_wrapped_key(sheet2); expect unwrapTaggedSheetKey(wk,B.priv) === K2. Also B.add_entry on sheet2 then re-read to prove write access post-promotion. Contrast: plain unwrapSheetKey(wk,B.priv,B.pub) rejects.
+- **[P1/ordering]** Re-invite after CREATOR leaves -> promoted member (was member_b, now member_a) issues invite and a new partner joins & reads K
+  - layer: `vitest-e2e`
+  - procedure: A+sheet, B accept, A leave_pair (B promoted to members[0]). B: issue_invite(pairId) (B must now be authorized as member[0]). C: accept_invite(code, rewrapFor C).
+  - expected: issue_invite succeeds for the promoted member; C fills slot B; C reads K; mirror of the partner-leave reissue path but with the OTHER leave direction.
+  - sketch: e2e continuing the creator-leave setup: after A.leave_pair, code=B.issue_invite(pairId) (assert it matches code regex — proves B is treated as a member post-promotion). C.accept_invite(code,[rewrapFor(C,sheet,K)],C.pub). wkC=C.get_sheet_wrapped_key; expect equals K. Also assert A.issue_invite(pairId) now traps 'not a member of this pair'.
+- **[P1/edge]** Creator accepts their OWN invite -> rejected (creator cannot claim the partner slot)
+  - layer: `vitest-e2e`
+  - procedure: A create_pair -> A calls accept_invite(A's own code, [], A.pubkey) while members[1] is still anonymous.
+  - expected: traps 'creator cannot accept their own invite' (guard fires because caller==members[0] and not a re-seal).
+  - sketch: e2e: A create_pair+sheet. await expect(A.accept_invite(code, [], A.pub)).rejects.toThrow(/creator cannot accept their own invite/i). Confirms is_reseal=false path + members[0]==caller guard.
+- **[P1/ordering]** accept_invite on an ARCHIVED pair -> rejected
+  - layer: `vitest-e2e`
+  - procedure: A create_pair+sheet -> A archive_pair -> B accept_invite(code).
+  - expected: traps 'pair is archived'; archiving before the partner accepts blocks the join.
+  - sketch: e2e: A create_pair+sheet; A.archive_pair(pairId); await expect(B.accept_invite(code,[rewrapFor(B,sheet,K)],B.pub)).rejects.toThrow(/archived/i). Then A.unarchive_pair; B.accept_invite succeeds — proves ordering gate is transient.
+- **[P1/ordering]** issue_invite on an ARCHIVED pair -> rejected
+  - layer: `vitest-e2e`
+  - procedure: A create_pair -> A archive_pair -> A issue_invite(pairId).
+  - expected: traps 'pair is archived' (issue_invite guards archived_at.is_some()).
+  - sketch: e2e: A.archive_pair(pairId); await expect(A.issue_invite(pairId)).rejects.toThrow(/archived/i); A.unarchive_pair; expect(await A.issue_invite(pairId)).toMatch(/^[A-Z0-9]{4}-[A-Z0-9]{4}$/).
+- **[P1/nonobvious]** Partial multi-sheet re-seal: pair has 2 sheets, accept_invite rewraps only sheet1 -> B reads sheet1 but NOT sheet2
+  - layer: `vitest-e2e`
+  - procedure: A create_pair -> create_sheet1 + create_sheet2 (both solo, member_b empty). B accept_invite(code, [rewrap for sheet1 ONLY], B.pub).
+  - expected: sheet1.member_b=B and B reads K1; sheet2.member_b stays anonymous and B.get_sheet_wrapped_key(sheet2) is null — accept only seals the sheets passed in rewraps. A later re-accept with a fresh link + rewrap for sheet2 heals it.
+  - sketch: e2e: create two sheets K1,K2. B.accept_invite(code1,[rewrapFor(B,sheet1,K1)],B.pub). expect B.get_sheet_wrapped_key(sheet1) truthy -> K1; expect optVal(B.get_sheet_wrapped_key(sheet2))==null. Then A.issue_invite code2; B.accept_invite(code2,[rewrapFor(B,sheet2,K2)],B.pub) (re-seal path, already members[1]); now B reads K2. Guards the exact 'some sheets re-sealed, some not' partial-rewrap seam.
+- **[P1/edge]** leave_pair on a SOLO account -> rejected (must delete, not leave)
+  - layer: `vitest-e2e`
+  - procedure: A create_pair (members[1] anonymous, no partner ever joined). A leave_pair(pairId).
+  - expected: traps 'cannot leave a solo account; delete it instead' (members[1]==anonymous guard).
+  - sketch: e2e: A create_pair; await expect(A.leave_pair(pairId)).rejects.toThrow(/cannot leave a solo/i). Also after B leaves (making A solo), await expect(A.leave_pair(pairId)).rejects.toThrow(/solo/i) — the solo-after-partner-left variant.
+- **[P1/ordering]** Creator (member_a) leaves -> creator is locked out (mirror of partner-locked-out)
+  - layer: `vitest-e2e`
+  - procedure: A+sheet, B accept, A leave_pair. Then A: get_pair/get_sheet_wrapped_key/get_my_pairs.
+  - expected: A no longer sees the pair or the sheet key (only the partner-leaves lock-out direction is currently asserted).
+  - sketch: part of the creator-leave e2e: after A.leave_pair, expect optVal(A.get_pair(pairId))==null, optVal(A.get_sheet_wrapped_key(sheet))==null, A.get_my_pairs has no pairId.
+- **[P1/nonobvious]** Re-key continuity after partner swap: B leaves, C joins via new invite with same K -> entries B previously wrote still decrypt for C
+  - layer: `vitest-e2e`
+  - procedure: A+sheet. B accept, B add_entry (encrypted under K). B leave_pair. A issue_invite(code2). C accept_invite(code2, rewrapFor C). C list_entries + decrypt B's old entry.
+  - expected: K is unchanged across the swap, so C decrypts entries authored by the departed B; only wrapped keys rotate, not K itself.
+  - sketch: e2e: B.add_entry(enc under K) capturing id. B.leave_pair. C.accept_invite(code2,[rewrapFor(C,sheet,K)],C.pub). KC=unwrap(C.get_sheet_wrapped_key). listed=C.list_entries(sheet); find B's entry; decodeEntry(decrypt(...,KC)) equals the payload B wrote. Asserts key continuity + that leave_pair did NOT purge entry data.
+- **[P1/ordering]** get_my_pairs reflects promotion after creator leaves: the promoted member appears as members[0] with other_principal anonymous (solo)
+  - layer: `vitest-e2e`
+  - procedure: A+sheet, B accept, A leave_pair. B calls get_my_pairs.
+  - expected: B's PairSummary: other_principal == anonymous, active_sheet_id still points at the sheet, archived_at null. Confirms slot-0 promotion is visible to the client that renders the accounts list.
+  - sketch: e2e: after A.leave_pair, mine=B.get_my_pairs find pairId; expect mine defined; other=optVal-ish principal equals Principal.anonymous().toText(); expect mine.active_sheet_id present. Pairs with the creator-leave e2e.
+- **[P2/edge]** issue_invite by a NON-member -> rejected
+  - layer: `vitest-e2e`
+  - procedure: A create_pair. Unrelated identity X calls issue_invite(A's pairId).
+  - expected: traps 'not a member of this pair'; checked twice (before await and under the lock).
+  - sketch: e2e: X=fresh member; await expect(X.actor.issue_invite(pairId)).rejects.toThrow(/not a member/i).
+- **[P2/edge]** accept_invite rewrap targeting a CLOSED sheet -> rejected
+  - layer: `vitest-e2e`
+  - procedure: A create_pair+sheet -> close_sheet(sheet) -> B accept_invite(code, [rewrap for the closed sheet], B.pub).
+  - expected: traps 'cannot join a closed sheet' (validated before any write; whole accept is atomic so nothing is mutated).
+  - sketch: e2e: A create_sheet then close it (close_and_start or close_sheet). await expect(B.accept_invite(code,[rewrapFor(B,sheet,K)],B.pub)).rejects.toThrow(/closed sheet/i). Then verify B is NOT a member (accept rolled back atomically): optVal(B.get_pair(pairId))==null.
+- **[P2/edge]** accept_invite rewrap referencing a sheet from a DIFFERENT pair -> rejected
+  - layer: `vitest-e2e`
+  - procedure: A has pair1+sheet1; A2 has pair2+sheet2. B accept_invite(pair1 code, [rewrap for sheet2], B.pub).
+  - expected: traps 'sheet does not belong to this pair'.
+  - sketch: e2e: build two independent pairs; B.accept_invite(code1,[{sheet_id: sheet2, wrapped_key_for_partner: blob}],B.pub) rejects /does not belong/i and B does not join pair1.
+- **[P2/nonobvious]** accept_invite rewrap targeting a sheet already sealed to a DIFFERENT partner -> rejected (never overwrites another member's key)
+  - layer: `vitest-e2e`
+  - procedure: Construct a sheet whose member_b is X (not anonymous, not caller). A different caller's accept_invite passes a rewrap for that sheet.
+  - expected: traps 'sheet already has a different partner' — the member_b != anonymous && member_b != caller guard.
+  - sketch: e2e: A+sheet, B accept (sheet.member_b=B). B leave_pair leaves member_b anon, so to hit this guard keep B in and re-accept as a THIRD principal is blocked earlier by the filled-slot check; instead target the sheet-level guard by giving the pair a second sheet sealed to B while a re-seal caller differs. Practical: assert via a focused canister test that a rewrap whose sheet.member_b is a foreign principal traps 'already has a different partner'. If unreachable via public API, cover as a Rust unit/pocket-ic guard test.
+- **[P2/edge]** accept_invite with an out-of-range pubkey (empty or >256 bytes) -> rejected
+  - layer: `vitest-e2e`
+  - procedure: B accept_invite(validCode, [], pubkey=[]) and separately pubkey of length 257.
+  - expected: traps 'pubkey length out of range'; no membership change.
+  - sketch: e2e: await expect(B.accept_invite(code,[],[])).rejects.toThrow(/pubkey length/i); await expect(B.accept_invite(code,[], new Array(257).fill(1))).rejects.toThrow(/pubkey length/i). Confirm code still live afterward (guard fires before INVITES.remove).
+- **[P2/edge]** leave_pair by a NON-member -> rejected
+  - layer: `vitest-e2e`
+  - procedure: A+sheet, B accept. Unrelated X calls leave_pair(pairId).
+  - expected: traps 'not a member of this pair'; pair unchanged.
+  - sketch: e2e: X fresh; await expect(X.actor.leave_pair(pairId)).rejects.toThrow(/not a member/i); assert members still [A,B] via A.get_pair.
+- **[P2/edge]** delete_pair by a NON-member -> rejected
+  - layer: `vitest-e2e`
+  - procedure: A solo+archived. Unrelated X calls delete_pair(pairId).
+  - expected: traps 'not a member of this pair'; pair survives.
+  - sketch: e2e: A create_pair, archive. X fresh; await expect(X.actor.delete_pair(pairId)).rejects.toThrow(/not a member/i); assert A.get_pair still truthy.
+- **[P2/nonobvious]** delete_pair purges the pair's INVITE code from INVITES (dangling code goes dead after delete)
+  - layer: `vitest-e2e`
+  - procedure: A solo+archived with a live invite_code. A delete_pair. A new identity tries accept_invite(that code).
+  - expected: code no longer resolves -> 'invalid or already-consumed invite code' (delete_pair removes pair.invite_code from INVITES). Guards the stale-invite trap on the delete path.
+  - sketch: e2e: capture code=cp.invite_code (or issue_invite before delete). archive+delete_pair. await expect(newMember.accept_invite(code,[],pub)).rejects.toThrow(/invalid or already-consumed/i).
+- **[P2/edge]** archive/unarchive is allowed by the PARTNER (member_b), not just the creator
+  - layer: `vitest-e2e`
+  - procedure: A+sheet, B accept. B archive_pair(pairId); A observes archived_at set; B unarchive_pair; cleared.
+  - expected: any member flips archived_at (set_pair_archived only checks is_member_of). Only creator-initiated archive is currently exercised.
+  - sketch: e2e: after B accepts, B.archive_pair(pairId); mine=A.get_my_pairs find pairId; expect optVal(mine.archived_at) truthy. B.unarchive_pair; expect cleared. Confirms member_b write access to the org flag.
+- **[P2/nonobvious]** Idempotent double re-seal: an already-granted member re-accepts a fresh link with a rewrap -> key unchanged, no second slot, no overwrite
+  - layer: `vitest-e2e`
+  - procedure: A+sheet, B accept (granted). A issue_invite(code2). B accept_invite(code2, [rewrapFor B], B.pub) again.
+  - expected: is_reseal path: membership unchanged (still members[1]=B), wrapped_key_b re-sealed to same K, code2 consumed; no error, no duplicate membership.
+  - sketch: e2e: after B granted, code2=A.issue_invite; B.accept_invite(code2,[rewrapFor(B,sheet,K)],B.pub); expect updated.members[1]==B; wk=B.get_sheet_wrapped_key -> K; a second accept_invite(code2,...) rejects /invalid or already-consumed/ (code single-use even on re-seal).
+- **[P2/edge]** issue_invite twice retires the first-issued code too (at most one live code beyond create_pair)
+  - layer: `vitest-e2e`
+  - procedure: A create_pair. A issue_invite -> code1. A issue_invite -> code2. B accept_invite(code1).
+  - expected: code1 dead ('invalid or already-consumed'); only code2 resolves. Extends the reissue regression beyond the create_pair->first-issue transition.
+  - sketch: e2e: code1=A.issue_invite(pairId); code2=A.issue_invite(pairId); expect code2!=code1; await expect(B.accept_invite(code1,[],B.pub)).rejects.toThrow(/invalid or already-consumed/i); B.accept_invite(code2,...) succeeds.
+- **[P2/ordering]** Concurrent/interleaved: two accept_invite calls race for one open slot, OR add_entry races leave_pair
+  - layer: `vitest-e2e`
+  - procedure: Fire B.accept_invite and C.accept_invite for the same code/slot without awaiting the first; or B.add_entry concurrently with B.leave_pair.
+  - expected: Exactly one accept wins the slot (the other traps 'already has a partner' or 'already-consumed'); an add_entry that lands after leave_pair is rejected/orphaned deterministically. accept_invite/leave_pair are synchronous single messages so the canister serializes them — worth an explicit ordering assertion.
+  - sketch: e2e (fileParallelism already off, so drive interleaving by issuing calls then awaiting both with Promise.allSettled): const [r1,r2]=await Promise.allSettled([B.accept_invite(code,[rewrapFor(B..)],B.pub), C.accept_invite(code,[rewrapFor(C..)],C.pub)]); expect exactly one fulfilled, one rejected; assert final members[1] is the winner. Separately: leave-then-add ordering — B.leave_pair; await expect(B.add_entry(...)).rejects (no key/not a member).
+- **[P2/ordering]** UI: the CREATOR (owner) leaves via the UI (not the partner) -> ownership promotes to the other member on both screens
+  - layer: `playwright-ui`
+  - procedure: Playwright: alice createAccount, bob acceptInvite. ALICE leaveAccount. Then bob still sees the account and reads entries; alice no longer sees it.
+  - expected: UI drives the creator-leave direction (member_b promotion) end to end; only the partner-leaves direction is currently exercised in membership.ui.spec.
+  - sketch: Playwright: reuse membership flow but call leaveAccount(alice) after bob adds an entry; assert bob.getByText(entry) still visible and bob can openSheet; assert alice.goto('/pairs') no longer lists ACCT. Exercises promotion + key survival through the UI read path.
+
+## Sheet-key crypto: P-256 ECDH self-wrap + TAGGED cross-wrap (devVetkd.ts wrap/unwrapSheetKey, wrap/unwrapTaggedSheetKey; 
+
+- **[P0/nonobvious]** Read-path WIRING: unwrapFor tries self-unwrap first, falls back to tagged on failure, caches result
+  - layer: `vitest-unit`
+  - procedure: A member calls SheetKeyContext.unwrapFor(sheetId). Backend returns a wrapped blob. Self-wrapped slot -> first unwrapSheetKey succeeds; cross-wrapped slot -> it throws and the catch calls unwrapTaggedSheetKey; resolved K cached in keys[sheetId].
+  - expected: Self-wrapped blob resolved via branch 1 (no tagged parse). Cross-wrapped blob: branch 1 throws, branch 2 (tagged) resolves. Second call returns from memory without a backend hit.
+  - sketch: SheetKeyContext.tsx unwrapFor has NO test at any layer. Drive it with a mock actor whose get_sheet_wrapped_key returns (a) a self-wrap blob and (b) a tagged cross-wrap blob; assert both resolve to the same K and that unwrapTaggedSheetKey is only reached for the cross-wrap. This is the exact self-vs-tagged ordering seam and it is completely untested.
+- **[P0/nonobvious]** Creator LEAVES -> promoted member reads a post-join sheet on a FRESH DEVICE (new keypair)
+  - layer: `vitest-unit`
+  - procedure: Same as above but B reads on a device with empty localStorage. deriveUserKeypair(B) finds no stored keypair and GENERATES a new random P-256 keypair. B then tries unwrapTaggedSheetKey/unwrapFor on the promoted blob, which was sealed to B's ORIGINAL public key.
+  - expected: Intended: B recovers K via a mnemonic-restored keypair. ACTUAL today: unwrap FAILS because the new keypair's private key doesn't match the sealed pubkey -> B permanently locked out. seedFromMnemonic exists but is never wired to deriveUserKeypair (confirmed: no caller reconstructs the keypair from a seed).
+  - sketch: Seal a tagged cross-wrap for B (pubkey1). Clear the localStorage map (fresh device), call deriveUserKeypair('B') -> assert publicKeyB64 CHANGED and unwrapTaggedSheetKey(blob, newPriv) throws/null, documenting the lockout. Then add the intended fix: restoreKeypairFromSeed(seedFromMnemonic(m)) reproducing pubkey1 so the read succeeds. Top procedural/ORDER seam for this domain; entirely uncovered; mnemonic recovery for the dev keypair is unimplemented.
+- **[P0/nonobvious]** Creator reads their OWN self-wrapped/solo sheet on a FRESH DEVICE (new keypair)
+  - layer: `vitest-unit`
+  - procedure: A created a solo/self-wrapped sheet on device1. A signs in on device2 (same II principal, empty localStorage). deriveUserKeypair(A) generates a new keypair. A opens the sheet -> unwrapFor self-unwrap.
+  - expected: Intended: A restores the same keypair from mnemonic and self-unwraps. ACTUAL: new keypair -> self-unwrap FAILS; A cannot read their own sheet on a new device without localStorage. Same missing keypair-recovery wiring.
+  - sketch: devVetkd.test.ts: self-wrap K under A's key, clear the localStorage map, deriveUserKeypair('A') again -> assert new publicKeyB64 and that unwrapSheetKey with the new keypair throws. Proves the same-principal-second-device data-loss risk. deriveUserKeypair's regenerate-on-missing branch (devVetkd.ts:164-166) has no test.
+- **[P1/happy]** Solo sheet: creator seals self-wrap in slot A, empty placeholder in slot B
+  - layer: `vitest-unit`
+  - procedure: A opens a solo account (member_b anonymous). createSheetForPair runs isSolo=true: wrapA=self-wrap under A's own key, wrapB=empty Uint8Array(0). Later A reads via unwrapFor -> get_sheet_wrapped_key -> self-unwrap.
+  - expected: create_sheet request has non-empty wrapped_key_a (self-wrap) and EMPTY wrapped_key_b; A self-unwraps slot A to the same K_sheet; no partner pubkey lookup; registerMyWrapPubkey still called.
+  - sketch: createSheet.test.ts describe('createSheetForPair solo'): makeSheetActor with get_pair members=[A, ANON '2vxsx-fae']. Call as A. assert captured.req.wrapped_key_b.length===0 and wrapped_key_a.length>0; unwrapSheetKey(wrapped_key_a, aKp.priv, aKp.pub)===K. Exercises the isSolo branch (createSheet.ts:88-96). Only E2E inviteLifecycle asserts solo member_b empty; the createSheetForPair solo branch has no unit test.
+- **[P1/ordering]** NEW sheet on an already-shared pair (rotation): non-creator reads the new sheet while old one stays cached
+  - layer: `vitest-unit`
+  - procedure: Pair already has sheet1 (both readable). A creates sheet2 (rotation on close/new-sheet). B, who cached sheet1's K, reads sheet2: unwrapFor(sheet2) must NOT return sheet1's key and must tagged-unwrap sheet2 independently.
+  - expected: sheet2's K distinct from sheet1's; unwrapFor keys the cache per sheetId; B reads sheet2 via the tagged cross-wrap; sheet1 remains readable.
+  - sketch: createSheet.test.ts only ever creates ONE sheet. Call createSheetForPair twice for the same pair, assert K_sheet differs, and both wrapped_key_b tagged blobs unwrapTaggedSheetKey to their respective distinct K. Ideally drive unwrapFor with a per-sheet cache to prove no cross-sheet key bleed. Multi-sheet ordering is uncovered in every layer here.
+- **[P1/edge]** unwrapFor on a sheet with NO wrapped key (empty slot / legacy 'joined but not granted')
+  - layer: `vitest-unit`
+  - procedure: A member (legacy pair, or member_b of a solo sheet before accept) calls unwrapFor; get_sheet_wrapped_key returns [] / null.
+  - expected: unwrapFor throws 'no wrapped key for this sheet' (SheetKeyContext.tsx:122) rather than silently returning a bogus key.
+  - sketch: Drive unwrapFor with a mock actor whose get_sheet_wrapped_key returns [] -> expect throw 'no wrapped key'. E2E inviteReissue asserts the canister returns null for a legacy keyless slot, but nothing asserts the unwrapFor error mapping.
+- **[P2/edge]** unwrapFor when BOTH self-unwrap and tagged-unwrap fail (corrupt/foreign blob)
+  - layer: `vitest-unit`
+  - procedure: get_sheet_wrapped_key returns a non-empty blob that is neither a valid self-wrap for this member nor a tagged blob they can open (corruption, or sealed for a different key).
+  - expected: Branch 1 throws, branch 2 unwrapTaggedSheetKey returns null or throws, mapped to a single 'cannot unwrap sheet key' error (SheetKeyContext.tsx:139).
+  - sketch: unwrapFor mock actor returns random 40 bytes -> expect throw 'cannot unwrap sheet key'. Also feed a tagged blob with a wrong MAGIC byte (unwrapTaggedSheetKey null branch, devVetkd.ts:329) and a too-short tagged blob (devVetkd.ts:331) — those null guards are not unit-covered.
+- **[P2/edge]** Prod vetKD SEAL placeholder: createSheetForPair isProdVetkd branch emits self-wrapped placeholders (empty B slot when solo)
+  - layer: `vitest-unit`
+  - procedure: With VITE_IOU_PROD_VETKD=1, createSheetForPair skips registerMyWrapPubkey/cross-wrap and writes wrapA=self-wrap, wrapB=self-wrap (shared) or empty (solo) as unused placeholders (IC re-derives per member).
+  - expected: No partner pubkey lookup; wrapped_key_a non-empty (guard passes); wrapped_key_b empty iff solo; the prod branch (createSheet.ts:86-90) is exercised.
+  - sketch: prod-path.test only pins that the prod adapter stays gated OFF and checks transport-key/signature shapes; it never drives createSheetForPair with isProdVetkd()===true. Stub isProdVetkd to true (module mock) and assert the prod placeholder branch runs and fetchWrapPubkey is NOT called.
+- **[P2/nonobvious]** Prod vetKD READ path: unwrapFor derives K via vetkd_wrap_sheet_key + transport key (multi-device)
+  - layer: `vitest-unit`
+  - procedure: With prod vetkd, unwrapFor loads/creates a per-device transport key, calls vetkd_public_key + vetkd_wrap_sheet_key, then deriveSheetKeyProd with the canister-id audience. A second device with its own transport key derives the SAME K.
+  - expected: Both devices resolve identical K_sheet without any P-256 keypair or partner-pubkey; the intended fix for the fresh-device lockout the dev path suffers.
+  - sketch: SheetKeyContext.tsx:88-110 (prod branch of unwrapFor) has no test. Requires a mocked actor returning fixed vetkd_public_key / vetkd_wrap_sheet_key vectors and asserting deriveSheetKeyProd is called with Principal.fromText(canisterId) audience bytes. Currently un-exercised.
+- **[P2/ordering]** Multi-sheet partial re-seal on re-accept: only SOME sheets rewrapped, older sheets still readable
+  - layer: `vitest-e2e`
+  - procedure: A pair has several sheets. A legacy 'no wrapped key' member re-accepts a fresh invite; AcceptInvitePage rewraps only the sheets it enumerates. Reader then opens both a rewrapped and a not-rewrapped sheet.
+  - expected: Rewrapped sheets self-unwrap; sheets the re-accept didn't touch either remain readable via their prior blob or surface the 'no wrapped key' path deterministically — no silent wrong-key.
+  - sketch: inviteReissue.e2e covers single-sheet self-heal only. Add a two-sheet pair, re-accept, assert each sheet's read outcome independently. Guards against a partial-rewrap array desync.
+
+## entries / drafts / fees / schedules / balance / close-and-rotate
+
+- **[P0/nonobvious]** Edit a PARTNER's entry: direction is re-oriented back to author frame on store (flipDirection)
+  - layer: `playwright-ui`
+  - procedure: B authored an entry (stored in B's frame). A opens it — SheetPage shows it oriented to A. A edits the amount and saves. onSubmit does {...p, direction: flipDirection(p.direction)} because createdByMe===false, then edit_entry re-encrypts.
+  - expected: After the edit, both members' balances are unchanged except by the amount delta; the stored direction is still B's author-frame value (not double-flipped). A wrong sign flip here silently inverts who owes whom on every partner-authored edit.
+  - sketch: multiUser edit flow: B adds IOU credit 100 (B is owed). A opens the entry (sees 'You owe 100'), edits amount to 120, saves. Assert A now 'You owe 120' and B 'owed 120' (sign preserved, not flipped to A being owed). Alternatively extract an orientForStore(payload,createdByMe) helper from SheetPage.onSubmit and unit-test flip-on-partner / no-flip-on-own.
+- **[P0/ordering]** Close & rotate leaves the chat→sheet link pointing at the ARCHIVED sheet (stale route after rotation)
+  - layer: `playwright-ui`
+  - procedure: A chat is pinned to sheet1 (set_chat_sheet_link). User does Close & start new → sheet2. CloseSheetButton.confirm() creates sheet2 but never re-points the chat link. A subsequent imported draft from that chat routes via draftBelongsOnSheet → sheet1 (archived).
+  - expected: BUG SEAM: next imported draft lands on the archived sheet1 instead of the active sheet2. Either close should re-point the link to sheet2, or import should follow the pair's current active sheet. No test covers this.
+  - sketch: openchat.ui + close flow: pin chat→sheet1, close&rotate to sheet2, import a draft from the same chat, assert the entry appears on sheet2 (active) not sheet1. If current behavior routes to sheet1, this is the documented ordering bug to fix. Backup: unit test that CloseSheetButton.confirm calls set_chat_sheet_link(chat, newSheet.id) for every link that pointed at the old sheet.
+- **[P1/nonobvious]** Edit own entry preserves draft_id and re-encrypts under the sheet key
+  - layer: `vitest-e2e`
+  - procedure: A imports a chat draft (entry carries draft_id). A later edits that entry (own) and saves.
+  - expected: edit_entry re-encrypts new ciphertext; draft_id survives (EntryForm passes initial.draft_id through buildEntryPayload), so re-importing the same chat draft still dedupes via isDuplicateDraft.
+  - sketch: iouBackend.e2e: add_entry with draft_id, edit_entry with a changed amount, re-read + decrypt, assert draft_id unchanged and ciphertext differs; then isDuplicateDraft still true for the same draftId.
+- **[P1/edge]** Edit that changes txn_type IOU→settlement drops schedule and fee
+  - layer: `vitest-unit`
+  - procedure: Edit an existing IOU (with fee+schedule) and flip type to Settlement, save.
+  - expected: buildEntryPayload emits kind='payment', no schedule, no fee; amount_minor becomes the gross (no fee netting). Balance recomputes as an instant settlement.
+  - sketch: entryMath.test: start from an iou input with fee+schedule, set txnType='settlement', assert payload.fee undefined, schedule undefined, amount_minor=gross. Guards the form's type-toggle-on-edit path.
+- **[P1/nonobvious]** Close & rotate collapses FUTURE-due IOU installments into a single 'due now' carry-forward
+  - layer: `vitest-unit`
+  - procedure: Sheet has an IOU with a 50/50 schedule where the second half is due next month. Owner closes the sheet. CloseSheetButton uses computeBalances(entries) = ALL portions at 100%.
+  - expected: the entire outstanding amount (incl. the not-yet-matured half) is carried forward as one opening entry due=now, percent:100 — the future maturity date is lost. Whether intended or not, no test pins this behavior; a change to computeBalancesAsOf(now) inside close would silently alter carry-forward totals.
+  - sketch: Extract the closing-balance computation (currently computeBalances(entries) in CloseSheetButton) into a pure helper and unit-test: an IOU with a future-due half is carried forward at full amount, due now. Documents intended lump-sum-now semantics vs matured-only.
+- **[P1/ordering]** Partner's mirror view of the carried-forward entry after close & rotate
+  - layer: `playwright-ui`
+  - procedure: Owner closes sheet (owner was owed 25000). Owner authors the carry-forward entries in owner's frame. Manager later opens sheet2.
+  - expected: manager sees 'You owe 25000 EGP' (exact mirror of owner's 'owes you'). Only the owner/closer side is asserted today.
+  - sketch: Extend closeAndName.ui.spec: after rotation, have the manager open sheet2 and assert balancesText matches /You owe/ 25000 EGP (mirror), not /owes you/.
+- **[P1/ordering]** Close & rotate INITIATED BY THE PARTNER (joiner), not the account owner
+  - layer: `playwright-ui`
+  - procedure: The manager (who joined via invite, holds a cross-wrapped key) clicks Close & start new instead of the owner.
+  - expected: close_sheet + createSheetForPair + publishAccountNames + carry-forward all work from the joiner's identity; direction of carried balance is correct from the joiner's frame; both members read the new sheet.
+  - sketch: membership/close flow: manager triggers closeAndStartNewSheet, assert new sheet created, carry-forward balance correct on both sides, account name re-published under the new key by the non-owner.
+- **[P1/ordering]** Import draft PENDING when the sheet is closed: confirm the draft AFTER rotation
+  - layer: `playwright-ui`
+  - procedure: A 'Pending from chat' draft is staged on sheet1. Owner closes sheet1→sheet2 before confirming. Owner then confirms the pending draft.
+  - expected: the confirmed entry should land on the ACTIVE sheet2 (or be blocked), not silently write to the archived sheet1. Interacts with the stale chat-link seam above.
+  - sketch: Stage a pending import, close&rotate, then confirm; assert the entry appears on sheet2 and not on archived sheet1 (or a clear re-route/error). Guards the close-mid-import order.
+- **[P2/nonobvious]** Converted SETTLEMENT (convert toggle on a settlement, not an IOU)
+  - layer: `vitest-unit`
+  - procedure: type=Settlement, amount 100 USD, convert→EGP @49.12, submit. buildEntryPayload does not gate convert on txnType.
+  - expected: kind='payment', currency='EGP', amount_minor=round(10000*49.12), convert populated, fee undefined. No fee even though converted.
+  - sketch: entryMath.test: it('converts a settlement with no fee') — base({txnType:'settlement', convert:{to:'EGP',rate:49.12,...}}); assert currency EGP, amount_minor=491200, fee undefined, convert.to_amount_minor=491200.
+- **[P2/ordering]** k/m suffix normalization actually applied end-to-end: '26k' → 26000 through the OpenChat manifest normalize pass into a stored entry
+  - layer: `vitest-unit`
+  - procedure: A chat message 'lent you 26k EGP' passes through OpenChat's k_m_suffix normalize rule, becomes amount:26000 in the draft, then parseDraft→balance.
+  - expected: stored amount_minor=2600000 EGP. The IOU manifest declares the rule (actionManifest.ts) but no test drives the normalize EXECUTION producing 26000 that IOU then accepts.
+  - sketch: Cross-repo/simulated: feed the normalized draft {amount:26000} (post k_m_suffix) into parseDraft and assert amount_minor=2600000; complements the boundary test by proving the happy side. True execution lives in open-chat runner (aiAction) — add a note there.
+- **[P2/edge]** Multi-cycle repeated close & rotate (close, add, close again)
+  - layer: `playwright-ui`
+  - procedure: Close sheet1→sheet2 (carry 25000). Add a new entry on sheet2. Close sheet2→sheet3.
+  - expected: sheet3 carries forward the cumulative balance (carry-forward + new entry); no double-counting; each old sheet archived and still listed.
+  - sketch: Loop the close helper twice with an add_entry in between; assert sheet3 balance = sheet2 carried + new delta, and /pairs lists the account pointing at sheet3.
+- **[P2/edge]** Close a sheet whose entries net to ZERO: still rotates, writes NO carry-forward entries
+  - layer: `playwright-ui`
+  - procedure: Sheet has entries that fully offset (balance []). computeBalances returns []. User closes.
+  - expected: modal shows 'All settled — nothing to carry forward'; close_sheet + new sheet created; the carry-forward loop writes zero opening entries; new sheet starts empty.
+  - sketch: Add credit 100 + debt 100 (nets 0), click Close & start new, assert 'nothing to carry forward' copy, new sheet id differs and has no entries.
+- **[P2/nonobvious]** Foreign-fee currency line is carried forward as its own opening entry on close
+  - layer: `vitest-unit`
+  - procedure: Sheet has an IOU with a foreign EGP fixed fee (produces a separate EGP balance line) while the entry currency is USD. Close the sheet.
+  - expected: close carries forward BOTH the USD net line and the opposite-direction EGP fee line as two separate opening entries in the correct directions.
+  - sketch: Unit-test the extracted closing-balance→opening-entries mapping with a foreign-fee entry: assert two carry-forward payloads (USD credit + EGP debt) with correct signs.
+- **[P2/edge]** Empty-schedule IOU rejected by buildEntryPayload ('add at least one due date')
+  - layer: `vitest-unit`
+  - procedure: buildEntryPayload with txnType='iou' and schedule=[].
+  - expected: {ok:false, error:'add at least one due date'}. Currently only the multi-row!=100 branch is unit-tested; the length-0 branch is not.
+  - sketch: entryMath.test: buildEntryPayload(base({txnType:'iou', schedule:[]})) toEqual {ok:false, error:'add at least one due date'}.
+- **[P2/edge]** Single-row schedule with a non-100 typed percent is forced to 100 in buildEntryPayload (form layer)
+  - layer: `vitest-unit`
+  - procedure: buildEntryPayload txnType='iou', schedule=[{date, percent:40}] (one row).
+  - expected: payload.schedule=[{due_ts, percent:100}] — the length===1 branch overrides the typed percent. parseDraft's equivalent is tested; buildEntryPayload's is not.
+  - sketch: entryMath.test: single-row schedule percent:40 → assert emitted percent is 100.
+
+## TYPES/TEMPLATES ↔ OpenChat MANIFEST SYNC — do a user's saved transaction types actually reach the REGISTERED OpenChat ma
+
+- **[P0/regression]** Caller wiring — connected-only user's type-save actually re-registers the manifest
+  - layer: `vitest-unit`
+  - procedure: Connect-only user (per-user key registered, OC_LINKED_KEY unset). addTemplate({name:'Rent',keywords:['rent']}) → reRegisterOpenChatIfLinked.
+  - expected: registerAiApp is called with templates including Rent so the manifest gains the keyword_map. CURRENTLY NEVER FIRES: reRegisterOpenChatIfLinked hard-codes connected:false (TemplatesContext.tsx:104) AND reads no per-user-key status, so a connect-only user's types are never registered.
+  - sketch: New TemplatesContext.test.tsx (or extract reRegisterOpenChatIfLinked to a testable fn). Mock registerAiApp + localStorage(no OC_LINKED_KEY) + a 'connected=true' key-status source. describe('reRegister when connected-only') it('fires registerAiApp with the new type when the user has a registered delivery key but never Linked'): assert registerAiApp called once and its templates arg contains {name:'Rent',keywords:['rent']}. This is the exact fix-verification the RED predicate test can't give (it stops at the boolean).
+- **[P0/nonobvious]** buildManifestWire actually embeds the template keyword_map + schema.template in the WIRE manifest
+  - layer: `vitest-unit`
+  - procedure: buildManifestWire('', undefined, ()=>{}, inboxId, [{id:'z',name:'Reservation',keywords:['reservation','booking']}]) — the 5th (templates) positional arg.
+  - expected: manifest.actions[0].rules contains a keyword_map on field 'template' mapping value 'Reservation' → keywords, AND response_schema JSON has properties.template:{type:'string'}.
+  - sketch: Extend registerAiApp.test.ts: NO existing buildManifestWire test passes the templates arg — all call buildManifestWire('', undefined, ()=>{}) with ≤4 args, so the folding is proven only inside buildIouRules in isolation (actionManifest*.test), never through the wire builder. Add it('folds saved types into the registered wire manifest'): parse JSON.parse(manifest.actions[0].response_schema) and scan manifest.actions[0].rules for the template keyword_map. Cheapest assertion of the whole 'types reach the manifest' promise.
+- **[P0/ordering]** Link-then-add-type: linked user adds a type → manifest re-registers with it
+  - layer: `vitest-unit`
+  - procedure: Tap 'Link to OpenChat' (sets OC_LINKED_KEY=ME, registers base+current types). Later addTemplate('Rent').
+  - expected: reRegisterOpenChatIfLinked sees linked flag → registerAiApp fires with templates=[...,Rent]; invalidateInboxCache called.
+  - sketch: TemplatesContext.test.tsx: render provider with a get_my_user returning existing types, localStorage OC_LINKED_KEY=ME, mocked registerAiApp. Call addTemplate; assert registerAiApp called with templates array containing the new type, and with inboxCanisterId=OC_ACTION_INBOX_CANISTER_ID (the upsert-must-carry-inbox regression). No test drives TemplatesContext at all today.
+- **[P0/ordering]** Add-type-then-Link: types created before linking are in the FIRST registration
+  - layer: `vitest-unit`
+  - procedure: User saves types while unlinked (no register). Then taps 'Link to OpenChat'. linkToOpenChat passes templates=useTemplates().templates.
+  - expected: The single register_ai_app call carries all pre-existing types' keyword_map; a chat message matching a type routes to it.
+  - sketch: Component test of ActionInboxSettings.linkToOpenChat with useTemplates() returning 2 routable types + mocked registerAiApp: assert the templates arg passed through == current types. Guards the ADMIN-link path (distinct from the reRegister path). Also add a registry.e2e variant registering buildManifestWire(..., [types]) and reading it back via ai_apps to assert the keyword_map survives the round-trip (registry.e2e currently registers EMPTY templates only).
+- **[P0/ordering]** Add-type-then-Connect (never Link): types added before Connect stay unmapped
+  - layer: `vitest-unit`
+  - procedure: Save types → do 6-digit Connect (connectWithCode → claimAiAppLinkCode only). Never Link.
+  - expected: connectWithCode NEVER calls registerAiApp, so unless a connected-only re-sync exists the types remain unmapped. Post-fix: connecting (or the next type edit as connected) should trigger a manifest sync.
+  - sketch: ActionInboxSettings.connectWithCode test asserting current behaviour (no registerAiApp) + a fix-target test that after a successful claim the manifest is (re)registered with the user's current types (or that the connected flag now makes the next addTemplate sync). Pairs with the connected-only caller-wiring row.
+- **[P0/regression]** Connect-only, no type edits ever (base manifest forever) — the named 'not mapped after a fresh start' bug
+  - layer: `vitest-e2e`
+  - procedure: User only ever does 6-digit Connect; saves types but the app was deployed with the base manifest and no edit happens afterwards.
+  - expected: Without an app-load sync, chat messages can never route to the user's types (base manifest has no `template` keyword_map).
+  - sketch: End-to-end: register base manifest (empty templates), user has types, no edit → ai_apps read-back shows NO template keyword_map. Then trigger the on-load sync and assert it appears. Currently NOTHING re-syncs on load; see next row.
+- **[P0/ordering]** FRESH DEPLOY re-registers BASE manifest, linked user does nothing → types silently unmapped until next edit
+  - layer: `vitest-unit`
+  - procedure: User linked & types mapped. Redeploy/CI runs scripts/register-openchat-app.ts which upserts the BASE manifest (empty templates), overwriting the keyword_map. User opens the app but edits nothing.
+  - expected: On app load (authenticated + connected/linked) IOU should re-register with the user's current types, restoring the keyword_map. TODAY: no mount-time caller exists — the map stays gone until the user happens to add/edit/remove a type.
+  - sketch: There is NO app-load re-sync caller anywhere (grep: reRegisterOpenChatIfLinked only called from add/update/removeTemplate). Introduce an on-load sync (e.g. in TemplatesProvider effect after templates load, gated by shouldSyncOpenChatManifest) and test: mount with linked/connected + types → registerAiApp fires exactly once with those types. This is the 'nothing re-syncs the manifest on load' bug — highest-value gap.
+- **[P0/ordering]** Full ordering integration: Connect → save type → redeploy(base manifest) → chat message routes to the type
+  - layer: `playwright-ui`
+  - procedure: Connect (per-user key) → save a 'Reservation' type → CI redeploy re-registers base manifest → app load re-syncs → send a chat message containing 'reservation'.
+  - expected: After the on-load re-sync, the confirmed action's draft carries template='Reservation' and imports onto the right sheet. Without the re-sync the message extracts with no template.
+  - sketch: The single sequenced flow the brief calls for; assembled nowhere today (chatToLedger.scenario assumes drafts already arrived). Drive UI: connect, add type, simulate a base-manifest re-register, reload, then assert the manifest (via ai_apps or a routed import) reflects the type. Heaviest but the only test that catches the compound 'connect + redeploy + no-edit' bug end-to-end.
+- **[P1/ordering]** Link then EDIT an existing type → manifest re-registers with new keywords
+  - layer: `vitest-unit`
+  - procedure: Linked. updateTemplate({id, name:'Reservation', keywords:['reservation','booking','hotel']}).
+  - expected: registerAiApp re-fires with the edited keywords; the keyword_map value 'Reservation' now includes 'hotel'.
+  - sketch: TemplatesContext.test.tsx updateTemplate path: mocked registerAiApp, assert called with the edited template. buildIouRules keyword mapping is unit-covered (actionManifest.test) but the update→register wiring is not.
+- **[P1/ordering]** Link then REMOVE a type → manifest re-registers with it gone
+  - layer: `vitest-unit`
+  - procedure: Linked, two routable types. removeTemplate(id_of_Rent).
+  - expected: registerAiApp re-fires with templates minus Rent; the keyword_map no longer maps Rent (a stale chat keyword stops routing).
+  - sketch: TemplatesContext.test.tsx removeTemplate path asserting the shrunk templates arg. Prevents a deleted type lingering in the routable manifest.
+- **[P1/ordering]** Two devices, same principal: device B (unlinked) edits a type after device A linked
+  - layer: `vitest-unit`
+  - procedure: Device A taps Link (OC_LINKED_KEY set in A's localStorage only). Device B (same principal, no OC_LINKED_KEY) addTemplate.
+  - expected: Device B's reRegisterOpenChatIfLinked reads null OC_LINKED_KEY → shouldSync false → B's edit does NOT reach the manifest until A edits/re-links. This is a real cross-device staleness seam; the fix's `connected` (canister-backed per-user key, device-independent) would close it.
+  - sketch: TemplatesContext.test.tsx with localStorage OC_LINKED_KEY absent but a canister-backed 'connected' status present: assert that a connected user re-registers even on a device that never tapped Link (i.e. sync keys off canister connection, not per-device localStorage).
+- **[P1/ordering]** Account switch on one device: principal B edits a type while OC_LINKED_KEY still holds principal A
+  - layer: `vitest-unit`
+  - procedure: Sign in as A, Link (OC_LINKED_KEY=A). Sign out, sign in as B (no Link). B addTemplate.
+  - expected: reRegisterOpenChatIfLinked({linkedPrincipal:A, myPrincipal:B}) → shouldSync false → B does NOT hijack the 'iou' registration or leak B's types under A. (Predicate covered at unit; the CALLER honouring it is not.)
+  - sketch: TemplatesContext.test.tsx: localStorage OC_LINKED_KEY=A, identity=B, addTemplate → assert registerAiApp NOT called. Guards against a stale-flag re-register hijacking the shared app entry.
+- **[P1/nonobvious]** Disconnect then reconnect: OC_LINKED_KEY is never cleared on disconnect
+  - layer: `vitest-unit`
+  - procedure: Linked (OC_LINKED_KEY=ME) → 'Disconnect from OpenChat' (clearConsumerKeypair + revoke) → later addTemplate.
+  - expected: Ambiguous/likely-wrong: disconnect leaves OC_LINKED_KEY set (ActionInboxSettings never removeItem's it), so a post-disconnect type edit STILL re-registers the manifest even though the user 'disconnected'. Decide + assert intended behaviour (clear the flag on disconnect, or keep syncing).
+  - sketch: ActionInboxSettings.disconnectFromOpenChat test: after disconnect assert localStorage OC_LINKED_KEY is removed (fix), so a later addTemplate no-ops; OR document that manifest sync intentionally follows `connected` (now false) not the stale flag. Confirmed today: disconnect only removeItem's LS_INBOX, never OC_LINKED_KEY.
+- **[P1/happy]** Registered manifest read-back over ai_apps carries the template keyword_map (true end-to-end wiring)
+  - layer: `vitest-e2e`
+  - procedure: Register the IOU app with a non-empty templates list against the live user_index, then ai_apps() read-back.
+  - expected: The read-back manifest's action rules contain the `template` keyword_map for the registered types and response_schema advertises properties.template.
+  - sketch: registry.e2e.test.ts currently does buildManifestWire('', undefined, ()=>{}, E2E.actionInboxId) with NO templates. Add a throwaway-named app registered with [{name:'Reservation',keywords:['reservation']}]; read via ai_apps and assert the keyword_map + schema.template survived the candid round-trip. Proves types→registered-manifest across the real wire, not just buildIouRules.
+- **[P2/edge]** Type edit while fully UNLINKED and UNCONNECTED → no registration (correct no-op)
+  - layer: `vitest-unit`
+  - procedure: User never touched OpenChat. addTemplate.
+  - expected: reRegisterOpenChatIfLinked returns early (shouldSync false) → registerAiApp NOT called; the type save still succeeds.
+  - sketch: TemplatesContext.test.tsx: no OC_LINKED_KEY, not connected → assert persist() ran but registerAiApp did not. Confirms the guard doesn't accidentally register non-OpenChat users.
+- **[P2/edge]** registerAiApp failure during a type-save re-register is swallowed (save must not block)
+  - layer: `vitest-unit`
+  - procedure: Linked user addTemplate while user_index is unreachable / returns oc_error/invalid_request.
+  - expected: persist() succeeds and setTemplates updates; the registerAiApp rejection/outcome is swallowed (best-effort) and never throws out of addTemplate.
+  - sketch: TemplatesContext.test.tsx: mock registerAiApp to reject; assert addTemplate resolves and templates state includes the new type. registerAiApp.outcomes.test covers outcome DECODING but not the TemplatesContext try/catch swallow.
+- **[P2/nonobvious]** Anonymous Link (test_mode fallback) leaves OC_LINKED_KEY unset → later type edits don't re-sync
+  - layer: `vitest-unit`
+  - procedure: linkToOpenChat with identity undefined (anonymous fallback path accepted by local test_mode). Then addTemplate.
+  - expected: linkToOpenChat only setItem's OC_LINKED_KEY when identity is present, so an anonymous link never records the flag; the subsequent type edit sees no flag and skips re-register.
+  - sketch: ActionInboxSettings.linkToOpenChat test with identity=undefined: assert OC_LINKED_KEY not written, and document that anonymous local linking won't auto-resync (acceptable for dev, but pin it so it isn't mistaken for the connect-only bug).
+- **[P2/edge]** >50 saved types / keyword-less types while linked → validator caps applied to the REGISTERED wire
+  - layer: `vitest-unit`
+  - procedure: Linked user has 60 types (some keyword-less). addTemplate triggers re-register.
+  - expected: The registered manifest's keyword_map is capped at 50 mappings, ≤50 keywords each, roster instruction ≤1000 chars; keyword-less types omitted — so register_ai_app never rejects on caps.
+  - sketch: Assert buildManifestWire(..., templates(60)) produces a wire action whose keyword_map length ≤50 and response_schema still valid — i.e. the caps hold after the wire transform, not just in buildIouRules isolation.
+
+## OpenChat LINK/CONNECT/CLAIM/REVOKE flows + OC_LINKED_KEY + deep links + inline sign-in (IOU frontend: ActionInboxSetting
+
+- **[P0/happy]** linkToOpenChat success wires: sets OC_LINKED_KEY=principal, invalidates inbox cache, shows Linked
+  - layer: `vitest-unit (RTL component, mock registerAiApp + actionInboxClient)`
+  - procedure: Signed-in user opens /settings, clicks 'Link to OpenChat'. registerAiApp returns {kind:'success'}.
+  - expected: invalidateInboxCache() runs, localStorage[OC_LINKED_KEY] is set to identity.getPrincipal().toText(), status = 'Linked to OpenChat…'.
+  - sketch: describe('ActionInboxSettings linkToOpenChat'){ mock registerAiApp -> success, spy invalidateInboxCache; render with a fake identity; click 'Link to OpenChat'; expect localStorage.getItem(OC_LINKED_KEY)===principal, invalidateInboxCache called once, 'Linked to OpenChat' visible }. Only registerAiApp OUTCOME decode is unit-tested today (registerAiApp.outcomes.test); the success->localStorage/cache side-effects in the component are untested.
+- **[P0/regression]** CONNECT-only user (6-digit Connect, never 'Link to OpenChat') should still sync manifest — decision vs wiring
+  - layer: `vitest-unit`
+  - procedure: User completes the 6-digit Connect (claim_ai_app_link_code) so they have a per-user delivery key, but never taps 'Link to OpenChat' (OC_LINKED_KEY unset). They save a type with keywords.
+  - expected: Their type should fold into the manifest (shouldSyncOpenChatManifest returns true for connected:true). Today the DECISION function ignores `connected` (returns linkedPrincipal===myPrincipal) AND the caller hardcodes connected:false, so the type never reaches the manifest.
+  - sketch: The named test EXISTS but is RED (impl returns linkedPrincipal===myPrincipal, ignoring connected) — the fix is not applied. Separately, NO test covers the WIRING: reRegisterOpenChatIfLinked passes connected:false hardcoded and nothing derives a real connected value from the registered per-user key. Add: (a) make manifestSync honour connected; (b) a TemplatesContext test where a connected-but-unlinked user's addTemplate triggers registerAiApp.
+- **[P0/ordering]** No manifest re-sync on app load after a fresh deploy re-registered the BASE manifest
+  - layer: `vitest-unit (RTL, a new on-load effect) + playwright-ui`
+  - procedure: Linked user's types are in the manifest. Ops redeploys and re-runs base registration (types dropped). User reopens the app but edits no type.
+  - expected: On load, IOU should detect it participates in OpenChat and re-register with the user's current types. Today shouldSyncOpenChatManifest is ONLY consulted inside reRegisterOpenChatIfLinked, which fires ONLY on addTemplate/updateTemplate/removeTemplate — so with no edit the user stays on the base manifest indefinitely.
+  - sketch: There is NO app-load caller of shouldSyncOpenChatManifest (grep: only referenced by TemplatesContext + its own test). Add an on-mount effect (e.g. in TemplatesProvider or a dedicated ManifestSync component) and a test: given linked/connected principal, on mount register_ai_app fires once with current templates; given neither, it does not.
+- **[P0/regression]** /settings#openchat-connect opened SIGNED-OUT renders inline sign-in (no redirect) and preserves the hash
+  - layer: `playwright-ui`
+  - procedure: Unsigned visitor (e.g. OpenChat 'Open the code page in IOU' opens a fresh browser tab) lands on /settings#openchat-connect.
+  - expected: SettingsPage renders SignInButtons inline (does not Navigate to '/'), so the URL + #openchat-connect survive; after sign-in the page re-renders authenticated and the Connect section scrolls into view with the code input focused.
+  - sketch: This is the JUST-FIXED bug and has NO test. In a signed-out context goto('/settings#openchat-connect'); assert 'Sign in to manage your account and connect OpenChat' visible and URL still ends with #openchat-connect (not '/'); click dev sign-in; assert the 'Connect to OpenChat' heading is in view and the 6-digit input is focused.
+- **[P0/regression]** Desktop deep link iou://settings#openchat-connect DROPS the hash (lands on /settings, no scroll to Connect)
+  - layer: `vitest-unit`
+  - procedure: On the native/desktop app, OpenChat opens iou://settings#openchat-connect.
+  - expected: Should navigate to /settings#openchat-connect and scroll to Connect. BUG: deepLinkToPath returns '/settings' WITHOUT the hash (only the 'invite' case preserves url.hash), so the Connect anchor is lost and the code input isn't focused.
+  - sketch: deepLink.test asserts iou://settings -> '/settings' but never the hashed form. Add expect(deepLinkToPath('iou://settings#openchat-connect')).toBe('/settings#openchat-connect') — currently RED. Fix: append url.hash for the settings case (as done for invite).
+- **[P1/nonobvious]** linkToOpenChat with anonymous identity registers but does NOT set OC_LINKED_KEY (later template edits won't re-sync)
+  - layer: `vitest-unit (RTL component)`
+  - procedure: User with identity===undefined (anonymous fallback path) clicks Link. registerAiApp succeeds anonymously.
+  - expected: Registration succeeds but OC_LINKED_KEY is never written (guarded by `if (identity)`), so a subsequent template edit's reRegisterOpenChatIfLinked bails — the manifest silently stops tracking type edits.
+  - sketch: Render ActionInboxSettings with identity=undefined; mock registerAiApp success; click Link; assert localStorage[OC_LINKED_KEY] stays null and status shows success. Documents the anon-link -> no-resync trap.
+- **[P1/edge]** linkToOpenChat invalid_request / oc_error / thrown network error surface as distinct messages
+  - layer: `vitest-unit (RTL component)`
+  - procedure: registerAiApp returns invalid_request, then oc_error{code}, then throws.
+  - expected: Each maps to its own err message ('OpenChat rejected the manifest…', 'OpenChat error <code>…', or the thrown message); OC_LINKED_KEY stays unset in all three.
+  - sketch: registerAiApp.outcomes.test covers the OUTCOME DECODE only. Add component-level: mock each outcome, assert the rendered error text AND that OC_LINKED_KEY was NOT written on failure.
+- **[P1/nonobvious]** linkToOpenChat folds the user's LIVE saved templates (from useTemplates) into the registered manifest
+  - layer: `vitest-unit (RTL component)`
+  - procedure: User has 2 saved types with keywords; clicks Link.
+  - expected: registerAiApp is called with templates=<those 2 types>; the manifest's keyword_map 'template' rules reflect them.
+  - sketch: buildManifestWire/buildIouRules with templates is covered by actionManifest.test + registerAiApp.test using STATIC arrays; nothing asserts ActionInboxSettings passes the LIVE useTemplates() value. Render inside a TemplatesProvider seeded with 2 types; spy registerAiApp; assert opts.templates equals the live list.
+- **[P1/happy]** connectWithCode success clears the input and shows the connected message
+  - layer: `vitest-unit (RTL component)`
+  - procedure: User enters a valid 6-digit code; claimAiAppLinkCode returns success.
+  - expected: linkCode is cleared, status = 'Connected — OpenChat now delivers…'.
+  - sketch: claim OUTCOME success is decoded in registerAiApp.outcomes.test, but the component wiring (clear input + success copy) is untested; the UI e2e (openchat.ui.spec) only drives the two REJECTION paths, never a real success (no live code available). Mock claimAiAppLinkCode->success; type 123456; click Connect; assert input empty + connected text.
+- **[P1/edge]** connectWithCode code_expired / invalid_request / oc_error each show distinct copy
+  - layer: `vitest-unit (RTL component)`
+  - procedure: claimAiAppLinkCode returns code_expired, then invalid_request, then oc_error{code}.
+  - expected: 'This code has expired…', 'OpenChat rejected the request: <m>', 'OpenChat error <code>…' respectively.
+  - sketch: Outcome DECODE is covered; the component's switch->message mapping (esp. the expired branch, which no test drives) is not. Mock each outcome; assert the exact rendered error string.
+- **[P1/ordering]** Template edit re-registers manifest ONLY when OC_LINKED_KEY === current principal
+  - layer: `vitest-unit (RTL component / context)`
+  - procedure: Linked user (OC_LINKED_KEY==me) adds/updates/removes a type.
+  - expected: reRegisterOpenChatIfLinked calls registerAiApp with the new templates + the inbox override, then invalidateInboxCache().
+  - sketch: TemplatesContext.tsx (modified, uncommitted) has no test. Mock registerAiApp; render TemplatesProvider with OC_LINKED_KEY=me; call addTemplate/updateTemplate/removeTemplate; assert registerAiApp called with the post-mutation array, inboxCanisterId sent, invalidateInboxCache fired.
+- **[P1/ordering]** Template edit under a STALE OC_LINKED_KEY (different principal) must NOT re-register (no global 'iou' hijack)
+  - layer: `vitest-unit (RTL component / context)`
+  - procedure: User A links (OC_LINKED_KEY=A). User switches to identity B on the same device (flag still =A). B edits a type.
+  - expected: reRegisterOpenChatIfLinked bails (linkedPrincipal!==myPrincipal), so B's edit never re-owns/clobbers the shared registration.
+  - sketch: Decision is covered; the WIRING in reRegisterOpenChatIfLinked is not. Render TemplatesProvider with identity=B and OC_LINKED_KEY=A; call addTemplate; assert registerAiApp NOT called.
+- **[P1/ordering]** linkToOpenChat then edit a type: re-register preserves inbox override AND new templates (upsert continuity)
+  - layer: `vitest-unit (RTL component / context)`
+  - procedure: User taps Link (sets flag), then adds a type with keywords.
+  - expected: Second registerAiApp (from the edit) carries inbox_canister_id (else deposits go NotConfigured) and the new template rules.
+  - sketch: registerAiApp.outcomes.test guards that the inbox override is present on a single register call; nothing tests the link->edit SEQUENCE. Drive both steps; assert both registerAiApp calls include inboxCanisterId and the second includes the new template.
+- **[P1/ordering]** disconnectFromOpenChat: revoke runs BEFORE clearConsumerKeypair (PEM needed for the revoke signature)
+  - layer: `vitest-unit (RTL component)`
+  - procedure: Connected user clicks 'Disconnect from OpenChat'.
+  - expected: revokeAiAppUserKey (signing with the still-present private key) is called first; only then clearConsumerKeypair() wipes the key. Reversing the order would make the revoke unsignable.
+  - sketch: revoke OUTCOME decode + preimage layout are covered in registerAiApp.outcomes.test, but the disconnect ORDER in ActionInboxSettings is untested. Spy revokeAiAppUserKey + clearConsumerKeypair; assert revoke resolves before clear is invoked and that sign() saw the pre-clear key.
+- **[P1/edge]** disconnect when the user_index is unreachable still deletes the local key and shows the 'couldn't be reached' copy
+  - layer: `vitest-unit (RTL component)`
+  - procedure: revokeAiAppUserKey throws (network down); user still clicks Disconnect.
+  - expected: clearConsumerKeypair still runs, pubKeyPem/fingerprint cleared, status = the 'also press Disconnect in the chat's Apps settings' variant (revoked=false).
+  - sketch: Mock revokeAiAppUserKey to throw; assert clearConsumerKeypair called, key state cleared, and the non-revoked success message rendered.
+- **[P1/ordering]** CLAIM happy path then REVOKE happy path then RECONNECT with a fresh key (full round-trip ordering)
+  - layer: `vitest-e2e (against live user_index) / cargo-pocket-ic`
+  - procedure: Pair a live code (claim success) -> disconnect (revoke success + local clear) -> get a new code and claim again with a freshly generated keypair.
+  - expected: Each step succeeds; the reconnect uses a NEW consumer keypair (old one was cleared) so the fingerprint changes; deposits after reconnect target the new key.
+  - sketch: IOU e2e only covers claim CodeNotFound + revoke KeyNotFound (registry.e2e). OpenChat Rust covers claim single-use + revoke-then-KeyNotFound separately, but no test sequences claim->revoke->reclaim, nor asserts the reconnect fingerprint differs. Add an e2e that pairs, revokes, re-pairs and checks the new key is the one receiving fan-out.
+- **[P1/happy]** /settings#openchat-connect opened SIGNED-IN scrolls to the Connect section and focuses the code input
+  - layer: `playwright-ui`
+  - procedure: Signed-in user navigates to /settings#openchat-connect.
+  - expected: The useEffect on location.hash==='#openchat-connect' scrolls #openchat-connect into view and focuses the code input.
+  - sketch: openchat.ui.spec.openSettings navigates to '/settings' with no hash. Add: goto('/settings#openchat-connect'); assert document.activeElement is the 6-digit input (or the input is focused).
+- **[P1/ordering]** /openchat/link-chat?chat=... opened SIGNED-OUT renders inline sign-in and preserves ?chat
+  - layer: `playwright-ui`
+  - procedure: Unsigned visitor (external browser from OpenChat) opens /openchat/link-chat?chat=group:xyz.
+  - expected: LinkChatPage renders SignInButtons inline (not a redirect through /sign-in that would drop ?chat); after sign-in the same page loads the sheet list for that chat.
+  - sketch: openchat.ui.spec signs in BEFORE navigating, so the anon branch in linkChatToSheet is effectively dead there. Add a genuinely signed-OUT flow: fresh context, goto link-chat?chat=..., assert the 'Sign in to choose which sheet…' prompt, sign in in place, assert URL still carries ?chat and the sheet picker appears.
+- **[P2/edge]** linkToOpenChat with VITE_OC_USER_INDEX_CANISTER_ID unset shows env error, makes no network call
+  - layer: `vitest-unit (RTL component)`
+  - procedure: OC_USER_INDEX_CANISTER_ID is undefined. User clicks Link.
+  - expected: status = 'VITE_OC_USER_INDEX_CANISTER_ID is not set…', registerAiApp is never called.
+  - sketch: Mock ocConfig.OC_USER_INDEX_CANISTER_ID = undefined; click Link; assert error text and that the registerAiApp spy was not called.
+- **[P2/nonobvious]** connectWithCode ensures the consumer keypair exists (auto-create) before claiming
+  - layer: `vitest-unit (RTL component)`
+  - procedure: User with no cached consumer keypair enters a valid code and connects.
+  - expected: consumerPublicKeyPem() is awaited first (creates + wraps the keypair), then claimAiAppLinkCode is called with that PEM.
+  - sketch: consumerKeypair.test covers keypair creation in isolation; nothing asserts connectWithCode calls it before claim. Spy consumerPublicKeyPem + claimAiAppLinkCode; assert call order and that claim received the generated PEM.
+- **[P2/edge]** revoke returns key_not_found (already revoked / never paired) is treated as a clean disconnect
+  - layer: `vitest-unit (RTL component)`
+  - procedure: User disconnects; OpenChat returns KeyNotFound.
+  - expected: revoked=true branch (key_not_found counts as success), key cleared, 'removed from OpenChat' copy shown.
+  - sketch: Outcome (key_not_found) decoded in unit + e2e; the component's mapping of key_not_found->revoked=true (success copy) is untested. Mock outcome; assert the revoked-variant message.
+- **[P2/nonobvious]** Reconnecting after Disconnect generates a NEW keypair (fingerprint changes)
+  - layer: `playwright-ui`
+  - procedure: Connected user disconnects, then reconnects via a new 6-digit code.
+  - expected: clearConsumerKeypair wiped the device cache + canister blob, so loadOrCreateConsumerKeypair mints a fresh keypair — the settings-card fingerprint differs from before.
+  - sketch: openchat.ui.spec shows per-user fingerprints but never disconnect->reconnect. Capture fingerprint, disconnect, reconnect (mock/live), assert fingerprint changed.
+- **[P2/edge]** /openchat/link-chat with missing ?chat shows the 'missing chat reference' error
+  - layer: `playwright-ui`
+  - procedure: Open /openchat/link-chat with no chat param.
+  - expected: chatKeyError renders: 'This link is missing its chat reference — open it from OpenChat…' and no sheet list loads.
+  - sketch: goto('/openchat/link-chat'); assert the missing-reference error text; assert no radio inputs render.
+- **[P2/edge]** /openchat/link-chat with an over-long (>200 char) ?chat shows the 'not valid' error
+  - layer: `playwright-ui`
+  - procedure: Open /openchat/link-chat?chat=<201 chars>.
+  - expected: chatKeyError = 'The chat reference in this link is not valid…', no load.
+  - sketch: goto with a >200-char chat param; assert the not-valid error branch.
+- **[P2/edge]** /openchat/link-chat existing mapping to a now-inactive sheet warns and forces re-pick
+  - layer: `playwright-ui`
+  - procedure: A chat is linked to sheet S; S is later archived/closed so it's not in get_my_pairs active list. Reopen the link page.
+  - expected: 'This chat is currently linked to a sheet that is no longer active (<id>) — pick a new one.' and no radio is preselected.
+  - sketch: Link a chat, close that sheet (close & start new rotates active_sheet_id), reopen link-chat; assert the stale-mapping hint and that selected===null.
+- **[P2/edge]** /openchat/link-chat with zero active sheets prompts to create an account first
+  - layer: `playwright-ui`
+  - procedure: A brand-new signed-in user with no sheets opens link-chat?chat=...
+  - expected: 'You don't have any active sheets yet — create an account… first' message; no Save button.
+  - sketch: Fresh dev identity, no createAccount; goto link-chat; assert the empty-state copy.
+- **[P2/edge]** Connection check FAILS gracefully: unregistered app / unreachable user_index leaves inbox display as 'resolving…'
+  - layer: `vitest-unit (RTL component)`
+  - procedure: Open /settings when the app isn't registered or the user_index is unreachable.
+  - expected: getActionInboxConfig returns null / rejects; the card stays on 'resolving from OpenChat…' without crashing the settings page.
+  - sketch: Mock getActionInboxConfig to reject/return null; render ActionInboxSettings; assert 'resolving from OpenChat…' persists and no unhandled rejection.
+- **[P2/happy]** OpenChatSettings (relay) card: with no relay config it points to the on-chain inbox; with config it starts pairing / lists / revokes
+  - layer: `vitest-unit (RTL component)`
+  - procedure: Open /settings without a relay config, then with one; click 'Link an OpenChat account', then Revoke a listed pairing.
+  - expected: No-config branch renders the guidance card only; configured branch shows a ~10-min pairing code, lists pairings, and Revoke removes one.
+  - sketch: This is the RELAY pairing path (distinct from the on-chain claim/revoke). No test drives startPairing/listPairings/revokePairing wiring. Mock relay fns; assert code render, list, and revoke->reload.
+
+## Action Inbox + Fan-out Delivery (IOU actionInboxClient/inboxDedupe/SheetPage poll loop + OpenChat c2c_deposit_action_con
+
+- **[P0/ordering]** PROCEDURAL: member links their app key AFTER the card was posted -> gets no deposit (recipient keys baked at post time)
+  - layer: `cargo-pocket-ic`
+  - procedure: AI app posts a card gathering recipient keys from ai_app_user_keys while only member A has registered a key; THEN member B does set_my_ai_app_key; then a member confirms.
+  - expected: Card's recipient_public_keys were frozen at post time (all_recipient_keys), so B gets NO envelope even though B is now linked; only A's bucket receives a deposit. Documents that late-linking requires a re-posted card.
+  - sketch: post_card with recipient list = [A_key] only; register B_key on user_index after post; confirm; assert deposit lands in A's bucket only and B's fingerprint bucket stays empty. Pins the 'Connect-but-linked-late' fan-out gap the bug brief names.
+- **[P0/ordering]** PROCEDURAL: card confirmed when NOBODY linked a key (empty recipient set + confirm_payload) -> confirm silently succeeds with ZERO delivery
+  - layer: `cargo-pocket-ic`
+  - procedure: Post a card carrying confirm_payload but an EMPTY recipient set (no member ever did the Link-to-OpenChat/set_my_ai_app_key step); a member confirms.
+  - expected: all_recipient_keys() is empty so action_card_confirm_deposit returns None; respond_to_action_card commits synchronously as a routing-less confirm; card goes Confirmed with NO deposit and NO error — the ledger entry never arrives. (Is this the intended silent no-op, or should it surface a warning?)
+  - sketch: post_card with recipient_public_key=None, recipient_public_keys=[], confirm_payload=Some; confirm; assert card.state==Confirmed AND count_actions across all buckets==0. Asserts the exact 'Connect but never Link' delivery-black-hole seam.
+- **[P1/edge]** One malformed key among valid recipients fails the WHOLE fan-out batch (card stays Pending, retryable)
+  - layer: `cargo-pocket-ic`
+  - procedure: Post a card whose recipient list has A's valid PEM and a malformed/garbage PEM; a member confirms.
+  - expected: ecies_payload::encrypt errors on the bad key -> prepare returns Error -> deposit rejected -> two-phase leaves card Pending; NO partial deposit to the good key (atomic).
+  - sketch: post_card recipients=[A_valid, "not-a-pem"]; confirm; assert Response==Error, card still Pending, and A's bucket count==0 (whole batch rolled back). Complements fan_out happy path.
+- **[P1/ordering]** Concurrent double-confirm by DIFFERENT members: fan-out from both confirms collapses via shared idempotency_id per bucket
+  - layer: `cargo-pocket-ic`
+  - procedure: Both members confirm the same card near-simultaneously (or sequentially before state propagates); each confirm fans out to both keys.
+  - expected: idempotency_id is keyed on (message_id, payload) — identical across confirmers — so each fingerprint bucket dedupes to a single action despite two confirms; confirmedBy reflects whichever committed first.
+  - sketch: Existing confirm_twice test re-confirms as the SAME user. Drive B-confirm then A-confirm of the same pending card; assert each bucket holds exactly one action (not two). Guards the two-member race the collapseByMessageId UI defense mirrors.
+- **[P1/nonobvious]** Direct-chat mirror copy never emits a second deposit (only responder's canister deposits)
+  - layer: `cargo-pocket-ic`
+  - procedure: In a DIRECT chat (two user canisters), one participant confirms a routing-bearing card; the other participant's canister mirrors the Confirmed state apply-only.
+  - expected: Only the responder's canister emits the deposit; the mirrored copy applies state without emitting a deposit -> exactly one deposit per recipient, not doubled.
+  - sketch: fan_out/per_user tests use a GROUP. Set up a direct chat, confirm on one side, assert single deposit per bucket and the mirror copy carries no deposit. Uses user/impl respond_to_action_card apply-only path.
+- **[P1/ordering]** Key rotation: set_my_ai_app_key overwrites the prior key; an already-posted card still delivers to the STALE key
+  - layer: `cargo-pocket-ic`
+  - procedure: Member registers key K1; a card is posted capturing K1; member rotates to K2 via set_my_ai_app_key; then confirms.
+  - expected: Deposit goes to K1's fingerprint (baked on card), NOT K2; the member polling with K2 sees nothing. Verifies rotation-ordering delivery to old vs new key.
+  - sketch: register K1; post_card [K1]; set_my_ai_app_key(K2); confirm; assert K1 bucket populated, K2 bucket empty. Also assert my_ai_app_keys now returns only K2 (rotation replaced, not appended).
+- **[P1/regression]** CROSS-REPO E2E: real OpenChat confirm DEPOSIT -> IOU pollActionInbox IMPORT of the same envelope
+  - layer: `vitest-e2e`
+  - procedure: Drive a live OpenChat confirm that deposits into the action_inbox; then run IOU's pollActionInbox against that same inbox with the recipient's real consumer keypair and feed the payload through parseDraft->add_entry.
+  - expected: The deposited envelope verifies OpenChat's signature, decrypts to the v2 wrapper, splits context+payload, and imports as a ledger draft — closing the deposit+poll loop end to end.
+  - sketch: Both actionInbox.e2e and iouBackend.e2e stop at the poll/import half with EMPTY buckets; the deposit half is deferred to Rust. Add an e2e that deposits (via LUI c2c or a seeded action) then polls, asserting one imported draft with correct context.chat/messageId/confirmedBy.
+- **[P1/ordering]** SheetPage poll loop advances the since_id cursor and never re-imports an already-seen inbox id
+  - layer: `vitest-unit`
+  - procedure: Mount SheetPage; first poll returns actions ids [5,6]; cursor advances to 7; second poll (same or overlapping) must not re-add ids <=6 or ids already in handledInboxIds/importedMessageIds.
+  - expected: since advances to max(id)+1 per tick; setInboxPending filters out oc-<id> already seen or handled; no duplicate 'Pending from OpenChat' cards across 15s ticks.
+  - sketch: The cursor-advance + dedupe wiring in SheetPage.tsx (lines ~452-474) is untested; only pollActionInbox passthrough and helpers are unit-tested. Extract the cursor/merge reducer or mount with a mocked poll and assert cursor monotonicity + no duplicate PendingDraft.
+- **[P1/edge]** IOU import UI collapses a double-confirm (same messageId, two confirmedBy) to one visible card and blocks re-accept
+  - layer: `playwright-ui`
+  - procedure: Two deposits with the SAME context.messageId (different confirmedBy) reach the inbox; SheetPage builds visibleInbox = collapseByMessageId(...) and the accept path guards on importedMessageIds.
+  - expected: Only the first card per messageId is visible; accepting persists the messageId so a second copy cannot be imported -> exactly one ledger entry.
+  - sketch: collapseByMessageId + parse/serialize are unit-tested, but the wiring (visibleInbox render + accept-guard writing importedMessageIds) is not exercised end to end. Drive two same-messageId pending cards in the UI, accept, assert single entry and second card suppressed.
+- **[P2/edge]** Fan-out recipient list beyond MAX_DEPOSIT_RECIPIENTS (8) is truncated -> the 9th+ member gets no deposit
+  - layer: `cargo-pocket-ic`
+  - procedure: Post a card carrying 9 distinct recipient keys; confirm.
+  - expected: recipients.truncate(8) keeps the first 8 (legacy-first order); exactly 8 deposits; the 9th key's bucket stays empty.
+  - sketch: post_card with 9 keys; confirm; assert 8 buckets populated, 9th empty. Edge for large-group fan-out cap.
+- **[P2/edge]** Confirm of an EXPIRED card deposits nothing (expires_at path)
+  - layer: `cargo-pocket-ic`
+  - procedure: Post a routing-bearing card with expires_at set; advance PocketIc time beyond it; confirm.
+  - expected: action_card_confirm_deposit sees expired -> None -> falls to commit which yields the expiry/NoChange outcome; no deposit; card not Confirmed.
+  - sketch: All existing tests leave expires_at==None. Set expires_at, tick past it, confirm, assert no deposit + card not Confirmed.
+- **[P2/ordering]** Fan-out still deposits to a member who LEFT the chat between card post and confirm
+  - layer: `cargo-pocket-ic`
+  - procedure: Post a card capturing both members' keys; member B leaves/removed from the group; the remaining member confirms.
+  - expected: Recipient keys were baked at post time, so B's key is still on the card and B receives a deposit into their bucket despite no longer being a member (potential post-departure delivery/leak). Document whether this is intended.
+  - sketch: post_card [A,B]; remove_from_group(B); confirm as A; assert B's bucket still receives an envelope. Mirrors the 'read/act after partner left' seam on the delivery side.
+- **[P2/ordering]** Redeploy resets inbox ids to 1 but deploy-scoped importedMessageIds prevents cross-deployment suppression
+  - layer: `vitest-unit`
+  - procedure: Import messageIds under deployment-1's user_index tag; redeploy OpenChat (new user_index id, inbox ids restart from 1); mount SheetPage.
+  - expected: planScopedInboxKey computes a fresh prefix.tag for the new deployment and removes the old-tag/legacy keys, so deployment-2's low/reused ids are NOT wrongly suppressed and DO import.
+  - sketch: planScopedInboxKey is unit-tested in isolation but the SheetPage mount migration (lines ~78-90 applying keep/remove to localStorage) is not. Simulate localStorage with an old-deployment set, mount under a new DEPLOY_TAG, assert old keys removed and fresh set empty.
+
+## Routing / auth-gating / deep links (src/app/App.tsx route table, per-route auth guards, deepLink.ts, inline vs redirect 
+
+- **[P0/happy]** Guarded page while DEFINITIVELY anonymous redirects to /sign-in (Pairs/NewPair/NewSheet/Pair/SetDisplayName)
+  - layer: `playwright-ui`
+  - procedure: Anonymous visitor navigates to /pairs (or /pair/new, /sheet/new, /pair/:id, /set-name)
+  - expected: useEffect sees state.kind==='anonymous' → nav('/sign-in', replace)
+  - sketch: fresh context WITHOUT signInDev; page.goto('/pairs'); expect(page).toHaveURL(/\/sign-in$/). Repeat for /pair/new, /sheet/new, /set-name. (No current spec runs a guarded page while truly anonymous — all pre-sign-in.)
+- **[P0/ordering]** /settings while anonymous renders INLINE sign-in preserving the URL + #openchat-connect hash
+  - layer: `playwright-ui`
+  - procedure: Unsigned visitor opens /settings#openchat-connect (e.g. OpenChat 'Open the code page in IOU' in a fresh browser tab)
+  - expected: SettingsPage renders SignInButtons inline (NOT a redirect to '/'); URL and #openchat-connect hash are retained so post-login re-render scrolls to Connect
+  - sketch: anonymous context; page.goto('/settings#openchat-connect'); expect 'Sign in to manage…' inline + URL still /settings#openchat-connect; click dev sign-in; expect Settings authed view AND Connect section (#openchat-connect) scrolled/visible + code input focused
+- **[P0/ordering]** /openchat/link-chat while anonymous renders INLINE sign-in preserving ?chat
+  - layer: `playwright-ui`
+  - procedure: Unsigned visitor opens /openchat/link-chat?chat=group:xyz
+  - expected: LinkChatPage renders SignInButtons inline; ?chat query survives so post-login the same page loads the sheet picker for that chat key
+  - sketch: NOTE current openchat.ui.spec + flows.ts::linkChatToSheet call signInDev FIRST, so the anonymous inline-sign-in branch (LinkChatPage line 214-225) is DEAD in tests. Add: fresh anonymous context; goto('/openchat/link-chat?chat='+enc('group:x')); expect inline 'Sign in to choose…' + URL keeps ?chat; click dev; expect 'Link this chat to a sheet' heading AND chat key still shown
+- **[P0/ordering]** Invite accept while anonymous: 'Sign in to accept' → /sign-in → user is NOT returned to /pair/accept
+  - layer: `playwright-ui`
+  - procedure: Anonymous invitee opens /pair/accept#c=..&s=..&k=.. ; clicks 'Sign in to accept' (a Link to /sign-in); completes sign-in
+  - expected: BUG SUSPECT: SignIn's post-login effect navs to '/' (→ /pairs), NOT back to /pair/accept. The invite is stashed in sessionStorage (STASH) but nothing re-navigates to consume it, so the 'You'll come right back here to accept' promise is broken (unlike Settings/LinkChat which sign in INLINE).
+  - sketch: fresh anonymous context; goto(inviteLink); expect 'You've been invited' + 'Sign in to accept'; click it → /sign-in; click dev sign-in; assert whether URL returns to /pair/accept and 'Accept invite' is shown. Current code lands on /pairs — this test would FAIL and expose the missing return-to-destination. Fix candidate: render SignInButtons inline in AcceptInvitePage OR carry a returnTo through /sign-in
+- **[P1/happy]** Landing / while anonymous shows the sign-in CTA
+  - layer: `playwright-ui`
+  - procedure: Anonymous (no II delegation, no dev identity) visitor navigates to '/'
+  - expected: Hello renders the wordmark + 'Sign in with Internet Identity' button; does NOT redirect
+  - sketch: describe('Hello landing') it('anonymous sees sign-in CTA at /') → fresh context (no signInDev), page.goto('/'), expect getByText('Track who owes whom') visible AND button 'Sign in with Internet Identity' visible AND URL still '/'
+- **[P1/edge]** Landing / while auth still 'loading' shows Loading… (no premature redirect)
+  - layer: `vitest-unit`
+  - procedure: App boots; AuthProvider mount effect still resolving isAuthenticated() when '/' renders
+  - expected: Hello shows 'Loading…' — must NOT redirect to /pairs nor to /sign-in until auth resolves
+  - sketch: render <Hello/> inside a mocked AuthProvider forced to {kind:'loading'}; assert text 'Loading…' and that useNavigate was NOT called
+- **[P1/nonobvious]** /me redirects to /settings (route-level Navigate)
+  - layer: `playwright-ui`
+  - procedure: Navigate to /me (e.g. via legacy deep link iou://me)
+  - expected: Route renders <Navigate to='/settings' replace/>; ends on /settings (then /settings applies its own auth gate)
+  - sketch: signInDev(page); page.goto('/me'); expect(page).toHaveURL(/\/settings$/) and Settings heading visible
+- **[P1/edge]** Unknown route redirects to /
+  - layer: `playwright-ui`
+  - procedure: Navigate to a path matching no route, e.g. /does-not-exist
+  - expected: catch-all <Route path='*'> renders <Navigate to='/' replace/> → Hello (→ /pairs if authed)
+  - sketch: signInDev(page); page.goto('/zzz-nope'); expect(page).toHaveURL(/\/pairs$/); and anonymous variant lands on '/' landing
+- **[P1/nonobvious]** useDeepLinks wires Capacitor appUrlOpen → navigate(path) and ignores null-mapped links
+  - layer: `vitest-unit`
+  - procedure: Native app receives an appUrlOpen event; the hook maps the URL and navigates only when deepLinkToPath returns non-null
+  - expected: A valid iou:// link calls navigate(mappedPath); an unknown-host link does NOT navigate; listener is removed on unmount
+  - sketch: mock '@capacitor/app' App.addListener to capture the handler; render a component using useDeepLinks with a mocked useNavigate; invoke handler with {url:'iou://sheet/abc'} → navigate('/sheet/abc'); with {url:'iou://evil/x'} → navigate not called; unmount → handle.remove() called
+- **[P1/nonobvious]** SheetPage & ArchivedSheetsPage while anonymous show 'Please sign in' with NO redirect (inconsistent gate)
+  - layer: `playwright-ui`
+  - procedure: Anonymous visitor deep-links to /sheet/:id or /pair/:id/archived
+  - expected: Renders inert 'Please sign in.' text and stays on the URL — unlike Pairs/NewPair which redirect. This asymmetry (no route to sign-in, no inline button) is likely a UX bug
+  - sketch: anonymous context; page.goto('/sheet/anything'); expect getByText('Please sign in.') visible AND URL unchanged (no /sign-in). Document/decide whether it should redirect or render inline SignInButtons like Settings
+- **[P1/ordering]** #openchat-connect scroll-into-view + input focus fires after inline sign-in (mount ordering)
+  - layer: `playwright-ui`
+  - procedure: Anonymous → /settings#openchat-connect → sign in inline → ActionInboxSettings mounts for the first time (auth branch) with hash still present
+  - expected: ActionInboxSettings mount effect reads location.hash==='#openchat-connect', scrolls connectRef into view and focuses the code input — even though the component only mounts AFTER auth resolves
+  - sketch: as above, after inline sign-in assert the connect code <input> is document.activeElement (or evaluate document.activeElement.id) and Connect heading in viewport
+- **[P1/edge]** /openchat/link-chat with missing/oversized ?chat shows the chatKeyError card (no sign-in, no sheet load)
+  - layer: `vitest-unit`
+  - procedure: Open /openchat/link-chat with no ?chat, or ?chat longer than 200 chars
+  - expected: Renders the error card ('missing its chat reference' / 'not valid'); short-circuits BEFORE the auth gate and sheet fetch
+  - sketch: render <LinkChatPage/> with useSearchParams mocked to '' and to 201 chars; assert error copy shown and that useActor/get_my_pairs was never invoked; also assert the chatKeyError card renders even while anonymous (gate is bypassed)
+- **[P1/regression]** Invite accept round-trip restores invite from sessionStorage stash (fragment survives sign-in)
+  - layer: `vitest-unit`
+  - procedure: Invitee opens /pair/accept#... (fragment stashed) then returns to /pair/accept WITHOUT the hash (e.g. hash dropped by an auth redirect)
+  - expected: useMemo reads STASH from sessionStorage and reconstructs InviteParams so Accept still works even though window.location.hash is empty
+  - sketch: seed sessionStorage[STASH] with a serialized invite; render <AcceptInvitePage/> with window.location.hash=''; assert it shows the authenticated 'Accept invite' path (invite non-null) rather than the 'missing or malformed' card
+- **[P1/ordering]** Sign out while on a guarded deep page transitions the view correctly
+  - layer: `playwright-ui`
+  - procedure: Authenticated user on /sheet/:id (or /pairs) clicks Sign out in /settings, then browser-backs to the guarded page
+  - expected: After signOut state→anonymous: /pairs re-renders → nav('/sign-in'); /sheet/:id shows 'Please sign in' (no redirect). Confirms no stale authed data leaks and the guards fire on the anonymous transition
+  - sketch: signInDev; createAccount; goto('/settings'); click 'Sign out'; goto('/pairs') → toHaveURL(/sign-in/); goto('/sheet/'+id) → getByText('Please sign in.')
+- **[P2/edge]** /sign-in dev button visible only in DEV build
+  - layer: `vitest-unit`
+  - procedure: Open /sign-in under a production (import.meta.env.DEV=false) build
+  - expected: Only the II button renders; the 'Sign in (dev — local identity)' button and dev caption are absent
+  - sketch: render <SignInButtons/> with import.meta.env.DEV stubbed false → queryByText(/Sign in \(dev/) is null; stub true → present
+- **[P2/edge]** Invite accept with malformed/absent invite shows the 'missing or malformed' card
+  - layer: `vitest-unit`
+  - procedure: Open /pair/accept with no fragment and no stash (or a garbage fragment)
+  - expected: parseInviteFragment returns null, stash empty → renders '← Accounts' + 'This invite link is missing or malformed.'
+  - sketch: clear sessionStorage; render <AcceptInvitePage/> authed with hash='#garbage'; assert error card and NO Accept button
+- **[P2/edge]** Invite accept while auth 'loading' renders nothing (no flash of malformed/anon card)
+  - layer: `vitest-unit`
+  - procedure: Full page load of an invite link while AuthProvider still resolving
+  - expected: AcceptInvitePage returns null during state.kind==='loading' — avoids flashing the anon or malformed card before auth settles
+  - sketch: render with auth forced 'loading' and a valid hash → component renders null (container empty); then flip to authenticated → Accept button appears
+- **[P2/edge]** SetDisplayName redirects anonymous → /sign-in and only submits when authenticated
+  - layer: `vitest-unit`
+  - procedure: Anonymous user reaches /set-name; separately an authenticated user submits a 1..32 char name
+  - expected: anonymous → nav('/sign-in', replace) and renders null; authenticated submit calls set_display_name then nav('/', replace); name length validated 1..32
+  - sketch: render <SetDisplayName/> anonymous → navigate('/sign-in') called + null render; authenticated → fill 33 chars → error 'Name must be 1..=32 characters'; valid → actor.set_display_name invoked + navigate('/')
+- **[P2/nonobvious]** Deep link iou://me resolves through the app to /settings (native → route redirect chain)
+  - layer: `vitest-unit`
+  - procedure: Native appUrlOpen fires iou://me → deepLinkToPath('/me') → navigate('/me') → Route redirect → /settings
+  - expected: End state is /settings (authenticated hub) — verifies the native-link + route-redirect chain composes, not just the pure mapping
+  - sketch: integration render of <App/> (memory router seeded to '/me') with authed auth → expect Settings hub rendered; complements deepLinkToPath unit test which only checks the string mapping
+- **[P2/happy]** Anonymous → landing → click 'Sign in with Internet Identity' navigates to /sign-in
+  - layer: `playwright-ui`
+  - procedure: Anonymous visitor on '/' clicks the Hello CTA button
+  - expected: nav('/sign-in') — Hello's button routes to the SignIn page (as opposed to the inline surfaces)
+  - sketch: anonymous context; page.goto('/'); click 'Sign in with Internet Identity'; expect(page).toHaveURL(/\/sign-in$/)
+
+## Cross-repo end-to-end user journeys (IOU ↔ OpenChat) where ORDER across both apps matters — pairing, connect/link orderi
+
+- **[P0/ordering]** Connect-only user (6-digit Connect, never Link) — their saved types must still reach the manifest
+  - layer: `scripted-live-driver (IOU scripts/live + OpenChat OC profile) end-to-end; plus a unit test wiring the real connected flag into TemplatesContext.reRegisterOpenChatIfLinked`
+  - procedure: User signs into IOU, saves a 'Reservation' type with keywords, does the OpenChat 6-digit Connect (claim_ai_app_link_code — registers a per-user delivery key) but NEVER taps 'Link to OpenChat'. A chat message 'reservation 5000' is sent.
+  - expected: Manifest re-registers with the user's types folded in as template keyword_map rules; the chat message routes to the Reservation type. Today shouldSyncOpenChatManifest returns false (link-only) AND the TemplatesContext caller hardcodes connected:false, so the manifest stays on the deploy BASE manifest and the message routes to nothing.
+  - sketch: describe('connect-only manifest sync') — drive Connect (claim link code so ai_app_user_keys has this user's key), save a type with keywords via set_user_templates, then assert register_ai_app was called with a template keyword_map containing those keywords (read back via explore_ai_apps/ai_apps). The manifestSync.test 'syncs a CONNECTED user' is a pure-decision test only; this asserts the WIRING: connected=true is actually derived at the call site and register_ai_app actually fires. Then post a chat message and assert it classifies to the type.
+- **[P0/nonobvious]** TemplatesContext hardcodes connected:false — a type edit by a connect-only user never re-registers
+  - layer: `vitest-unit (mock registerAiApp + a real per-user-key/connected probe) — assert the caller derives connected and invokes registerAiApp`
+  - procedure: A connect-only user (no link flag) edits an existing type's keywords in IOU Settings/Types.
+  - expected: reRegisterOpenChatIfLinked should re-register because the user participates in OpenChat (connected). Actual: line 99-104 passes connected:false unconditionally, so shouldSyncOpenChatManifest is false and no re-register fires — the edited keywords never reach the manifest.
+  - sketch: Mock localStorage (no OC_LINKED_KEY), stub the per-user-key check to report connected=true, spy on registerAiApp. addTemplate/updateTemplate/removeTemplate → expect registerAiApp called once with templates. Regression guard so the connected branch can't silently regress back to the hardcoded false.
+- **[P0/ordering]** No re-sync on app load after a fresh deploy re-registers the BASE manifest
+  - layer: `scripted-live-driver (register base manifest, then simulate app load); unit test for an app-load sync effect once one exists`
+  - procedure: User has types + is connected/linked. Ops redeploys IOU, which re-runs register_ai_app with the EMPTY/base manifest (no user template rules). User reloads the IOU app. A chat message that used to route now arrives.
+  - expected: On app load, IOU should detect it participates in OpenChat and re-sync its current types into the manifest (overwriting the base one). Actual: sync only fires on an explicit template EDIT (addTemplate/updateTemplate/removeTemplate) or explicit Link — nothing runs shouldSyncOpenChatManifest on load, so after redeploy the base manifest persists until the user happens to edit a type.
+  - sketch: There is currently NO app-load caller of shouldSyncOpenChatManifest (confirmed: only reference is in TemplatesContext.reRegisterOpenChatIfLinked, fired on template mutation). Test: register_ai_app 'iou' with empty templates (base), then mount the app / run the load effect for a connected user with saved types, assert register_ai_app is re-invoked with the user's template rules. This is the exact 'nothing re-syncs the manifest on load' bug from the brief and is untested at every layer.
+- **[P0/happy]** Confirm an action and BOTH members see it in their IOU 'Pending from chat' inbox (full deposit→poll→import)
+  - layer: `scripted-live-driver spanning OpenChat (post+confirm) and IOU (pollActionInbox→import); or a combined harness`
+  - procedure: In a linked chat, a confirmable ActionCard carrying both members' delivery keys is posted; the non-proposer confirms. Each member opens IOU and polls the action inbox.
+  - expected: One confirm deposits one envelope into EACH member's fingerprint bucket; each member's IOU consumer decrypts ONLY their own envelope and imports the same draft into the shared sheet. The Rust fan_out test proves the DEPOSIT half; no IOU test proves the POLL+IMPORT half against a live deposit — the cross-repo deposit→import seam is unbridged.
+  - sketch: OpenChat side: post_card with recipient_public_keys=[A,B], confirm as B (reuse fan_out_delivery_tests helpers). IOU side: for each member run pollActionInbox with their consumerKeypair, assert exactly one draft decodes, encrypt+add_entry into the linked sheet, and BOTH members computeBalances to the same $20 line. actionInbox.e2e and iouBackend.e2e each cover only half and stop at a FRESH (empty) key; nothing drives a real deposit then imports it on both sides.
+- **[P0/ordering]** Member reads a sheet AFTER partner LEFT — joiner holding a partner-CROSS-WRAPPED key
+  - layer: `vitest-e2e (live replica, two identities) + playwright-ui variant`
+  - procedure: A creates sheet (self-wrapped K). B accepts an invite where A cross-wrapped K for B. Later A LEAVES the pair (A's slot anonymized). B then reads/decrypts the sheet and imports a chat draft into it.
+  - expected: B still decrypts K from its wrapped copy after the cross-wrapper left; the slot anonymization must not invalidate B's wrapped key. inviteLifecycle.e2e only proves the CREATOR (A, self-wrapped) reads after B leaves; the mirror — a cross-wrap joiner reading after the wrapper leaves — is the untested key-read seam called out in the brief.
+  - sketch: A create_pair+sheet, issue_invite, B accept_invite (cross-wrap). A leave_pair. Assert B get_sheet_wrapped_key still returns B's copy and B decrypts K; B add_entry succeeds and A (gone) cannot. Then layer a chat import on top to cover the cross-repo continuation.
+- **[P0/ordering]** Fresh-start then resume: wipe device/localStorage, re-auth, types + OpenChat participation reload and manifest re-syncs
+  - layer: `scripted-live-driver (openchat-durable-profiles wipe+re-inject toolkit) end-to-end`
+  - procedure: Connected+typed user fully wipes the IOU device (localStorage incl. OC_LINKED_KEY and cached consumer keypair gone; delegation re-injected). Signs back in. Sends a chat message that should route to a saved type.
+  - expected: Types decrypt back from the canister (they live in UserRecord, not localStorage), the per-user delivery key re-syncs from the canister (consumerKeypair.test canister-sync branch), and the manifest re-registers so routing still works. Risk: OC_LINKED_KEY was in the wiped localStorage, so post-wipe the user is 'connected but not linked' — the exact connect-only gap — and without an app-load sync their types never re-reach the manifest.
+  - sketch: Save type+Connect+Link, snapshot routing works. Wipe localStorage, re-auth. Assert: templates reload, consumer keypair re-derives/re-syncs, and a chat message still routes (requires manifest re-sync on load). This chains the fresh-start bug to the no-app-load-resync bug — the highest-value single journey.
+- **[P1/ordering]** Happy path both-linked: A creates type before connecting, B connects before creating a type, message routes
+  - layer: `scripted-live-driver driving 2 OC profiles + 2 IOU identities`
+  - procedure: A: save type → Connect → Link. B: Connect → Link → save type. Both in the same OpenChat chat linked to an IOU sheet. Send a message matching A's type keyword, then one matching B's type keyword.
+  - expected: Each user's manifest reflects THEIR types regardless of whether the type was saved before or after connecting; both keywords route to the right type. Since the 'iou' registry entry is a single per-app record, this also surfaces whether A's and B's type rules clobber each other on the shared app registration (last-writer-wins hazard).
+  - sketch: Sequence the two orders explicitly, then assert both keyword_maps are present in the registered manifest and both messages classify. Explicitly assert whether register_ai_app for 'iou' is per-user or shared — if shared, this documents/guards the clobber behaviour (the ai_app_registry re_register upsert is by name+owner, so a second owner may re-own per re_register_by_different_user_reowns_in_test_mode).
+- **[P1/edge]** Confirmer never Linked/registered a delivery key — fan-out to a member with no key
+  - layer: `scripted-live-driver`
+  - procedure: A and B pair in IOU and share a chat. A completes Connect (has a delivery key); B never did the Connect. A posts a confirmable card that tries to fan out to both; someone confirms.
+  - expected: Deposit lands only for A; B has no bucket. IOU must degrade gracefully (B sees nothing rather than a hard error) and ideally B is prompted to Connect. ai_app_user_keys returns only A's row (proven in fan_out test at the registry level), but no journey test asserts the IOU/OpenChat behaviour when the fan-out list omits an unregistered member mid-confirm.
+  - sketch: Register A only. Build the card from ai_app_user_keys (which returns 1 row). Confirm. Assert one deposit (A), zero for B, no confirm failure, and B's IOU poll returns []. Guards the 'one member never linked' half of the Connect-vs-Link seam end-to-end.
+- **[P1/ordering]** add_entry / chat import RACING leave_pair (interleave: import in flight as partner leaves)
+  - layer: `vitest-e2e with explicit interleaving (issue add_entry and leave_pair without awaiting the first)`
+  - procedure: B has a chat draft queued to import into the shared sheet. A initiates leave_pair at ~the same moment B's import (add_entry) fires.
+  - expected: Either the import commits before anonymization (entry lands, still decryptable by B) or it is cleanly rejected — never a half-written entry or a key B can no longer read. fileParallelism is off in the e2e suite and every existing test is strictly sequential, so no test interleaves a write with leave-time slot anonymization.
+  - sketch: Fire add_entry (B) and leave_pair (A) concurrently; assert a consistent end state across both orderings (entry present+readable OR cleanly absent), and that B's wrapped key survives if B remains.
+- **[P1/ordering]** Type saved BEFORE ever connecting — does the eventual Connect pick up pre-existing types?
+  - layer: `scripted-live-driver; unit test for a Connect-completion sync hook`
+  - procedure: User saves several types while never having touched OpenChat. Only later do they do Connect (and/or Link).
+  - expected: At Connect/Link time the manifest should be registered with the ALREADY-saved types. Actual: registration is triggered by template MUTATIONS (add/update/remove) and by explicit Link; a Connect that happens after the last type edit — with no subsequent edit — never folds the pre-existing types in (no Connect-time sync, no load-time sync).
+  - sketch: set_user_templates with 3 types, THEN claim link code (Connect) with NO further edits. Assert manifest carries the 3 types. Fails today because nothing syncs on Connect completion — routing silently empty until the user re-edits a type.
+- **[P1/nonobvious]** Two members both edit their types — shared 'iou' app registration last-writer-wins clobber
+  - layer: `scripted-live-driver (2 owners registering the same app name)`
+  - procedure: A saves/edits a type (re-registers 'iou'). Then B saves/edits a type (re-registers 'iou'). Both used the same appCanisterId (iouBackendCanisterId).
+  - expected: Each member's chat should route by THEIR own types. But registerAiApp upserts the single 'iou' app record by name; the second registration may overwrite the first's template keyword_map (ai_app_registry re_register upserts in place; re_register_by_different_user re-owns in test_mode). This risks A's rules being clobbered by B's — a cross-user manifest interference no test covers.
+  - sketch: A register 'iou' with rules_A; B register 'iou' with rules_B; read back ai_apps and assert whether both sets coexist or one clobbers. If per-user manifests aren't isolated, this documents the design gap; if they are, it guards against regression. Directly probes whether template routing is per-user or shared.
+- **[P1/ordering]** Partner replacement: B leaves, C joins — do B's chat-imported entries stay readable by C, and is B's stale key purged?
+  - layer: `vitest-e2e (multi-sheet, three identities)`
+  - procedure: B (joined via cross-wrap) imports several chat drafts into the shared sheet, then leaves. A re-invites; C accepts a fresh link (re-wrap). C reads the sheet.
+  - expected: Entries B wrote remain decryptable by C (same K re-sealed to C), and B's wrapped key is actually purged across ALL sheets of the pair (not just the one test sheet). inviteReissue.e2e proves C can read K but asserts neither that B's prior entries survive for C nor that B's stale wrapped keys are purged beyond a single sheet.
+  - sketch: Multi-sheet pair; B writes entries on 2 sheets, leaves; C accepts; assert C decrypts B's old entries on both sheets AND B's wrapped_key_b is gone on every sheet. Covers the multi-sheet partial-rewrap gap too.
+- **[P1/happy]** Successful 6-digit Connect against a live OpenChat code (not just rejection paths)
+  - layer: `scripted-live-driver (mint a real link code in OpenChat, claim from IOU)`
+  - procedure: User enters a valid OpenChat AI-app link code in IOU's Connect field.
+  - expected: claimAiAppLinkCode succeeds, per-user delivery key is registered, IOU reflects connected state, and (with the fix) manifest sync becomes eligible. openchat.ui.spec + registry.e2e only exercise REJECTION (invalid/unknown code, CodeNotFound); no test drives a SUCCESSFUL connect against a real user_index-minted code.
+  - sketch: Owner create_ai_app_link_code in OC, IOU claimAiAppLinkCode with its consumer key, assert my_ai_app_keys shows the key and IOU treats the user as connected. The success side of connectWithCode is a total blind spot.
+- **[P1/nonobvious]** Chat message routed via a TEMPLATE keyword (not just a settlement/credit draft)
+  - layer: `scripted-live-driver (chat message → classify → import) or playwright-ui import variant`
+  - procedure: In a linked chat, send a message whose text matches a type's keyword (e.g. 'reservation ...'); it should extract using that template's base (fee %, schedule) then import.
+  - expected: The draft is classified to the template, template base (fee/schedule/direction) is merged, and the imported entry carries those defaults. importDraft UI + chatToLedger.scenario cover only settlement/credit drafts assuming drafts already arrived correctly; no test drives keyword→template routing end-to-end from a real chat message.
+  - sketch: With a registered template keyword_map, post a matching chat message, assert it classifies to the template id, template base merges (templateToInitial), and the imported entry reflects fee/schedule. Bridges the manifest routing to the ledger import — the two halves are only ever tested separately.
+- **[P2/edge]** Partial rewrap on re-accept: pair has several sheets, only some re-sealed on the fresh invite
+  - layer: `vitest-e2e`
+  - procedure: A pair owns 3 sheets. Partner re-accepts a fresh invite but the accept re-wraps K for only a subset of sheets.
+  - expected: Either all sheets are re-sealed atomically, or the un-sealed sheets are clearly keyless (null wrapped key) rather than silently corrupt. accept_invite tests all use a SINGLE sheet, so partial-rewrap ordering across multiple sheets is untested.
+  - sketch: Create 3 sheets, re-accept with a rewrap array covering 2, assert the 3rd reports 'no wrapped key' (self-heal path) rather than a decryption error, then re-accept again to seal it.
+- **[P2/happy]** Link-to-OpenChat upsert driven through the IOU UI (deliberately skipped today)
+  - layer: `playwright-ui against an ISOLATED per-test app name (not the shared 'iou'), or scripted-live-driver with a throwaway app id`
+  - procedure: User taps 'Link to OpenChat' in IOU Settings; register_ai_app upsert fires with the user's current types.
+  - expected: Manifest registers/updates with template rules; OC_LINKED_KEY set to this principal. openchat.ui.spec deliberately SKIPS this (unsafe against the shared live 'iou' registration) so the whole Link path is unexercised at the UI layer.
+  - sketch: Register under a uniquely-named throwaway app (as registry.e2e does) so the shared 'iou' entry is untouched; drive the Link button, assert register_ai_app called with template rules and OC_LINKED_KEY set. Removes the reason the UI test was skipped.
+- **[P2/ordering]** Confirm-then-Cancel / Cancel-then-Confirm race on the same card across both members
+  - layer: `cargo-pocket-ic (OpenChat integration) + a cross-repo assertion that IOU never imports a cancelled card`
+  - procedure: A posts a card; B confirms while A (or B) cancels around the same time.
+  - expected: Exactly one terminal state — a cancelled card must not deposit; a confirmed card must not later be cancelled into an inconsistent state. two_phase tests cover confirm-before-configured and double-confirm, but never Cancel interleaved with Confirm.
+  - sketch: Post card; interleave cancel + confirm both orders; assert deposit count is 0 when cancel wins and 1 when confirm wins, and IOU poll never surfaces a cancelled card's envelope.
+- **[P2/ordering]** Key rotation: user re-Connects with a NEW delivery key while old envelopes are still buffered
+  - layer: `scripted-live-driver or cargo-pocket-ic`
+  - procedure: User connected with key K1, some deposits landed in K1's bucket, then user rotates (revoke + set new key K2 / re-claim). User polls.
+  - expected: Post-rotation the user still retrieves K1-bucket envelopes they hadn't imported (or they're re-delivered to K2), and new deposits go to K2. set_my_ai_app_key overwrite / revoke ordering is untested for whether pre-rotation deposits become unreadable — a silent data-loss seam.
+  - sketch: Deposit to K1, rotate to K2, assert K1 envelopes are still decryptable by the retained K1 private key on device OR explicitly documented as lost; assert new confirms deposit to K2's fingerprint.
+- **[P2/edge]** Manifest sync fires with a STALE OC_LINKED_KEY belonging to a previously signed-in principal (device reuse)
+  - layer: `vitest-unit (caller-level, not just the pure decision)`
+  - procedure: User X links on a shared device (OC_LINKED_KEY=X). User Y signs into IOU on the same device and edits a type.
+  - expected: shouldSyncOpenChatManifest returns false for Y (stale flag belongs to X) so Y does NOT hijack X's registration — the manifestSync stale-principal guard. But once connected is wired in, Y (if connected) SHOULD sync under Y's own identity; the interaction of the stale link flag with the new connected path is untested at the caller.
+  - sketch: The pure decision is covered, but the CALLER (reRegisterOpenChatIfLinked) is not tested with a stale flag + connected=true. Add a caller test: linkedPrincipal=X, myPrincipal=Y, connected=true → registerAiApp fires under Y (not X) and does not carry X's identity.
+
+## completeness-critic
+
+- **[P0/ordering]** since_id poll CURSOR is not deployment-scoped — a cursor from a prior deploy suppresses all fresh low-id deposits
+  - layer: `vitest-unit (cursor persistence keying) + vitest-e2e (redeploy then confirm)`
+  - procedure: SheetPage advances a persisted since_id cursor (say 40). OpenChat is cleanly redeployed → action_inbox ids restart at 1. New confirmed actions get ids 1..5. Poll still calls pollActionInbox({ sinceId: 40 }).
+  - expected: Fresh deposits import. inboxDedupe.ts deploy-scopes the dismissed-ids and importedMessageIds SETS, but the monotonic since_id CURSOR is a separate value; if it is persisted un-scoped it stays at 40 and the inbox query returns nothing (id must be > since_id) — confirmed-in-OpenChat-never-imported, distinct from the messageId-suppression case already enumerated. Verify the cursor is reset/scoped on deploy-tag change.
+  - sketch: it('resets the since_id cursor when the deploy tag changes'): seed localStorage cursor=40 under old userIndexId, switch VITE_OC_USER_INDEX_CANISTER_ID, mount poll, assert first actions() call uses since_id 0n (or scoped key), and an id=3 deposit is imported.
+- **[P0/nonobvious]** Fresh-device resume LOSES templates: deriveUserKey is non-deterministic (random localStorage keypair), so templates_enc cannot decrypt
+  - layer: `vitest-unit (devVetkd deriveUserKey determinism) + integration (TemplatesProvider after localStorage wipe)`
+  - procedure: User has saved types (templates_enc/iv on their UserRecord, encrypted under deriveUserKey(principal)). Wipe device/localStorage, re-auth as the same principal on a fresh device. TemplatesContext load effect derives K=deriveUserKey(principal) → deriveUserKeypair generates a NEW random P-256 keypair → decryptWithSheetKey fails.
+  - expected: The enumerated cross-repo scenario 'Fresh-start then resume … types + OpenChat participation reload and manifest re-syncs' assumes types reload. They CANNOT: deriveUserKey depends on the same random-per-device keypair whose fresh-device breakage is only tested for SHEET reads, never for TEMPLATE decryption. Manifest re-sync then has nothing (or the wrong set) to sync. seedFromMnemonic is never wired to reconstruct the keypair. This is the template-domain twin of the crypto fresh-device gap.
+  - sketch: it('deriveUserKey is stable across a localStorage wipe for the same principal'): derive K1, clear localStorage, derive K2, assert equal (currently FAILS). Then: encrypt templates under K1, wipe, mount provider, assert setError or empty templates and document the data-loss.
+- **[P1/nonobvious]** Concurrent template saves clobber each other via stale `templates` closure (no functional setState)
+  - layer: `vitest-component (TemplatesProvider with a fake actor, two overlapping awaited mutations)`
+  - procedure: In TemplatesContext, call addTemplate(A) and addTemplate(B) back-to-back (or updateTemplate + addTemplate) before the first persist() resolves. Both callbacks capture the SAME `templates` array from the render closure; each builds next=[...templates, X] and calls persist(next) / set_user_templates independently.
+  - expected: Both A and B end up persisted. In reality the second persist overwrites templates_enc with a list missing the first addition (last-writer-wins on a stale base), and setTemplates(next) likewise drops one. No test drives two overlapping mutations; addTemplate/updateTemplate/removeTemplate all read the non-functional `templates` closure.
+  - sketch: describe('TemplatesContext concurrency') it('does not lose an entry when two mutations overlap'): render provider, fire addTemplate(A) and addTemplate(B) without awaiting the first, await both, assert set_user_templates final payload contains BOTH ids and templates state length===2.
+- **[P1/edge]** Native deep link iou://openchat/link-chat?chat=… is UNMAPPED and silently dropped
+  - layer: `vitest-unit (deepLinkToPath)`
+  - procedure: On native, App.appUrlOpen fires with url=iou://openchat/link-chat?chat=group:abc. deepLinkToPath parses host='openchat' → switch falls through to default → returns null → useDeepLinks ignores it.
+  - expected: A link-to-chat deep link should route to /openchat/link-chat?chat=…. Instead nothing happens (no navigation, no error). The enumerated deep-link tests cover the WEB route and the settings#hash drop, but never the fact that the link-chat destination has no deep-link host mapping at all — a whole native entry point is dead.
+  - sketch: it('maps iou://openchat/link-chat?chat=X'): expect(deepLinkToPath('iou://openchat/link-chat?chat=group:abc')) to a /openchat/link-chat?chat=… path (currently null). Add companion asserting the ?chat query survives.
+- **[P1/nonobvious]** Shared 'iou' registry entry: member B's chat message routes through member A's template keyword_map (cross-user routing corruption, not just clobber)
+  - layer: `vitest-e2e / cargo-pocket-ic (register A, register B, resolve routing for A's text)`
+  - procedure: App name 'iou' is a single global registry entry. A links and registers keyword_map {A's keywords}. Later B links and registers {B's keywords}, clobbering. Now A sends a chat message whose text matches one of A's OWN keywords but NOT B's.
+  - expected: A's message should route to A's type. Because the manifest keyword_map is global and last-writer-wins (B), A's message routes by B's rules → wrong type or no match. The enumerated 'last-writer-wins clobber' captures the WRITE collision but not the READ-side consequence: every user shares one keyword table, so routing is systematically wrong for whoever didn't register last. Needs a per-user keyword_map or per-user app id decision.
+  - sketch: it('A message still routes to A type after B re-registers'): register iou manifest with A keywords, then with B keywords, then classify A's phrase → expect A's template id (currently resolves via B's map). Document the design gap.
+- **[P1/ordering]** Sign-out does not clear OC_LINKED_KEY, the consumer keypair, or importedMessageIds — the next principal on the device inherits them
+  - layer: `vitest-component (auth transition) + e2e`
+  - procedure: User P1 links + connects (OC_LINKED_KEY=P1, consumer keypair + importedMessageIds in storage). P1 signs out. User P2 signs in on the same device and opens a sheet.
+  - expected: P2 starts clean. The enumerated 'stale OC_LINKED_KEY' test covers the re-register guard, but not the fuller isolation seam: P2's inbox poll may reuse P1's consumer key fingerprint (receiving/omitting deposits by P1's identity) and P2 inherits P1's importedMessageIds suppression set. Verify sign-out (or sign-in-as-different-principal) purges OC_LINKED_KEY, consumer keypair, and dedupe sets.
+  - sketch: it('purges OpenChat local state on account switch'): set OC_LINKED_KEY/consumer key/importedMessageIds as P1, transition auth to P2, assert each is cleared or re-scoped by principal before any poll uses them.
+- **[P1/regression]** Canister post_upgrade round-trips PAIRS/SHEETS/INVITES/ENTRY_COUNTERS/templates with no MemoryId collision
+  - layer: `cargo-pocket-ic (install → seed → upgrade → assert)`
+  - procedure: Populate a pair with 2 sheets, entries, an outstanding invite, and user templates. Upgrade the IOU canister (same wasm or a field-added struct) via install_mode=upgrade.
+  - expected: All state survives and decodes. The MEMORY note records a real v1.3.2 bug (MemoryId 11 reused with a changed value type). NO enumerated scenario exercises a canister UPGRADE at all — the entire migration/stable-memory dimension is absent. A test that installs, seeds, upgrades, and re-reads get_my_pairs / get_sheet_wrapped_key / get_my_user.templates_enc would catch a MemoryId or Storable-layout regression.
+  - sketch: it('preserves state across upgrade'): create_pair, create sheets+entries+invite+templates, pic.upgrade_canister(same wasm), assert pairs/sheets/wrapped keys/invite/templates identical.
+- **[P1/ordering]** Leaver rejoins the same pair via a fresh invite — old entries they authored must still decrypt after the round-trip
+  - layer: `cargo-pocket-ic + vitest-unit (unwrap of the re-sealed blob)`
+  - procedure: A (creator) and B are paired with sheet1. B writes entries. B leaves (slot B anonymized, wrapped_key_b cleared). A issues a NEW invite. B accepts it again (re-claims slot B) supplying a rewrap for sheet1.
+  - expected: B regains read access and the entries B wrote before leaving still decrypt under the re-sealed key (K unchanged). Enumerated covers 'B leaves, C joins' continuity, but not the SAME member leaving and REJOINING (identity re-enters slot B; is_reseal is false because they were anonymized) — an ordering permutation with subtle pubkey/rewrap re-store semantics.
+  - sketch: it('a departed member can rejoin and read prior entries'): pair A/B, B add_entry, leave_pair(B), issue_invite(A), accept_invite(B, rewrap sheet1), assert get_sheet_wrapped_key(B) unwraps and old entry decrypts.
+- **[P1/ordering]** Fan-out retry after a partial failure re-deposits DUPLICATES to recipients who already received the envelope
+  - layer: `cargo-pocket-ic (fan_out_delivery_tests)`
+  - procedure: Card confirmed with 3 recipients; one key is malformed so the whole batch fails and the card stays Pending (enumerated). The confirmer retries. The 2 valid recipients already got their deposit on the first attempt.
+  - expected: Retry delivers only the missing recipient (or is idempotent per recipient). If fan-out has one batch-level idempotency_id but no per-recipient dedup, the retry re-deposits to the 2 who already have it → duplicate inbox cards. Enumerated covers the all-or-nothing failure and shared idempotency for DOUBLE-CONFIRM, but not the RETRY-after-partial-failure duplicate path.
+  - sketch: it('retry after partial failure does not duplicate to already-delivered recipients'): confirm with [good,good,bad], expect fail, fix key, retry, assert each good recipient inbox has exactly ONE action.
+- **[P1/edge]** connectWithCode interrupted after the code is burned but before local key/flag persist → user is stuck (code consumed, not connected)
+  - layer: `vitest-component (mock claim resolving then a thrown persist) + manual recovery doc`
+  - procedure: User enters the 6-digit code. claim_ai_app_link_code succeeds on OpenChat (code marked consumed, per-user key registered), then the network drops / tab closes before IOU persists the consumer keypair association or invalidates the inbox cache.
+  - expected: Either the whole connect is atomic/resumable, or a clear recovery path exists. Because the code is single-use and now burned, re-entering it returns code_expired, yet the local side never finished — the user cannot reconnect without a NEW code. No enumerated scenario covers an INTERRUPTED connect (only distinct rejection copies for expired/invalid).
+  - sketch: it('surfaces a recoverable state when claim succeeds but local persist fails'): mock claim ok, force ensureConsumerKeypair/persist to throw, assert UI does not show 'Connected' falsely and guides re-issue rather than re-entry of the dead code.
+- **[P1/ordering]** Native deep link arrives while auth is still 'loading' → useDeepLinks navigates immediately and the guard bounces to /sign-in, losing the destination
+  - layer: `vitest-component (router + auth in 'loading' then 'authenticated')`
+  - procedure: Cold app launch from iou://sheet/abc. useDeepLinks' appUrlOpen fires and calls navigate('/sheet/abc') before AuthProvider resolves. The route guard, seeing a not-yet-authenticated (loading) state, may redirect.
+  - expected: The deep target is retained until auth resolves (like the invite sessionStorage stash). Enumerated covers 'landing while loading shows Loading' and 'invite accept while loading renders nothing', but not a DEEP-LINK navigation racing the auth-loading state and whether the destination is preserved through the redirect.
+  - sketch: it('preserves a deep-link destination through auth loading'): mount with auth=loading, dispatch appUrlOpen(iou://sheet/abc), resolve auth=authenticated, assert final location is /sheet/abc (not /sign-in with the target lost).
+- **[P2/edge]** deepLinkToPath silently drops query strings (sheet/pair) and drops the hash on iou://me and iou://settings
+  - layer: `vitest-unit (deepLinkToPath)`
+  - procedure: Call deepLinkToPath('iou://sheet/abc?ref=chat'), and deepLinkToPath('iou://me#openchat-connect').
+  - expected: sheet/pair mappings rebuild only the pathname (encodeURIComponent(rest)) — url.search is discarded; 'me' returns bare '/me' and 'settings' returns bare '/settings', dropping any fragment. Only the 'invite' case preserves url.hash. The enumerated set names the settings#openchat-connect drop but not the general query-loss nor the /me hash-loss (which then redirects to /settings losing the anchor entirely).
+  - sketch: table test: {in:'iou://sheet/abc?x=1', wantContains:'x=1'}, {in:'iou://me#openchat-connect', wantContains:'#openchat-connect'} — both currently fail, pinning the asymmetry vs the invite case.
+- **[P2/nonobvious]** unwrapFor has no in-flight dedup and reads a stale `keys` closure — concurrent reads double-derive; a post-cache() call re-derives
+  - layer: `vitest-component (SheetKeyProvider, spy on actor.get_sheet_wrapped_key)`
+  - procedure: unwrapFor is a plain async function recreated each render (not memoized). Two SheetPage effects call unwrapFor(s) concurrently: both see keys[s] empty in their captured closure, both call buildAgent + get_sheet_wrapped_key + crypto. Separately: cache(s,K) is called, but an unwrapFor captured from an earlier render still sees the old `keys` and re-derives instead of returning the cached key.
+  - expected: One derivation, cache reuse. Instead there is no inflight Promise map and the guard `if (keys[sheetId]) return` uses a render-stale snapshot, so duplicate network+ECDH work and a cache miss right after seeding. No test drives concurrent or post-cache unwrapFor.
+  - sketch: it('coalesces concurrent unwrapFor'): fire two unwrapFor(s) in the same tick, assert get_sheet_wrapped_key called once. it('honors a fresh cache() before unwrapFor resolves'): cache then unwrapFor, assert no network call.
+- **[P2/edge]** unwrapFor failure is never cached — a legacy no-wrapped-key sheet makes the 15s poll re-hit get_sheet_wrapped_key every tick
+  - layer: `vitest-component (fake timers + poll)`
+  - procedure: Sheet has an empty wrapped-key slot (legacy 'joined but not granted'). SheetPage renders and its poll loop calls unwrapFor(s) each tick. unwrapFor throws 'no wrapped key for this sheet' and caches nothing.
+  - expected: A single friendly failure, not a per-tick network storm. Because failures aren't memoized (no negative cache), every poll rebuilds the agent and re-queries the canister. Enumerated covers the ERROR message once, not the repeated-retry cost/behavior under the poll loop.
+  - sketch: it('does not re-query on every tick for a permanently unreadable sheet'): mount, advance 3 poll intervals, assert get_sheet_wrapped_key call count is bounded (documents current unbounded behavior).
+- **[P2/nonobvious]** delete_pair orphans the departed/solo member's PARTNER_PUBKEYS entry (no key cleanup on delete)
+  - layer: `cargo-pocket-ic`
+  - procedure: Solo (archived) account is delete_pair'd. It purges SHEETS, entries, ENTRY_COUNTERS, INVITES[invite_code], PAIRS. PARTNER_PUBKEYS still holds the caller's pubkey.
+  - expected: Delete fully cleans up. The enumerated OpenChat-side test flags 'delete_ai_app does NOT purge per-user keys' as an orphan-cleanup gap; the IOU delete_pair has the same class of orphan (PARTNER_PUBKEYS, and any leftover invite entries from prior reissues whose codes were retired but not removed) that no test asserts.
+  - sketch: it('delete_pair leaves no PARTNER_PUBKEYS/INVITES residue'): seed pair with reissued invites, archive, delete_pair, assert PARTNER_PUBKEYS and INVITES have no dangling entries for that pair.
+- **[P2/edge]** accept_invite with an EMPTY rewraps vector on a pair that already has sheets → partner joins with zero readable sheets
+  - layer: `cargo-pocket-ic`
+  - procedure: Pair has sheet1 + sheet2 (both active). New partner calls accept_invite(code, rewraps=[], pubkey). The slot-claim and pubkey-store proceed; no sheet's member_b/wrapped_key_b is set.
+  - expected: Defined behavior: partner is a member but sees no sheets until a later re-seal, or the call is rejected for granting nothing. Enumerated covers PARTIAL re-seal (sheet1 but not sheet2); the TOTAL-empty boundary (member with access to nothing, yet counted as the partner so the slot is now closed to a proper grant) is not enumerated and is the worst-case of the same seam.
+  - sketch: it('empty rewraps join leaves partner with no wrapped keys'): create pair+2 sheets, issue_invite, accept_invite(empty rewraps), assert members[1]==B but get_sheet_wrapped_key(B) empty on both sheets; decide reject-vs-allow and pin it.
+- **[P2/regression]** IOU backend redeploy assigns a new app_canister_id → publish_ai_app anti-squat vouch and inbox override break
+  - layer: `cargo-pocket-ic (register with old id, publish, re-register with new id, publish)`
+  - procedure: IOU registers/publishes with appCanisterId=OLD backend id (vouched). The IOU backend is redeployed to a NEW canister id (VITE_IOU_BACKEND_CANISTER_ID changes). Next register/publish uses the new id.
+  - expected: Ownership + published state migrate cleanly. If publish_ai_app re-verifies the app_canister_id vouch against the NEW id while the registry still holds the OLD, publish returns NotVerified (fail-closed) and IOU's OC_ACTION_INBOX_CANISTER_ID override may no longer match — a cross-repo migration seam. Enumerated tests upsert/ownership but not an app_canister_id CHANGE across a redeploy.
+  - sketch: it('handles app_canister_id change on redeploy'): register+publish(old), register(new id), publish → assert defined outcome (re-vouch or explicit re-own) rather than a silent NotVerified/orphan.
+- **[P2/edge]** Prod vetKD read path traps for a member who LEFT or was never granted — unwrapFor surfaces the raw trap
+  - layer: `vitest-component (prod flag on, actor.vetkd_wrap_sheet_key rejects) + cargo-pocket-ic (auth check)`
+  - procedure: Under VITE_IOU_PROD_VETKD=1, a departed member (slot anonymized) or a non-member calls unwrapFor(sheetId). vetkd_wrap_sheet_key is invoked; the canister should refuse (no authorization).
+  - expected: A friendly 'cannot unwrap' error, parallel to the dev path's caught fallback. The prod branch has NO try/catch and NO tagged fallback — a canister trap propagates as an unhandled rejection. Enumerated covers only the prod HAPPY read; the prod DENIED/departed read is absent.
+  - sketch: it('prod unwrapFor errors cleanly when not authorized'): mock vetkd_wrap_sheet_key to reject, call unwrapFor, assert a mapped error rather than an unhandled throw; canister test asserts a non-member is refused.
+- **[P2/ordering]** issue_invite twice while a partner is mid-accept on the now-retired first code (interleave)
+  - layer: `cargo-pocket-ic (ordered calls)`
+  - procedure: Creator issues code1. Partner begins accept_invite(code1). Before it lands, creator issues code2 (retiring code1 per 'at most one live code'). The in-flight accept_invite(code1) then executes.
+  - expected: Deterministic outcome — either code1's accept is honored (it was valid at send) or cleanly rejected as consumed/retired, with exactly one partner in the slot and no dangling INVITES entry. Enumerated has 'issue twice retires first' and 'two accept_invite race one slot' separately, but not the issue-retire vs in-flight-accept-on-retired-code interleave.
+  - sketch: it('reissue vs in-flight accept on old code'): issue code1, issue code2 (retire code1), accept_invite(code1) → assert either trap('consumed') or single consistent membership; INVITES holds only code2 (or none).
+- **[P2/nonobvious]** Two DEVICES of the same principal race a manifest re-register (self last-writer-wins on own templates)
+  - layer: `vitest-integration (two provider instances, shared fake canister)`
+  - procedure: Same user linked on device A and device B. Device A edits type X (re-registers manifest with {…,X}); device B, still holding an older template set, edits type Y and re-registers with {…,Y} (no X).
+  - expected: Final manifest reflects both edits, or at least the newer template blob. Because each device sends its OWN in-memory templates array and set_user_templates is a blob overwrite, a device with a stale template set clobbers the other's edit in BOTH the encrypted store and the registered manifest. Enumerated covers two DIFFERENT users clobbering the shared app; the same-user two-device clobber (a common real case) is distinct and unlisted.
+  - sketch: it('same-user second device does not silently drop the other device edit'): device A add X + register, device B (stale) add Y + register, assert registered keyword_map and templates_enc contain both (documents the last-writer-wins loss).
+- **[P2/edge]** importedMessageIds cap eviction + redeploy id reuse causes a previously-imported message to re-import
+  - layer: `vitest-unit (inboxDedupe cap + parse/serialize round-trip)`
+  - procedure: Over a session the importedMessageIds set exceeds its cap and evicts the oldest ids (serializeImportedMessageIds slices to the most recent N). A later deposit reuses a messageId that was evicted (e.g. after a redeploy that resets OpenChat message ids).
+  - expected: No duplicate import. The cap protects unbounded growth but combined with id reuse across a deploy, an evicted-then-reused messageId is treated as new → a second visible/importable card for the same logical action. Enumerated covers deploy-scoping of the SET and collapse-by-messageId, but not the cap-eviction + reuse interaction.
+  - sketch: it('evicted-then-reused messageId is not re-imported'): fill set past cap so id 'm1' evicts, then feed a draft with context.messageId 'm1' post-redeploy, assert the accept guard still blocks (or document the reliance on deploy-tag scoping to prevent it).
+
+## OpenChat BACKEND (Rust / user_index + LUI): register_ai_app upsert & ownership/re-own, publish_ai_app app_canister_id an
+
+- **[P1/ordering]** register_ai_app: DIFFERENT owner re-registers same name in PRODUCTION (test_mode=false) -> rejected
+  - layer: `rust-unit (user_index model: ai_app_registry.rs)`
+  - procedure: With allow_reown=false (production path), owner_a owns 'X'; owner_b registers 'X'.
+  - expected: AiAppRegistry::register returns Err(NameTakenByAnotherOwner) -> endpoint InvalidRequest('an app with this name is already registered'); owner/manifest of the existing entry unchanged.
+  - sketch: Unit test on AiAppRegistry: register(a,'X',now,false)->Ok; register(b,'X',now,false)->Err(NameTakenByAnotherOwner) and get(id).owner still == a. Integration env is always test_mode so the production reject is currently NEVER exercised.
+- **[P1/regression]** register_ai_app: re-register/upsert PRESERVES published flag (published app stays published)
+  - layer: `rust-unit (user_index model: ai_app_registry.rs)`
+  - procedure: Register 'X', publish it (published=true), then re-register 'X' (same owner, new manifest).
+  - expected: Entry stays published==true; only manifest+updated change. (Model comment guarantees the upsert branch leaves `published` untouched.)
+  - sketch: reg.register(a,'X',t0,false); reg.publish(id,t1); reg.register(a,'X'-v2,t2,false); assert get(id).published==true && manifest==v2. Guards against a re-sync/redeploy re-registration silently un-publishing an app.
+- **[P1/ordering]** Ordering: base-manifest re-registration on redeploy must not drop user's keyword_map/published state
+  - layer: `cargo-pocket-ic`
+  - procedure: Register app with actions carrying keyword_map rules (user's folded types) and publish; simulate a fresh deploy that re-registers the SAME name with the BASE manifest (empty/other actions).
+  - expected: Whatever the intended contract is, it must be asserted: either the re-register overwrites manifest wholesale (types lost until re-sync) or is merged. Today register() replaces manifest verbatim, so a base re-register DROPS the keyword_map rules — the exact 'nothing re-syncs the manifest after redeploy' bug at the canister level.
+  - sketch: register(manifest with KeywordMap rule mapping keyword->type) -> read back rules present; register(base manifest, actions=[]) -> read back and ASSERT the documented behavior (rules gone). Pins the destructive-overwrite so the frontend re-sync obligation is explicit.
+- **[P1/happy]** register_ai_app validation: manifest WITH keyword_map action rules registers and round-trips
+  - layer: `cargo-pocket-ic`
+  - procedure: Register manifest whose action carries AiActionRule::KeywordMap mappings (the IOU Types->manifest fold), within caps (<=50 mappings, <=50 keywords, rule strings 1..64).
+  - expected: Success; ai_apps read-back returns the actions with keyword_map rules intact and unmangled.
+  - sketch: Every existing integration manifest uses actions:vec![]; nothing asserts the template-routing rule payload survives register+read. Register with a KeywordMap rule, read via ai_apps, assert mapping value+keywords preserved. Directly covers IOU's saved-types fold.
+- **[P1/happy]** publish_ai_app: app_canister_id vouches -> Success and app becomes explorer-visible
+  - layer: `cargo-pocket-ic`
+  - procedure: Register app with app_canister_id pointing at a canister that answers c2c_verify_ai_app{name,owner}=>vouched:true; call publish_ai_app in test_mode.
+  - expected: Success; explore_ai_apps/search now returns the app (was absent while unpublished).
+  - sketch: Install a stub verifier canister returning vouched=true; register app.manifest.app_canister_id=verifier; publish; assert Success and explore_ai_apps(term) now includes it. ENTIRE publish/verify path has zero integration coverage.
+- **[P1/edge]** publish_ai_app: no app_canister_id -> NotVerified (anti-squat gate, fail closed)
+  - layer: `cargo-pocket-ic`
+  - procedure: Register app with app_canister_id=None; call publish_ai_app.
+  - expected: NotVerified (a canister that can vouch is required).
+  - sketch: publish an app with app_canister_id None -> NotVerified; app stays unpublished/absent from explore.
+- **[P1/nonobvious]** publish_ai_app: canister returns vouched=false / traps / times out -> NotVerified (never fail open)
+  - layer: `cargo-pocket-ic`
+  - procedure: Register app pointing at a canister that returns vouched=false (and separately one that traps/decode-fails); publish.
+  - expected: NotVerified in every non-vouch outcome; app never becomes published.
+  - sketch: Stub verifier variants: vouched=false, trap, wrong candid. Each publish -> NotVerified. Security-critical fail-closed property is untested.
+- **[P1/ordering]** Visibility boundary: unpublished app absent from explore_ai_apps, present after publish
+  - layer: `cargo-pocket-ic`
+  - procedure: register (private) -> explore_ai_apps(search term matching name) -> publish -> explore again.
+  - expected: Before publish the term returns no match (owner still sees it via ai_apps); after publish it appears in explore/search results.
+  - sketch: explore_rejects_short_term_and_accepts_normal only checks term length, never the published-visibility transition. Assert absent-then-present around publish.
+- **[P1/ordering]** link code: claim with INVALID key does NOT burn the code
+  - layer: `cargo-pocket-ic`
+  - procedure: Create code; claim with a malformed public_key (fails validate_user_public_key); then claim the SAME code with a valid key.
+  - expected: First claim InvalidRequest and code NOT consumed; second claim with valid key Succeeds. (Code notes key is validated 'before touching the code so an invalid request doesn't burn the code'.)
+  - sketch: claim(code,'garbage')->InvalidRequest; claim(code,valid_pem)->Success. Ordering-sensitive invariant currently unverified — a regression here would silently consume codes.
+- **[P1/ordering]** link code: creating a new code for the same (user,app) retires the prior code
+  - layer: `cargo-pocket-ic`
+  - procedure: create_ai_app_link_code twice for the same (user,app); attempt to claim the FIRST code.
+  - expected: First code is dead (CodeNotFound); only the second code claims successfully (insert() retains-away the prior pair entry).
+  - sketch: code1=create; code2=create; claim(code1)->CodeNotFound; claim(code2)->Success. Mirrors the stale-invite-reissue class on the OpenChat side.
+- **[P1/ordering]** claim throttle recovery: after the 1-hour window elapses a legitimate claim succeeds
+  - layer: `cargo-pocket-ic`
+  - procedure: Trip the per-caller throttle (11 misses), advance_time past WINDOW (1h), then claim a REAL valid code.
+  - expected: The post-window claim is NOT throttled and Succeeds (failure bucket pruned).
+  - sketch: repeated_failed_claims proves the 11th trips but never proves recovery; a permanent lock-out would be a real bug. Trip throttle, advance 61 min, create+claim a valid code -> Success.
+- **[P1/ordering]** key rotation: set_my_ai_app_key overwrites the previous key for the same (user,app)
+  - layer: `cargo-pocket-ic`
+  - procedure: set key1 for (user,app); set key2 for same (user,app); read my_keys and ai_app_user_keys.
+  - expected: Only key2 remains (upsert); my_keys and fan-out lookup return key2, never key1 — no stale key still eligible for deposits.
+  - sketch: AiAppUserKeys::set upserts by (user,app); assert exactly one row and it's key2 after rotation. Ordering seam: a lingering old key would keep receiving fan-out deposits.
+- **[P1/ordering]** fan-out with a keyless confirmer (Connect-but-never-Link): card carries no key for that member
+  - layer: `cargo-pocket-ic`
+  - procedure: Member B never registered a delivery key. A proposer builds a card via ai_app_user_keys lookup (returns no row for B). B confirms.
+  - expected: Deposit list omits B (no envelope for B); the confirm still Succeeds and commits the card. If B is the ONLY recipient, recipient_public_keys is empty — assert the documented outcome (confirm still commits vs. deposit no-op) so a keyless confirmer isn't a silent hang.
+  - sketch: This is the top recurring seam. Build a card with recipient_public_keys=[] (or only A's key while B confirms), confirm as B, assert respond_to_action_card Succeeds and zero deposits land for B. Nothing today drives a confirm whose fan-out list is empty.
+- **[P1/edge]** fan-out with one malformed/unresolvable recipient key among valid ones (partial failure)
+  - layer: `cargo-pocket-ic`
+  - procedure: Post a card whose recipient_public_keys contains one un-fingerprintable/garbage PEM plus valid ones; confirm.
+  - expected: Defined behavior asserted: either the whole confirm fails atomically, or the good keys get deposits and the bad one is skipped — but NOT a partial/inconsistent commit that leaves the card Confirmed with missing deposits.
+  - sketch: Only all-valid + exact-duplicate fan-out cases exist. Inject one bad PEM; assert deposit counts per good fingerprint and the card's final state are consistent.
+- **[P1/ordering]** member removed from group between card post and confirm (slot anonymized) — fan-out to departed member
+  - layer: `cargo-pocket-ic`
+  - procedure: Post a card addressed to A and B; remove B from the group (remove_from_group); then confirm.
+  - expected: Defined behavior: does the deposit still fan out to B's key, or is B pruned? Assert whichever is intended so a leaver doesn't either lose a legitimately-owed envelope or receive one post-departure.
+  - sketch: fan_out/per_user_key tests keep both members present. Interleave remove_from_group between post and confirm; assert deposit set for the departed member. Mirrors IOU's read-after-partner-left seam.
+- **[P1/nonobvious]** delete_ai_app does NOT purge per-user keys / outstanding link codes for that app (orphan cleanup)
+  - layer: `cargo-pocket-ic`
+  - procedure: Register per_user app, pair a delivery key (claim), create an outstanding link code; delete_ai_app; then read my_ai_app_keys and ai_app_user_keys and try claiming the outstanding code.
+  - expected: Assert the intended contract. Today delete only removes the registry entry — orphaned per-user keys remain in my_ai_app_keys/ai_app_user_keys and the outstanding code may still be claimable, leaving delivery keys registered for a non-existent app.
+  - sketch: Pins the leak so cleanup is either implemented or explicitly accepted. delete_ai_app_impl calls only ai_apps.delete; nothing touches ai_app_user_keys or ai_app_link_codes.
+- **[P1/ordering]** Ordering trap: delete + re-register a name mints a NEW id (breaks per-chat enablement), unlike same-name upsert
+  - layer: `cargo-pocket-ic`
+  - procedure: Register 'X' (id=N), delete_ai_app('X'), register 'X' again.
+  - expected: The re-registration gets a fresh id (next_id++), NOT N — so any per-chat enablement that stored N is now dangling. Contrast with the upsert path which preserves the id.
+  - sketch: id1=register('X'); delete('X'); id2=register('X'); assert id2 != id1. Directly documents the id-stability difference between upsert and delete+recreate — a redeploy that deletes-then-registers silently breaks enablement.
+- **[P2/edge]** register_ai_app validation: keyword_map over caps (>50 mappings / >50 keywords / >64-char rule string) -> InvalidRequest
+  - layer: `cargo-pocket-ic`
+  - procedure: Register manifest with a KeywordMap rule exceeding MAX_KEYWORD_MAPPINGS / MAX_KEYWORDS_PER_MAPPING / MAX_RULE_STRING_LENGTH.
+  - expected: InvalidRequest with an actions[i] message.
+  - sketch: Three sub-cases; assert InvalidRequest each. Guards the rule-validation path the IOU fold could overflow with many types.
+- **[P2/edge]** register_ai_app validation: non-empty but malformed key (no 'BEGIN PUBLIC KEY') -> InvalidRequest even with per_user_keys=true
+  - layer: `cargo-pocket-ic`
+  - procedure: Register with consumer_public_key='garbage' (per_user_keys true or false).
+  - expected: InvalidRequest ('must be a PEM encoded public key') — a supplied key must be valid in either mode.
+  - sketch: Set key to a non-PEM string; assert InvalidRequest. Also cover name empty/>64, invalid icon_url, malformed surface url as cheap sibling assertions.
+- **[P2/nonobvious]** register_ai_app: unregistered principal in test_mode owns app as raw principal
+  - layer: `cargo-pocket-ic`
+  - procedure: A principal that is NOT an OpenChat user calls register_ai_app in test_mode (deploy-script path).
+  - expected: Success with owner == caller.into() (principal-as-UserId); ai_apps read-back for that principal sees it.
+  - sketch: All current tests register via a diamond user (get_by_principal branch); the test_mode caller.into() owner branch is never taken. Register from random_principal(), assert Success + ai_apps(that principal) lists it.
+- **[P2/edge]** publish_ai_app: unknown app_id -> NotFound; production without governance -> NotAuthorised
+  - layer: `cargo-pocket-ic`
+  - procedure: publish_ai_app with a bogus app_id; and (production sim) via the non-proposal update path with test_mode=false.
+  - expected: NotFound for unknown id; NotAuthorised when test_mode is false and caller isn't governance.
+  - sketch: Two cheap assertions; the NotAuthorised branch needs a non-test_mode env or a unit-level guard test.
+- **[P2/edge]** link code: create for unknown app_id -> AppNotFound; create by non-user in production -> InitiatorNotFound
+  - layer: `cargo-pocket-ic`
+  - procedure: create_ai_app_link_code with app_id=u32::MAX; and a non-registered caller with test_mode false.
+  - expected: AppNotFound for bad app; Error(InitiatorNotFound) for non-user in production.
+  - sketch: Only set_my_ai_app_key's AppNotFound is tested; create's AppNotFound branch is not. Assert AppNotFound for unknown app_id.
+- **[P2/nonobvious]** claim throttle: an EXPIRED-code hit does not count towards the throttle (only true misses do)
+  - layer: `cargo-pocket-ic`
+  - procedure: Create N codes, let them expire; claim each expired code many times.
+  - expected: Each returns CodeExpired and record_failure is NOT called, so no Throttled even past 10 attempts.
+  - sketch: Only CodeNotFound records a failure; assert repeated CodeExpired never throttles the caller.
+- **[P2/edge]** revoke: future timestamp beyond slack -> Expired; malformed PEM -> InvalidPublicKey; bad revoke also throttles
+  - layer: `cargo-pocket-ic`
+  - procedure: Revoke with timestamp >60s in the future; with an unparseable PEM; and repeat failing revokes 11x from one caller.
+  - expected: Future-skew -> Expired; unparseable PEM -> Error(InvalidPublicKey); 11th failing revoke -> Throttled (revoke shares AiAppCallThrottle).
+  - sketch: Only the PAST window + bad-sig branches are tested for revoke; the future-slack, InvalidPublicKey, and revoke-path throttle branches are not.
+- **[P2/edge]** ai_app_user_keys: request >32 users is truncated to MAX_USERS_PER_LOOKUP and preserves input order
+  - layer: `cargo-pocket-ic`
+  - procedure: Register keys for 40 users; request all 40 in a fixed order.
+  - expected: At most 32 rows returned, in the requested input order (filter_map over truncated slice).
+  - sketch: Assert len<=32 and ordering matches the (truncated) input; guards the cap/order contract the fan-out proposer relies on.

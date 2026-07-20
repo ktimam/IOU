@@ -56,9 +56,11 @@ export function deepLinkToPath(rawUrl: string): string | null {
     case "pairs":
       return "/pairs";
     case "settings":
-      return "/settings";
+      // Preserve the fragment (e.g. #openchat-connect) so the OpenChat "Open the code page in IOU"
+      // deep link lands on and scrolls to the Connect section — same fragment handling as `invite`.
+      return `/settings${url.hash}`;
     case "me":
-      return "/me";
+      return `/me${url.hash}`;
     case "invite": {
       // The invite secret rides in the URL fragment (#c=…&s=…&k=…), which the
       // URL parser exposes as `url.hash` (leading "#"). Preserve it verbatim so

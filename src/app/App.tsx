@@ -11,7 +11,6 @@ import {NewSheet} from "../features/flows/NewSheet";
 import { SheetKeyProvider } from "../features/flows/SheetKeyContext";
 import { SheetPage } from "../features/entries/SheetPage";
 import { ArchivedSheetsPage } from "../features/entries/ArchivedSheetsPage";
-import { RecoveryKeyPage } from "../features/recovery/RecoveryKeyPage";
 import { ToastProvider } from "../features/ui/Toasts";
 import { ErrorBoundary } from "./ErrorBoundary";
 import { PreferencesProvider } from "../features/settings/usePreferences";
@@ -61,10 +60,6 @@ export function App() {
                 element={<ArchivedSheetsPage />}
               />
               <Route path="/settings" element={<SettingsPage />} />
-              <Route
-                path="/settings/recovery-key"
-                element={<RecoveryKeyPage />}
-              />
               {/* OpenChat "chat_link" surface: opened by OpenChat (in a bottom-sheet
                   iframe) with ?chat=<chatKey> to map that chat to a sheet. */}
               <Route path="/openchat/link-chat" element={<LinkChatPage />} />

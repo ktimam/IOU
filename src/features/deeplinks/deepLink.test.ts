@@ -10,6 +10,16 @@ describe("deepLinkToPath", () => {
     expect(deepLinkToPath("iou://me")).toBe("/me");
   });
 
+  it("preserves the fragment on settings/me so the OpenChat connect deep link scrolls to Connect", () => {
+    // Regression (P0-20): iou://settings#openchat-connect must carry the hash through, or the
+    // desktop "Open the code page in IOU" button lands on /settings but never focuses the Connect
+    // section. Previously the settings case dropped url.hash (only `invite` preserved it).
+    expect(deepLinkToPath("iou://settings#openchat-connect")).toBe("/settings#openchat-connect");
+    expect(deepLinkToPath("iou://me#openchat-connect")).toBe("/me#openchat-connect");
+    // fragment-less still resolves cleanly
+    expect(deepLinkToPath("iou://settings")).toBe("/settings");
+  });
+
   it("maps invite links to the accept surface, preserving the fragment", () => {
     expect(
       deepLinkToPath("iou://invite#c=ABCD-1234&s=deadbeef&k=Zm9v"),

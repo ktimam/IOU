@@ -30,7 +30,8 @@ import {
 import { claimAiAppLinkCode, registerAiApp, revokeAiAppUserKey } from "./registerAiApp";
 import { getActionInboxConfig, invalidateInboxCache } from "./actionInboxClient";
 import { useTemplates } from "../templates/TemplatesContext";
-import { OC_ACTION_INBOX_CANISTER_ID, OC_IC_URL, OC_LINKED_KEY, OC_USER_INDEX_CANISTER_ID } from "./ocConfig";
+import { syncManifestWithTypes } from "./syncManifest";
+import { OC_ACTION_INBOX_CANISTER_ID, OC_CONNECTED_KEY, OC_IC_URL, OC_LINKED_KEY, OC_USER_INDEX_CANISTER_ID } from "./ocConfig";
 
 const LS_INBOX = "iou.openchat.actionInbox.v1";
 
@@ -184,6 +185,15 @@ export function ActionInboxSettings() {
       switch (outcome.kind) {
         case "success":
           setLinkCode("");
+          // Connecting IS participating in OpenChat: mark it, then fold the user's saved types into
+          // the manifest so a connect-only user's chat messages route to their types — no separate
+          // "Link to OpenChat" needed. (Previously connect touched neither, so types stayed unmapped.)
+          try {
+            if (identity) localStorage.setItem(OC_CONNECTED_KEY, identity.getPrincipal().toText());
+          } catch {
+            /* best-effort */
+          }
+          void syncManifestWithTypes(identity, templates);
           setConnect({
             kind: "ok",
             message: "Connected — OpenChat now delivers your confirmed actions encrypted to your own key.",
@@ -237,6 +247,13 @@ export function ActionInboxSettings() {
         }
       }
       await clearConsumerKeypair();
+      // No longer connected — clear the marker so manifest sync stops treating this principal as a
+      // participant (a later type edit won't re-register unless they're still explicitly linked).
+      try {
+        localStorage.removeItem(OC_CONNECTED_KEY);
+      } catch {
+        /* best-effort */
+      }
       setPubKeyPem("");
       setFingerprint("");
       setDisconnect({

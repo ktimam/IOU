@@ -45,6 +45,39 @@ describe("buildManifestWire", () => {
     expect(aliasInbox.inbox_canister_id).toEqual([]);
   });
 
+  it("folds a user's saved TYPES into the wire manifest as a `template` keyword_map + schema (P0-9)", () => {
+    // The 5th positional arg is the user's templates. This is the WIRE end of the type-routing
+    // path: each type's trigger words must become a keyword_map on a `template` field so a chat
+    // message routes to that type. (buildIouRules is unit-tested in isolation elsewhere; this pins
+    // that buildManifestWire actually carries it into the registered manifest.)
+    const templates = [
+      { id: "z1", name: "Reservation", keywords: ["reservation", "booking"] },
+      { id: "z2", name: "Rent", keywords: ["rent"] },
+    ];
+    const manifest = buildManifestWire("", undefined, () => {}, undefined, templates) as {
+      actions: { rules: { keyword_map?: { field: string; map: { value: string; keywords: string[] }[] } }[]; response_schema: string }[];
+    };
+    const action = manifest.actions[0];
+    const tmplRule = action.rules.find((r) => r.keyword_map?.field === "template");
+    expect(tmplRule).toBeDefined();
+    const entries = tmplRule!.keyword_map!.map;
+    expect(entries.map((e) => e.value).sort()).toEqual(["Rent", "Reservation"]);
+    expect(entries.find((e) => e.value === "Reservation")!.keywords).toEqual(
+      expect.arrayContaining(["reservation", "booking"]),
+    );
+    // The response schema advertises the optional `template` field so the model may emit it.
+    expect(JSON.parse(action.response_schema).properties.template).toBeDefined();
+  });
+
+  it("omits the template keyword_map + schema field when the user has NO routable types", () => {
+    const manifest = buildManifestWire("", undefined, () => {}, undefined, []) as {
+      actions: { rules: { keyword_map?: { field: string } }[]; response_schema: string }[];
+    };
+    const action = manifest.actions[0];
+    expect(action.rules.find((r) => r.keyword_map?.field === "template")).toBeUndefined();
+    expect(JSON.parse(action.response_schema).properties.template).toBeUndefined();
+  });
+
   it("candid-encodes the empty-key manifest against the register_ai_app IDL", () => {
     const manifest = buildManifestWire("", undefined, () => {});
     const { RegisterAiAppArgs } = buildIdl();

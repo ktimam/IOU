@@ -20,11 +20,7 @@ import {
 } from "../crypto/devVetkd";
 import { unwrap } from "../flows/useActor";
 import type { Direction, TxnType } from "../entries/types";
-import type { Identity } from "@dfinity/agent";
-import { registerAiApp } from "../openchat/registerAiApp";
-import { invalidateInboxCache } from "../openchat/actionInboxClient";
-import { OC_ACTION_INBOX_CANISTER_ID, OC_IC_URL, OC_LINKED_KEY, OC_USER_INDEX_CANISTER_ID } from "../openchat/ocConfig";
-import { canisterId as iouBackendCanisterId } from "../auth/config";
+import { syncManifestWithTypes } from "../openchat/syncManifest";
 
 // How a template portion's due date is anchored, relative to the
 // transaction date (so the template stays reusable):
@@ -77,41 +73,6 @@ function optBytes(o: any): Uint8Array | null {
   return v == null ? null : new Uint8Array(v);
 }
 
-// Fire-and-forget: if this device has linked to OpenChat (as THIS principal), re-register the IOU
-// manifest so it reflects the current templates — each template's trigger words become a `template`
-// keyword_map mapping, so a chat message matching them routes to that template. Guarded by an
-// owner-scoped flag so a template edit never hijacks the global "iou" registry entry for a user who
-// didn't link. Errors are swallowed — a slow/unreachable user_index must never block a template save.
-async function reRegisterOpenChatIfLinked(
-  identity: Identity | undefined,
-  templates: TxnTemplate[],
-): Promise<void> {
-  if (!identity || !OC_USER_INDEX_CANISTER_ID) return;
-  let linked: string | null = null;
-  try {
-    linked = localStorage.getItem(OC_LINKED_KEY);
-  } catch {
-    return;
-  }
-  if (linked !== identity.getPrincipal().toText()) return;
-  try {
-    await registerAiApp({
-      host: OC_IC_URL,
-      userIndexCanisterId: OC_USER_INDEX_CANISTER_ID,
-      consumerPublicKeyPem: "",
-      appCanisterId: iouBackendCanisterId,
-      // Preserve IOU's inbox override on this upsert; without it deposits fail with NotConfigured.
-      inboxCanisterId: OC_ACTION_INBOX_CANISTER_ID,
-      identity,
-      templates,
-    });
-    // A re-register may change the routed inbox — drop the resolver cache so the poll picks it up now.
-    invalidateInboxCache();
-  } catch {
-    /* best-effort: re-registers again on the next template edit or an explicit re-link */
-  }
-}
-
 export function TemplatesProvider({ children }: { children: ReactNode }) {
   const { identity, state } = useAuth();
   const [templates, setTemplates] = useState<TxnTemplate[]>([]);
@@ -127,6 +88,7 @@ export function TemplatesProvider({ children }: { children: ReactNode }) {
     (async () => {
       setLoading(true);
       setError(null);
+      let loaded: TxnTemplate[] = [];
       try {
         const principal = identity.getPrincipal().toText();
         const agent = await buildAgent(identity);
@@ -138,15 +100,18 @@ export function TemplatesProvider({ children }: { children: ReactNode }) {
           const K = await deriveUserKey(principal);
           const bytes = await decryptWithSheetKey(K, iv, enc);
           const parsed = JSON.parse(new TextDecoder().decode(bytes));
-          if (!cancelled && Array.isArray(parsed)) setTemplates(parsed);
-        } else if (!cancelled) {
-          setTemplates([]);
+          if (Array.isArray(parsed)) loaded = parsed;
         }
+        if (!cancelled) setTemplates(loaded);
       } catch (e) {
         if (!cancelled) setError((e as Error).message);
       } finally {
         if (!cancelled) setLoading(false);
       }
+      // Re-sync the manifest with the just-loaded types ON APP LOAD: a fresh deploy re-registers the
+      // BASE manifest (no template rules), so without this a participating user's existing types stay
+      // unmapped until their next edit. No-op unless the user participates in OpenChat.
+      if (!cancelled) void syncManifestWithTypes(identity, loaded);
     })();
     return () => {
       cancelled = true;
@@ -173,8 +138,9 @@ export function TemplatesProvider({ children }: { children: ReactNode }) {
       const next = [...templates, { ...t, id }];
       await persist(next);
       setTemplates(next);
-      // Keep the registered OpenChat manifest in lock-step with the user's types (no-op if unlinked).
-      void reRegisterOpenChatIfLinked(identity, next);
+      // Keep the registered OpenChat manifest in lock-step with the user's types (no-op unless the
+      // user participates in OpenChat — connected via the 6-digit Connect or explicitly linked).
+      void syncManifestWithTypes(identity, next);
     },
     [templates, persist, identity],
   );
@@ -184,8 +150,9 @@ export function TemplatesProvider({ children }: { children: ReactNode }) {
       const next = templates.map((x) => (x.id === t.id ? t : x));
       await persist(next);
       setTemplates(next);
-      // Keep the registered OpenChat manifest in lock-step with the user's types (no-op if unlinked).
-      void reRegisterOpenChatIfLinked(identity, next);
+      // Keep the registered OpenChat manifest in lock-step with the user's types (no-op unless the
+      // user participates in OpenChat — connected via the 6-digit Connect or explicitly linked).
+      void syncManifestWithTypes(identity, next);
     },
     [templates, persist, identity],
   );
@@ -195,8 +162,9 @@ export function TemplatesProvider({ children }: { children: ReactNode }) {
       const next = templates.filter((t) => t.id !== id);
       await persist(next);
       setTemplates(next);
-      // Keep the registered OpenChat manifest in lock-step with the user's types (no-op if unlinked).
-      void reRegisterOpenChatIfLinked(identity, next);
+      // Keep the registered OpenChat manifest in lock-step with the user's types (no-op unless the
+      // user participates in OpenChat — connected via the 6-digit Connect or explicitly linked).
+      void syncManifestWithTypes(identity, next);
     },
     [templates, persist, identity],
   );
