@@ -119,6 +119,28 @@ describeE2E("OpenChat registry — register/explore/delete + claim/revoke negati
     await actor.delete_ai_app({ name });
   });
 
+  it("register_ai_app: a DIFFERENT owner re-owns the same app name (test_mode re-own)", async () => {
+    const idA = freshIdentity();
+    const idB = freshIdentity();
+    const actorA = await registryActor(idA);
+    const actorB = await registryActor(idB);
+    const name = uniqueName();
+    const wire = { ...buildManifestWire("", undefined, () => {}, E2E.actionInboxId), name };
+
+    const r1 = await actorA.register_ai_app({ manifest: wire });
+    expect("Success" in r1).toBe(true);
+    expect(r1.Success.owner.toText()).toBe(idA.getPrincipal().toText());
+
+    // A DIFFERENT principal re-registers the same name → in test_mode it RE-OWNS the entry (the dev
+    // convenience that lets a fresh deploy identity take over a local registration).
+    const r2 = await actorB.register_ai_app({ manifest: { ...wire, description: "re-owned by B" } });
+    expect("Success" in r2).toBe(true);
+    expect(r2.Success.owner.toText()).toBe(idB.getPrincipal().toText()); // owner is now B
+    expect(r2.Success.manifest.description).toBe("re-owned by B");
+
+    await actorB.delete_ai_app({ name }); // B (the current owner) cleans up
+  });
+
   it("claim with a nonexistent code returns CodeNotFound", async () => {
     const out = await claimAiAppLinkCode({
       host: E2E.host,

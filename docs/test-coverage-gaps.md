@@ -49,7 +49,19 @@ Triaged 17 e2e P1s: 2 covered, 13 need a live OpenChat 6-digit code (deferred), 
 - ✅ **E8** re-key continuity — a departed partner's entry still decrypts for the replacement.
 - ✅ **E9** get_my_pairs shows the promoted member as solo (partner anon, active sheet2, not archived).
 
-**P1 backlog** (88: unit done, e2e wave done [8 new], playwright next, 21 rust review-only, 7+13 need live-drive). Remaining P0: register_ai_app ownership (pocket-ic) · P0-30/32 cross-repo.
+### Batch 9 (Playwright + registry P1s — live)
+
+- ✅ **P4/P5/P7/P8/P9** route/surface: landing CTA (no redirect), /me→/settings, unknown→/, signed-out link-chat returns to the picker after inline sign-in, signed-in /settings#openchat-connect focuses the code input.
+- ✅ **P1/P2** close-and-rotate: partner's mirror of the carry-forward; the JOINER (member_b) closes & rotates and both sides read the new sheet correctly.
+- ✅ **register_ai_app re-own** (remaining P0, run-verifiable half): a different owner re-owns the same app name in test_mode (registry.e2e).
+
+## Sweep status — all run-verifiable coverage DONE
+
+Every P0/P1 that can be run-verified in this environment (vitest-unit, vitest-e2e on the live replica, Playwright-UI, plus batch-5 fan-out review-only) is fixed/covered/committed. What remains is **not reliably automatable here**:
+
+- **Rust P1s (~18 left) + production-path ownership (U26/U27):** pocket-ic, and the workspace builds via docker (no native cargo target reachable) → review-only, run via `scripts/run-integration-tests.sh`. (Batch 5 added 3 fan-out lock-in tests this way.)
+- **live-drive P1s (E12/E13, P3/P6, U6/U7/U10-15/U18) + scripted (P0-30/32):** require a real OpenChat 6-digit pairing + the on-device extraction model — covered manually by the existing `scripts/live-*` drivers, not deterministic enough for CI.
+- **hard (U22 transient loading, U23 native Capacitor):** not practically unit/e2e-testable.
 
 ---
 
