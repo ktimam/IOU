@@ -28,7 +28,13 @@
 
 - ✅ **P0-21/22** fan-out lock-in — 3 tests in `backend/integration_tests/src/fan_out_delivery_tests.rs` (frozen recipient set is authoritative; empty-recipient card confirms safely with no deposit; late-link does not retroactively deliver). Mirror the existing green fan-out harness. **Run-caveat:** authored against the passing harness but not executed in-session — the OpenChat workspace builds via docker and no native cargo target was reachable; run via `scripts/run-integration-tests.sh fan_out`.
 
-Remaining P0 (heaviest): P0-15 connect→type→redeploy→route cross-repo journey (scripted-live) · OpenChat register_ai_app ownership/re-own permutations (pocket-ic) · remaining cross-repo journeys (P0-30/32).
+### Batch 6 (P0-15 core + first P1 units — all run-verified)
+
+- ✅ **P0-15** (verifiable core) — new e2e in `registry.e2e.test.ts`: a base-manifest redeploy (no template rules) self-heals when re-registered with the user's types (upsert → same app, `template` keyword_map restored). Run-verified on the live replica. (The full chat-extraction routing is the on-device model — not deterministically testable.)
+- ✅ **P1 U29** — `deepLinkToPath` drops the `iou://openchat/...` host (OpenChat surfaces use HTTPS, not deep links).
+- ✅ **P1 U1** — `createSheetForPair` solo seal: self-wrap in slot A, empty placeholder in slot B.
+
+**P1 backlog started** (88 total: 30 vitest-unit, 21 rust, 17 vitest-e2e, 13 playwright, 7 scripted). Many manifest-sync/crypto P1s (U3, U16, U17, …) are already covered by the batch-1/2 seams. Remaining P0: register_ai_app ownership permutations (pocket-ic) · P0-30/32 cross-repo journeys.
 
 ---
 

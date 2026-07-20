@@ -39,5 +39,8 @@ describe("deepLinkToPath", () => {
     expect(deepLinkToPath("https://example.com/sheet/abc")).toBe(null); // wrong scheme
     expect(deepLinkToPath("not a url")).toBe(null);
     expect(deepLinkToPath("")).toBe(null);
+    // P1 (U29): the OpenChat surfaces are opened via HTTPS URLs, never iou:// deep links, so the
+    // `openchat` host is intentionally unmapped (dropped) rather than routed anywhere.
+    expect(deepLinkToPath("iou://openchat/link-chat?chat=group:abc")).toBe(null);
   });
 });

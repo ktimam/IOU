@@ -25,6 +25,7 @@ import {
   unwrapSheetKey,
   unwrapTaggedSheetKey,
   wrapSheetKeyTagged,
+  recoverSheetKey,
 } from "../crypto/devVetkd";
 
 type Pair = { id: string; active_sheet_id?: [] | [string] };
@@ -325,5 +326,38 @@ describe("createSheetForPair — partner can read a sheet created after they joi
         closingDays: 30,
       }),
     ).rejects.toThrow(/hasn't published their key/i);
+  });
+});
+
+// P1 (U1): a SOLO account (member_b not yet joined) seals a self-wrap in slot A and leaves slot B an
+// EMPTY placeholder that accept_invite fills when a partner joins.
+describe("createSheetForPair — solo account seal", () => {
+  it("self-wraps slot A and leaves slot B an empty placeholder", async () => {
+    const ANON = "2vxsx-fae";
+    const aKp = await deriveUserKeypair(A_PRINCIPAL);
+    const captured: { req?: any } = {};
+    const actor = {
+      // member_b is the anonymous placeholder → isSolo.
+      get_pair: async (id: string) => [{ id, members: [principalLike(A_PRINCIPAL), principalLike(ANON)] }],
+      register_sheet_pubkey: async () => {},
+      create_sheet: async (req: any) => {
+        captured.req = req;
+        return { id: "solo-sheet", ...req };
+      },
+    };
+    const identity = { getPrincipal: () => principalLike(A_PRINCIPAL) } as any;
+
+    const { K_sheet } = await createSheetForPair(actor as any, identity, {
+      pairId: "pair-solo",
+      currencies: ["USD"],
+      closingDays: 30,
+    });
+
+    const req = captured.req;
+    expect(req.wrapped_key_b).toEqual([]); // empty placeholder for the not-yet-joined partner
+    expect(req.wrapped_key_a.length).toBeGreaterThan(0);
+    // The creator recovers the SAME K from its self-wrapped slot A.
+    const back = await recoverSheetKey(new Uint8Array(req.wrapped_key_a), aKp);
+    expect(Array.from(back)).toEqual(Array.from(K_sheet));
   });
 });

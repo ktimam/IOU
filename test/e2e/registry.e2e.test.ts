@@ -83,6 +83,42 @@ describeE2E("OpenChat registry — register/explore/delete + claim/revoke negati
     expect("NotFound" in del2).toBe(true); // idempotent-ish: already gone
   });
 
+  it("P0-15: a base-manifest redeploy self-heals when re-registered with the user's types (template rule restored)", async () => {
+    // The core of the "types not mapped after a fresh start" journey, proven at the live canister:
+    // a deploy registers the BASE manifest (no template rules); IOU's app-load sync then re-registers
+    // the SAME app (upsert) with the user's saved types, restoring the `template` keyword_map so a
+    // chat message can route to a type again.
+    const identity = freshIdentity();
+    const actor = await registryActor(identity);
+    const name = uniqueName();
+    const tmplRule = (m: { actions: { rules: { keyword_map?: { field: string; map: { value: string }[] } }[] }[] }) =>
+      m.actions[0].rules.find((r) => r.keyword_map?.field === "template");
+    const readManifest = async () =>
+      ((await actor.ai_apps({})).Success.apps as { manifest: { name: string; actions: unknown[] } }[]).find(
+        (a) => a.manifest.name === name,
+      )!.manifest;
+
+    // 1. Deploy/CI registers the BASE manifest (no user types).
+    const base = { ...buildManifestWire("", undefined, () => {}, E2E.actionInboxId, []), name, description: "p0-15 base" };
+    const r1 = await actor.register_ai_app({ manifest: base });
+    expect("Success" in r1).toBe(true);
+    const appId = Number(r1.Success.id);
+    expect(tmplRule(await readManifest())).toBeUndefined(); // no template routing yet
+
+    // 2. App-load sync re-registers the SAME app WITH the user's types (upsert → same id).
+    const templates = [{ id: "z1", name: "Reservation", keywords: ["reservation", "booking"] }];
+    const healed = { ...buildManifestWire("", undefined, () => {}, E2E.actionInboxId, templates), name, description: "p0-15 healed" };
+    const r2 = await actor.register_ai_app({ manifest: healed });
+    expect(Number(r2.Success.id)).toBe(appId);
+
+    // 3. The template keyword_map is back — routing restored.
+    const rule = tmplRule(await readManifest());
+    expect(rule).toBeDefined();
+    expect(rule!.keyword_map!.map.map((m) => m.value)).toContain("Reservation");
+
+    await actor.delete_ai_app({ name });
+  });
+
   it("claim with a nonexistent code returns CodeNotFound", async () => {
     const out = await claimAiAppLinkCode({
       host: E2E.host,
