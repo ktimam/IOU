@@ -130,6 +130,25 @@ test("username eager-publishes to an existing account · close & start carries b
   await owner.goto("/pairs");
   await expect(owner.getByText("Owner & Manager")).toBeVisible();
 
+  // ── P1: the PARTNER's mirror of the carry-forward on the NEW sheet ──
+  // The manager reads sheet2 (its key is a tagged cross-wrap sealed for them at rotation) and sees
+  // the EXACT mirror of the owner's balance: the owner was owed, so the manager "owes" — 25000 EGP,
+  // labeled "Carried forward". This proves the rotation re-seals the partner slot AND the direction
+  // orients correctly on both sides.
+  let mirror = "";
+  for (let i = 0; i < 15; i++) {
+    await openSheet(manager); // manager's sole account now points at the active sheet2
+    await manager.waitForTimeout(600);
+    mirror = await balancesText(manager);
+    if (/25000\.00 EGP/.test(mirror) && /you owe/i.test(mirror)) break;
+    await manager.waitForTimeout(2000);
+  }
+  console.log("[manager, mirror on new sheet]", mirror);
+  expect(mirror).toContain("25000.00 EGP");
+  expect(mirror).toMatch(/you owe/i); // exact mirror of the owner's "owes you"
+  expect(mirror).not.toMatch(/owes you/i);
+  await expect(manager.getByText(/Carried forward/i)).toBeVisible();
+
   await ownerCtx.close();
   await managerCtx.close();
 });
