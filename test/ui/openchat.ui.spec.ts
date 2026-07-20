@@ -127,3 +127,11 @@ test("✨ Import a chat-bridge draft into a sheet", async ({ browser }) => {
 
   await ctx.close();
 });
+
+// P1 (P4): a SIGNED-IN visit to /settings#openchat-connect scrolls to + focuses the 6-digit code
+// input (the deep link's landing target) — the signed-in half of the inline-sign-in guard tests.
+test("/settings#openchat-connect (signed in) focuses the 6-digit code input", async ({ page }) => {
+  await signInDev(page);
+  await page.goto("/settings#openchat-connect", { waitUntil: "domcontentloaded" });
+  await expect(page.locator('input[placeholder="6-digit code"]')).toBeFocused({ timeout: 20_000 });
+});

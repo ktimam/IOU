@@ -31,4 +31,35 @@ test.describe("route auth guards — anonymous visitor", () => {
     expect(new URL(page.url()).pathname).toBe("/openchat/link-chat");
     expect(new URL(page.url()).searchParams.get("chat")).toBe("group:xyz");
   });
+
+  // P1 (P7): the landing route while anonymous shows the sign-in CTA and does NOT redirect.
+  test("/ (landing) while anonymous shows the sign-in CTA without redirect", async ({ page }) => {
+    await page.goto("/", { waitUntil: "domcontentloaded" });
+    await expect(page.getByRole("button", { name: /Sign in with Internet Identity/ })).toBeVisible({ timeout: 20_000 });
+    expect(new URL(page.url()).pathname).toBe("/");
+  });
+
+  // P1 (P8): /me redirects to /settings (which renders inline sign-in when anonymous).
+  test("/me redirects to /settings", async ({ page }) => {
+    await page.goto("/me", { waitUntil: "domcontentloaded" });
+    await expect(page).toHaveURL(/\/settings$/, { timeout: 20_000 });
+    await expect(page.getByRole("button", { name: /Sign in with Internet Identity/ })).toBeVisible();
+  });
+
+  // P1 (P9): an unknown route redirects to the landing page.
+  test("an unknown route redirects to /", async ({ page }) => {
+    await page.goto("/does-not-exist", { waitUntil: "domcontentloaded" });
+    await expect(page).toHaveURL(/\/$/, { timeout: 20_000 });
+  });
+
+  // P1 (P5): after inline sign-in on /openchat/link-chat, the SAME page renders the sheet picker
+  // (?chat kept) — the destination survives, no bounce to /pairs.
+  test("signed-out link-chat returns to the picker after inline sign-in (?chat kept)", async ({ page }) => {
+    await page.goto("/openchat/link-chat?chat=group:xyz", { waitUntil: "domcontentloaded" });
+    await page.getByRole("button", { name: /Sign in with Internet Identity/ }).waitFor({ timeout: 20_000 });
+    await page.getByRole("button", { name: /Sign in \(dev/ }).click();
+    await expect(page.getByRole("heading", { name: "Link this chat to a sheet" })).toBeVisible({ timeout: 30_000 });
+    expect(new URL(page.url()).pathname).toBe("/openchat/link-chat");
+    expect(new URL(page.url()).searchParams.get("chat")).toBe("group:xyz");
+  });
 });
