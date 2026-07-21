@@ -72,6 +72,15 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   useEffect(() => {
     let cancelled = false;
     (async () => {
+      // DEV-only test hook (?e2eDelayAuth=<ms>): hold the "loading" state for a beat so a UI test
+      // can assert transient loading renders (no premature redirect) before auth resolves. The
+      // whole branch tree-shakes out of production builds.
+      if (import.meta.env.DEV) {
+        const delay = Number(new URLSearchParams(globalThis.location?.search ?? "").get("e2eDelayAuth"));
+        if (Number.isFinite(delay) && delay > 0) {
+          await new Promise((r) => setTimeout(r, Math.min(delay, 10_000)));
+        }
+      }
       const client = await AuthClient.create();
       if (cancelled) return;
       if (await client.isAuthenticated()) {

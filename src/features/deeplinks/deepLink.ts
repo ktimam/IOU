@@ -73,6 +73,17 @@ export function deepLinkToPath(rawUrl: string): string | null {
 }
 
 /**
+ * The appUrlOpen handler: map the launch URL and navigate ONLY when it resolves —
+ * an unknown/malformed link is ignored (no navigation at all, never a fallback
+ * route). Extracted from useDeepLinks so the wiring is unit-testable without the
+ * native bridge (U23); the hook below is the only production caller.
+ */
+export function handleAppUrl(url: string, navigate: (path: string) => void): void {
+  const path = deepLinkToPath(url);
+  if (path) navigate(path);
+}
+
+/**
  * Register the native deep-link listener and navigate when one arrives.
  * No-op on web. Safe to mount once near the router root.
  */
@@ -89,10 +100,7 @@ export function useDeepLinks(): void {
       } catch {
         return; // plugin not available (pure web/dev) → nothing to listen to
       }
-      const handle = await App.addListener("appUrlOpen", (event) => {
-        const path = deepLinkToPath(event.url);
-        if (path) navigate(path);
-      });
+      const handle = await App.addListener("appUrlOpen", (event) => handleAppUrl(event.url, navigate));
       if (cancelled) handle.remove();
       else cleanup = () => void handle.remove();
     })();

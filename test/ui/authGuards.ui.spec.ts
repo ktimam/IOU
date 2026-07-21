@@ -52,6 +52,17 @@ test.describe("route auth guards — anonymous visitor", () => {
     await expect(page).toHaveURL(/\/$/, { timeout: 20_000 });
   });
 
+  // P1 (U22): while auth is still resolving, "/" renders the transient Loading state and does NOT
+  // redirect; once resolved (anonymous) the sign-in CTA appears, still on "/". Uses the DEV-only
+  // ?e2eDelayAuth hook to hold the loading state long enough to observe.
+  test("/ while auth is loading shows Loading… (no premature redirect), then the CTA", async ({ page }) => {
+    await page.goto("/?e2eDelayAuth=1500", { waitUntil: "domcontentloaded" });
+    await expect(page.getByText("Loading…")).toBeVisible({ timeout: 5_000 });
+    expect(new URL(page.url()).pathname).toBe("/"); // no redirect while loading
+    await expect(page.getByRole("button", { name: /Sign in with Internet Identity/ })).toBeVisible({ timeout: 20_000 });
+    expect(new URL(page.url()).pathname).toBe("/");
+  });
+
   // P1 (P5): after inline sign-in on /openchat/link-chat, the SAME page renders the sheet picker
   // (?chat kept) — the destination survives, no bounce to /pairs.
   test("signed-out link-chat returns to the picker after inline sign-in (?chat kept)", async ({ page }) => {
