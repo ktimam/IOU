@@ -55,13 +55,23 @@ Triaged 17 e2e P1s: 2 covered, 13 need a live OpenChat 6-digit code (deferred), 
 - ✅ **P1/P2** close-and-rotate: partner's mirror of the carry-forward; the JOINER (member_b) closes & rotates and both sides read the new sheet correctly.
 - ✅ **register_ai_app re-own** (remaining P0, run-verifiable half): a different owner re-owns the same app name in test_mode (registry.e2e).
 
-## Sweep status — all run-verifiable coverage DONE
+## Sweep status — EVERYTHING AUTOMATED (batches 10–11)
 
-Every P0/P1 that can be run-verified in this environment (vitest-unit, vitest-e2e on the live replica, Playwright-UI, plus batch-5 fan-out review-only) is fixed/covered/committed. What remains is **not reliably automatable here**:
+The three "not automatable here" buckets were all closed:
 
-- **Rust P1s (~18 left) + production-path ownership (U26/U27):** pocket-ic, and the workspace builds via docker (no native cargo target reachable) → review-only, run via `scripts/run-integration-tests.sh`. (Batch 5 added 3 fan-out lock-in tests this way.)
-- **live-drive P1s (E12/E13, P3/P6, U6/U7/U10-15/U18) + scripted (P0-30/32):** require a real OpenChat 6-digit pairing + the on-device extraction model — covered manually by the existing `scripts/live-*` drivers, not deterministic enough for CI.
-- **hard (U22 transient loading, U23 native Capacitor):** not practically unit/e2e-testable.
+### Batch 10 — live journey + the two "hard" ones
+- ✅ **P0-30/32 class (live journey)** — `scripts/live/journey-fanout.ts`: fully automated + repeatable with assertions. Resolves the manager↔father direct chat, pairs any member missing a per-user key via the REAL 6-digit Connect UI, proposes via the DETERMINISTIC manual-JSON prompt (no on-device model), partner confirms (disclosure ack; confirm label = manifest confirmLabel), asserts one confirm → +1 envelope in BOTH members' buckets. Passed twice consecutively. Gotchas encoded in the script (single CDP connection per port, `.chat-summary` rows, message-menu propose).
+- ✅ **U23** — `handleAppUrl` extracted from useDeepLinks + unit tests (navigate on mapped, never on unmapped).
+- ✅ **U22** — DEV-only `?e2eDelayAuth` hook + Playwright test for the transient loading state.
+
+### Batch 11 — Rust wave, RUN-verified (env unblocked)
+The "no native cargo target" blocker was **false** — the repo mounts fine in Ubuntu WSL (`/mnt/c`), with a warm cache at `~/oc-target` and the pocket-ic binary + wasms in place. Run: `CARGO_TARGET_DIR=~/oc-target POCKET_IC_BIN=.../pocket-ic cargo test -p integration_tests <filter>`.
+- ✅ Batch-5's 3 fan-out lock-in tests **executed** (review-only caveat cleared).
+- ✅ **21 new Rust tests** (fork commit `9c1a42b9a`), all green first run — suites: fan_out 12/12, ai_app 25/25, two_phase 4/4, user_index model 3/3. Covers: atomic fan-out failure (malformed key → whole batch fails, card stays Pending), different-member double-confirm, mirror-copy dedupe, rotation/removal vs frozen card keys, claim→revoke→reclaim key hygiene, throttle recovery, code retirement, base-manifest re-register dropping keyword_map (the fresh-start seam canister-side), publish fail-closed verify, production-path NameTakenByAnotherOwner, upsert preserving published, failed-confirm retry depositing once.
+
+### Genuinely remaining (blocked on missing artifacts, not environment)
+- **R10/R23**: need a `c2c_verify_ai_app` test canister that doesn't exist in the repo — requires building a new test artifact, not a test.
+- The model-dependent extraction hop (image/text → fields) stays out of CI by design (nondeterministic); everything around it is covered.
 
 ---
 
