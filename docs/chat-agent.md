@@ -215,12 +215,18 @@ card across members:
   never the content-hash `draft_id` (per-user template sets make the derived hash diverge, and two
   legitimately-distinct same-content cards must not suppress each other); wrapper-less (pre-v2)
   cards fall back to `draft_id` equality, mirroring the paste path's `isDuplicateDraft` rule.
-- **Dismiss is per-user by design.** "✕" means "I'm not interested", not "handled for the ledger" —
-  it only marks the local `handledInboxIds`; the partner may still legitimately import their copy.
-  Once anyone imports, the entry-based filter hides the card for all members.
-- **Delete resurrects for the partner only.** Deleting the imported entry un-hides the card for
-  members who never handled it locally (deleted entries never match); the deleter's own local
-  handled/imported sets keep it hidden for them.
+- **Dismiss syncs to ALL members (supersedes the earlier per-user design).** "✕" appends the card's
+  `context.messageId` to the dismisser's own encrypted pair slot — the slot payload is a versioned
+  v2 envelope `{v:2, templates, dismissed}` (`pairTemplates.ts`; legacy bare-array v1 blobs still
+  decode) — via the same `set_pair_templates` publish the template mirror uses. Every member's
+  `visibleInbox` filters against the MERGED dismissed union of both slots (de-duped, capped at 300
+  ids with the oldest pruned — inbox envelopes expire server-side anyway), so the partner's card
+  disappears on their next pair-slot load (also triggered when the tab regains visibility). The
+  local `handledInboxIds` set stays as the instant/offline echo for the dismisser. K_sheet rotation
+  re-seals the full v2 payload verbatim, dismissals included.
+- **Delete resurrects for members who never dismissed.** Deleting the imported entry un-hides the
+  card for members who neither imported nor dismissed it (deleted entries never match); the
+  deleter's own local handled/imported sets — and any synced dismissal — keep it hidden.
 - **Legacy entries** imported before `import_message_id` existed carry no key, so their cards stay
   visible to the partner until dismissed once — accepted, no migration.
 
@@ -233,14 +239,19 @@ card across members:
   `per_user_keys=false` debugging), the auto-derived inbox readout, and the legacy off-chain relay
   cards — live behind a collapsed **Advanced** disclosure (auto-expanded when a relay config already
   exists). The "set up relay first" placeholder card is gone.
-- **Shared account types**: transaction types (templates) can be **shared per sheet**. Each member
-  gets an encrypted slot on the Pair (`set_pair_templates`, additive `opt` fields, SCHEMA_VERSION 7)
-  sealed under **K_sheet** (the `set_member_name` pattern), so the partner decrypts with their own
-  wrapped sheet key — no key sharing, canister stays ciphertext-blind. Client merge is pure + rev-based
-  (`src/features/templates/pairTemplates.ts`): higher rev wins, tombstones hide (higher-rev republish
-  resurrects), copy-on-write "Edit a copy" for partner-shared types, deterministic + commutative
-  ties. Share toggle defaults OFF in the Types manager; shared types show a "· shared" badge, fold
-  into the OpenChat manifest, and closing a sheet re-seals slots under the rotated key.
+- **Shared account types**: transaction types (templates) are **always shared to the account** —
+  there is NO Share toggle. Each member gets an encrypted slot on the Pair (`set_pair_templates`,
+  additive `opt` fields, SCHEMA_VERSION 7) sealed under **K_sheet** (the `set_member_name`
+  pattern), so the partner decrypts with their own wrapped sheet key — no key sharing, canister
+  stays ciphertext-blind. A member's slot is a **mirror of their personal template list**: a
+  reconcile effect (`reconcileSlot`, `src/features/templates/pairTemplates.ts`) publishes only on
+  real drift — new/changed ids upserted at the next rev, ids deleted from the personal list DROPPED
+  from the slot (absence, not tombstone, so a removed copy-on-write override resurfaces the
+  partner's original; legacy tombstones still decode + hide). Client merge is pure + rev-based:
+  higher rev wins, deterministic + commutative ties; "Edit a copy" of a partner type adds the copy
+  to MY personal list under the same id (the mirror publishes it as my override). Partner-authored
+  types show a "· partner" badge, fold into the OpenChat manifest, and closing a sheet re-seals
+  slots (the full v2 payload) under the rotated key.
 
 #### The OpenChat connector — real contract (2026-06-24)
 

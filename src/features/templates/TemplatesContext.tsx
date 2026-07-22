@@ -61,7 +61,11 @@ type Ctx = {
   templates: TxnTemplate[];
   loading: boolean;
   error: string | null;
-  addTemplate: (t: Omit<TxnTemplate, "id">) => Promise<void>;
+  /** Add a template. An explicit `id` (normally absent — one is generated)
+   *  lets "Edit a copy" of a partner-shared type store MY personal copy
+   *  under the SAME id, which the pair-slot mirror then publishes as my
+   *  copy-on-write override. */
+  addTemplate: (t: Omit<TxnTemplate, "id"> & { id?: string }) => Promise<void>;
   updateTemplate: (t: TxnTemplate) => Promise<void>;
   removeTemplate: (id: string) => Promise<void>;
 };
@@ -133,9 +137,10 @@ export function TemplatesProvider({ children }: { children: ReactNode }) {
   );
 
   const addTemplate = useCallback(
-    async (t: Omit<TxnTemplate, "id">) => {
-      const id = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
-      const next = [...templates, { ...t, id }];
+    async (t: Omit<TxnTemplate, "id"> & { id?: string }) => {
+      const id =
+        t.id ?? `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+      const next = [...templates.filter((x) => x.id !== id), { ...t, id }];
       await persist(next);
       setTemplates(next);
       // Keep the registered OpenChat manifest in lock-step with the user's types (no-op unless the

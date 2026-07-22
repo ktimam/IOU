@@ -7,6 +7,7 @@
 import { encryptWithSheetKey, decryptWithSheetKey } from "../crypto/devVetkd";
 import {
   type SharedTemplate,
+  type PairSlotPayload,
   decodePairSlot,
   mergePairTemplates,
   visibleTemplates,
@@ -37,29 +38,34 @@ export function myMemberIndex(pair: any, myPrincipal: string): 0 | 1 | null {
   return null;
 }
 
-/** Decrypt one slot; ANY failure (stale key after rotation, garbage) → []. */
+/** Decrypt one slot to its full v2 payload (templates + dismissed); ANY
+ *  failure (stale key after rotation, garbage) → the empty payload. */
 export async function decryptSlot(
   K: Uint8Array,
   enc: unknown,
   iv: unknown,
-): Promise<SharedTemplate[]> {
+): Promise<PairSlotPayload> {
   const e = optBytes(enc);
   const i = optBytes(iv);
-  if (!e || !i) return [];
+  if (!e || !i) return { templates: [], dismissed: [] };
   try {
     return decodePairSlot(await decryptWithSheetKey(K, i, e));
   } catch {
-    return []; // degrade — self-heals when that member next republishes
+    // degrade — self-heals when that member next republishes
+    return { templates: [], dismissed: [] };
   }
 }
 
 /**
  * Sheet-rotation follow-up (CloseSheetButton): re-encrypt the CALLER's own
  * templates slot under the NEW K_sheet, mirroring how publishAccountNames
- * re-publishes the names. Best-effort by design — on any failure the slot
- * is simply stale under the old key, which the loader already degrades on,
- * and it self-heals on the next publish. The partner's slot is theirs to
- * re-seal (same standing limitation the encrypted names have).
+ * re-publishes the names. Re-seals the decrypted plaintext VERBATIM, so the
+ * FULL v2 payload (templates + dismissed) — or a legacy v1 blob — survives
+ * byte-identically; no decode/re-encode, no format assumptions. Best-effort
+ * by design — on any failure the slot is simply stale under the old key,
+ * which the loader already degrades on, and it self-heals on the next
+ * publish. The partner's slot is theirs to re-seal (same standing
+ * limitation the encrypted names have).
  */
 export async function rotateMyPairTemplates(
   actor: any,
@@ -117,7 +123,7 @@ export async function loadAllSharedTemplates(
       const K = await unwrapFor(sheetId);
       const a = await decryptSlot(K, pair.templates_a_enc, pair.templates_a_iv);
       const b = await decryptSlot(K, pair.templates_b_enc, pair.templates_b_iv);
-      for (const t of visibleTemplates(mergePairTemplates(a, b))) {
+      for (const t of visibleTemplates(mergePairTemplates(a.templates, b.templates))) {
         if (!seen.has(t.id)) {
           seen.add(t.id);
           out.push(t);

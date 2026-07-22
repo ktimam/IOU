@@ -222,8 +222,10 @@ export function SheetPage() {
   // consumed on this page (picker + chat-draft routing).
   const pairTemplates = usePairTemplates(sheet?.pair_id as string | undefined, sheetId);
   const allTemplates = combineTemplates(templates, pairTemplates.shared);
-  // Partner-authored shared types (not in the personal store) get a badge.
-  const sharedOnlyIds = new Set(
+  // Everything of MINE is shared with the account automatically (the pair
+  // slot mirrors my personal list), so only PARTNER-authored types (not in
+  // my personal store) get a badge.
+  const partnerSharedIds = new Set(
     pairTemplates.shared
       .filter((s) => !templates.some((p) => p.id === s.id))
       .map((s) => s.id),
@@ -351,12 +353,8 @@ export function SheetPage() {
   const clearRelay = async (id: string) => {
     if (id.startsWith("oc-")) {
       // On-chain inbox actions are append-only; drop it from the local pending view and remember
-      // it as handled so it does not reappear on the next refresh/poll.
-      //
-      // Dismissal is intentionally PER-USER (this localStorage set only): it means "I'm not
-      // interested", not "handled for the ledger" — the partner may still legitimately import
-      // their copy of the fanned-out card. IMPORTING is what syncs cross-member: the entry's
-      // import_message_id hides the card for every member via isImportedIntoSheet.
+      // it as handled so it does not reappear on the next refresh/poll. (This local set is the
+      // instant/offline echo — cross-member sync rides on the pair slot, see dismissCard below.)
       markInboxDraftHandled(id);
       setInboxPending((prev) => prev.filter((p) => p.id !== id));
       return;
@@ -370,6 +368,20 @@ export function SheetPage() {
       }
     }
     await reloadPending();
+  };
+  // "✕" dismisses a pending card for ALL members: the local handledInboxIds echo hides it
+  // instantly (and keeps it hidden offline), while the card's messageId is appended to MY pair
+  // slot's dismissed list (set_pair_templates) so the PARTNER's client filters it out too on its
+  // next pair load / visibility-regain reload. Best-effort: if the publish fails, the local echo
+  // still applies and the partner simply keeps their copy of the card.
+  const dismissDraft = (p: PendingDraft) => {
+    const mid = p.context?.messageId;
+    if (mid !== undefined && p.id.startsWith("oc-")) {
+      void pairTemplates.dismissCard(mid).catch(() => {
+        /* best-effort — local echo already hides it for me */
+      });
+    }
+    void clearRelay(p.id);
   };
   const closeEntryModal = () => {
     setModal(null);
@@ -627,12 +639,16 @@ export function SheetPage() {
   }, [actor, sheetId]);
 
   // Freshness for the cross-member pending filter: the partner's import only hides a card here
-  // once OUR `entries` copy contains their entry (with its import_message_id). The 15 s inbox
-  // polls only ADD cards — entries drive removal — so re-fetch when the tab regains visibility,
-  // letting the hide land without a manual page reload.
+  // once OUR `entries` copy contains their entry (with its import_message_id), and the partner's
+  // DISMISSALS only land once we re-read the pair slots (their dismissed list). The 15 s inbox
+  // polls only ADD cards — entries + slots drive removal — so re-fetch BOTH when the tab regains
+  // visibility, letting the hide land without a manual page reload.
   useEffect(() => {
     const onVisible = () => {
-      if (document.visibilityState === "visible") void reload();
+      if (document.visibilityState === "visible") {
+        void reload();
+        pairTemplates.reload();
+      }
     };
     document.addEventListener("visibilitychange", onVisible);
     return () => document.removeEventListener("visibilitychange", onVisible);
@@ -664,8 +680,10 @@ export function SheetPage() {
   // Cross-member sync: a card ANY member already imported is hidden by matching the sheet's
   // decrypted entries — import_message_id for mid-bearing cards, the derived content-hash
   // draft_id only for wrapper-less ones (see isImportedIntoSheet for why mid-bearing cards
-  // never fall back to the content hash). The partner's import reaches us on the next entries
-  // reload, so both members' pending lists converge without sharing any local state.
+  // never fall back to the content hash). A card ANY member DISMISSED is hidden via the merged
+  // pair-slot dismissed union (pairTemplates.dismissed). The partner's import/dismissal reaches
+  // us on the next entries/slots reload, so both members' pending lists converge without
+  // sharing any local state.
   //
   // A double-confirm race can surface two cards for the same messageId; collapse
   // them by keeping the first (earliest — poll appends in order). Drafts with no
@@ -676,6 +694,8 @@ export function SheetPage() {
         inboxPending.filter((p) => {
           if (!draftBelongsOnSheet(p.context?.chat, chatLinks, sheetId)) return false;
           const mid = p.context?.messageId;
+          // Dismissed by ANY member (merged pair-slot union) → hidden for everyone.
+          if (mid !== undefined && pairTemplates.dismissed.has(mid)) return false;
           // Only wrapper-less cards need the parsed draftId (the fallback key); mid-bearing
           // cards match exclusively on import_message_id, so skip the parse for them.
           let draftId: string | undefined;
@@ -688,7 +708,7 @@ export function SheetPage() {
       ),
     // resolveTemplateBase is re-created each render but only reads `templates` — dep on that.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [inboxPending, chatLinks, sheetId, entries, templates],
+    [inboxPending, chatLinks, sheetId, entries, templates, pairTemplates.dismissed],
   );
 
   async function onSubmit(p: EntryPayload) {
@@ -1039,8 +1059,8 @@ export function SheetPage() {
                     </button>
                     <button
                       className="secondary small"
-                      onClick={() => void clearRelay(p.id)}
-                      title="Dismiss without adding"
+                      onClick={() => dismissDraft(p)}
+                      title="Dismiss without adding (for everyone on this sheet)"
                     >
                       ✕
                     </button>
@@ -1083,8 +1103,8 @@ export function SheetPage() {
                         onClick={() => openAdd(templateToInitial(t))}
                       >
                         {t.name}
-                        {sharedOnlyIds.has(t.id) && (
-                          <span className="muted small"> · shared</span>
+                        {partnerSharedIds.has(t.id) && (
+                          <span className="muted small"> · partner</span>
                         )}
                       </button>
                     ))}

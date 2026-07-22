@@ -2,13 +2,16 @@
 // the sheet's "Add type" button (templates are user-level and stored
 // encrypted on-chain, so they're available across every sheet).
 //
-// v1.12.0: when opened in a pair context (the sheet page passes `pair`,
-// the usePairTemplates api), each personal template gets a "Share" toggle
-// that publishes it into the caller's OWN encrypted slot on the Pair
-// (default OFF — nothing is shared without this explicit action), and
-// partner-authored shared types are listed read-only with an "Edit a copy"
-// action (copy-on-write: the override goes into the caller's own slot at
-// the next rev; the partner's slot is never touched).
+// Types are ALWAYS shared to the account (no Share toggle): when opened in
+// a pair context (the sheet page passes `pair`, the usePairTemplates api),
+// every personal template is automatically mirrored into the caller's OWN
+// encrypted slot on the Pair by the usePairTemplates reconcile effect —
+// saving/editing/deleting a personal type is all it takes for the partner
+// to see the change. Partner-authored shared types are listed read-only
+// with an "Edit a copy" action (copy-on-write: the edited copy is added to
+// MY PERSONAL templates under the SAME id, which the mirror publishes as my
+// override at the next rev; the partner's slot is never touched, and
+// deleting my copy resurfaces their original).
 
 import { useState } from "react";
 import { orderedCurrencies } from "../settings/currencies";
@@ -164,36 +167,21 @@ export function TemplatesManager({
     setBusy(true);
     setErr(null);
     try {
-      if (editingId && editingShared && pair) {
-        // Copy-on-write edit of a shared (possibly partner-authored) type:
-        // same id, next rev, into MY slot only.
-        await pair.editShared({ id: editingId, ...base });
+      if (editingId && editingShared) {
+        // Copy-on-write edit of a partner-authored shared type: add the
+        // edited copy to MY PERSONAL templates under the SAME id — the
+        // pair-slot mirror then publishes it as my override at the next
+        // rev (the partner's slot is never touched).
+        await addTemplate({ id: editingId, ...base });
       } else if (editingId) {
+        // The pair-slot mirror picks the edit up automatically (types are
+        // always shared to the account — no explicit share step).
         await updateTemplate({ id: editingId, ...base });
-        // If I share this template with the account, keep the shared copy
-        // in lock-step with my personal edit.
-        if (pair?.myIds.has(editingId)) {
-          await pair.shareTemplate({ id: editingId, ...base });
-        }
       } else {
         await addTemplate(base);
       }
       resetForm();
       onSaved?.();
-    } catch (e) {
-      setErr((e as Error).message);
-    } finally {
-      setBusy(false);
-    }
-  }
-
-  async function toggleShare(t: TxnTemplate, share: boolean) {
-    if (!pair) return;
-    setBusy(true);
-    setErr(null);
-    try {
-      if (share) await pair.shareTemplate(t);
-      else await pair.unshareTemplate(t.id);
     } catch (e) {
       setErr((e as Error).message);
     } finally {
@@ -207,11 +195,10 @@ export function TemplatesManager({
   }
 
   // Partner-authored shared types: visible in the account's merged view but
-  // neither mine personally nor published from my slot.
+  // not mine personally (my slot mirrors my personal list, so "not in my
+  // personal list" ≡ "not published by me").
   const partnerShared = pair
-    ? pair.shared.filter(
-        (s) => !pair.myIds.has(s.id) && !templates.some((p) => p.id === s.id),
-      )
+    ? pair.shared.filter((s) => !templates.some((p) => p.id === s.id))
     : [];
 
   function summary(t: TxnTemplate): string {
@@ -252,7 +239,7 @@ export function TemplatesManager({
         Save presets like “Reservation” (e.g. 20% + a fixed fee, split due
         dates). Pick one from <strong>+ Add ▾</strong> on any sheet to
         pre-fill an entry. Stored encrypted on your account, usable
-        everywhere.
+        everywhere.{pair ? " Your types are automatically shared with this account." : ""}
       </p>
 
       {loading && <p className="muted small">Loading…</p>}
@@ -271,33 +258,16 @@ export function TemplatesManager({
                 className="secondary small"
                 onClick={() => {
                   if (window.confirm(`Delete the “${t.name}” type? This can't be undone.`)) {
+                    // The pair-slot mirror drops it from my slot on the next
+                    // reconcile — if it overrode a partner's type, theirs
+                    // resurfaces; if it was mine alone it disappears for both.
                     void removeTemplate(t.id);
-                    // Was it shared with this account? Tombstone the shared
-                    // copy too so the partner's view drops it as well.
-                    if (pair?.myIds.has(t.id)) void pair.unshareTemplate(t.id);
                     if (editingId === t.id) resetForm();
                   }
                 }}
               >
                 Remove
               </button>
-              {pair && (
-                <>
-                  {" "}
-                  <button
-                    className="secondary small"
-                    disabled={busy}
-                    title={
-                      pair.myIds.has(t.id)
-                        ? "Shared with this account — click to stop sharing"
-                        : "Share this type with this account (your partner will see it)"
-                    }
-                    onClick={() => void toggleShare(t, !pair.myIds.has(t.id))}
-                  >
-                    {pair.myIds.has(t.id) ? "Shared ✓" : "Share"}
-                  </button>
-                </>
-              )}
             </li>
           ))}
         </ul>
