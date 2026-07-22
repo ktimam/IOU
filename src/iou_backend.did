@@ -43,6 +43,12 @@ type Pair = record {
     member_a_name_iv : opt vec nat8;
     member_b_name_enc : opt vec nat8;   // E2E-encrypted member_b display name
     member_b_name_iv : opt vec nat8;
+    // v1.12.0: per-member SHARED transaction-template blobs (AES-GCM under
+    // the active sheet's K_sheet). Slot a = members[0], slot b = members[1].
+    templates_a_enc : opt vec nat8;
+    templates_a_iv : opt vec nat8;
+    templates_b_enc : opt vec nat8;
+    templates_b_iv : opt vec nat8;
 };
 
 type PairSummary = record {
@@ -240,6 +246,9 @@ service : {
     set_pair_name : (text, vec nat8, vec nat8) -> ();
     set_sheet_name : (text, vec nat8, vec nat8) -> ();
     set_member_name : (text, vec nat8, vec nat8) -> ();
+    // v1.12.0: shared transaction types per account — the caller's own
+    // per-member slot only; both members read both slots via get_pair.
+    set_pair_templates : (text, vec nat8, vec nat8) -> ();
 
     // Phase 3
     add_entry : (AddEntryReq) -> (Entry);

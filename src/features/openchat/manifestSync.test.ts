@@ -69,7 +69,8 @@ describe("maybeSyncManifest (caller wiring)", () => {
   const templates = [{ id: "z1", name: "Reservation", keywords: ["reservation"] }];
 
   it("CONNECT-only user's type-save re-registers the manifest with their types (P0-8/P0-28)", async () => {
-    const register = vi.fn(async () => ({ ok: true }));
+    // Rest params so the mock's calls tuple is typed unknown[] (arg-less vi.fn types it []).
+    const register = vi.fn(async (..._args: unknown[]) => ({ ok: true }));
     const res = await maybeSyncManifest(fakeIdentity(ME), templates, register, {
       myPrincipal: ME, linkedPrincipal: null, connected: true,
     });

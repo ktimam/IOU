@@ -23,6 +23,38 @@ export function collapseByMessageId<T extends { context?: { messageId?: string }
 }
 
 /**
+ * Cross-member "already imported" predicate: has ANY member of the sheet already imported this
+ * pending card as an entry? The fan-out deposits one envelope per member, each carrying the SAME
+ * `context.messageId`; importing writes that id into the shared encrypted entry as
+ * `payload.import_message_id`, so every member's decrypted entries carry the signal.
+ *
+ * Matching rules:
+ *  - Card WITH a messageId → match ONLY non-deleted entries whose `import_message_id` equals it.
+ *    Deliberately NO fallback to the content-hash `draft_id`: (a) per-user template sets make the
+ *    derived hash diverge between members, and (b) two legitimately-distinct cards can share
+ *    identical content (two same-price bookings) — a content match would falsely suppress a real
+ *    card. Legacy entries imported before `import_message_id` existed therefore do NOT hide their
+ *    card for the partner (acceptable: dismiss once).
+ *  - Card WITHOUT a messageId (wrapper-less / pre-v2 deposit) → fall back to `draft_id` equality
+ *    against non-deleted entries (same rule as the paste path's isDuplicateDraft).
+ *  - DELETED entries never match: deleting the imported entry resurrects the card for members who
+ *    have not locally dismissed it.
+ */
+export function isImportedIntoSheet(
+  entries: { deleted: boolean; payload: { draft_id?: string; import_message_id?: string } }[],
+  messageId: string | undefined,
+  draftId: string | undefined,
+): boolean {
+  if (messageId !== undefined) {
+    return entries.some((e) => !e.deleted && e.payload.import_message_id === messageId);
+  }
+  if (draftId !== undefined) {
+    return entries.some((e) => !e.deleted && e.payload.draft_id === draftId);
+  }
+  return false;
+}
+
+/**
  * Tolerantly parse the persisted importedMessageIds payload (a JSON string array) into a Set.
  * Anything malformed (non-JSON, non-array, non-string entries) degrades to an empty/filtered set —
  * a corrupt store must never throw and never block importing.

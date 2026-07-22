@@ -1,6 +1,14 @@
 // Create / edit / delete transaction templates. Rendered in a popup from
 // the sheet's "Add type" button (templates are user-level and stored
 // encrypted on-chain, so they're available across every sheet).
+//
+// v1.12.0: when opened in a pair context (the sheet page passes `pair`,
+// the usePairTemplates api), each personal template gets a "Share" toggle
+// that publishes it into the caller's OWN encrypted slot on the Pair
+// (default OFF — nothing is shared without this explicit action), and
+// partner-authored shared types are listed read-only with an "Edit a copy"
+// action (copy-on-write: the override goes into the caller's own slot at
+// the next rev; the partner's slot is never touched).
 
 import { useState } from "react";
 import { orderedCurrencies } from "../settings/currencies";
@@ -10,6 +18,7 @@ import {
   type TemplatePortion,
   type DueAnchor,
 } from "./TemplatesContext";
+import type { PairTemplatesApi } from "./PairTemplatesContext";
 import type { Direction, TxnType } from "../entries/types";
 
 function fmtMajor(minor?: number): string {
@@ -18,10 +27,16 @@ function fmtMajor(minor?: number): string {
 
 type SchedRow = { anchor: DueAnchor; days: number; percent: number };
 
-export function TemplatesManager({ onSaved }: { onSaved?: () => void } = {}) {
+export function TemplatesManager({
+  onSaved,
+  pair,
+}: { onSaved?: () => void; pair?: PairTemplatesApi | null } = {}) {
   const { templates, addTemplate, updateTemplate, removeTemplate, loading, error } =
     useTemplates();
   const [editingId, setEditingId] = useState<string | null>(null);
+  // Editing a SHARED template (copy-on-write into my own pair slot) rather
+  // than a personal one — set by "Edit a copy" on a partner-authored type.
+  const [editingShared, setEditingShared] = useState(false);
   const [name, setName] = useState("");
   const [direction, setDirection] = useState<Direction>("credit");
   const [txnType, setTxnType] = useState<TxnType>("iou");
@@ -54,6 +69,7 @@ export function TemplatesManager({ onSaved }: { onSaved?: () => void } = {}) {
 
   function resetForm() {
     setEditingId(null);
+    setEditingShared(false);
     setName("");
     setDirection("credit");
     setTxnType("iou");
@@ -70,6 +86,7 @@ export function TemplatesManager({ onSaved }: { onSaved?: () => void } = {}) {
 
   function startEdit(t: TxnTemplate) {
     setEditingId(t.id);
+    setEditingShared(false);
     setName(t.name);
     setDirection(t.direction);
     setTxnType(t.txn_type);
@@ -147,8 +164,20 @@ export function TemplatesManager({ onSaved }: { onSaved?: () => void } = {}) {
     setBusy(true);
     setErr(null);
     try {
-      if (editingId) await updateTemplate({ id: editingId, ...base });
-      else await addTemplate(base);
+      if (editingId && editingShared && pair) {
+        // Copy-on-write edit of a shared (possibly partner-authored) type:
+        // same id, next rev, into MY slot only.
+        await pair.editShared({ id: editingId, ...base });
+      } else if (editingId) {
+        await updateTemplate({ id: editingId, ...base });
+        // If I share this template with the account, keep the shared copy
+        // in lock-step with my personal edit.
+        if (pair?.myIds.has(editingId)) {
+          await pair.shareTemplate({ id: editingId, ...base });
+        }
+      } else {
+        await addTemplate(base);
+      }
       resetForm();
       onSaved?.();
     } catch (e) {
@@ -157,6 +186,33 @@ export function TemplatesManager({ onSaved }: { onSaved?: () => void } = {}) {
       setBusy(false);
     }
   }
+
+  async function toggleShare(t: TxnTemplate, share: boolean) {
+    if (!pair) return;
+    setBusy(true);
+    setErr(null);
+    try {
+      if (share) await pair.shareTemplate(t);
+      else await pair.unshareTemplate(t.id);
+    } catch (e) {
+      setErr((e as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  function startEditShared(t: TxnTemplate) {
+    startEdit(t);
+    setEditingShared(true);
+  }
+
+  // Partner-authored shared types: visible in the account's merged view but
+  // neither mine personally nor published from my slot.
+  const partnerShared = pair
+    ? pair.shared.filter(
+        (s) => !pair.myIds.has(s.id) && !templates.some((p) => p.id === s.id),
+      )
+    : [];
 
   function summary(t: TxnTemplate): string {
     const parts: string[] = [
@@ -216,15 +272,60 @@ export function TemplatesManager({ onSaved }: { onSaved?: () => void } = {}) {
                 onClick={() => {
                   if (window.confirm(`Delete the “${t.name}” type? This can't be undone.`)) {
                     void removeTemplate(t.id);
+                    // Was it shared with this account? Tombstone the shared
+                    // copy too so the partner's view drops it as well.
+                    if (pair?.myIds.has(t.id)) void pair.unshareTemplate(t.id);
                     if (editingId === t.id) resetForm();
                   }
                 }}
               >
                 Remove
               </button>
+              {pair && (
+                <>
+                  {" "}
+                  <button
+                    className="secondary small"
+                    disabled={busy}
+                    title={
+                      pair.myIds.has(t.id)
+                        ? "Shared with this account — click to stop sharing"
+                        : "Share this type with this account (your partner will see it)"
+                    }
+                    onClick={() => void toggleShare(t, !pair.myIds.has(t.id))}
+                  >
+                    {pair.myIds.has(t.id) ? "Shared ✓" : "Share"}
+                  </button>
+                </>
+              )}
             </li>
           ))}
         </ul>
+      )}
+
+      {pair && partnerShared.length > 0 && (
+        <div className="col" style={{ gap: 4, marginTop: 8 }}>
+          <strong className="small">Shared with this account</strong>
+          <p className="muted small" style={{ margin: 0 }}>
+            Types your partner shared. Use “Edit a copy” to publish your own
+            version — theirs stays untouched.
+          </p>
+          <ul>
+            {partnerShared.map((t) => (
+              <li key={t.id} style={{ marginBottom: 6 }}>
+                <strong>{t.name}</strong>{" "}
+                <span className="muted small">{summary(t)}</span>{" "}
+                <button
+                  className="secondary small"
+                  disabled={busy}
+                  onClick={() => startEditShared(t)}
+                >
+                  Edit a copy
+                </button>
+              </li>
+            ))}
+          </ul>
+        </div>
       )}
 
       <div className="col" style={{ gap: 8, marginTop: 12 }}>

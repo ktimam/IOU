@@ -222,6 +222,17 @@ export async function openSettings(page: Page): Promise<void> {
   await page.getByRole("heading", { name: /OpenChat action inbox/i }).waitFor({ timeout: T });
 }
 
+/** Expand the "Advanced" disclosure on the OpenChat settings card — the admin "Link to OpenChat"
+ * button, the debug PEM/Copy-public-key/fingerprint surfaces, the inbox readout, and the legacy
+ * relay cards live behind it. Idempotent: no-ops when already expanded (a saved relay config
+ * auto-expands it). */
+export async function openAdvanced(page: Page): Promise<void> {
+  const toggle = page.getByRole("button", { name: /Advanced/ });
+  await toggle.waitFor({ timeout: T });
+  if ((await toggle.getAttribute("aria-expanded")) !== "true") await toggle.click();
+  await page.getByRole("button", { name: "Copy public key" }).waitFor({ timeout: T });
+}
+
 /** The per-account consumer-key fingerprint shown on the OpenChat settings card. */
 export async function consumerFingerprint(page: Page): Promise<string> {
   const fp = page.getByText(/fingerprint:/i).first();

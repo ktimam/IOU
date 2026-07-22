@@ -32,16 +32,15 @@ async function main() {
   await models.click({ timeout: 8000 });
   await p.waitForTimeout(2000);
 
-  // ── 2. The chooser (renders only while NO model is attached — otherwise the status view shows) ──
+  // ── 2. The chooser ALWAYS lists the catalog now — with the current model marked when attached ──
   const screen = await p.evaluate(`document.body.innerText.replace(/\\s+/g,' ')`);
-  const already = /Model: .*Gemma 3 1B.*(attached|loaded)/i.test(screen);
+  const already = /Current|Model: .*Gemma 3 1B.*(attached|loaded)/i.test(screen);
+  check(/Gemma 3 1B/.test(screen), "chooser lists Gemma 3 1B (default)");
+  check(/Qwen2.5 1.5B/.test(screen), "chooser lists Qwen2.5 1.5B");
+  check(/Qwen2.5 0.5B/.test(screen), "chooser lists Qwen2.5 0.5B");
+  check(/Pros:.*Cons:/.test(screen), "pros/cons descriptions shown");
   if (already) {
-    check(true, "model already attached (chooser correctly replaced by the status view)");
-  } else {
-    check(/Gemma 3 1B/.test(screen), "chooser lists Gemma 3 1B (default)");
-    check(/Qwen2.5 1.5B/.test(screen), "chooser lists Qwen2.5 1.5B");
-    check(/Qwen2.5 0.5B/.test(screen), "chooser lists Qwen2.5 0.5B");
-    check(/Pros:.*Cons:/.test(screen), "pros/cons descriptions shown");
+    check(/Current/.test(screen), "attached model is marked 'Current' (list stays visible)");
   }
 
   // ── 3. Download & use the DEFAULT (Gemma) ──────────────────────────────────

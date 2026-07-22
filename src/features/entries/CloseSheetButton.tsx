@@ -12,6 +12,7 @@ import { useAuth } from "../auth/AuthProvider";
 import { useSheetKey } from "../flows/SheetKeyContext";
 import { usePreferences } from "../settings/usePreferences";
 import { createSheetForPair, publishAccountNames } from "../flows/createSheet";
+import { rotateMyPairTemplates } from "../templates/pairTemplatesActor";
 import {
   fetchChatSheetLinks,
   storeChatSheetLink,
@@ -40,7 +41,7 @@ export function CloseSheetButton({
 }: CloseSheetButtonProps) {
   const { actor } = useActor();
   const { state } = useAuth();
-  const { cache } = useSheetKey();
+  const { cache, get, unwrapFor } = useSheetKey();
   const { prefs } = usePreferences();
   const toasts = useToasts();
   const nav = useNavigate();
@@ -73,6 +74,16 @@ export function CloseSheetButton({
         accountName: prefs.accountNames[pairId],
         profileName: prefs.profileName,
       });
+      // 3a. Re-encrypt MY shared-templates slot under the new K_sheet (the
+      //     partner's slot self-heals on their next publish; until then the
+      //     loader degrades to the decryptable slot). Best-effort like names.
+      await rotateMyPairTemplates(
+        actor,
+        state.identity.getPrincipal().toText(),
+        pairId,
+        async () => get(sheetId) ?? (await unwrapFor(sheetId)),
+        K_sheet,
+      );
       cache(newSheet.id, K_sheet);
 
       // 3b. Re-point any chat→sheet links from the just-archived sheet onto the new one, so the next

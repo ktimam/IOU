@@ -164,6 +164,10 @@ export function EntryForm({
           ? { to: convertTo, rate: rate.rate, rateSource: rate.source, rateFetchedAt: rate.fetchedAt }
           : null,
       draftId: initial?.draft_id,
+      // Cross-member already-imported key: carried on BOTH the import path (SheetPage sets it on
+      // the initial from the card's context.messageId) and the EDIT path (initial is the existing
+      // payload) — an edit that dropped it would resurrect the card in the partner's pending list.
+      importMessageId: initial?.import_message_id,
     });
     if (!result.ok) {
       setErr(result.error);

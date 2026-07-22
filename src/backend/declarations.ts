@@ -64,6 +64,12 @@ export const idlFactory = ({ IDL: idl }: { IDL: IDL }) => {
     member_a_name_iv: idl.Opt(idl.Vec(idl.Nat8)),
     member_b_name_enc: idl.Opt(idl.Vec(idl.Nat8)),
     member_b_name_iv: idl.Opt(idl.Vec(idl.Nat8)),
+    // v1.12.0: per-member SHARED transaction-template slots (a = members[0],
+    // b = members[1]), AES-GCM under the active sheet's K_sheet.
+    templates_a_enc: idl.Opt(idl.Vec(idl.Nat8)),
+    templates_a_iv: idl.Opt(idl.Vec(idl.Nat8)),
+    templates_b_enc: idl.Opt(idl.Vec(idl.Nat8)),
+    templates_b_iv: idl.Opt(idl.Vec(idl.Nat8)),
   });
   const PairSummary = idl.Record({
     id: idl.Text,
@@ -217,6 +223,12 @@ export const idlFactory = ({ IDL: idl }: { IDL: IDL }) => {
       [],
     ),
     set_member_name: idl.Func(
+      [idl.Text, idl.Vec(idl.Nat8), idl.Vec(idl.Nat8)],
+      [],
+      [],
+    ),
+    // v1.12.0: shared transaction types per account
+    set_pair_templates: idl.Func(
       [idl.Text, idl.Vec(idl.Nat8), idl.Vec(idl.Nat8)],
       [],
       [],

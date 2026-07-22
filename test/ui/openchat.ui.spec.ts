@@ -16,6 +16,7 @@ import {
   unlinkChat,
   importDraft,
   openSettings,
+  openAdvanced,
   consumerFingerprint,
   connectWithCode,
   balancesText,
@@ -30,6 +31,8 @@ test("OpenChat settings: per-user consumer key, inbox resolution, connect-code v
   await signInDev(bob);
 
   await openSettings(alice);
+  // The key/fingerprint/inbox debug surfaces live under the "Advanced" disclosure now.
+  await openAdvanced(alice);
   // A per-account consumer keypair is generated (canister-backed) and shown.
   await expect(alice.getByRole("button", { name: "Copy public key" })).toBeEnabled();
   const aFp = await consumerFingerprint(alice);
@@ -37,7 +40,8 @@ test("OpenChat settings: per-user consumer key, inbox resolution, connect-code v
   // The action_inbox is AUTO-DERIVED from the OpenChat registration (resolves to "<id> @ <host>").
   await expect(alice.getByText(/@\s*https?:\/\//)).toBeVisible({ timeout: 30_000 });
 
-  // Connect-code validation: a non-6-digit code is rejected client-side …
+  // Connect-code validation stays on the DEFAULT (non-advanced) view: a non-6-digit code is
+  // rejected client-side …
   await connectWithCode(alice, "12345");
   await expect(alice.getByText(/6-digit code shown in OpenChat/i)).toBeVisible();
   // … and a well-formed but unknown code is rejected by the LIVE user_index (CodeNotFound).
@@ -46,6 +50,7 @@ test("OpenChat settings: per-user consumer key, inbox resolution, connect-code v
 
   // Bob has his OWN distinct consumer key (per-user keypair isolation).
   await openSettings(bob);
+  await openAdvanced(bob);
   const bFp = await consumerFingerprint(bob);
   expect(bFp).not.toBe(aFp);
 

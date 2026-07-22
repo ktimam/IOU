@@ -198,6 +198,50 @@ Confirm card, and on Confirm OpenChat forwards the draft to `/v1/openchat/drafts
 key. Point `verifyOpenChatToken` at OpenChat's published key (the only open seam) — steps 2-5 are
 unchanged.
 
+#### Cross-member pending sync (fan-out) — BUILT 2026-07-22
+
+The on-chain action inbox **fans out one envelope per chat member** (each wrapped under that
+member's own consumer key, all carrying the SAME `context.messageId` — see the open-chat-cycle
+fan-out design), so both members of a shared sheet see the confirmable-action card. Lifecycle of a
+card across members:
+
+- **Import syncs cross-member.** Importing writes the card's `context.messageId` into the shared
+  encrypted entry as `EntryPayload.import_message_id` (client-side JSON only — the canister never
+  parses the ciphertext and old clients ignore the field; no storage migration). Every member's
+  pending list filters against the sheet's decrypted entries (`isImportedIntoSheet`,
+  `src/features/openchat/inboxDedupe.ts`): a non-deleted entry carrying the card's messageId hides
+  the card for **everyone** — the partner's copy disappears on their next entries reload (also
+  triggered when the tab regains visibility). Mid-bearing cards match ONLY on `import_message_id`,
+  never the content-hash `draft_id` (per-user template sets make the derived hash diverge, and two
+  legitimately-distinct same-content cards must not suppress each other); wrapper-less (pre-v2)
+  cards fall back to `draft_id` equality, mirroring the paste path's `isDuplicateDraft` rule.
+- **Dismiss is per-user by design.** "✕" means "I'm not interested", not "handled for the ledger" —
+  it only marks the local `handledInboxIds`; the partner may still legitimately import their copy.
+  Once anyone imports, the entry-based filter hides the card for all members.
+- **Delete resurrects for the partner only.** Deleting the imported entry un-hides the card for
+  members who never handled it locally (deleted entries never match); the deleter's own local
+  handled/imported sets keep it hidden for them.
+- **Legacy entries** imported before `import_message_id` existed carry no key, so their cards stay
+  visible to the partner until dismissed once — accepted, no migration.
+
+#### Settings simplification + shared account types — BUILT 2026-07-22
+
+- **Settings**: the 6-digit **Connect to OpenChat** (+ Disconnect) is now the ONLY default-visible
+  integration flow. The admin/debug surfaces — "Link to OpenChat" (manifest registration; end users
+  never need it since the manifest auto-syncs on Connect/type-edit/app-load and first bootstrap is
+  CI's `register:openchat`), the SPKI PEM + "Copy public key" + fingerprint (legacy
+  `per_user_keys=false` debugging), the auto-derived inbox readout, and the legacy off-chain relay
+  cards — live behind a collapsed **Advanced** disclosure (auto-expanded when a relay config already
+  exists). The "set up relay first" placeholder card is gone.
+- **Shared account types**: transaction types (templates) can be **shared per sheet**. Each member
+  gets an encrypted slot on the Pair (`set_pair_templates`, additive `opt` fields, SCHEMA_VERSION 7)
+  sealed under **K_sheet** (the `set_member_name` pattern), so the partner decrypts with their own
+  wrapped sheet key — no key sharing, canister stays ciphertext-blind. Client merge is pure + rev-based
+  (`src/features/templates/pairTemplates.ts`): higher rev wins, tombstones hide (higher-rev republish
+  resurrects), copy-on-write "Edit a copy" for partner-shared types, deterministic + commutative
+  ties. Share toggle defaults OFF in the Types manager; shared types show a "· shared" badge, fold
+  into the OpenChat manifest, and closing a sheet re-seals slots under the rotated key.
+
 #### The OpenChat connector — real contract (2026-06-24)
 
 The OpenChat fork (`C:\Kiko\MyProjects\Blockchain\ICP\open-chat`, branches `feat/on-device-model-manager`

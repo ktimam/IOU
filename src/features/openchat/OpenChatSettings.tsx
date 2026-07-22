@@ -1,9 +1,13 @@
-// Settings card: link an OpenChat account to this device's relay token so an
-// OpenChat-confirmed transaction draft routes into the "Pending from chat"
-// inbox. Pairing is started here (the app holds the link token); the user gives
-// the short code to the IOU integration inside OpenChat, which claims it with a
-// provenance token. The relay stays key-blind — the encrypted write still
-// happens on this device on Accept. See docs/chat-agent.md.
+// LEGACY relay-pairing card ("OpenChat link (relay)") — the pre-on-chain off-chain path, superseded
+// by the on-chain action inbox (ActionInboxSettings). It links an OpenChat account to this device's
+// relay token so an OpenChat-confirmed transaction draft routes into the "Pending from chat" inbox.
+// Pairing is started here (the app holds the link token); the user gives the short code to the IOU
+// integration inside OpenChat, which claims it with a provenance token. The relay stays key-blind —
+// the encrypted write still happens on this device on Accept. See docs/chat-agent.md.
+//
+// Rendered ONLY under the "Advanced" disclosure on /settings, and ONLY when a relay is actually
+// configured (getRelayConfig() non-null) — with no relay there is nothing to pair, so this renders
+// nothing (the old "set up Chat import (relay) above first" placeholder card is gone).
 
 import { useEffect, useState } from "react";
 import {
@@ -13,9 +17,8 @@ import {
   revokePairing,
   type OpenChatPairing,
 } from "../relay/relay";
-import { ActionInboxSettings } from "./ActionInboxSettings";
 
-export function OpenChatSettings() {
+export function RelayPairingCard() {
   const [pairings, setPairings] = useState<OpenChatPairing[]>([]);
   const [code, setCode] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
@@ -35,20 +38,7 @@ export function OpenChatSettings() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  if (!cfg) {
-    return (
-      <>
-        <ActionInboxSettings />
-        <div className="card">
-          <h2>OpenChat link (relay)</h2>
-          <p className="muted small">
-            Set up “Chat import (relay)” above first — OpenChat forwards drafts through it. (The on-chain action
-            inbox above is the relay-free alternative.)
-          </p>
-        </div>
-      </>
-    );
-  }
+  if (!cfg) return null;
 
   const link = async () => {
     setBusy(true);
@@ -74,8 +64,6 @@ export function OpenChatSettings() {
   };
 
   return (
-    <>
-    <ActionInboxSettings />
     <div className="card">
       <h2>OpenChat link (relay)</h2>
       <p className="muted small">
@@ -132,6 +120,5 @@ export function OpenChatSettings() {
 
       <span className="lock-cue">🔒 nothing is written until you Accept on the sheet</span>
     </div>
-    </>
   );
 }

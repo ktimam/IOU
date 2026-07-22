@@ -35,6 +35,8 @@ import { buildInviteLink } from "../flows/inviteLink";
 import { isProdVetkd } from "../crypto/devVetkd";
 import { usePreferences } from "../settings/usePreferences";
 import { useTemplates } from "../templates/TemplatesContext";
+import { usePairTemplates } from "../templates/PairTemplatesContext";
+import { combineTemplates } from "../templates/pairTemplates";
 import { TemplatesManager } from "../templates/TemplatesManager";
 import { templateToInitial } from "../templates/templateBase";
 import { parseDraft, isDuplicateDraft, extractTs } from "./draft";
@@ -51,6 +53,7 @@ import {
   serializeImportedMessageIds,
   deriveDeployTag,
   planScopedInboxKey,
+  isImportedIntoSheet,
 } from "../openchat/inboxDedupe";
 
 // The two inbox dedup sets below (dismissed inbox ids; imported messageIds) persist so a handled
@@ -214,6 +217,17 @@ export function SheetPage() {
   }>(null);
   const [sortKey, setSortKey] = useState<SortKey>("newest");
   const { templates } = useTemplates();
+  // v1.12.0: SHARED types for this account (per-member encrypted pair slots,
+  // merged client-side) AUGMENT the personal list everywhere templates are
+  // consumed on this page (picker + chat-draft routing).
+  const pairTemplates = usePairTemplates(sheet?.pair_id as string | undefined, sheetId);
+  const allTemplates = combineTemplates(templates, pairTemplates.shared);
+  // Partner-authored shared types (not in the personal store) get a badge.
+  const sharedOnlyIds = new Set(
+    pairTemplates.shared
+      .filter((s) => !templates.some((p) => p.id === s.id))
+      .map((s) => s.id),
+  );
   const [addOpen, setAddOpen] = useState(false);
   const [typesOpen, setTypesOpen] = useState(false);
   const [renamingSheet, setRenamingSheet] = useState(false);
@@ -275,8 +289,8 @@ export function SheetPage() {
     if (typeof ref !== "string" || ref.trim() === "") return undefined;
     const key = ref.trim().toLowerCase();
     const t =
-      templates.find((x) => x.name.trim().toLowerCase() === key) ??
-      templates.find((x) => x.id === ref);
+      allTemplates.find((x) => x.name.trim().toLowerCase() === key) ??
+      allTemplates.find((x) => x.id === ref);
     // Anchor the template's due schedule at the draft's transaction date (same date the entry gets),
     // so "due in 0 days" lands on the reservation date, not today.
     return t ? templateToInitial(t, extractTs(raw as { note?: unknown; date?: unknown })) : undefined;
@@ -338,6 +352,11 @@ export function SheetPage() {
     if (id.startsWith("oc-")) {
       // On-chain inbox actions are append-only; drop it from the local pending view and remember
       // it as handled so it does not reappear on the next refresh/poll.
+      //
+      // Dismissal is intentionally PER-USER (this localStorage set only): it means "I'm not
+      // interested", not "handled for the ledger" — the partner may still legitimately import
+      // their copy of the fanned-out card. IMPORTING is what syncs cross-member: the entry's
+      // import_message_id hides the card for every member via isImportedIntoSheet.
       markInboxDraftHandled(id);
       setInboxPending((prev) => prev.filter((p) => p.id !== id));
       return;
@@ -369,16 +388,22 @@ export function SheetPage() {
     // amount/currency/date/note (two same-price bookings, or repeated same-day drafts before the
     // date is parsed), which the content hash (draftId) would wrongly flag as "already added" and
     // permanently suppress WITHOUT importing. Fall back to the content hash only for wrapper-less
-    // pastes that have no messageId.
+    // pastes that have no messageId. The mid branch checks BOTH my local imported set and the
+    // sheet's decrypted entries (import_message_id) — the latter catches the PARTNER's import of
+    // their fanned-out copy of the same card.
     const mid = p.context?.messageId;
     const alreadyAdded = mid
-      ? importedMessageIds.has(mid)
+      ? importedMessageIds.has(mid) || isImportedIntoSheet(entries, mid, undefined)
       : isDuplicateDraft(entries, res.value.draftId);
     if (alreadyAdded) {
       toasts.show({ kind: "info", text: "Already added — clearing it from chat" });
       void clearRelay(p.id);
       return;
     }
+    // Persist the cross-member key on the entry-to-be: every member's fanned-out envelope carries
+    // the SAME messageId, so once this import lands, isImportedIntoSheet hides the card for the
+    // partner too (their local handled/imported sets never see it).
+    if (mid) res.value.initial.import_message_id = mid;
     setPendingRelayId(p.id);
     // Track the source chat so confirming can remember chat → sheet.
     setPendingChatKey(p.context?.chat ?? null);
@@ -601,6 +626,19 @@ export function SheetPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [actor, sheetId]);
 
+  // Freshness for the cross-member pending filter: the partner's import only hides a card here
+  // once OUR `entries` copy contains their entry (with its import_message_id). The 15 s inbox
+  // polls only ADD cards — entries drive removal — so re-fetch when the tab regains visibility,
+  // letting the hide land without a manual page reload.
+  useEffect(() => {
+    const onVisible = () => {
+      if (document.visibilityState === "visible") void reload();
+    };
+    document.addEventListener("visibilitychange", onVisible);
+    return () => document.removeEventListener("visibilitychange", onVisible);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [actor, sheetId]);
+
   const sorted = useMemo(() => {
     const arr = entries.filter((e) => showDeleted || !e.deleted);
     switch (sortKey) {
@@ -618,6 +656,40 @@ export function SheetPage() {
         );
     }
   }, [entries, sortKey, showDeleted]);
+
+  // Inbox drafts whose source chat is pinned to a DIFFERENT sheet are hidden
+  // here — they show up on their mapped sheet's page instead. Drafts without
+  // context (wrapper-less deposits) and unmapped chats stay visible.
+  //
+  // Cross-member sync: a card ANY member already imported is hidden by matching the sheet's
+  // decrypted entries — import_message_id for mid-bearing cards, the derived content-hash
+  // draft_id only for wrapper-less ones (see isImportedIntoSheet for why mid-bearing cards
+  // never fall back to the content hash). The partner's import reaches us on the next entries
+  // reload, so both members' pending lists converge without sharing any local state.
+  //
+  // A double-confirm race can surface two cards for the same messageId; collapse
+  // them by keeping the first (earliest — poll appends in order). Drafts with no
+  // messageId (wrapper-less) are never collapsed — each undefined stays distinct.
+  const visibleInbox = useMemo(
+    () =>
+      collapseByMessageId(
+        inboxPending.filter((p) => {
+          if (!draftBelongsOnSheet(p.context?.chat, chatLinks, sheetId)) return false;
+          const mid = p.context?.messageId;
+          // Only wrapper-less cards need the parsed draftId (the fallback key); mid-bearing
+          // cards match exclusively on import_message_id, so skip the parse for them.
+          let draftId: string | undefined;
+          if (mid === undefined) {
+            const parsed = parseDraft(p.draft, resolveTemplateBase(p.draft));
+            draftId = parsed.ok ? parsed.value.draftId : undefined;
+          }
+          return !isImportedIntoSheet(entries, mid, draftId);
+        }),
+      ),
+    // resolveTemplateBase is re-created each render but only reads `templates` — dep on that.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [inboxPending, chatLinks, sheetId, entries, templates],
+  );
 
   async function onSubmit(p: EntryPayload) {
     if (!actor) return;
@@ -777,16 +849,6 @@ export function SheetPage() {
     { label: "Previous month", hint: "due by end of last month", list: prevMonth },
     { label: "Overall", hint: "incl. upcoming", list: overall },
   ];
-  // Inbox drafts whose source chat is pinned to a DIFFERENT sheet are hidden
-  // here — they show up on their mapped sheet's page instead. Drafts without
-  // context (wrapper-less deposits) and unmapped chats stay visible.
-  //
-  // A double-confirm race can surface two cards for the same messageId; collapse
-  // them by keeping the first (earliest — poll appends in order). Drafts with no
-  // messageId (wrapper-less) are never collapsed — each undefined stays distinct.
-  const visibleInbox = collapseByMessageId(
-    inboxPending.filter((p) => draftBelongsOnSheet(p.context?.chat, chatLinks, sheetId)),
-  );
   // The draft under review came from a chat with no mapping yet → offer to
   // remember the chat → sheet link on confirm.
   const showRememberChat = pendingRelayId != null && !!pendingChatKey && !chatLinks[pendingChatKey];
@@ -992,7 +1054,7 @@ export function SheetPage() {
       <div className="row">
         {isActive(sheet.state) && !modal && (
           <>
-            {templates.length > 0 ? (
+            {allTemplates.length > 0 ? (
               <div style={{ position: "relative", display: "inline-block" }}>
                 <button onClick={() => setAddOpen((o) => !o)}>+ Add ▾</button>
                 {addOpen && (
@@ -1013,7 +1075,7 @@ export function SheetPage() {
                     >
                       Blank entry
                     </button>
-                    {templates.map((t) => (
+                    {allTemplates.map((t) => (
                       <button
                         key={t.id}
                         className="secondary"
@@ -1021,6 +1083,9 @@ export function SheetPage() {
                         onClick={() => openAdd(templateToInitial(t))}
                       >
                         {t.name}
+                        {sharedOnlyIds.has(t.id) && (
+                          <span className="muted small"> · shared</span>
+                        )}
                       </button>
                     ))}
                   </div>
@@ -1370,7 +1435,7 @@ export function SheetPage() {
                 Close
               </button>
             </div>
-            <TemplatesManager onSaved={() => setTypesOpen(false)} />
+            <TemplatesManager onSaved={() => setTypesOpen(false)} pair={pairTemplates} />
           </div>
         </div>
       )}

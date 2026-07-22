@@ -19,7 +19,8 @@ import { useSheetKey } from "../flows/SheetKeyContext";
 import { publishUsernameToAllPairs } from "../flows/createSheet";
 import { IOUMark } from "../ui/Logo";
 import { RelaySettings } from "../relay/RelaySettings";
-import { OpenChatSettings } from "../openchat/OpenChatSettings";
+import { RelayPairingCard } from "../openchat/OpenChatSettings";
+import { ActionInboxSettings } from "../openchat/ActionInboxSettings";
 
 export function SettingsPage() {
   const { state, signOut } = useAuth();
@@ -152,8 +153,16 @@ export function SettingsPage() {
         </p>
       </div>
 
-      <RelaySettings />
-      <OpenChatSettings />
+      {/* The OpenChat card: the 6-digit Connect flow is the only default-visible integration
+          surface. Admin/debug surfaces AND the legacy off-chain relay cards (passed as children)
+          sit behind its "Advanced" disclosure — auto-expanded when a relay is already configured. */}
+      <ActionInboxSettings>
+        <p className="muted small" style={{ marginTop: 12 }}>
+          Legacy off-chain path — superseded by the on-chain OpenChat connection above.
+        </p>
+        <RelaySettings />
+        <RelayPairingCard />
+      </ActionInboxSettings>
     </div>
   );
 }

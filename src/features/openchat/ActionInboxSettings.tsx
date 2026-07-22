@@ -1,25 +1,32 @@
 // Settings card for the ON-CHAIN action inbox path (the successor to the relay).
 //
-// Two flows live here:
-//   1. ADMIN — "Link to OpenChat" registers the app manifest (with per_user_keys=true) at the
-//      user_index's register_ai_app in one tap (registerAiApp.ts). Delivery always uses per-user
-//      keys, so registration sends an EMPTY app-level key — no key dependency at all. The SPKI
-//      PEM + copy button remain for the user pairing flow below and for debugging/legacy
-//      (per_user_keys=false) setups; the CI script (pnpm register:openchat) no longer needs it.
-//   2. USER — "Connect to OpenChat": each user pairs their OWN delivery key once by entering the
-//      6-digit code OpenChat displays (its consent sheet); we push this account's public key via
-//      claim_ai_app_link_code. The keypair itself is canister-backed (consumerKeypair.ts): wrapped
-//      via the same vetkd mechanism as sheet keys, so any of the user's devices can decrypt.
-// The inbox canister id is NOT entered here: getActionInboxConfig() auto-derives it from this app's
-// registered manifest in OpenChat's user_index (the id OpenChat routes deposits to). It's shown
-// read-only below, and any legacy hand-entered localStorage override is purged on mount.
+// DEFAULT view — the ONE end-user flow: "Connect to OpenChat". Each user pairs their OWN delivery
+// key once by entering the 6-digit code OpenChat displays (its consent sheet); we push this
+// account's public key via claim_ai_app_link_code. The keypair itself is canister-backed
+// (consumerKeypair.ts): wrapped via the same vetkd mechanism as sheet keys, so any of the user's
+// devices can decrypt. Disconnect (one-sided key delete + best-effort OpenChat revoke) also lives
+// on the default view.
+//
+// ADVANCED (collapsed disclosure) — admin & debugging surfaces only:
+//   - "Link to OpenChat" registers the app manifest (per_user_keys=true) at the user_index's
+//     register_ai_app in one tap (registerAiApp.ts). Registration sends an EMPTY app-level key.
+//     End users never need it: first-ever bootstrap is CI's `pnpm register:openchat` (deploy:local),
+//     and the manifest re-syncs automatically on Connect, on type edits, and on app load.
+//   - The SPKI PEM + "Copy public key" + fingerprint remain for debugging/legacy
+//     (per_user_keys=false) setups only.
+//   - The inbox canister readout: NOT entered here — getActionInboxConfig() auto-derives it from
+//     this app's registered manifest in OpenChat's user_index (the id OpenChat routes deposits to);
+//     any legacy hand-entered localStorage override is purged on mount.
+//   - The legacy off-chain relay cards are passed in as children by SettingsPage and render only
+//     while Advanced is open (auto-expanded when a relay config already exists, so nobody strands).
 //
 // The private key exists in plaintext only on the user's devices (the canister stores an opaque
 // wrapped blob); decryption happens here on poll. Nothing is written to a sheet until the user
 // Accepts, exactly like the relay path.
 
-import { useEffect, useRef, useState } from "react";
-import { useAuth } from "../auth/AuthProvider";
+import { useEffect, useRef, useState, type ReactNode } from "react";
+import { getRelayConfig } from "../relay/relay";
+import { useAuth, buildAgent } from "../auth/AuthProvider";
 import { canisterId as iouBackendCanisterId } from "../auth/config";
 import {
   clearConsumerKeypair,
@@ -30,6 +37,10 @@ import {
 import { claimAiAppLinkCode, registerAiApp, revokeAiAppUserKey } from "./registerAiApp";
 import { getActionInboxConfig, invalidateInboxCache } from "./actionInboxClient";
 import { useTemplates } from "../templates/TemplatesContext";
+import { loadAllSharedTemplates } from "../templates/pairTemplatesActor";
+import { combineTemplates } from "../templates/pairTemplates";
+import { useSheetKey } from "../flows/SheetKeyContext";
+import { createActor } from "../../backend/declarations";
 import { syncManifestWithTypes } from "./syncManifest";
 import { OC_ACTION_INBOX_CANISTER_ID, OC_CONNECTED_KEY, OC_IC_URL, OC_LINKED_KEY, OC_USER_INDEX_CANISTER_ID } from "./ocConfig";
 
@@ -41,12 +52,17 @@ type LinkStatus =
   | { kind: "ok"; message: string }
   | { kind: "err"; message: string };
 
-export function ActionInboxSettings() {
+export function ActionInboxSettings({ children }: { children?: ReactNode }) {
   const { identity } = useAuth();
   const { templates } = useTemplates();
+  // For folding SHARED (per-account) types into the manifest on Connect.
+  const { unwrapFor } = useSheetKey();
   const [pubKeyPem, setPubKeyPem] = useState<string>("");
   const [fingerprint, setFingerprint] = useState<string>("");
   const [inbox, setInbox] = useState<{ canisterId: string; host: string } | null>(null);
+  // Admin/debug + legacy relay surfaces are collapsed by default; auto-expand for users who
+  // already configured a relay so their URL/token stay reachable after the simplification.
+  const [showAdvanced, setShowAdvanced] = useState<boolean>(() => getRelayConfig() !== null);
   const [link, setLink] = useState<LinkStatus>({ kind: "idle" });
   const [linkCode, setLinkCode] = useState("");
   const [connect, setConnect] = useState<LinkStatus>({ kind: "idle" });
@@ -193,7 +209,23 @@ export function ActionInboxSettings() {
           } catch {
             /* best-effort */
           }
-          void syncManifestWithTypes(identity, templates);
+          // Fold PERSONAL + all accounts' SHARED types into the manifest, so
+          // a keyword on a partner-authored shared template routes chat
+          // extraction on THIS member's manifest too. Best-effort: any
+          // failure falls back to the personal list (previous behavior).
+          void (async () => {
+            let manifestTemplates = templates;
+            try {
+              if (identity) {
+                const actor = createActor(await buildAgent(identity)) as any;
+                const shared = await loadAllSharedTemplates(actor, unwrapFor);
+                manifestTemplates = combineTemplates(templates, shared);
+              }
+            } catch {
+              /* personal-only fallback */
+            }
+            void syncManifestWithTypes(identity, manifestTemplates);
+          })();
           setConnect({
             kind: "ok",
             message: "Connected — OpenChat now delivers your confirmed actions encrypted to your own key.",
@@ -271,118 +303,139 @@ export function ActionInboxSettings() {
   };
 
   return (
-    <div className="card">
-      <h2>OpenChat action inbox (on-chain)</h2>
-      <p className="muted small">
-        Receive OpenChat-confirmed actions <em>on-chain</em>, end-to-end encrypted — no relay. Register this
-        device's public key with the OpenChat action as its <code>recipient_public_key</code>. Confirmed
-        actions appear under “Pending from chat”; the encrypted entry is still written on <em>this device</em>
-        when you Accept.
-      </p>
+    <>
+      <div className="card">
+        <h2>OpenChat action inbox (on-chain)</h2>
+        <p className="muted small">
+          Receive OpenChat-confirmed actions <em>on-chain</em>, end-to-end encrypted — no relay. Confirmed
+          actions appear under “Pending from chat”; the encrypted entry is still written on <em>this device</em>
+          when you Accept.
+        </p>
 
-      <p className="muted small" style={{ marginTop: 8 }}>
-        Your account's consumer public key (canister-backed, cached on this device) —{" "}
-        <strong>Link to OpenChat</strong> registers the app manifest in one tap (no key involved:
-        delivery uses per-user keys); <em>Copy public key</em> stays for debugging and legacy
-        setups:
-      </p>
-      <textarea
-        readOnly
-        value={pubKeyPem}
-        rows={4}
-        style={{ width: "100%", fontFamily: "monospace", fontSize: "0.75rem" }}
-        onFocusCapture={(e) => e.currentTarget.select()}
-      />
-      <div className="row" style={{ gap: 8, flexWrap: "wrap", alignItems: "center" }}>
-        <button type="button" onClick={() => void linkToOpenChat()} disabled={link.kind === "busy"}>
-          {link.kind === "busy" ? "Linking…" : "Link to OpenChat"}
-        </button>
-        <button type="button" className="secondary small" onClick={() => copy(pubKeyPem)} disabled={!pubKeyPem}>
-          Copy public key
-        </button>
-        {fingerprint && <span className="muted small">fingerprint: {fingerprint.slice(0, 16)}…</span>}
-      </div>
-      {link.kind === "ok" && (
-        <p className="small" style={{ color: "var(--credit)", marginTop: 6 }}>
-          {link.message}
+        <h3 id="openchat-connect" ref={connectRef} style={{ marginTop: 16 }}>
+          Connect to OpenChat
+        </h3>
+        <p className="muted small">
+          OpenChat delivers <em>your</em> confirmed actions encrypted to a key only your IOU account holds.
+          When OpenChat shows you a 6-digit code, enter it here to connect them — once per account, ever.
         </p>
-      )}
-      {link.kind === "err" && (
-        <p className="small" style={{ color: "var(--debt)", marginTop: 6 }}>
-          {link.message}
-        </p>
-      )}
+        <div className="row" style={{ gap: 8, flexWrap: "wrap", alignItems: "center" }}>
+          <input
+            ref={codeInputRef}
+            placeholder="6-digit code"
+            value={linkCode}
+            onChange={(e) => setLinkCode(e.target.value)}
+            inputMode="numeric"
+            maxLength={6}
+            style={{ flex: "0 1 140px", fontFamily: "monospace", letterSpacing: "0.2em" }}
+          />
+          <button
+            type="button"
+            onClick={() => void connectWithCode()}
+            disabled={connect.kind === "busy" || !linkCode.trim()}
+          >
+            {connect.kind === "busy" ? "Connecting…" : "Connect"}
+          </button>
+        </div>
+        {connect.kind === "ok" && (
+          <p className="small" style={{ color: "var(--credit)", marginTop: 6 }}>
+            {connect.message}
+          </p>
+        )}
+        {connect.kind === "err" && (
+          <p className="small" style={{ color: "var(--debt)", marginTop: 6 }}>
+            {connect.message}
+          </p>
+        )}
 
-      <h3 id="openchat-connect" ref={connectRef} style={{ marginTop: 16 }}>
-        Connect to OpenChat
-      </h3>
-      <p className="muted small">
-        OpenChat delivers <em>your</em> confirmed actions encrypted to a key only your IOU account holds.
-        When OpenChat shows you a 6-digit code, enter it here to connect them — once per account, ever.
-      </p>
-      <div className="row" style={{ gap: 8, flexWrap: "wrap", alignItems: "center" }}>
-        <input
-          ref={codeInputRef}
-          placeholder="6-digit code"
-          value={linkCode}
-          onChange={(e) => setLinkCode(e.target.value)}
-          inputMode="numeric"
-          maxLength={6}
-          style={{ flex: "0 1 140px", fontFamily: "monospace", letterSpacing: "0.2em" }}
-        />
-        <button
-          type="button"
-          onClick={() => void connectWithCode()}
-          disabled={connect.kind === "busy" || !linkCode.trim()}
-        >
-          {connect.kind === "busy" ? "Connecting…" : "Connect"}
-        </button>
-      </div>
-      {connect.kind === "ok" && (
-        <p className="small" style={{ color: "var(--credit)", marginTop: 6 }}>
-          {connect.message}
-        </p>
-      )}
-      {connect.kind === "err" && (
-        <p className="small" style={{ color: "var(--debt)", marginTop: 6 }}>
-          {connect.message}
-        </p>
-      )}
+        <div className="row" style={{ gap: 8, alignItems: "center", marginTop: 12 }}>
+          <button
+            type="button"
+            className="secondary"
+            onClick={() => void disconnectFromOpenChat()}
+            disabled={disconnect.kind === "busy" || !pubKeyPem}
+          >
+            {disconnect.kind === "busy" ? "Disconnecting…" : "Disconnect from OpenChat"}
+          </button>
+          <span className="muted small">
+            Deletes this account's delivery key — one-sided, no code needed.
+          </span>
+        </div>
+        {disconnect.kind === "ok" && (
+          <p className="small" style={{ color: "var(--credit)", marginTop: 6 }}>
+            {disconnect.message}
+          </p>
+        )}
+        {disconnect.kind === "err" && (
+          <p className="small" style={{ color: "var(--debt)", marginTop: 6 }}>
+            {disconnect.message}
+          </p>
+        )}
 
-      <div className="row" style={{ gap: 8, alignItems: "center", marginTop: 12 }}>
-        <button
-          type="button"
-          className="secondary"
-          onClick={() => void disconnectFromOpenChat()}
-          disabled={disconnect.kind === "busy" || !pubKeyPem}
-        >
-          {disconnect.kind === "busy" ? "Disconnecting…" : "Disconnect from OpenChat"}
-        </button>
-        <span className="muted small">
-          Deletes this account's delivery key — one-sided, no code needed.
+        <span className="lock-cue" style={{ marginTop: 8 }}>
+          🔒 your private key is end-to-end encrypted — the canister only ever stores a wrapped blob
         </span>
+
+        <div style={{ marginTop: 14 }}>
+          <button
+            type="button"
+            className="secondary small"
+            aria-expanded={showAdvanced}
+            onClick={() => setShowAdvanced((v) => !v)}
+          >
+            {showAdvanced ? "▾ Advanced" : "▸ Advanced"}
+          </button>
+        </div>
+
+        {showAdvanced && (
+          <div style={{ marginTop: 10 }}>
+            <h3 style={{ marginTop: 0 }}>Admin &amp; debugging</h3>
+            <p className="muted small">
+              <strong>Link to OpenChat</strong> registers the app manifest in one tap (admin only — no
+              key involved: delivery uses per-user keys, and the manifest re-syncs automatically on
+              Connect, on type edits, and on app load). The consumer public key below is
+              canister-backed and cached on this device; <em>Copy public key</em> stays for debugging
+              and legacy setups:
+            </p>
+            <textarea
+              readOnly
+              value={pubKeyPem}
+              rows={4}
+              style={{ width: "100%", fontFamily: "monospace", fontSize: "0.75rem" }}
+              onFocusCapture={(e) => e.currentTarget.select()}
+            />
+            <div className="row" style={{ gap: 8, flexWrap: "wrap", alignItems: "center" }}>
+              <button type="button" onClick={() => void linkToOpenChat()} disabled={link.kind === "busy"}>
+                {link.kind === "busy" ? "Linking…" : "Link to OpenChat"}
+              </button>
+              <button type="button" className="secondary small" onClick={() => copy(pubKeyPem)} disabled={!pubKeyPem}>
+                Copy public key
+              </button>
+              {fingerprint && <span className="muted small">fingerprint: {fingerprint.slice(0, 16)}…</span>}
+            </div>
+            {link.kind === "ok" && (
+              <p className="small" style={{ color: "var(--credit)", marginTop: 6 }}>
+                {link.message}
+              </p>
+            )}
+            {link.kind === "err" && (
+              <p className="small" style={{ color: "var(--debt)", marginTop: 6 }}>
+                {link.message}
+              </p>
+            )}
+
+            <p className="muted small" style={{ marginTop: 12 }}>
+              action_inbox canister (auto-derived from your OpenChat registration — nothing to configure):
+            </p>
+            <p className="small" style={{ fontFamily: "monospace", wordBreak: "break-all" }}>
+              {inbox ? `${inbox.canisterId} @ ${inbox.host}` : "resolving from OpenChat…"}
+            </p>
+          </div>
+        )}
       </div>
-      {disconnect.kind === "ok" && (
-        <p className="small" style={{ color: "var(--credit)", marginTop: 6 }}>
-          {disconnect.message}
-        </p>
-      )}
-      {disconnect.kind === "err" && (
-        <p className="small" style={{ color: "var(--debt)", marginTop: 6 }}>
-          {disconnect.message}
-        </p>
-      )}
 
-      <p className="muted small" style={{ marginTop: 12 }}>
-        action_inbox canister (auto-derived from your OpenChat registration — nothing to configure):
-      </p>
-      <p className="small" style={{ fontFamily: "monospace", wordBreak: "break-all" }}>
-        {inbox ? `${inbox.canisterId} @ ${inbox.host}` : "resolving from OpenChat…"}
-      </p>
-
-      <span className="lock-cue" style={{ marginTop: 8 }}>
-        🔒 your private key is end-to-end encrypted — the canister only ever stores a wrapped blob
-      </span>
-    </div>
+      {/* Legacy off-chain relay cards (SettingsPage passes them in) — advanced-only. */}
+      {showAdvanced && children}
+    </>
   );
 }

@@ -85,6 +85,17 @@ pub struct Pair {
     pub member_a_name_iv: Option<Vec<u8>>,
     pub member_b_name_enc: Option<Vec<u8>>, // member_b's display name
     pub member_b_name_iv: Option<Vec<u8>>,
+    // v1.12.0: per-member SHARED transaction-template blobs (AES-GCM under
+    // the active sheet's K_sheet — ciphertext only, exactly like the names
+    // above). Slot a belongs to members[0], slot b to members[1];
+    // set_pair_templates routes by caller, so one member's write can never
+    // touch the other's slot. Both members read both slots via get_pair and
+    // merge client-side (src/features/templates/pairTemplates.ts). All
+    // optional ⇒ Candid-backward-compatible with pre-v1.12.0 records.
+    pub templates_a_enc: Option<Vec<u8>>,
+    pub templates_a_iv: Option<Vec<u8>>,
+    pub templates_b_enc: Option<Vec<u8>>,
+    pub templates_b_iv: Option<Vec<u8>>,
 }
 
 impl Storable for Pair {
@@ -345,7 +356,11 @@ impl Storable for RecoveryKey {
 // v1.7.0 (schema v5 -> v6): added optional history + deleted_at to Entry
 // (edit history + soft delete). All new fields are `opt`, so Candid decodes
 // older records with them absent — no data migration needed.
-const SCHEMA_VERSION: u32 = 6;
+// v1.12.0 (schema v6 -> v7): added optional templates_a/b_enc/iv to Pair
+// (per-member SHARED transaction-template slots). Same additive-`opt`
+// pattern — old Pair records decode with the new fields = None. No
+// MemoryId changes.
+const SCHEMA_VERSION: u32 = 7;
 
 thread_local! {
     static MEMORY_MANAGER: RefCell<MemoryManager<DefaultMemoryImpl>> =
@@ -795,6 +810,8 @@ fn inspect_message() {
         "set_pair_name",
         "set_sheet_name",
         "set_member_name",
+        // v1.12.0: shared transaction types per account
+        "set_pair_templates",
         // Phase 4: entries
         "add_entry",
         "edit_entry",
@@ -866,6 +883,7 @@ fn inspect_message() {
         "set_pair_name",
         "set_sheet_name",
         "set_member_name",
+        "set_pair_templates",
         "set_consumer_keypair",
         "delete_consumer_keypair",
         "vetkd_wrap_consumer_key",
@@ -1057,6 +1075,10 @@ async fn create_pair() -> CreatePairResult {
         member_a_name_iv: None,
         member_b_name_enc: None,
         member_b_name_iv: None,
+        templates_a_enc: None,
+        templates_a_iv: None,
+        templates_b_enc: None,
+        templates_b_iv: None,
     };
     PAIRS.with(|p| {
         // V5 fix: pre-insert existence check. now_id uses 64 bits
@@ -1469,6 +1491,81 @@ fn set_member_name(pair_id: String, name_enc: Vec<u8>, name_iv: Vec<u8>) {
         } else {
             map.insert(pair_id.clone(), pair);
             ic_cdk::trap("not a member of this pair");
+        }
+        map.insert(pair_id.clone(), pair);
+    });
+}
+
+// ───────────────────────── v1.12.0: shared transaction types per account ─────────────────────────
+//
+// Each member publishes the templates they chose to SHARE with this account
+// as one AES-GCM blob (encrypted client-side under the active sheet's
+// K_sheet) into their OWN per-member slot on the Pair. Per-member slots make
+// write conflicts impossible by construction (mirrors set_member_name); both
+// members read both slots via the existing get_pair and merge client-side.
+// Guards mirror set_user_templates (64KB blob, 12–16B iv) — NOT the 1KB
+// check_name_blob.
+
+/// Pure guard for a templates blob. Returns the trap message on failure.
+fn check_templates_blob(enc: &[u8], iv: &[u8]) -> Result<(), &'static str> {
+    if enc.is_empty() {
+        return Err("templates ciphertext is empty");
+    }
+    if enc.len() > 64_000 {
+        return Err("templates blob too large");
+    }
+    if iv.len() < 12 || iv.len() > 16 {
+        return Err("templates iv length out of range");
+    }
+    Ok(())
+}
+
+/// Pure slot routing: which per-member slot (0 = a, 1 = b) the caller may
+/// write, or None for a non-member. The anonymous principal is NEVER a
+/// member — a solo pair's empty members[1] slot is Principal::anonymous(),
+/// and matching it would let an anonymous caller write the b-slot.
+fn member_slot(members: &[Principal; 2], caller: Principal) -> Option<usize> {
+    if caller == Principal::anonymous() {
+        None
+    } else if members[0] == caller {
+        Some(0)
+    } else if members[1] == caller {
+        Some(1)
+    } else {
+        None
+    }
+}
+
+/// set_pair_templates: publish the caller's SHARED transaction templates
+/// for this account into the caller's own slot (members[0] → a-slot,
+/// members[1] → b-slot). A non-member traps; one member's write never
+/// touches the other member's slot.
+#[ic_cdk::update]
+fn set_pair_templates(pair_id: String, templates_enc: Vec<u8>, templates_iv: Vec<u8>) {
+    require_authed();
+    if let Err(msg) = check_templates_blob(&templates_enc, &templates_iv) {
+        ic_cdk::trap(msg);
+    }
+    let caller = ic_cdk::api::msg_caller();
+    PAIRS.with(|p| {
+        let mut map = p.borrow_mut();
+        let mut pair = match map.remove(&pair_id) {
+            Some(x) => x,
+            None => ic_cdk::trap("pair not found"),
+        };
+        match member_slot(&pair.members, caller) {
+            Some(0) => {
+                pair.templates_a_enc = Some(templates_enc);
+                pair.templates_a_iv = Some(templates_iv);
+            }
+            Some(_) => {
+                pair.templates_b_enc = Some(templates_enc);
+                pair.templates_b_iv = Some(templates_iv);
+            }
+            None => {
+                map.insert(pair_id.clone(), pair);
+                ic_cdk::trap("not a member of this pair");
+            }
         }
         map.insert(pair_id.clone(), pair);
     });
@@ -2976,5 +3073,127 @@ mod tests {
         // test crate won't compile, which is the loudest possible
         // signal.
         const { assert!(SCHEMA_VERSION >= 3, "SCHEMA_VERSION must be >= 3 after the v1.3.3 MemoryId move (issue #7)") };
+    }
+
+    // ── v1.12.0: shared transaction types per account ──────────────────
+
+    fn p(byte: u8) -> Principal {
+        Principal::from_slice(&[byte])
+    }
+
+    #[test]
+    fn templates_blob_guards_mirror_set_user_templates_not_check_name_blob() {
+        let iv12 = vec![0u8; 12];
+        // empty ciphertext trap
+        assert!(check_templates_blob(&[], &iv12).is_err());
+        // 64KB cap (set_user_templates' 64_000, NOT check_name_blob's 1024)
+        assert!(check_templates_blob(&vec![0u8; 64_000], &iv12).is_ok());
+        assert!(check_templates_blob(&vec![0u8; 64_001], &iv12).is_err());
+        // a >1KB blob is FINE here (this is what rules out the name channel)
+        assert!(check_templates_blob(&vec![0u8; 2048], &iv12).is_ok());
+        // iv must be 12..=16
+        assert!(check_templates_blob(&[1], &vec![0u8; 11]).is_err());
+        assert!(check_templates_blob(&[1], &vec![0u8; 12]).is_ok());
+        assert!(check_templates_blob(&[1], &vec![0u8; 16]).is_ok());
+        assert!(check_templates_blob(&[1], &vec![0u8; 17]).is_err());
+    }
+
+    #[test]
+    fn member_slot_routes_by_caller_and_rejects_outsiders() {
+        let members = [p(1), p(2)];
+        // members[0] writes the a-slot, members[1] the b-slot
+        assert_eq!(member_slot(&members, p(1)), Some(0));
+        assert_eq!(member_slot(&members, p(2)), Some(1));
+        // a non-member gets None (set_pair_templates traps on it)
+        assert_eq!(member_slot(&members, p(3)), None);
+        // the anonymous principal NEVER matches — even a solo pair whose
+        // members[1] slot IS anonymous must not hand out the b-slot
+        let solo = [p(1), Principal::anonymous()];
+        assert_eq!(member_slot(&solo, Principal::anonymous()), None);
+        assert_eq!(member_slot(&solo, p(1)), Some(0));
+        assert_eq!(member_slot(&solo, p(9)), None);
+    }
+
+    #[test]
+    fn pair_decodes_pre_v1_12_records_with_template_slots_absent() {
+        // Candid backward-compat: a Pair encoded WITHOUT the v1.12.0
+        // template fields (i.e. any record written before this upgrade)
+        // must decode with all four = None. Same additive-`opt` pattern
+        // as the v1.5.0 name fields.
+        #[derive(CandidType, Deserialize)]
+        struct OldPair {
+            id: String,
+            members: [Principal; 2],
+            invite_code: String,
+            created_at: u64,
+            archived_at: Option<u64>,
+            name_enc: Option<Vec<u8>>,
+            name_iv: Option<Vec<u8>>,
+            member_a_name_enc: Option<Vec<u8>>,
+            member_a_name_iv: Option<Vec<u8>>,
+            member_b_name_enc: Option<Vec<u8>>,
+            member_b_name_iv: Option<Vec<u8>>,
+        }
+        let old = OldPair {
+            id: "pair-1".into(),
+            members: [p(1), p(2)],
+            invite_code: "AAAA-BBBB".into(),
+            created_at: 42,
+            archived_at: None,
+            name_enc: Some(vec![9, 9]),
+            name_iv: Some(vec![0u8; 12]),
+            member_a_name_enc: None,
+            member_a_name_iv: None,
+            member_b_name_enc: None,
+            member_b_name_iv: None,
+        };
+        let bytes = Encode!(&old).expect("encode old pair");
+        let new = Decode!(&bytes, Pair).expect("old Pair must decode as new Pair");
+        assert_eq!(new.id, "pair-1");
+        assert_eq!(new.members, [p(1), p(2)]);
+        assert_eq!(new.name_enc, Some(vec![9, 9]));
+        assert_eq!(new.templates_a_enc, None);
+        assert_eq!(new.templates_a_iv, None);
+        assert_eq!(new.templates_b_enc, None);
+        assert_eq!(new.templates_b_iv, None);
+    }
+
+    #[test]
+    fn pair_round_trips_with_template_slots_via_storable() {
+        // Forward path: a post-upgrade Pair carrying both slots survives
+        // the Storable encode/decode used by the stable map.
+        let pair = Pair {
+            id: "pair-2".into(),
+            members: [p(1), p(2)],
+            invite_code: "CCCC-DDDD".into(),
+            created_at: 7,
+            archived_at: None,
+            name_enc: None,
+            name_iv: None,
+            member_a_name_enc: None,
+            member_a_name_iv: None,
+            member_b_name_enc: None,
+            member_b_name_iv: None,
+            templates_a_enc: Some(vec![1, 2, 3]),
+            templates_a_iv: Some(vec![0u8; 12]),
+            templates_b_enc: Some(vec![4, 5, 6]),
+            templates_b_iv: Some(vec![1u8; 16]),
+        };
+        let back = Pair::from_bytes(pair.to_bytes());
+        assert_eq!(back.templates_a_enc, Some(vec![1, 2, 3]));
+        assert_eq!(back.templates_a_iv, Some(vec![0u8; 12]));
+        assert_eq!(back.templates_b_enc, Some(vec![4, 5, 6]));
+        assert_eq!(back.templates_b_iv, Some(vec![1u8; 16]));
+    }
+
+    #[test]
+    fn schema_version_bumped_for_pair_template_slots() {
+        // v1.12.0 added the optional Pair template slots (schema v6 -> v7).
+        const {
+            assert!(
+                SCHEMA_VERSION >= 7,
+                "SCHEMA_VERSION must be >= 7 after the v1.12.0 Pair template slots"
+            )
+        };
     }
 }

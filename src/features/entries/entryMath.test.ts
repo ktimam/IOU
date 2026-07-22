@@ -99,6 +99,24 @@ describe("buildEntryPayload — basics + validation", () => {
     expect(okPayload({ draftId: "d:abc" }).draft_id).toBe("d:abc");
     expect(okPayload({}).draft_id).toBeUndefined();
   });
+
+  it("carries importMessageId into payload.import_message_id; omits the key when absent", () => {
+    // import_message_id is the CROSS-MEMBER already-imported key (the OpenChat context.messageId,
+    // identical in every member's fanned-out envelope) — it must survive into the stored payload.
+    expect(okPayload({ importMessageId: "12345" }).import_message_id).toBe("12345");
+    expect(okPayload({})).not.toHaveProperty("import_message_id");
+    expect(okPayload({ draftId: "d:abc" })).not.toHaveProperty("import_message_id");
+  });
+
+  it("preserves import_message_id through an edit round-trip (initial.import_message_id → input.importMessageId)", () => {
+    // EntryForm's edit path seeds the form input from the existing payload (draftId: initial?.draft_id,
+    // importMessageId: initial?.import_message_id). If an edit stripped the key, the card would
+    // resurrect in the partner's pending list.
+    const first = okPayload({ draftId: "d:abc", importMessageId: "m-77" });
+    const second = okPayload({ draftId: first.draft_id, importMessageId: first.import_message_id });
+    expect(second.import_message_id).toBe("m-77");
+    expect(second.draft_id).toBe("d:abc");
+  });
 });
 
 describe("buildEntryPayload — fees", () => {

@@ -16,6 +16,11 @@ import {
   balancesText,
 } from "./flows";
 
+// The heaviest journey in the suite (3 sign-ins, 3 accounts, 3 invite flows, 5 entries, cross-user
+// polls — dozens of full page loads, each now also loading the pair's shared-template slots). On a
+// long-lived contended replica the default 180s is too tight for the CUMULATIVE path.
+test.setTimeout(360_000);
+
 test("3 users · 3 sheets · cross-user shared view · chat links", async ({ browser }) => {
   const aliceCtx = await browser.newContext();
   const bobCtx = await browser.newContext();

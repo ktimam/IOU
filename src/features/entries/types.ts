@@ -74,6 +74,14 @@ export type EntryPayload = {
   // draft, so the same draft imported twice maps to one entry. Absent for
   // manually-entered entries. See src/features/entries/draft.ts.
   draft_id?: string;
+  // OpenChat context.messageId of the confirmable-action card this entry was
+  // imported from. The fan-out deposits one envelope PER member all carrying the
+  // SAME messageId, so this is the CROSS-MEMBER "already imported" key: once any
+  // member imports, every member's pending list hides the card by matching this
+  // field on the sheet's decrypted entries (see openchat/inboxDedupe.ts
+  // isImportedIntoSheet). Absent for manual/pasted entries and wrapper-less
+  // (pre-v2) deposits.
+  import_message_id?: string;
 };
 
 export function encodeEntry(p: EntryPayload): Uint8Array {

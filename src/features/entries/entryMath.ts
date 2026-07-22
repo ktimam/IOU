@@ -30,6 +30,7 @@ export type EntryFormInput = {
   schedule: ScheduleRowInput[];
   convert?: ConvertInput | null; // present iff the convert toggle is on with a loaded rate
   draftId?: string;
+  importMessageId?: string; // OpenChat messageId of the imported card → payload.import_message_id
 };
 
 export type BuildEntryResult =
@@ -117,6 +118,7 @@ export function buildEntryPayload(input: EntryFormInput): BuildEntryResult {
     ...(fee ? { fee } : {}),
     convert,
     ...(input.draftId ? { draft_id: input.draftId } : {}),
+    ...(input.importMessageId ? { import_message_id: input.importMessageId } : {}),
   };
   return { ok: true, payload };
 }

@@ -3,6 +3,7 @@ import {
   collapseByMessageId,
   parseImportedMessageIds,
   serializeImportedMessageIds,
+  isImportedIntoSheet,
 } from "./inboxDedupe";
 
 type Draft = { id: string; context?: { messageId?: string } };
@@ -44,6 +45,60 @@ describe("collapseByMessageId", () => {
   it("keeps the earliest of three siblings for the same messageId", () => {
     const items = [d("a", "m1"), d("b", "m1"), d("c", "m1")];
     expect(collapseByMessageId(items).map((x) => x.id)).toEqual(["a"]);
+  });
+});
+
+// Cross-member "already imported" predicate: the fan-out deposits one envelope per member with the
+// SAME context.messageId, so a partner's import — which persists that messageId on the shared entry
+// as payload.import_message_id — must hide the card for EVERY member, not just the importer.
+describe("isImportedIntoSheet", () => {
+  type Entry = { deleted: boolean; payload: { draft_id?: string; import_message_id?: string } };
+  const entry = (payload: Entry["payload"], deleted = false): Entry => ({ deleted, payload });
+
+  it("hides a card whose messageId matches a non-deleted entry's import_message_id", () => {
+    const entries = [entry({ draft_id: "d:aaa", import_message_id: "m1" })];
+    expect(isImportedIntoSheet(entries, "m1", "d:aaa")).toBe(true);
+  });
+
+  it("does NOT hide a mid-bearing card on a same-content entry that lacks import_message_id", () => {
+    // Two same-price bookings share a content-hash draft_id but are distinct cards. A mid-bearing
+    // card must ONLY match on import_message_id — never fall back to the content hash.
+    const entries = [entry({ draft_id: "d:same" })];
+    expect(isImportedIntoSheet(entries, "m1", "d:same")).toBe(false);
+  });
+
+  it("hides a wrapper-less card (no messageId) when a non-deleted entry carries its draft_id", () => {
+    // Paste-path parity: wrapper-less deposits have no messageId, so the content-hash draft_id is
+    // the only key (isDuplicateDraft semantics).
+    const entries = [entry({ draft_id: "d:xyz" })];
+    expect(isImportedIntoSheet(entries, undefined, "d:xyz")).toBe(true);
+  });
+
+  it("a DELETED entry with a matching import_message_id does not hide the card", () => {
+    // Deleting the imported entry must resurrect the card so it can be re-imported.
+    const entries = [entry({ draft_id: "d:aaa", import_message_id: "m1" }, true)];
+    expect(isImportedIntoSheet(entries, "m1", "d:aaa")).toBe(false);
+  });
+
+  it("a DELETED entry with a matching draft_id does not hide a wrapper-less card", () => {
+    const entries = [entry({ draft_id: "d:xyz" }, true)];
+    expect(isImportedIntoSheet(entries, undefined, "d:xyz")).toBe(false);
+  });
+
+  it("two identical-content cards with different messageIds: importing one hides only that one", () => {
+    const entries = [entry({ draft_id: "d:same", import_message_id: "m1" })];
+    expect(isImportedIntoSheet(entries, "m1", "d:same")).toBe(true);
+    expect(isImportedIntoSheet(entries, "m2", "d:same")).toBe(false);
+  });
+
+  it("returns false when the card has neither a messageId nor a parsed draftId", () => {
+    // An unparseable wrapper-less card has no key at all — never suppress it.
+    const entries = [entry({ draft_id: "d:aaa", import_message_id: "m1" })];
+    expect(isImportedIntoSheet(entries, undefined, undefined)).toBe(false);
+  });
+
+  it("returns false on an empty sheet", () => {
+    expect(isImportedIntoSheet([], "m1", "d:aaa")).toBe(false);
   });
 });
 
