@@ -152,45 +152,66 @@ async function pairViaUi(oc: Page, iou: Page, who: string): Promise<void> {
   await oc.keyboard.press("Escape").catch(() => {});
 }
 
+// ── Role parameters (the v1/v2 UI matrix) ──────────────────────────────────────────────────────
+// The two OpenChat UI trees (v1 classic `components/`, v2 mobile `components_mobile/` — selected in
+// main.ts by OC_MOBILE_LAYOUT=v2 + a below-breakpoint window at boot) are FULL parallel
+// implementations, so each direction of the journey exercises a different propose/confirm UI. Roles
+// are `user:ocPort:iouPort`; defaults = the original manager(v1-wide)→father(v2-exe) direction.
+//   pnpm exec tsx scripts/live/journey-fanout.ts \
+//     --proposer mother:9242:9242 --confirmer manager:9241:9241   # v2-browser proposes, v1 confirms
+type Role = { user: string; ocPort: number; iouPort: number };
+function roleArg(name: string, def: Role): Role {
+  const i = process.argv.indexOf(`--${name}`);
+  if (i < 0 || !process.argv[i + 1]) return def;
+  const [user, oc, iou] = process.argv[i + 1].split(":");
+  if (!user || !oc || !iou) throw new Error(`--${name} must be user:ocPort:iouPort`);
+  return { user, ocPort: Number(oc), iouPort: Number(iou) };
+}
+const PROPOSER = roleArg("proposer", { user: "manager", ocPort: 9241, iouPort: 9241 });
+const CONFIRMER = roleArg("confirmer", { user: "father", ocPort: 9222, iouPort: 9231 });
+
 async function main() {
   const a = await agent();
   const appId = await iouAppId(a);
   console.log(`[env] user_index=${IDS.userIndex} inbox=${IDS.inbox} appId=${appId}`);
+  console.log(`[roles] proposer=${PROPOSER.user}(oc:${PROPOSER.ocPort}) confirmer=${CONFIRMER.user}(oc:${CONFIRMER.ocPort})`);
 
-  const managerOC = await attach(9241, "localhost:5003");
-  const fatherOC = await attach(9222, "localhost:5003");
-  const managerIOU = await attach(9241, "127.0.0.1:3000");
-  const fatherIOU = await attach(9231, "127.0.0.1:3000");
+  const proposerOC = await attach(PROPOSER.ocPort, "localhost:5003");
+  const confirmerOC = await attach(CONFIRMER.ocPort, "localhost:5003");
+  const proposerIOU = await attach(PROPOSER.iouPort, "127.0.0.1:3000");
+  const confirmerIOU = await attach(CONFIRMER.iouPort, "127.0.0.1:3000");
+  const proposerRow = new RegExp(CONFIRMER.user, "i"); // the row the proposer clicks = the OTHER member
+  const confirmerRow = new RegExp(PROPOSER.user, "i");
 
-  // 1. Open the manager↔father direct chat on both sides; ids come from the chat URLs. The rail row
-  //    is the `.chat-summary` container (a generic div/li filter matches outer wrappers and no-ops).
-  await managerOC.goto("http://localhost:5003/chats", { waitUntil: "domcontentloaded" });
-  await managerOC.waitForTimeout(3000);
-  await managerOC.locator(".chat-summary, .chat_summary").filter({ hasText: /father/i }).first().click({ timeout: 15000 });
-  await managerOC.waitForTimeout(2500);
-  const fatherId = /user\/([a-z0-9-]+)/.exec(managerOC.url())?.[1];
-  check(!!fatherId, `manager side: father's user id resolved (${fatherId})`);
+  // 1. Open the direct chat on both sides; ids come from the chat URLs. The rail row is the
+  //    `.chat-summary` (web) / `.chat_summary` (mobile tree) container.
+  await proposerOC.goto("http://localhost:5003/chats", { waitUntil: "domcontentloaded" });
+  await proposerOC.waitForTimeout(3000);
+  await proposerOC.locator(".chat-summary, .chat_summary").filter({ hasText: proposerRow }).first().click({ timeout: 15000 });
+  await proposerOC.waitForTimeout(2500);
+  const confirmerId = /user\/([a-z0-9-]+)/.exec(proposerOC.url())?.[1];
+  check(!!confirmerId, `${PROPOSER.user} side: ${CONFIRMER.user}'s user id resolved (${confirmerId})`);
 
-  await fatherOC.goto("http://localhost:5003/chats", { waitUntil: "domcontentloaded" }).catch(() => {});
-  await fatherOC.waitForTimeout(3000);
-  await fatherOC.locator(".chat-summary, .chat_summary").filter({ hasText: /manager/i }).first().click({ timeout: 15000 });
-  await fatherOC.waitForTimeout(2500);
-  const managerId = /user\/([a-z0-9-]+)/.exec(fatherOC.url())?.[1];
-  check(!!managerId, `father side: manager's user id resolved (${managerId})`);
-  if (!fatherId || !managerId) throw new Error("could not resolve both user ids");
+  await confirmerOC.goto("http://localhost:5003/chats", { waitUntil: "domcontentloaded" }).catch(() => {});
+  await confirmerOC.waitForTimeout(3000);
+  await confirmerOC.locator(".chat-summary, .chat_summary").filter({ hasText: confirmerRow }).first().click({ timeout: 15000 });
+  await confirmerOC.waitForTimeout(2500);
+  const proposerId = /user\/([a-z0-9-]+)/.exec(confirmerOC.url())?.[1];
+  check(!!proposerId, `${CONFIRMER.user} side: ${PROPOSER.user}'s user id resolved (${proposerId})`);
+  if (!confirmerId || !proposerId) throw new Error("could not resolve both user ids");
 
   // 2. Both members need a per-user IOU key — pair any that lack one via the real UI.
-  let keys = await memberKeys(a, appId, [managerId, fatherId]);
-  if (!keys.has(managerId)) await pairViaUi(managerOC, managerIOU, "manager");
-  if (!keys.has(fatherId)) await pairViaUi(fatherOC, fatherIOU, "father");
-  keys = await memberKeys(a, appId, [managerId, fatherId]);
-  check(keys.has(managerId), "manager has a registered per-user IOU key");
-  check(keys.has(fatherId), "father has a registered per-user IOU key");
-  if (!keys.has(managerId) || !keys.has(fatherId)) throw new Error("pairing failed");
+  let keys = await memberKeys(a, appId, [proposerId, confirmerId]);
+  if (!keys.has(proposerId)) await pairViaUi(proposerOC, proposerIOU, PROPOSER.user);
+  if (!keys.has(confirmerId)) await pairViaUi(confirmerOC, confirmerIOU, CONFIRMER.user);
+  keys = await memberKeys(a, appId, [proposerId, confirmerId]);
+  check(keys.has(proposerId), `${PROPOSER.user} has a registered per-user IOU key`);
+  check(keys.has(confirmerId), `${CONFIRMER.user} has a registered per-user IOU key`);
+  if (!keys.has(proposerId) || !keys.has(confirmerId)) throw new Error("pairing failed");
 
   // Re-open the direct chat on BOTH sides (pairing navigates each paired member's OC page away to
-  // /communities — the confirm gate polls father's page, so his chat must be open too).
-  for (const [page, rowRx] of [[managerOC, /father/i], [fatherOC, /manager/i]] as const) {
+  // /communities — the confirm gate polls the confirmer's page, so their chat must be open too).
+  for (const [page, rowRx] of [[proposerOC, proposerRow], [confirmerOC, confirmerRow]] as const) {
     await page.goto("http://localhost:5003/chats", { waitUntil: "domcontentloaded" }).catch(() => {});
     await page.waitForTimeout(2500);
     await page.locator(".chat-summary, .chat_summary").filter({ hasText: rowRx }).first().click({ timeout: 15000 });
@@ -198,63 +219,96 @@ async function main() {
   }
 
   // 3. Bucket snapshot.
-  const fpManager = await fingerprintOfPem(keys.get(managerId)!);
-  const fpFather = await fingerprintOfPem(keys.get(fatherId)!);
-  const before = { manager: await bucketCount(a, fpManager), father: await bucketCount(a, fpFather) };
+  const fpProposer = await fingerprintOfPem(keys.get(proposerId)!);
+  const fpConfirmer = await fingerprintOfPem(keys.get(confirmerId)!);
+  const before = { proposer: await bucketCount(a, fpProposer), confirmer: await bucketCount(a, fpConfirmer) };
   console.log("[inbox] before:", before);
 
-  // 4. manager sends a message + proposes via the DETERMINISTIC manual-JSON prompt.
+  // 4. The proposer sends a message + proposes via the DETERMINISTIC manual-JSON prompt.
   const nonce = Date.now() % 1000000;
   const text = `Journey ${nonce}: cleaning fee 350 EGP`;
   const extraction = JSON.stringify({ kind: "iou", amount: 350, currency: "EGP", direction: "credit", note: `journey ${nonce}` });
-  managerOC.on("dialog", (d) => {
+  proposerOC.on("dialog", (d) => {
     const msg = d.message();
     const reply = /JSON/i.test(msg) ? extraction : "1"; // extraction prompt vs (optional) app chooser
-    console.log(`[manager] dialog: "${msg.slice(0, 60)}…" → ${reply.slice(0, 50)}`);
+    console.log(`[${PROPOSER.user}] dialog: "${msg.slice(0, 60)}…" → ${reply.slice(0, 50)}`);
     // accept() can race a concurrent dismissal ("No dialog is showing") — tolerate it; the retry
     // loop below re-proposes if the card never posts.
-    d.accept(reply).catch(() => console.log("[manager] dialog accept raced — will retry propose"));
+    d.accept(reply).catch(() => console.log(`[${PROPOSER.user}] dialog accept raced — will retry propose`));
   });
-  const composer = managerOC.locator(".ProseMirror").first();
+  // Dismiss any open modal/sheet overlay first (a leftover #masked_overlay — e.g. an open chat menu
+  // from a prior aborted run — silently intercepts ALL pointer events on the v2 tree).
+  for (let i = 0; i < 3; i++) {
+    const blocked = await proposerOC.evaluate(
+      `(() => { const ov = document.querySelector('#masked_overlay'); return !!ov && ov.className.includes('visible'); })()`,
+    );
+    if (!blocked) break;
+    await proposerOC.keyboard.press("Escape").catch(() => {});
+    await proposerOC.waitForTimeout(500);
+    await proposerOC.locator("#masked_overlay").click({ position: { x: 10, y: 10 }, timeout: 3000 }).catch(() => {});
+    await proposerOC.waitForTimeout(500);
+  }
+  const composer = proposerOC.locator(".ProseMirror").first();
   await composer.waitFor({ timeout: 15000 });
   await composer.click();
-  await managerOC.keyboard.type(text);
-  await managerOC.keyboard.press("Enter");
-  console.log(`[manager] sent: ${text}`);
-  await managerOC.waitForTimeout(2500);
+  await proposerOC.keyboard.type(text);
+  await proposerOC.keyboard.press("Enter");
+  console.log(`[${PROPOSER.user}] sent: ${text}`);
+  await proposerOC.waitForTimeout(2500);
 
-  // The propose entry on the web client is the message menu ("Propose action"): hover the just-sent
-  // bubble to reveal its menu icon, open it, click the item — the manual-JSON prompt then fires and
-  // the dialog handler above answers it deterministically. Retried once in case the dialog answer
-  // raced (see the handler); success gate = the card's Confirm button visible on FATHER's side.
-  // The card's confirm button carries the MANIFEST's confirm_label — for the live iou app that is
-  // "Add to IOU" (docs/openchat-registration.json), not a generic "Confirm".
-  const confirmBtn = fatherOC.locator("button").filter({ hasText: /^(Add to IOU|Confirm)$/i }).last();
+  // The propose entry is the message menu ("Propose action"): hover the just-sent bubble to reveal
+  // its menu icon, open it, click the item — the manual-JSON prompt then fires and the dialog
+  // handler above answers it deterministically. Retried once in case the dialog answer raced;
+  // success gate = the card's confirm button visible on the CONFIRMER's side. The confirm button
+  // carries the MANIFEST's confirm_label — for the live iou app "Add to IOU".
+  const confirmBtn = confirmerOC.locator("button").filter({ hasText: /^(Add to IOU|Confirm)$/i }).last();
+  // v1 vs v2 propose UI: the classic tree has .bubble-wrapper + a hover menu with a TEXT item; the
+  // v2 (components_mobile) tree opens an icon-button sheet on LONG-PRESS, where the propose item is
+  // the AutoFix (wand) ICON button — no text, so target its SVG path.
+  const isV2 = (await proposerOC.locator(".bubble-wrapper").count()) === 0;
+  console.log(`[${PROPOSER.user}] propose UI tree: ${isV2 ? "v2 (mobile)" : "v1 (classic)"}`);
   let posted = false;
   for (let attempt = 1; attempt <= 2 && !posted; attempt++) {
-    const bubble = managerOC.locator(".bubble-wrapper").last();
-    await bubble.hover();
-    await managerOC.waitForTimeout(500);
-    await bubble.locator(".menu-icon").first().click({ timeout: 15000 });
-    await managerOC.getByText("Propose action", { exact: true }).click({ timeout: 15000 });
-    console.log(`[manager] proposed (attempt ${attempt}, manual JSON — no model)`);
+    if (isV2) {
+      const msg = proposerOC.locator(".message_text").last();
+      const box = await msg.boundingBox();
+      if (!box) throw new Error("v2: no message box");
+      await proposerOC.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
+      await proposerOC.mouse.down();
+      await proposerOC.waitForTimeout(900); // long-press opens the action sheet
+      await proposerOC.mouse.up();
+      await proposerOC.waitForTimeout(1200);
+      await proposerOC.locator('button:has(path[d^="M7.5,5.6"])').first().click({ timeout: 15000 }); // AutoFix icon
+    } else {
+      const bubble = proposerOC.locator(".bubble-wrapper").last();
+      await bubble.hover();
+      await proposerOC.waitForTimeout(500);
+      await bubble.locator(".menu-icon").first().click({ timeout: 15000 });
+      await proposerOC.getByText("Propose action", { exact: true }).click({ timeout: 15000 });
+    }
+    console.log(`[${PROPOSER.user}] proposed (attempt ${attempt}, manual JSON — no model)`);
     posted = await confirmBtn.waitFor({ timeout: 30000 }).then(() => true).catch(() => false);
+    if (!posted) {
+      // Clear any leftover sheet/overlay before retrying.
+      await proposerOC.keyboard.press("Escape").catch(() => {});
+      await proposerOC.locator("#masked_overlay").click({ position: { x: 10, y: 10 }, timeout: 2000 }).catch(() => {});
+    }
   }
-  check(posted, "the action card posted (Confirm visible on father's side)");
+  check(posted, `the action card posted (confirm visible on ${CONFIRMER.user}'s side)`);
   if (!posted) throw new Error("card never posted");
 
-  // 5. father confirms (the NON-proposer). The IOU manifest declares a DISCLOSURE, so the confirm
-  //    button stays disabled until the acknowledgment checkbox on the card is ticked.
-  await fatherOC.locator('input[type="checkbox"]').last().check({ timeout: 15000 });
+  // 5. The confirmer (the NON-proposer) confirms. The IOU manifest declares a DISCLOSURE, so the
+  //    confirm button stays disabled until the acknowledgment checkbox on the card is ticked.
+  await confirmerOC.locator('input[type="checkbox"]').last().check({ timeout: 15000 });
   await confirmBtn.click();
-  console.log("[father] confirmed");
-  await fatherOC.waitForTimeout(6000);
+  console.log(`[${CONFIRMER.user}] confirmed`);
+  await confirmerOC.waitForTimeout(6000);
 
   // 6. Fan-out: ONE confirm → +1 envelope in EACH member's own bucket.
-  const after = { manager: await bucketCount(a, fpManager), father: await bucketCount(a, fpFather) };
+  const after = { proposer: await bucketCount(a, fpProposer), confirmer: await bucketCount(a, fpConfirmer) };
   console.log("[inbox] after:", after);
-  check(after.manager === before.manager + 1, `manager bucket +1 (${before.manager} → ${after.manager})`);
-  check(after.father === before.father + 1, `father bucket +1 (${before.father} → ${after.father})`);
+  check(after.proposer === before.proposer + 1, `${PROPOSER.user} bucket +1 (${before.proposer} → ${after.proposer})`);
+  check(after.confirmer === before.confirmer + 1, `${CONFIRMER.user} bucket +1 (${before.confirmer} → ${after.confirmer})`);
 
   if (failures > 0) {
     console.error(`\nJOURNEY FAILED — ${failures} assertion(s) failed`);
