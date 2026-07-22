@@ -166,14 +166,14 @@ async function main() {
   //    is the `.chat-summary` container (a generic div/li filter matches outer wrappers and no-ops).
   await managerOC.goto("http://localhost:5003/chats", { waitUntil: "domcontentloaded" });
   await managerOC.waitForTimeout(3000);
-  await managerOC.locator(".chat-summary").filter({ hasText: /father/i }).first().click({ timeout: 15000 });
+  await managerOC.locator(".chat-summary, .chat_summary").filter({ hasText: /father/i }).first().click({ timeout: 15000 });
   await managerOC.waitForTimeout(2500);
   const fatherId = /user\/([a-z0-9-]+)/.exec(managerOC.url())?.[1];
   check(!!fatherId, `manager side: father's user id resolved (${fatherId})`);
 
   await fatherOC.goto("http://localhost:5003/chats", { waitUntil: "domcontentloaded" }).catch(() => {});
   await fatherOC.waitForTimeout(3000);
-  await fatherOC.locator(".chat-summary").filter({ hasText: /manager/i }).first().click({ timeout: 15000 });
+  await fatherOC.locator(".chat-summary, .chat_summary").filter({ hasText: /manager/i }).first().click({ timeout: 15000 });
   await fatherOC.waitForTimeout(2500);
   const managerId = /user\/([a-z0-9-]+)/.exec(fatherOC.url())?.[1];
   check(!!managerId, `father side: manager's user id resolved (${managerId})`);
@@ -188,11 +188,14 @@ async function main() {
   check(keys.has(fatherId), "father has a registered per-user IOU key");
   if (!keys.has(managerId) || !keys.has(fatherId)) throw new Error("pairing failed");
 
-  // Re-open the direct chat on the manager side (pairing navigated away).
-  await managerOC.goto("http://localhost:5003/chats", { waitUntil: "domcontentloaded" });
-  await managerOC.waitForTimeout(2500);
-  await managerOC.locator(".chat-summary").filter({ hasText: /father/i }).first().click({ timeout: 15000 });
-  await managerOC.waitForTimeout(2000);
+  // Re-open the direct chat on BOTH sides (pairing navigates each paired member's OC page away to
+  // /communities — the confirm gate polls father's page, so his chat must be open too).
+  for (const [page, rowRx] of [[managerOC, /father/i], [fatherOC, /manager/i]] as const) {
+    await page.goto("http://localhost:5003/chats", { waitUntil: "domcontentloaded" }).catch(() => {});
+    await page.waitForTimeout(2500);
+    await page.locator(".chat-summary, .chat_summary").filter({ hasText: rowRx }).first().click({ timeout: 15000 });
+    await page.waitForTimeout(2000);
+  }
 
   // 3. Bucket snapshot.
   const fpManager = await fingerprintOfPem(keys.get(managerId)!);
