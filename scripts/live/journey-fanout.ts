@@ -259,9 +259,18 @@ async function main() {
   // The propose entry is the message menu ("Propose action"): hover the just-sent bubble to reveal
   // its menu icon, open it, click the item — the manual-JSON prompt then fires and the dialog
   // handler above answers it deterministically. Retried once in case the dialog answer raced;
-  // success gate = the card's confirm button visible on the CONFIRMER's side. The confirm button
+  // success gate = OUR card's confirm button visible on the CONFIRMER's side. The confirm button
   // carries the MANIFEST's confirm_label — for the live iou app "Add to IOU".
-  const confirmBtn = confirmerOC.locator("button").filter({ hasText: /^(Add to IOU|Confirm)$/i }).last();
+  //
+  // Confirm targeting is scoped to THIS RUN'S card, never "the last confirm button on the page":
+  // the card's Note row renders the extraction JSON's `note` — the run-unique `journey ${nonce}` —
+  // so match the `.action-card` (ActionCardContent.svelte, shared by the v1 and v2 UI trees)
+  // containing that nonce. A stale unconfirmed card left in the chat by an earlier run can then
+  // neither satisfy the posted-gate nor receive the confirm click (live 2026-07-22: the journey
+  // confirmed a leftover invalid "hi" card instead of its own 350 EGP one). Step 5 additionally
+  // asserts the matched card shows this run's amount before clicking.
+  const card = confirmerOC.locator(".action-card").filter({ hasText: `journey ${nonce}` }).last();
+  const confirmBtn = card.locator("button").filter({ hasText: /^(Add to IOU|Confirm)$/i });
   // v1 vs v2 propose UI: the classic tree has .bubble-wrapper + a hover menu with a TEXT item; the
   // v2 (components_mobile) tree opens an icon-button sheet on LONG-PRESS, where the propose item is
   // the AutoFix (wand) ICON button — no text, so target its SVG path.
@@ -320,9 +329,16 @@ async function main() {
   check(posted, `the action card posted (confirm visible on ${CONFIRMER.user}'s side)`);
   if (!posted) throw new Error("card never posted");
 
-  // 5. The confirmer (the NON-proposer) confirms. The IOU manifest declares a DISCLOSURE, so the
-  //    confirm button stays disabled until the acknowledgment checkbox on the card is ticked.
-  await confirmerOC.locator('input[type="checkbox"]').last().check({ timeout: 15000 });
+  // 5. The confirmer (the NON-proposer) confirms — on the nonce-scoped card only (see above).
+  //    Belt-and-braces before clicking: the matched card must carry this run's amount 350 (a
+  //    mis-scoped or stale card fails here instead of getting confirmed). The IOU manifest
+  //    declares a DISCLOSURE, so the confirm button stays disabled until the acknowledgment
+  //    checkbox ON THIS CARD is ticked.
+  const cardText = (await card.innerText()).replace(/\s+/g, " ");
+  const cardIsOurs = cardText.includes("350");
+  check(cardIsOurs, `the matched card carries this run's amount 350 ("${cardText.slice(0, 80)}")`);
+  if (!cardIsOurs) throw new Error("matched card is not this run's draft — refusing to confirm");
+  await card.locator('input[type="checkbox"]').check({ timeout: 15000 });
   await confirmBtn.click();
   console.log(`[${CONFIRMER.user}] confirmed`);
   await confirmerOC.waitForTimeout(6000);

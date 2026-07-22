@@ -37,6 +37,46 @@ describe("template routing", () => {
   });
 });
 
+describe("invalid-draft guardrails (schema ↔ parseDraft lock-step)", () => {
+  // Live-reproduced 2026-07-22: the on-device model turned the message "hi" into
+  // {"kind":"settlement","amount":0,"currency":"USD","note":"hi"}; OpenChat posted+deposited it and
+  // IOU could only render "invalid draft". The registered schema must DECLARE what parseDraft
+  // enforces so OpenChat's post-generation schema check drops such extractions (no_extraction)
+  // before a card ever posts.
+
+  it("schema requires amount (and keeps currency required)", () => {
+    const required = iouActionManifest.outputSchema.required as string[];
+    expect(required).toContain("amount");
+    expect(required).toContain("currency");
+    // The template-enriched schema (the one actually registered) carries the same requirement.
+    expect(buildIouOutputSchema([]).required as string[]).toContain("amount");
+  });
+
+  it("schema declares amount > 0 via draft-07 numeric exclusiveMinimum", () => {
+    const amount = (iouActionManifest.outputSchema.properties as Record<string, unknown>)
+      .amount as Record<string, unknown>;
+    expect(amount.type).toBe("number");
+    expect(amount.exclusiveMinimum).toBe(0);
+    // Survives the deep clone into the registered (template-enriched) schema too.
+    const enriched = (buildIouOutputSchema([]).properties as Record<string, unknown>)
+      .amount as Record<string, unknown>;
+    expect(enriched.exclusiveMinimum).toBe(0);
+  });
+
+  it("parseDraft rejects a draft missing amount or with amount 0 (the manifest constraints are real)", () => {
+    // Exactly the live "hi" extraction: amount 0 must NOT parse.
+    const zero = parseDraft({ kind: "settlement", amount: 0, currency: "USD", note: "hi" });
+    expect(zero.ok).toBe(false);
+    if (!zero.ok) expect(zero.errors[0]).toMatch(/amount/i);
+    // Missing amount must NOT parse either (schema `required` mirrors this).
+    const missing = parseDraft({ kind: "settlement", currency: "USD", note: "hi" });
+    expect(missing.ok).toBe(false);
+    if (!missing.ok) expect(missing.errors.join(" ")).toMatch(/amount/i);
+    // Negative amounts are equally out (exclusiveMinimum, not minimum).
+    expect(parseDraft({ amount: -5, currency: "USD" }).ok).toBe(false);
+  });
+});
+
 describe("iouActionManifest", () => {
   it("declares an output the IOU draft parser accepts", () => {
     // A sample draft shaped exactly per the manifest's outputSchema.

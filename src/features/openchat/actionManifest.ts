@@ -203,7 +203,10 @@ export const iouActionManifest: IouActionManifest = {
       kind: { enum: ["settlement", "iou"] },
       // number ONLY: string amounts like "26k" are handled by the k_m_suffix normalize rule
       // before schema conformance, so anything still non-numeric here is dropped, not forwarded.
-      amount: { type: "number" },
+      // exclusiveMinimum (draft-07 numeric form) declares amount > 0 so OpenChat's post-generation
+      // schema check drops zero/negative extractions (e.g. "hi" → amount 0, live 2026-07-22) as
+      // no_extraction instead of posting a card parseDraft would reject anyway.
+      amount: { type: "number", exclusiveMinimum: 0 },
       currency: { type: "string", pattern: "^[A-Za-z]{3}$" },
       direction: { enum: ["credit", "debt"] },
       date: { type: "string", pattern: "^\\d{4}-\\d{2}-\\d{2}$" },

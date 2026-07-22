@@ -1051,7 +1051,10 @@ export function SheetPage() {
                         )}
                       </span>
                     )}
-                    {r.ok ? r.value.summary : "⚠ invalid draft"}
+                    {/* Invalid drafts carry the FIRST parse error so the human can see why (e.g.
+                        the live "hi" → amount 0 card read as a bare "invalid draft"); the ✕
+                        (dismiss-for-everyone) button is the resolution path. */}
+                    {r.ok ? r.value.summary : `⚠ can't import: ${r.errors[0]}`}
                   </span>
                   <span className="row" style={{ gap: 6 }}>
                     <button className="secondary small" onClick={() => importFromRelay(p)}>
