@@ -268,30 +268,53 @@ async function main() {
   const isV2 = (await proposerOC.locator(".bubble-wrapper").count()) === 0;
   console.log(`[${PROPOSER.user}] propose UI tree: ${isV2 ? "v2 (mobile)" : "v1 (classic)"}`);
   let posted = false;
-  for (let attempt = 1; attempt <= 2 && !posted; attempt++) {
-    if (isV2) {
-      const msg = proposerOC.locator(".message_text").last();
-      const box = await msg.boundingBox();
-      if (!box) throw new Error("v2: no message box");
-      await proposerOC.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
-      await proposerOC.mouse.down();
-      await proposerOC.waitForTimeout(900); // long-press opens the action sheet
-      await proposerOC.mouse.up();
-      await proposerOC.waitForTimeout(1200);
-      await proposerOC.locator('button:has(path[d^="M7.5,5.6"])').first().click({ timeout: 15000 }); // AutoFix icon
-    } else {
-      const bubble = proposerOC.locator(".bubble-wrapper").last();
-      await bubble.hover();
-      await proposerOC.waitForTimeout(500);
-      await bubble.locator(".menu-icon").first().click({ timeout: 15000 });
-      await proposerOC.getByText("Propose action", { exact: true }).click({ timeout: 15000 });
+  for (let attempt = 1; attempt <= 3 && !posted; attempt++) {
+    // Each attempt is fully fenced: any step timing out must fall through to the NEXT attempt, not
+    // abort the run (a thrown click timeout previously killed the whole journey on a flaky menu).
+    try {
+      if (isV2) {
+        const autoFix = proposerOC.locator('button:has(path[d^="M7.5,5.6"])').first(); // AutoFix icon
+        // Long-press until the action sheet actually shows the AutoFix button (cooldowns/timing can
+        // swallow a press), then click it.
+        // The v2 MenuTrigger suppresses long-press during the SCROLL cooldown (longpressCooldown =
+        // scrollStatus.isCooldown) — and the just-sent message auto-scrolls the chat. Let the
+        // scroll settle before pressing, and back off between press retries.
+        await proposerOC.waitForTimeout(3000);
+        let sheetOpen = false;
+        for (let press = 0; press < 3 && !sheetOpen; press++) {
+          const msg = proposerOC.locator(".message_text").last();
+          // Raw mouse coords do NOT auto-scroll (locator.hover/click do) — as the chat grows, the
+          // last message sits above/below the viewport and presses land at negative Y. Scroll first.
+          await msg.scrollIntoViewIfNeeded().catch(() => {});
+          await proposerOC.waitForTimeout(800);
+          const box = await msg.boundingBox();
+          if (!box) throw new Error("v2: no message box");
+          await proposerOC.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
+          await proposerOC.mouse.down();
+          await proposerOC.waitForTimeout(900);
+          await proposerOC.mouse.up();
+          sheetOpen = await autoFix.waitFor({ state: "visible", timeout: 4000 }).then(() => true).catch(() => false);
+          if (!sheetOpen) await proposerOC.waitForTimeout(1500); // let any scroll cooldown lapse
+        }
+        if (!sheetOpen) throw new Error("v2: action sheet never opened");
+        await autoFix.click({ timeout: 8000 });
+      } else {
+        const bubble = proposerOC.locator(".bubble-wrapper").last();
+        await bubble.hover();
+        await proposerOC.waitForTimeout(500);
+        await bubble.locator(".menu-icon").first().click({ timeout: 12000 });
+        await proposerOC.getByText("Propose action", { exact: true }).click({ timeout: 12000 });
+      }
+      console.log(`[${PROPOSER.user}] proposed (attempt ${attempt}, manual JSON — no model)`);
+      posted = await confirmBtn.waitFor({ timeout: 30000 }).then(() => true).catch(() => false);
+    } catch (e) {
+      console.log(`[${PROPOSER.user}] propose attempt ${attempt} failed: ${(e as Error).message.slice(0, 90)}`);
     }
-    console.log(`[${PROPOSER.user}] proposed (attempt ${attempt}, manual JSON — no model)`);
-    posted = await confirmBtn.waitFor({ timeout: 30000 }).then(() => true).catch(() => false);
     if (!posted) {
       // Clear any leftover sheet/overlay before retrying.
       await proposerOC.keyboard.press("Escape").catch(() => {});
       await proposerOC.locator("#masked_overlay").click({ position: { x: 10, y: 10 }, timeout: 2000 }).catch(() => {});
+      await proposerOC.waitForTimeout(1000);
     }
   }
   check(posted, `the action card posted (confirm visible on ${CONFIRMER.user}'s side)`);
