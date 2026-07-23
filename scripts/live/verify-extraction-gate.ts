@@ -46,6 +46,10 @@ async function main() {
   await p.locator(".chat-summary, .chat_summary").filter({ hasText: /father/i }).first().click({ timeout: 15000 });
   await p.waitForTimeout(2500);
 
+  // Issue 1 test seam: opt into the deterministic manual-JSON prompt (real users with no on-device
+  // model are guided to model setup instead). Must be set before the first propose.
+  await p.evaluate(`localStorage.setItem("oc:manualExtract","1")`);
+
   const cards = () => p.locator(".action-card").count();
   const nonce = Date.now() % 100000;
 

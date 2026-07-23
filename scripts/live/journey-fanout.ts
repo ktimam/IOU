@@ -225,6 +225,10 @@ async function main() {
   console.log("[inbox] before:", before);
 
   // 4. The proposer sends a message + proposes via the DETERMINISTIC manual-JSON prompt.
+  // Issue 1 test seam: with no on-device model, REAL users are now guided to set one up instead of a
+  // raw JSON prompt. The automated journey drives the deterministic manual-JSON path, so it OPTS IN
+  // to the manual prompt by setting oc:manualExtract="1" on the proposer's OC page before proposing.
+  await proposerOC.evaluate(`localStorage.setItem("oc:manualExtract","1")`);
   const nonce = Date.now() % 1000000;
   const text = `Journey ${nonce}: cleaning fee 350 EGP`;
   const extraction = JSON.stringify({ kind: "iou", amount: 350, currency: "EGP", direction: "credit", note: `journey ${nonce}` });

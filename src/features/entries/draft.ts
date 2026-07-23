@@ -49,6 +49,25 @@ export type ParseResult =
   | { ok: false; errors: string[] };
 
 const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
+const CCY_RE = /^[A-Za-z]{3}$/;
+
+/**
+ * Inject the IOU default currency (prefs.defaultCurrency) into a parseDraft `base` when — and only
+ * when — the base carries no currency of its own AND the default is a valid 3-letter code. This is
+ * the seam that gives the precedence **message.currency > template.currency > IOU default**: the
+ * template's currency (already on `base`) wins over the default here, and the MESSAGE's currency
+ * wins over `base` inside parseDraft. So a message with no currency and no matched template now
+ * defaults instead of erroring. Pure + unit-tested; the SheetPage wires it around every parseDraft
+ * call (paste path + parseDraftBatch).
+ */
+export function baseWithDefaultCurrency(
+  base: Partial<EntryPayload> | undefined,
+  defaultCurrency: string,
+): Partial<EntryPayload> | undefined {
+  if (typeof defaultCurrency !== "string" || !CCY_RE.test(defaultCurrency.trim())) return base;
+  if (base?.currency) return base; // template/base currency already present → template wins
+  return { ...(base ?? {}), currency: defaultCurrency.trim().toUpperCase() };
+}
 
 /** Parse a major-unit amount ("25", "25.00", 25) to integer minor units. */
 function toMinor(v: unknown): number | null {
@@ -322,6 +341,106 @@ export function parseDraft(input: unknown, base?: Partial<EntryPayload>): ParseR
     `${note ? ` · ${note}` : ""}`;
 
   return { ok: true, value: { initial, draftId, summary } };
+}
+
+// A per-element template resolver (SheetPage's resolveTemplateBase) OR a single shared base object.
+// parseDraftBatch accepts either: a function is called with each element (so different array
+// elements can route to different templates), an object/undefined is reused for every element.
+export type DraftBaseResolver = (raw: unknown) => Partial<EntryPayload> | undefined;
+
+/**
+ * Parse a confirmable-action payload that may carry EITHER a single entry (a JSON OBJECT) or MULTIPLE
+ * entries (a top-level JSON ARRAY of EntryDraft) — the shared wire contract for one card / one
+ * confirm / one deposit. Returns the valid ParsedDrafts plus one error string per invalid element;
+ * a single bad element never fails the whole batch. Each element is parsed with parseDraft after its
+ * `base` is resolved (per-element when `base` is a resolver) and the default currency injected.
+ *
+ * draftId distinctness: parseDraft derives its idempotency id from content, so two identical array
+ * elements would collide. For ARRAY elements whose id was DERIVED (no `draft_id` supplied) we append
+ * a numeric suffix on collision to keep every card's entries distinct; a provided `draft_id` is
+ * always honoured verbatim. A single OBJECT keeps parseDraft's id untouched (backward compatible).
+ */
+export function parseDraftBatch(
+  payload: unknown,
+  base?: Partial<EntryPayload> | DraftBaseResolver,
+  defaultCurrency?: string,
+): { drafts: ParsedDraft[]; errors: string[] } {
+  const resolve: DraftBaseResolver =
+    typeof base === "function" ? base : () => base as Partial<EntryPayload> | undefined;
+  const dflt = defaultCurrency ?? "";
+  const isArray = Array.isArray(payload);
+  const elements: unknown[] = isArray ? (payload as unknown[]) : [payload];
+
+  const drafts: ParsedDraft[] = [];
+  const errors: string[] = [];
+  const usedIds = new Set<string>();
+
+  elements.forEach((el, i) => {
+    const elBase = baseWithDefaultCurrency(resolve(el), dflt);
+    const res = parseDraft(el, elBase);
+    if (!res.ok) {
+      // One error entry per invalid element. Prefix array elements so the human can tell which one;
+      // a lone object keeps parseDraft's raw errors (unchanged single-entry behaviour).
+      if (isArray) errors.push(`entry ${i + 1}: ${res.errors.join("; ")}`);
+      else errors.push(...res.errors);
+      return;
+    }
+    const parsed = res.value;
+    // Keep array-element draftIds distinct. A provided draft_id (element carried one) always wins;
+    // a derived id gets a positional suffix only when it collides with one already in this batch.
+    const provided =
+      typeof (el as { draft_id?: unknown }).draft_id === "string" &&
+      (el as { draft_id: string }).draft_id.trim() !== "";
+    if (isArray && !provided && usedIds.has(parsed.draftId)) {
+      let n = 1;
+      let candidate = `${parsed.draftId}#${n}`;
+      while (usedIds.has(candidate)) candidate = `${parsed.draftId}#${++n}`;
+      parsed.draftId = candidate;
+      parsed.initial.draft_id = candidate;
+    }
+    usedIds.add(parsed.draftId);
+    drafts.push(parsed);
+  });
+
+  return { drafts, errors };
+}
+
+/**
+ * Complete a ParsedDraft.initial into a full EntryPayload for a headless write (the batch confirm-all
+ * path). parseDraft already did all the money math — amount_minor is the net, fee carries the gross,
+ * the schedule is resolved — so the only field to fill is the storage `kind` (payment/expense),
+ * exactly as EntryForm's buildEntryPayload derives it from txn_type. Fields absent on `initial`
+ * (fee/schedule/convert for a settlement) stay absent, so JSON.stringify yields the same ciphertext
+ * the form path would.
+ */
+export function parsedToPayload(initial: Partial<EntryPayload>): EntryPayload {
+  const txn: TxnType = initial.txn_type ?? "iou";
+  return {
+    ts: initial.ts ?? Date.now(),
+    kind: txn === "settlement" ? "payment" : "expense",
+    currency: initial.currency ?? "",
+    amount_minor: initial.amount_minor ?? 0,
+    direction: initial.direction ?? "credit",
+    note: initial.note ?? "",
+    txn_type: txn,
+    ...(initial.schedule ? { schedule: initial.schedule } : {}),
+    ...(initial.fee ? { fee: initial.fee } : {}),
+    ...(initial.convert ? { convert: initial.convert } : {}),
+    ...(initial.draft_id ? { draft_id: initial.draft_id } : {}),
+    ...(initial.import_message_id ? { import_message_id: initial.import_message_id } : {}),
+  };
+}
+
+/**
+ * One-line pending-card summary for a parseDraftBatch result: the single entry's summary when there
+ * is one (byte-identical to the old single-entry card), the entry COUNT + each summary for a
+ * multi-entry card, or a "can't import" line (with the first error) when nothing parsed.
+ */
+export function batchSummary(result: { drafts: ParsedDraft[]; errors: string[] }): string {
+  const { drafts, errors } = result;
+  if (drafts.length === 0) return `⚠ can't import: ${errors[0] ?? "no valid entries"}`;
+  if (drafts.length === 1) return drafts[0].summary;
+  return `${drafts.length} entries: ` + drafts.map((d) => d.summary).join(" · ");
 }
 
 /**

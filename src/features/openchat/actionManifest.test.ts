@@ -44,12 +44,17 @@ describe("invalid-draft guardrails (schema ↔ parseDraft lock-step)", () => {
   // enforces so OpenChat's post-generation schema check drops such extractions (no_extraction)
   // before a card ever posts.
 
-  it("schema requires amount (and keeps currency required)", () => {
+  it("schema requires amount but NOT currency (currency defaults to the user's IOU setting)", () => {
+    // amount is unrecoverable → required (a degenerate amount-0/absent extraction must be dropped).
+    // currency IS recoverable: IOU fills a missing currency from prefs.defaultCurrency on import
+    // (baseWithDefaultCurrency), so requiring it would wrongly BLOCK a no-currency message at the
+    // OpenChat gate before IOU can default it (live 2026-07-23: "paid 120 for groceries" → no card).
     const required = iouActionManifest.outputSchema.required as string[];
     expect(required).toContain("amount");
-    expect(required).toContain("currency");
+    expect(required).not.toContain("currency");
     // The template-enriched schema (the one actually registered) carries the same requirement.
     expect(buildIouOutputSchema([]).required as string[]).toContain("amount");
+    expect(buildIouOutputSchema([]).required as string[]).not.toContain("currency");
   });
 
   it("schema declares amount > 0 via draft-07 numeric exclusiveMinimum", () => {
@@ -113,6 +118,16 @@ describe("iouActionManifest", () => {
     const parsed = JSON.parse(json);
     expect(parsed.id).toBe("iou.entry.import");
     expect(parsed.prompt).toBe(IOU_EXTRACTION_PROMPT);
+  });
+
+  it("prompt instructs a JSON ARRAY for multiple transactions, a single object otherwise", () => {
+    // Issue 2: one card can carry several entries; the model must emit an array when the message
+    // describes multiple distinct transactions. The schema still validates a single object shape —
+    // OpenChat validates each array element against it (see the schema tests above).
+    expect(IOU_EXTRACTION_PROMPT).toMatch(/array/i);
+    expect(IOU_EXTRACTION_PROMPT).toMatch(/multiple/i);
+    // The single-object path stays the default (backward compatible).
+    expect(IOU_EXTRACTION_PROMPT).toMatch(/single/i);
   });
 
   it("declares a chat_link surface pointing at the /openchat/link-chat page", () => {

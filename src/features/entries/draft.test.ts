@@ -1,5 +1,14 @@
 import { describe, it, expect } from "vitest";
-import { parseDraft, isDuplicateDraft, extractTs } from "./draft";
+import {
+  parseDraft,
+  isDuplicateDraft,
+  extractTs,
+  baseWithDefaultCurrency,
+  parseDraftBatch,
+  parsedToPayload,
+  batchSummary,
+} from "./draft";
+import type { EntryPayload } from "./types";
 
 describe("extractTs — the date a template schedule anchors on", () => {
   const iso = (ms: number) => new Date(ms).toISOString().slice(0, 10);
@@ -199,5 +208,217 @@ describe("isDuplicateDraft", () => {
   it("does not flag a deleted draft or an unseen id", () => {
     expect(isDuplicateDraft(entries, "d:bbbb2222")).toBe(false);
     expect(isDuplicateDraft(entries, "d:cccc3333")).toBe(false);
+  });
+});
+
+// ── Issue 3: default currency (precedence message > template > IOU default) ──────────────────────
+describe("baseWithDefaultCurrency", () => {
+  it("injects the default currency when there is no base at all", () => {
+    expect(baseWithDefaultCurrency(undefined, "USD")).toEqual({ currency: "USD" });
+  });
+
+  it("injects the default currency into a base that has no currency", () => {
+    const base = { txn_type: "iou" as const, note: "reservation" };
+    expect(baseWithDefaultCurrency(base, "EGP")).toEqual({
+      txn_type: "iou",
+      note: "reservation",
+      currency: "EGP",
+    });
+  });
+
+  it("leaves a base that already carries a currency unchanged (template wins over default)", () => {
+    const base = { currency: "GBP", txn_type: "iou" as const };
+    expect(baseWithDefaultCurrency(base, "USD")).toEqual({ currency: "GBP", txn_type: "iou" });
+  });
+
+  it("does nothing when the default is not a valid 3-letter code", () => {
+    expect(baseWithDefaultCurrency(undefined, "")).toBeUndefined();
+    expect(baseWithDefaultCurrency(undefined, "dollars")).toBeUndefined();
+    const base = { note: "x" };
+    expect(baseWithDefaultCurrency(base, "12")).toBe(base); // untouched, same reference
+  });
+
+  it("normalizes the injected default to upper case", () => {
+    expect(baseWithDefaultCurrency(undefined, "usd")).toEqual({ currency: "USD" });
+  });
+
+  it("a message with no currency + no template now DEFAULTS instead of erroring", () => {
+    // The end-to-end wiring: the SheetPage passes baseWithDefaultCurrency(templateBase, default).
+    const res = parseDraft({ amount: 5, note: "coffee" }, baseWithDefaultCurrency(undefined, "USD"));
+    expect(res.ok).toBe(true);
+    if (res.ok) expect(res.value.initial.currency).toBe("USD");
+  });
+
+  it("a message currency still beats the injected default", () => {
+    const res = parseDraft({ amount: 5, currency: "EUR" }, baseWithDefaultCurrency(undefined, "USD"));
+    expect(res.ok).toBe(true);
+    if (res.ok) expect(res.value.initial.currency).toBe("EUR");
+  });
+});
+
+// ── Issue 2: parseDraftBatch (single object OR top-level array → many drafts, one card) ──────────
+describe("parseDraftBatch", () => {
+  it("parses a single OBJECT into one draft (backward compatible)", () => {
+    const { drafts, errors } = parseDraftBatch({ amount: 25, currency: "USD", note: "one" });
+    expect(errors).toEqual([]);
+    expect(drafts).toHaveLength(1);
+    expect(drafts[0].initial.amount_minor).toBe(2500);
+  });
+
+  it("parses an ARRAY of 3 into 3 drafts with distinct draftIds", () => {
+    const { drafts, errors } = parseDraftBatch([
+      { amount: 10, currency: "USD", note: "a" },
+      { amount: 20, currency: "USD", note: "b" },
+      { amount: 30, currency: "USD", note: "c" },
+    ]);
+    expect(errors).toEqual([]);
+    expect(drafts).toHaveLength(3);
+    const ids = drafts.map((d) => d.draftId);
+    expect(new Set(ids).size).toBe(3); // all distinct
+    // draftId and initial.draft_id stay in lock-step for every element.
+    for (const d of drafts) expect(d.initial.draft_id).toBe(d.draftId);
+  });
+
+  it("keeps distinct draftIds even for byte-identical array elements", () => {
+    const { drafts } = parseDraftBatch([
+      { amount: 50, currency: "USD", note: "same" },
+      { amount: 50, currency: "USD", note: "same" },
+    ]);
+    expect(drafts).toHaveLength(2);
+    expect(drafts[0].draftId).not.toBe(drafts[1].draftId);
+  });
+
+  it("collects the valid elements and pushes one error per invalid element (no whole-batch fail)", () => {
+    const { drafts, errors } = parseDraftBatch([
+      { amount: 10, currency: "USD", note: "ok1" },
+      { amount: 0, currency: "USD", note: "bad" }, // amount 0 → invalid
+      { amount: 30, currency: "USD", note: "ok2" },
+    ]);
+    expect(drafts).toHaveLength(2);
+    expect(errors).toHaveLength(1);
+    expect(errors[0]).toMatch(/amount/i);
+  });
+
+  it("a provided draft_id wins (never suffixed) even inside an array", () => {
+    const { drafts } = parseDraftBatch([
+      { amount: 10, currency: "USD", draft_id: "ext-1" },
+      { amount: 20, currency: "USD", draft_id: "ext-2" },
+    ]);
+    expect(drafts.map((d) => d.draftId)).toEqual(["ext-1", "ext-2"]);
+  });
+
+  it("empty array → no drafts, no errors", () => {
+    expect(parseDraftBatch([])).toEqual({ drafts: [], errors: [] });
+  });
+
+  it("all-invalid array → no drafts, one error per element", () => {
+    const { drafts, errors } = parseDraftBatch([
+      { amount: 0, currency: "USD" },
+      { amount: -1, currency: "USD" },
+    ]);
+    expect(drafts).toHaveLength(0);
+    expect(errors).toHaveLength(2);
+  });
+
+  it("a single invalid OBJECT → no drafts, the raw parse errors", () => {
+    const { drafts, errors } = parseDraftBatch({ amount: 0, currency: "USD" });
+    expect(drafts).toHaveLength(0);
+    expect(errors.length).toBeGreaterThanOrEqual(1);
+    expect(errors.join(" ")).toMatch(/amount/i);
+  });
+
+  it("applies the default currency per element (array elements with no currency default)", () => {
+    const { drafts } = parseDraftBatch(
+      [{ amount: 10, note: "a" }, { amount: 20, currency: "EUR", note: "b" }],
+      undefined,
+      "USD",
+    );
+    expect(drafts).toHaveLength(2);
+    expect(drafts[0].initial.currency).toBe("USD"); // defaulted
+    expect(drafts[1].initial.currency).toBe("EUR"); // message currency wins
+  });
+
+  it("accepts a per-element resolver for `base` (each element may carry its own template ref)", () => {
+    // Two elements route to two different template bases; the resolver is called per element.
+    const resolve = (raw: unknown): Partial<EntryPayload> | undefined => {
+      const t = (raw as { template?: string }).template;
+      if (t === "Reservation") return { txn_type: "iou", currency: "EGP" };
+      if (t === "Cash") return { txn_type: "settlement", currency: "GBP" };
+      return undefined;
+    };
+    const { drafts } = parseDraftBatch(
+      [
+        { amount: 100, template: "Reservation", note: "resv" },
+        { amount: 5, template: "Cash", note: "cash" },
+      ],
+      resolve,
+    );
+    expect(drafts).toHaveLength(2);
+    expect(drafts[0].initial.currency).toBe("EGP");
+    expect(drafts[0].initial.txn_type).toBe("iou");
+    expect(drafts[1].initial.currency).toBe("GBP");
+    expect(drafts[1].initial.txn_type).toBe("settlement");
+  });
+});
+
+// ── parsedToPayload: complete a ParsedDraft.initial into a full EntryPayload (batch write path) ──
+describe("parsedToPayload", () => {
+  it("completes a settlement initial into a full EntryPayload (kind=payment)", () => {
+    const r = parseDraft({ kind: "settlement", amount: 25, currency: "USD", note: "lunch", date: "2026-06-20" });
+    if (!r.ok) throw new Error("expected ok");
+    const p = parsedToPayload(r.value.initial);
+    expect(p.kind).toBe("payment");
+    expect(p.txn_type).toBe("settlement");
+    expect(p.currency).toBe("USD");
+    expect(p.amount_minor).toBe(2500);
+    expect(p.note).toBe("lunch");
+    expect(p.schedule).toBeUndefined();
+    expect(p.fee).toBeUndefined();
+  });
+
+  it("completes an IOU initial (kind=expense) carrying fee + schedule + ids", () => {
+    const r = parseDraft(
+      {
+        kind: "iou",
+        amount: 1000,
+        currency: "EGP",
+        fee_percent: 20,
+        schedule: [{ due_date: "2026-07-01", percent: 50 }, { due_date: "2026-08-01", percent: 50 }],
+        draft_id: "ext-9",
+      },
+    );
+    if (!r.ok) throw new Error("expected ok");
+    r.value.initial.import_message_id = "mid-1";
+    const p = parsedToPayload(r.value.initial);
+    expect(p.kind).toBe("expense");
+    expect(p.txn_type).toBe("iou");
+    expect(p.fee?.percent).toBe(20);
+    expect(p.schedule).toHaveLength(2);
+    expect(p.draft_id).toBe("ext-9");
+    expect(p.import_message_id).toBe("mid-1");
+  });
+});
+
+// ── batchSummary: the pending-card one-liner (count for multi, summary for single) ──────────────
+describe("batchSummary", () => {
+  it("shows the entry COUNT and each summary for a multi-entry card", () => {
+    const res = parseDraftBatch([
+      { amount: 10, currency: "USD", note: "a" },
+      { amount: 20, currency: "USD", note: "b" },
+    ]);
+    const s = batchSummary(res);
+    expect(s).toMatch(/^2 entries:/);
+    expect(s).toContain("a");
+    expect(s).toContain("b");
+  });
+
+  it("shows the single summary for a one-entry card (byte-identical to parseDraft)", () => {
+    const res = parseDraftBatch({ amount: 10, currency: "USD", note: "solo" });
+    expect(batchSummary(res)).toBe(res.drafts[0].summary);
+  });
+
+  it("shows a can't-import line when nothing parsed", () => {
+    const res = parseDraftBatch({ amount: 0, currency: "USD" });
+    expect(batchSummary(res)).toMatch(/can't import/i);
   });
 });

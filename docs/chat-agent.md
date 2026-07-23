@@ -231,6 +231,59 @@ card across members:
 - **Legacy entries** imported before `import_message_id` existed carry no key, so their cards stay
   visible to the partner until dismissed once — accepted, no migration.
 
+#### Three UX fixes: no-model guide + multi-entry cards + default currency — BUILT 2026-07-23
+
+Three fixes to the confirmable-action pipeline. The **wire seam** is `confirmPayload` (OpenChat) ==
+IOU's decrypted `p.draft`: it is now EITHER a single-entry JSON OBJECT (unchanged, byte-identical for
+1 entry) OR a top-level JSON ARRAY `[EntryDraft, …]` for multiple entries. A bare array is the multi
+form — NOT `{entries:[…]}`.
+
+- **No on-device model → guide, not a raw JSON box (Issue 1, OpenChat-side UI).** When OpenChat has
+  no on-device model it no longer pops a raw `window.prompt` for JSON at real users — it shows a
+  failure toast guiding them to set one up (profile → App settings → On-device models). The manual
+  JSON path survives ONLY behind a test seam: `localStorage["oc:manualExtract"] === "1"` (or
+  `?manualExtract=1`). The IOU live harness sets that flag on the OC page before proposing —
+  `scripts/live/journey-fanout.ts`, `verify-extraction-gate.ts` (and thus `journey-matrix.sh`, which
+  delegates to them). `scripts/live/verify-multi-entry.ts` covers the array path the same way.
+
+- **Multiple entries, one card, confirm ALL (Issue 2).** The manifest prompt now instructs the model
+  to emit a JSON ARRAY when a message describes MULTIPLE distinct transactions (a single object
+  otherwise); the schema stays single-object (OpenChat validates each array element against it). On
+  the IOU side a new pure `parseDraftBatch(payload, base?, defaultCurrency?)`
+  (`src/features/entries/draft.ts`) normalizes object-or-array → `ParsedDraft[]` + per-element errors
+  (one bad element never fails the batch; each element may route to its own template via a per-element
+  `base` resolver). Distinct `draftId`s are preserved even for byte-identical elements (a positional
+  suffix on a derived-id collision; a provided `draft_id` always wins). `SheetPage.importFromRelay`
+  parses via `parseDraftBatch`: **exactly 1** draft → the existing `EntryForm` (`openAdd`) flow,
+  unchanged; **≥2** → a new read-only **`BatchConfirmModal`** listing every entry with an
+  "Add all N entries" primary button (ONE human confirm). Confirming writes each entry through a
+  factored headless **`writeEntry(payload)`** (K_sheet encrypt + `add_entry`, no per-entry
+  toast/modal), tagging EVERY entry with the SAME `import_message_id = messageId` and its own
+  `draft_id`; then clears the card + `markMessageImported` + remembers the chat mapping ONCE. So
+  "several values in one message → several entries but ONE message consumed" falls out for free: all N
+  share the mid, so `isImportedIntoSheet` hides the card for both members once the batch lands. The
+  pending-card summary shows the entry COUNT for a multi card ("N entries: …") via the pure
+  `batchSummary` helper.
+
+- **Missing currency uses the IOU default (Issue 3).** A new pure
+  `baseWithDefaultCurrency(base, defaultCurrency)` injects `prefs.defaultCurrency` (browser-local,
+  default "USD") into the parseDraft `base` only when the base carries no currency and the default is
+  a valid 3-letter code. Precedence becomes **message.currency > template.currency > IOU default**, so
+  a message with no currency AND no matched template now DEFAULTS instead of erroring. Wired at every
+  parseDraft call site in `SheetPage` (the paste path, and per-element inside `parseDraftBatch`).
+
+New/changed unit coverage: `draft.test.ts` (+22 — `baseWithDefaultCurrency`, `parseDraftBatch`,
+`parsedToPayload`, `batchSummary`), `actionManifest.test.ts` (+1 — the array-prompt instruction).
+
+##### Setting up an on-device model (the no-model guide's destination)
+
+When a message can't be extracted because no on-device model is selected, propose fails with a guide
+toast. To fix it in OpenChat: **profile → App settings → On-device models**, pick a model from the
+catalog (Gemma 3 1B is the small default) or attach a local GGUF file, and wait for the download to
+finish. Then re-send the message and propose — the model runs in the browser (wllama / llama.cpp
+WASM) and extracts the draft. (The automated harness bypasses this by opting into the manual-JSON
+seam; real users go through the model.)
+
 #### Settings simplification + shared account types — BUILT 2026-07-22
 
 - **Settings**: the 6-digit **Connect to OpenChat** (+ Disconnect) is now the ONLY default-visible

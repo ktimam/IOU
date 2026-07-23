@@ -125,16 +125,19 @@ export type IouActionManifest = {
 // Extraction prompt for text-or-image input. Deliberately free of example VALUES (a small
 // on-device model can echo literals from the prompt into its answer); it names every field and
 // states the semantics instead.
-export const IOU_EXTRACTION_PROMPT = `You are extracting a single money transaction for a 2-person
-shared ledger. The input is a chat message: plain text, an image (for example a receipt, a bank
-transfer screenshot, or a booking confirmation), or both. Respond with ONLY one compact JSON
-object and nothing else - no prose, no code fences, and do not repeat the schema.
-The object may contain these fields:
+export const IOU_EXTRACTION_PROMPT = `You are extracting money transactions for a 2-person shared
+ledger. The input is a chat message: plain text, an image (for example a receipt, a bank transfer
+screenshot, or a booking confirmation), or both. Respond with ONLY compact JSON and nothing else -
+no prose, no code fences, and do not repeat the schema. When the message describes a SINGLE
+transaction, respond with ONE JSON object. When it describes MULTIPLE distinct transactions,
+respond with a JSON ARRAY of such objects, one object per transaction.
+Each object may contain these fields:
 - "kind": "iou" when the money is a future obligation (a reservation, a booking, rent, an
   instalment, or money owed to be paid later); "settlement" when the money has already moved
   (already paid, sent, transferred, or received).
 - "amount": the amount in major currency units, as a JSON number (never a string).
-- "currency": the 3-letter ISO currency code.
+- "currency": the 3-letter ISO currency code. OPTIONAL - omit it when the message states no
+  currency; IOU then uses the user's default currency.
 - "direction": "credit" when the amount is owed TO the user; "debt" when the user owes it.
 - "date": the transaction or due date as YYYY-MM-DD. Infer the year from "Today is" below. For a
   date RANGE like "1-7 July" or "July 1-7", use the START date (for example 2026-07-01). For a
@@ -212,7 +215,11 @@ export const iouActionManifest: IouActionManifest = {
       date: { type: "string", pattern: "^\\d{4}-\\d{2}-\\d{2}$" },
       note: { type: "string" },
     },
-    required: ["amount", "currency"],
+    // Only `amount` is required — it can't be recovered if absent. `currency` is intentionally NOT
+    // required: IOU fills a missing currency from the user's default (prefs.defaultCurrency) on
+    // import (baseWithDefaultCurrency), so requiring it here would wrongly drop a no-currency message
+    // at OpenChat's post-generation gate before IOU can default it.
+    required: ["amount"],
   },
   rules: IOU_EXTRACTION_RULES,
   card: {

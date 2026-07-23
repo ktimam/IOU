@@ -37,7 +37,17 @@ import { usePreferences } from "../settings/usePreferences";
 import { usePairTemplates } from "../templates/PairTemplatesContext";
 import { TemplatesManager } from "../templates/TemplatesManager";
 import { templateToInitial } from "../templates/templateBase";
-import { parseDraft, isDuplicateDraft, extractTs } from "./draft";
+import {
+  parseDraft,
+  isDuplicateDraft,
+  extractTs,
+  baseWithDefaultCurrency,
+  parseDraftBatch,
+  parsedToPayload,
+  batchSummary,
+  type ParsedDraft,
+} from "./draft";
+import { BatchConfirmModal } from "./BatchConfirmModal";
 import {
   getRelayConfig,
   fetchPending,
@@ -300,7 +310,10 @@ export function SheetPage() {
       setDraftErrors(["not valid JSON — paste the JSON your assistant produced"]);
       return;
     }
-    const res = parseDraft(parsed, resolveTemplateBase(parsed));
+    const res = parseDraft(
+      parsed,
+      baseWithDefaultCurrency(resolveTemplateBase(parsed), prefs.defaultCurrency),
+    );
     if (!res.ok) {
       setDraftErrors(res.errors);
       return;
@@ -331,6 +344,15 @@ export function SheetPage() {
   // and whether "remember this chat → this sheet" is ticked (default on).
   const [pendingChatKey, setPendingChatKey] = useState<string | null>(null);
   const [rememberChat, setRememberChat] = useState(true);
+  // A multi-entry chat card (confirmPayload was a JSON array): the whole batch confirms once through
+  // the BatchConfirmModal below — ONE deposit / ONE messageId consumed for all N entries.
+  const [batch, setBatch] = useState<null | {
+    drafts: ParsedDraft[];
+    messageId: string | null;
+    relayId: string;
+    chatKey: string | null;
+  }>(null);
+  const [batchBusy, setBatchBusy] = useState(false);
   const reloadPending = async () => {
     const cfg = getRelayConfig();
     if (!cfg) {
@@ -383,9 +405,16 @@ export function SheetPage() {
     setPendingMessageId(null);
   };
   const importFromRelay = (p: PendingDraft) => {
-    const res = parseDraft(p.draft, resolveTemplateBase(p.draft));
-    if (!res.ok) {
-      toasts.show({ kind: "error", text: "Invalid draft from chat: " + res.errors.join("; ") });
+    // A card's confirmPayload is EITHER a single entry (JSON object) or MULTIPLE (a JSON array);
+    // parseDraftBatch normalizes both. resolveTemplateBase runs per element (each may route to a
+    // different template) and the IOU default currency is injected per element.
+    const { drafts, errors } = parseDraftBatch(
+      p.draft,
+      resolveTemplateBase,
+      prefs.defaultCurrency,
+    );
+    if (drafts.length === 0) {
+      toasts.show({ kind: "error", text: "Invalid draft from chat: " + errors.join("; ") });
       return;
     }
     // Idempotency: a chat draft carries a UNIQUE messageId per card, so that is the reliable dedup
@@ -393,28 +422,35 @@ export function SheetPage() {
     // amount/currency/date/note (two same-price bookings, or repeated same-day drafts before the
     // date is parsed), which the content hash (draftId) would wrongly flag as "already added" and
     // permanently suppress WITHOUT importing. Fall back to the content hash only for wrapper-less
-    // pastes that have no messageId. The mid branch checks BOTH my local imported set and the
-    // sheet's decrypted entries (import_message_id) — the latter catches the PARTNER's import of
-    // their fanned-out copy of the same card.
+    // pastes that have no messageId (a multi-entry wrapper-less card keys off its FIRST entry). The
+    // mid branch checks BOTH my local imported set and the sheet's decrypted entries
+    // (import_message_id) — the latter catches the PARTNER's import of their fanned-out copy.
     const mid = p.context?.messageId;
     const alreadyAdded = mid
       ? importedMessageIds.has(mid) || isImportedIntoSheet(entries, mid, undefined)
-      : isDuplicateDraft(entries, res.value.draftId);
+      : isDuplicateDraft(entries, drafts[0].draftId);
     if (alreadyAdded) {
       toasts.show({ kind: "info", text: "Already added — clearing it from chat" });
       void clearRelay(p.id);
       return;
     }
+    // ≥2 entries → confirm the whole batch once through the BatchConfirmModal (one deposit consumed).
+    if (drafts.length > 1) {
+      setBatch({ drafts, messageId: mid ?? null, relayId: p.id, chatKey: p.context?.chat ?? null });
+      setRememberChat(true);
+      return;
+    }
+    // Single entry → the existing EntryForm confirm flow, unchanged.
     // Persist the cross-member key on the entry-to-be: every member's fanned-out envelope carries
     // the SAME messageId, so once this import lands, isImportedIntoSheet hides the card for the
     // partner too (their local handled/imported sets never see it).
-    if (mid) res.value.initial.import_message_id = mid;
+    if (mid) drafts[0].initial.import_message_id = mid;
     setPendingRelayId(p.id);
     // Track the source chat so confirming can remember chat → sheet.
     setPendingChatKey(p.context?.chat ?? null);
     setPendingMessageId(mid ?? null);
     setRememberChat(true);
-    openAdd(res.value.initial);
+    openAdd(drafts[0].initial);
   };
   // Persist a chat → sheet mapping: optimistic (state + cache first), then the
   // canister call; on failure roll back and let the next fetch re-sync.
@@ -690,11 +726,12 @@ export function SheetPage() {
           // Dismissed by ANY member (merged pair-slot union) → hidden for everyone.
           if (mid !== undefined && pairTemplates.dismissed.has(mid)) return false;
           // Only wrapper-less cards need the parsed draftId (the fallback key); mid-bearing
-          // cards match exclusively on import_message_id, so skip the parse for them.
+          // cards match exclusively on import_message_id, so skip the parse for them. A multi-entry
+          // wrapper-less card keys off its FIRST entry's draftId.
           let draftId: string | undefined;
           if (mid === undefined) {
-            const parsed = parseDraft(p.draft, resolveTemplateBase(p.draft));
-            draftId = parsed.ok ? parsed.value.draftId : undefined;
+            const parsed = parseDraftBatch(p.draft, resolveTemplateBase, prefs.defaultCurrency);
+            draftId = parsed.drafts[0]?.draftId;
           }
           return !isImportedIntoSheet(entries, mid, draftId);
         }),
@@ -705,6 +742,24 @@ export function SheetPage() {
     [inboxPending, chatLinks, sheetId, entries, pairTemplates.shared, pairTemplates.dismissed],
   );
 
+  // Headless encrypt-under-K_sheet + add_entry. No toast/modal/reload side effects — the caller
+  // orchestrates those. Used by both onSubmit's single-add path and the batch confirm-all path so
+  // the write seam is identical for one entry or N.
+  async function writeEntry(payload: EntryPayload): Promise<void> {
+    if (!actor) return;
+    const K_sheet = get(sheetId) ?? (await unwrapFor(sheetId));
+    const enc = await encryptEntryPayload(
+      new TextEncoder().encode(JSON.stringify(payload)),
+      K_sheet,
+    );
+    await (actor as any).add_entry({
+      sheet_id: sheetId,
+      entry_key: Array.from(enc.entryKey),
+      ciphertext: Array.from(enc.ciphertext),
+      iv: Array.from(enc.iv),
+    });
+  }
+
   async function onSubmit(p: EntryPayload) {
     if (!actor) return;
     // Direction is stored in the entry author's frame. The form works in the viewer's frame, so when
@@ -712,12 +767,12 @@ export function SheetPage() {
     // authored by me → my frame IS the author frame → no change.
     const toStore: EntryPayload =
       modal?.createdByMe === false ? { ...p, direction: flipDirection(p.direction) } : p;
-    const K_sheet = get(sheetId) ?? (await unwrapFor(sheetId));
-    const enc = await encryptEntryPayload(
-      new TextEncoder().encode(JSON.stringify(toStore)),
-      K_sheet,
-    );
     if (modal?.entryId != null) {
+      const K_sheet = get(sheetId) ?? (await unwrapFor(sheetId));
+      const enc = await encryptEntryPayload(
+        new TextEncoder().encode(JSON.stringify(toStore)),
+        K_sheet,
+      );
       await (actor as any).edit_entry({
         sheet_id: sheetId,
         entry_id: BigInt(modal.entryId),
@@ -727,12 +782,7 @@ export function SheetPage() {
       });
       toasts.show({ kind: "success", text: "Entry updated" });
     } else {
-      await (actor as any).add_entry({
-        sheet_id: sheetId,
-        entry_key: Array.from(enc.entryKey),
-        ciphertext: Array.from(enc.ciphertext),
-        iv: Array.from(enc.iv),
-      });
+      await writeEntry(toStore);
       toasts.show({ kind: "success", text: "Entry added" });
       if (pendingRelayId) await clearRelay(pendingRelayId);
       // Remember this messageId so a sibling double-confirm card is caught by
@@ -749,6 +799,32 @@ export function SheetPage() {
     setPendingMessageId(null);
     setModal(null);
     await reload();
+  }
+
+  // Confirm-all for a multi-entry card: write every parsed entry (each tagged with the SAME
+  // messageId + its own draft_id), then clear the card + mark the messageId imported + remember the
+  // chat mapping ONCE. One human confirm → N entries → one deposit consumed.
+  async function confirmBatch() {
+    if (!batch || batchBusy) return;
+    setBatchBusy(true);
+    try {
+      for (const d of batch.drafts) {
+        if (batch.messageId) d.initial.import_message_id = batch.messageId;
+        await writeEntry(parsedToPayload(d.initial));
+      }
+      await clearRelay(batch.relayId);
+      if (batch.messageId) markMessageImported(batch.messageId);
+      if (batch.chatKey && rememberChat && !chatLinks[batch.chatKey]) {
+        rememberChatMapping(batch.chatKey);
+      }
+      toasts.show({ kind: "success", text: `Added ${batch.drafts.length} entries` });
+      setBatch(null);
+      await reload();
+    } catch (e) {
+      toasts.show({ kind: "error", text: (e as Error).message });
+    } finally {
+      setBatchBusy(false);
+    }
   }
 
   async function onDelete(entryId: number) {
@@ -1019,7 +1095,9 @@ export function SheetPage() {
           </p>
           <ul style={{ listStyle: "none", padding: 0, margin: 0 }}>
             {[...pending, ...visibleInbox].map((p) => {
-              const r = parseDraft(p.draft, resolveTemplateBase(p.draft));
+              // Single OR multi-entry card: batchSummary renders the count ("N entries: …") for a
+              // multi card and the plain summary for a single one (byte-identical to before).
+              const rb = parseDraftBatch(p.draft, resolveTemplateBase, prefs.defaultCurrency);
               return (
                 <li
                   key={p.id}
@@ -1048,7 +1126,7 @@ export function SheetPage() {
                     {/* Invalid drafts carry the FIRST parse error so the human can see why (e.g.
                         the live "hi" → amount 0 card read as a bare "invalid draft"); the ✕
                         (dismiss-for-everyone) button is the resolution path. */}
-                    {r.ok ? r.value.summary : `⚠ can't import: ${r.errors[0]}`}
+                    {batchSummary(rb)}
                   </span>
                   <span className="row" style={{ gap: 6 }}>
                     <button className="secondary small" onClick={() => importFromRelay(p)}>
@@ -1436,6 +1514,18 @@ export function SheetPage() {
             />
           </div>
         </div>
+      )}
+
+      {batch && (
+        <BatchConfirmModal
+          drafts={batch.drafts}
+          busy={batchBusy}
+          onCancel={() => (batchBusy ? undefined : setBatch(null))}
+          onConfirm={() => void confirmBatch()}
+          showRemember={!!batch.chatKey && !chatLinks[batch.chatKey]}
+          remember={rememberChat}
+          onRememberChange={setRememberChat}
+        />
       )}
 
       {typesOpen && (
