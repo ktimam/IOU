@@ -1,7 +1,10 @@
 // IOU glue for the manifest-sync decision (manifestSync.ts): the concrete "register the IOU manifest
-// for this user with these types" call, gated on the user actually participating in OpenChat. Used by
-// TemplatesContext (on a type edit AND once on app load) and ActionInboxSettings (on a successful
-// Connect). Keeping this separate lets manifestSync.ts stay pure/unit-tested.
+// for this user with these types" call, gated on the user actually participating in OpenChat. Types
+// are ACCOUNT-SCOPED, so every caller feeds it SLOT-sourced types (loadAllSharedTemplates across all
+// the user's accounts — each account's chat routes through this user's manifest): usePairTemplates
+// (after every slot publish, i.e. on type CRUD), ManifestTypesSync (once on app load), and
+// ActionInboxSettings (on a successful Connect). Keeping this separate lets manifestSync.ts stay
+// pure/unit-tested.
 
 import type { Identity } from "@dfinity/agent";
 import { registerAiApp } from "./registerAiApp";

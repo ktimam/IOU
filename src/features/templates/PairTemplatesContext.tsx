@@ -1,11 +1,15 @@
-// SHARED transaction types per account — the client wiring around the pure
+// ACCOUNT-SCOPED transaction types — the client wiring around the pure
 // core (pairTemplates.ts).
 //
-// Unlike the app-wide TemplatesProvider (user-PERSONAL templates under a
-// self-derived key), shared templates are scoped to ONE pair and sealed
-// under that pair's ACTIVE sheet K_sheet, so there is no app-level provider
-// here: `usePairTemplates(pairId, sheetId)` is a per-pair hook the sheet
-// page mounts with the ids it already has (a global context can't know the
+// A type belongs to the account (pair) where it was created: it lives in
+// its author's encrypted slot on THAT Pair, is visible to both members of
+// that account only, and nothing follows the author into their other
+// accounts. Unlike the legacy app-wide TemplatesProvider (user-PERSONAL
+// templates under a self-derived key — now a read-only migration source),
+// these are scoped to ONE pair and sealed under that pair's ACTIVE sheet
+// K_sheet, so there is no app-level provider here:
+// `usePairTemplates(pairId, sheetId)` is a per-pair hook the sheet page
+// mounts with the ids it already has (a global context can't know the
 // pair). It:
 //
 //   * loads the Pair via get_pair, unwraps K_sheet via useSheetKey, and
@@ -13,54 +17,63 @@
 //     dismissed card ids) — a partner slot that fails AES-GCM (stale after
 //     a K_sheet rotation, until they republish) degrades to the readable
 //     slot instead of throwing;
-//   * MIRRORS my personal template list into MY slot: types are ALWAYS
-//     shared to the account (no Share toggle). A reconcile effect compares
-//     the personal list to my current slot (reconcileSlot) and publishes
-//     ONLY when a real diff exists — new/changed ids upserted at nextRev,
-//     ids no longer in my personal list dropped (absence, not tombstone:
-//     a removed copy-on-write override lets the partner's original
-//     resurface via the merge). Content comparison ignores rev/updatedAt
-//     bookkeeping, so the effect cannot publish-loop;
-//   * exposes the commutative merge (shared view), the merged `dismissed`
-//     union (cross-member "✕ dismissed" pending-card messageIds), and
-//     dismissCard(messageId) which appends to MY slot's dismissed list and
-//     republishes — the partner's client picks it up on its next pair load
-//     (reload() is exposed for the visibilitychange hook);
-//   * after each publish, re-syncs the OpenChat manifest with the merged
-//     personal + shared list so chat keywords on partner-authored types
-//     route on THIS member's manifest too.
-//
-// The user-level TemplatesProvider store is untouched: shared types AUGMENT
-// per-pair consumption (combineTemplates), they don't replace it.
+//   * exposes the account's type CRUD: upsertMyTemplate (create, edit, AND
+//     copy-on-write of a partner's type — a same-id upsert into MY slot at
+//     nextRev, their slot untouched) and removeMyTemplate (drop the id from
+//     MY slot — absence, not tombstone: removing my override resurfaces the
+//     partner's original; removing my own type removes it for both);
+//   * exposes the commutative merge (shared view), `myIds` (live ids in MY
+//     slot — everything else in `shared` is partner-authored), the merged
+//     `dismissed` union (cross-member "✕ dismissed" pending-card
+//     messageIds), and dismissCard(messageId) which appends to MY slot's
+//     dismissed list and republishes — the partner's client picks it up on
+//     its next pair load (reload() is exposed for the visibilitychange
+//     hook). Every publish carries MY current dismissed list forward, so
+//     type CRUD never drops a dismissal;
+//   * after each publish, re-syncs the OpenChat manifest from SLOT sources
+//     across ALL my accounts (loadAllSharedTemplates) — each account's chat
+//     routes through my manifest, so its keyword rules must cover every
+//     account's types (the legacy personal store no longer feeds it).
 
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { useAuth } from "../auth/AuthProvider";
 import { useActor, unwrap } from "../flows/useActor";
 import { useSheetKey } from "../flows/SheetKeyContext";
 import { encryptWithSheetKey } from "../crypto/devVetkd";
 import { syncManifestWithTypes } from "../openchat/syncManifest";
-import { useTemplates } from "./TemplatesContext";
+import type { TxnTemplate } from "./TemplatesContext";
 import {
   type SharedTemplate,
   type PairSlotPayload,
   encodePairSlot,
   mergePairTemplates,
   mergeDismissed,
-  reconcileSlot,
+  upsertMyTemplateSlot,
+  removeTemplateFromSlot,
   visibleTemplates,
-  combineTemplates,
 } from "./pairTemplates";
-import { decryptSlot, myMemberIndex } from "./pairTemplatesActor";
+import { decryptSlot, loadAllSharedTemplates, myMemberIndex } from "./pairTemplatesActor";
 
 export type PairTemplatesApi = {
   /** Visible merged shared templates (tombstones hidden), name-sorted. */
   shared: SharedTemplate[];
   /** Full merged view incl. legacy tombstones (rev bookkeeping). */
   merged: SharedTemplate[];
+  /** Ids present LIVE in MY slot — mine to Edit/Remove. Everything in
+   *  `shared` whose id is NOT here is partner-authored ("Edit a copy"). */
+  myIds: Set<string>;
   /** Cross-member dismissed pending-card messageIds (mine ∪ partner's). */
   dismissed: Set<string>;
   loading: boolean;
   error: string | null;
+  /** Create / edit / copy-on-write a type in THIS account (id absent → one
+   *  is generated). A same-id upsert of a partner's type lands MY override
+   *  in MY slot at the next rev — their slot is never touched. */
+  upsertMyTemplate: (t: Omit<TxnTemplate, "id"> & { id?: string }) => Promise<void>;
+  /** Remove a type from THIS account: drop the id from MY slot (absence,
+   *  not tombstone). Removing my override resurfaces the partner's
+   *  original; removing my own type removes it for both members. */
+  removeMyTemplate: (id: string) => Promise<void>;
   /** Dismiss a pending chat card for ALL members: append the messageId to
    *  MY slot's dismissed list and republish. */
   dismissCard: (messageId: string) => Promise<void>;
@@ -72,8 +85,9 @@ export type PairTemplatesApi = {
 const EMPTY_PAYLOAD: PairSlotPayload = { templates: [], dismissed: [] };
 
 /**
- * Per-pair shared templates. Pass the pair id and its ACTIVE sheet id (the
- * K_sheet everything is sealed under); either missing → inert empty API.
+ * Per-pair account-scoped templates. Pass the pair id and its ACTIVE sheet
+ * id (the K_sheet everything is sealed under); either missing → inert empty
+ * API.
  */
 export function usePairTemplates(
   pairId: string | undefined,
@@ -82,12 +96,11 @@ export function usePairTemplates(
   const { identity } = useAuth();
   const { actor } = useActor();
   const { get, unwrapFor } = useSheetKey();
-  const { templates: personal, loading: personalLoading } = useTemplates();
 
   const [mySlot, setMySlot] = useState<PairSlotPayload>(EMPTY_PAYLOAD);
   const [partnerSlot, setPartnerSlot] = useState<PairSlotPayload>(EMPTY_PAYLOAD);
-  // Only reconcile against a slot we actually LOADED — publishing before the
-  // fetch lands would clobber the real slot with an empty-based mirror.
+  // Only allow slot CRUD against a slot we actually LOADED — publishing
+  // before the fetch lands would clobber the real slot with an empty base.
   const [slotsLoaded, setSlotsLoaded] = useState(false);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -133,6 +146,10 @@ export function usePairTemplates(
     [mySlot, partnerSlot],
   );
   const shared = useMemo(() => visibleTemplates(merged), [merged]);
+  const myIds = useMemo(
+    () => new Set(mySlot.templates.filter((t) => !t.deleted).map((t) => t.id)),
+    [mySlot],
+  );
   const dismissed = useMemo(
     () => new Set(mergeDismissed(mySlot.dismissed, partnerSlot.dismissed)),
     [mySlot, partnerSlot],
@@ -149,33 +166,44 @@ export function usePairTemplates(
       await actor.set_pair_templates(pairId, Array.from(ciphertext), Array.from(iv));
       setMySlot(next);
       // Keep the OpenChat manifest in lock-step with what this member can
-      // now be routed to: personal + the NEW merged shared list.
-      const nextShared = visibleTemplates(
-        mergePairTemplates(next.templates, partnerSlot.templates),
-      );
-      void syncManifestWithTypes(identity, combineTemplates(personal, nextShared));
+      // now be routed to: the slot types of ALL my accounts (each account's
+      // chat routes through my manifest). Best-effort fire-and-forget — a
+      // slow/unreachable fold must never block a type save or a dismissal.
+      void (async () => {
+        try {
+          const all = await loadAllSharedTemplates(actor, unwrapFor);
+          await syncManifestWithTypes(identity, all);
+        } catch {
+          /* best-effort */
+        }
+      })();
     },
-    [pairId, sheetId, actor, get, unwrapFor, partnerSlot, personal, identity],
+    [pairId, sheetId, actor, get, unwrapFor, identity],
   );
 
-  // ── the mirror: my slot ≡ my personal templates ────────────────────
-  // Publishes only on real drift (reconcileSlot returns null otherwise) and
-  // never concurrently; on success setMySlot makes the next pass a no-op, on
-  // failure the deps are unchanged so the effect does not retry-loop.
-  const publishing = useRef(false);
-  useEffect(() => {
-    if (!slotsLoaded || personalLoading || publishing.current) return;
-    const next = reconcileSlot(personal, mySlot.templates, merged, Date.now());
-    if (!next) return;
-    publishing.current = true;
-    void publish({ templates: next, dismissed: mySlot.dismissed })
-      .catch((e) => setError((e as Error).message))
-      .finally(() => {
-        publishing.current = false;
+  const upsertMyTemplate = useCallback(
+    async (t: Omit<TxnTemplate, "id"> & { id?: string }) => {
+      if (!slotsLoaded) throw new Error("account types are still loading — try again");
+      const id =
+        t.id ?? `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+      await publish({
+        templates: upsertMyTemplateSlot(mySlot.templates, merged, { ...t, id }, Date.now()),
+        dismissed: mySlot.dismissed,
       });
-    // merged is derived from the two slots; personal/mySlot/partnerSlot cover it.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [slotsLoaded, personalLoading, personal, mySlot, partnerSlot]);
+    },
+    [slotsLoaded, mySlot, merged, publish],
+  );
+
+  const removeMyTemplate = useCallback(
+    async (id: string) => {
+      if (!slotsLoaded) throw new Error("account types are still loading — try again");
+      await publish({
+        templates: removeTemplateFromSlot(mySlot.templates, id),
+        dismissed: mySlot.dismissed,
+      });
+    },
+    [slotsLoaded, mySlot, publish],
+  );
 
   const dismissCard = useCallback(
     async (messageId: string) => {
@@ -190,9 +218,20 @@ export function usePairTemplates(
 
   const reload = useCallback(() => setReloadTick((t) => t + 1), []);
 
-  return { shared, merged, dismissed, loading, error, dismissCard, reload };
+  return {
+    shared,
+    merged,
+    myIds,
+    dismissed,
+    loading,
+    error,
+    upsertMyTemplate,
+    removeMyTemplate,
+    dismissCard,
+    reload,
+  };
 }
 
 // The non-hook helpers (rotateMyPairTemplates for the sheet-rotation step,
-// loadAllSharedTemplates for the settings-page manifest fold) live in
+// loadAllSharedTemplates for the manifest folds) live in
 // pairTemplatesActor.ts so Node-side callers never import React.

@@ -18,11 +18,11 @@ import {
   decodePairSlot,
   mergePairTemplates,
   mergeDismissed,
-  reconcileSlot,
   visibleTemplates,
   nextRev,
   upsertSlot,
-  combineTemplates,
+  upsertMyTemplateSlot,
+  removeTemplateFromSlot,
 } from "./pairTemplates";
 import type { TxnTemplate } from "./TemplatesContext";
 
@@ -256,54 +256,19 @@ describe("nextRev / upsertSlot", () => {
   });
 });
 
-// ── combineTemplates: personal + shared for the picker / manifest ────
-
-describe("combineTemplates", () => {
-  const personal = [
-    { id: "p1", name: "Personal only", direction: "credit" as const, txn_type: "iou" as const },
-    { id: "both", name: "Personal version", direction: "credit" as const, txn_type: "iou" as const },
-  ];
-  const shared = [
-    tpl({ id: "both", name: "Shared version", rev: 2 }),
-    tpl({ id: "s1", name: "Shared only", rev: 1 }),
-  ];
-
-  it("unions personal and shared; on an id collision the SHARED one wins (pair context)", () => {
-    const combined = combineTemplates(personal, shared);
-    expect(combined.map((t) => t.id).sort()).toEqual(["both", "p1", "s1"]);
-    expect(combined.find((t) => t.id === "both")?.name).toBe("Shared version");
-  });
-
-  it("keeps personal order first, then shared", () => {
-    const combined = combineTemplates(personal, shared);
-    expect(combined.map((t) => t.id)).toEqual(["p1", "both", "s1"]);
-  });
-
-  it("tombstoned shared envelopes are ignored (they don't shadow a personal template)", () => {
-    const combined = combineTemplates(personal, [
-      tpl({ id: "both", rev: 3, deleted: true }),
-    ]);
-    expect(combined.map((t) => t.id)).toEqual(["p1", "both"]);
-    expect(combined.find((t) => t.id === "both")?.name).toBe("Personal version");
-  });
-
-  it("works with an empty side", () => {
-    expect(combineTemplates([], shared).map((t) => t.id)).toEqual(["both", "s1"]);
-    expect(combineTemplates(personal, []).map((t) => t.id)).toEqual(["p1", "both"]);
-  });
-});
-
-// ── reconcileSlot: MY slot mirrors MY personal templates ─────────────
+// ── account-scoped slot CRUD ─────────────────────────────────────────
 //
-// Types are ALWAYS shared to the account: no Share toggle. An effect
-// compares the personal list to my current slot and publishes only when
-// they DRIFT — new/changed ids upserted at nextRev, ids no longer in my
-// personal list DROPPED (absence, not tombstone). null = no publish.
+// A type belongs to the ACCOUNT where it was created: the manager writes
+// it into the author's OWN slot on that pair — visible to both members of
+// that account ONLY. There is no user-global type and no personal mirror.
+// upsertMyTemplateSlot covers create, edit, AND copy-on-write of a
+// partner's type (same-id upsert at nextRev); removeTemplateFromSlot drops
+// the id (absence, not tombstone).
 
-describe("reconcileSlot (personal-list mirror)", () => {
+describe("upsertMyTemplateSlot (account-scoped create / edit / copy-on-write)", () => {
   const NOW = 7_777;
 
-  function personalTpl(over: Partial<TxnTemplate> & { id: string }): TxnTemplate {
+  function content(over: Partial<TxnTemplate> & { id: string }): TxnTemplate {
     return {
       name: `Type ${over.id}`,
       direction: "credit",
@@ -312,101 +277,96 @@ describe("reconcileSlot (personal-list mirror)", () => {
     };
   }
 
-  it("no drift → null (rev/updatedAt bookkeeping ignored in the comparison)", () => {
-    const p = personalTpl({ id: "resv", name: "Reservation", fee_percent: 20 });
-    const slot = [tpl({ id: "resv", name: "Reservation", fee_percent: 20, rev: 5, updatedAt: 42 })];
-    expect(reconcileSlot([p], slot, slot, NOW)).toBeNull();
+  it("new id → appended at rev 1 with updatedAt = now", () => {
+    const t = content({ id: "resv", name: "Reservation", fee_percent: 20 });
+    expect(upsertMyTemplateSlot([], [], t, NOW)).toEqual([
+      { ...t, rev: 1, updatedAt: NOW },
+    ]);
   });
 
-  it("no drift when a personal field is undefined and absent from the slot envelope (JSON round-trip)", () => {
-    const p = personalTpl({ id: "resv", currency: undefined, keywords: undefined });
-    const slot = [tpl({ id: "resv", rev: 2, updatedAt: 9 })];
-    expect(reconcileSlot([p], slot, slot, NOW)).toBeNull();
-  });
-
-  it("new personal type → upserted at rev 1 with updatedAt = now", () => {
-    const p = personalTpl({ id: "resv", name: "Reservation" });
-    const next = reconcileSlot([p], [], [], NOW);
-    expect(next).toEqual([{ ...p, rev: 1, updatedAt: NOW }]);
-  });
-
-  it("content edit → republished at the NEXT rev", () => {
+  it("existing id in my slot → replaced in place at the NEXT rev", () => {
     const cur = tpl({ id: "resv", name: "Reservation", rev: 3, updatedAt: 1 });
-    const p = personalTpl({ id: "resv", name: "Reservation (20%)" });
-    const next = reconcileSlot([p], [cur], [cur], NOW);
-    expect(next).toEqual([{ ...p, rev: 4, updatedAt: NOW }]);
+    const other = tpl({ id: "rent", name: "Rent", rev: 1, updatedAt: 1 });
+    const edit = content({ id: "resv", name: "Reservation (20%)" });
+    const next = upsertMyTemplateSlot([cur, other], [cur, other], edit, NOW);
+    expect(next).toEqual([{ ...edit, rev: 4, updatedAt: NOW }, other]);
   });
 
-  it("keyword-ONLY change counts as drift", () => {
-    const cur = tpl({ id: "resv", name: "Reservation", rev: 1, updatedAt: 1 });
-    const p = personalTpl({ id: "resv", name: "Reservation", keywords: ["deposit"] });
-    const next = reconcileSlot([p], [cur], [cur], NOW);
-    expect(next).not.toBeNull();
-    expect(next![0].rev).toBe(2);
-    expect(next![0].keywords).toEqual(["deposit"]);
-  });
-
-  it("type removed from personal → DROPPED from the slot (absence, not a tombstone)", () => {
-    const cur = tpl({ id: "resv", rev: 2, updatedAt: 1 });
-    const next = reconcileSlot([], [cur], [cur], NOW);
-    expect(next).toEqual([]); // publish an EMPTY slot — no deleted:true envelope
-  });
-
-  it("my override removed → the partner's original resurfaces via the merge", () => {
+  it("copy-on-write: a partner's rev-N type (absent from MY slot) lands in MY slot at rev N+1; inputs untouched", () => {
     const partnerOriginal = tpl({ id: "resv", name: "Reservation", rev: 1, updatedAt: 1 });
-    const myOverride = tpl({ id: "resv", name: "Reservation (25%)", rev: 2, updatedAt: 2 });
-    const merged = mergePairTemplates([myOverride], [partnerOriginal]);
-    // I deleted my personal copy → my slot drops the id entirely.
-    const next = reconcileSlot([], [myOverride], merged, NOW);
-    expect(next).toEqual([]);
-    // The partner's untouched slot now wins the merge again.
-    const after = visibleTemplates(mergePairTemplates(next!, [partnerOriginal]));
-    expect(after.map((t) => t.name)).toEqual(["Reservation"]);
+    const merged = mergePairTemplates([], [partnerOriginal]);
+    const myCopy = content({ id: "resv", name: "Reservation (25%)", fee_percent: 25 });
+    const mySlot = upsertMyTemplateSlot([], merged, myCopy, NOW);
+    expect(mySlot).toEqual([{ ...myCopy, rev: 2, updatedAt: NOW }]);
+    // my override wins the merge for BOTH members; the partner's slot object is untouched
+    const after = visibleTemplates(mergePairTemplates(mySlot, [partnerOriginal]));
+    expect(after.map((t) => t.name)).toEqual(["Reservation (25%)"]);
+    expect(partnerOriginal.rev).toBe(1);
   });
 
-  it("a tombstoned id still in my personal list is republished LIVE above the tombstone", () => {
-    const tomb = tpl({ id: "resv", rev: 3, updatedAt: 1, deleted: true });
-    const p = personalTpl({ id: "resv", name: "Reservation" });
-    const next = reconcileSlot([p], [tomb], [tomb], NOW);
-    expect(next).toEqual([{ ...p, rev: 4, updatedAt: NOW }]);
-    expect(next![0]).not.toHaveProperty("deleted");
-  });
-
-  it("a legacy tombstone for an id NOT in my personal list is dropped (one-time cleanup)", () => {
-    const tomb = tpl({ id: "old", rev: 2, updatedAt: 1, deleted: true });
-    expect(reconcileSlot([], [tomb], [tomb], NOW)).toEqual([]);
-  });
-
-  it("unchanged envelopes keep their rev/updatedAt; output follows personal order", () => {
-    const curA = tpl({ id: "a", name: "Alpha", rev: 4, updatedAt: 11 });
-    const pA = personalTpl({ id: "a", name: "Alpha" });
-    const pB = personalTpl({ id: "b", name: "Bravo" });
-    const next = reconcileSlot([pA, pB], [curA], [curA], NOW);
-    expect(next).toEqual([curA, { ...pB, rev: 1, updatedAt: NOW }]);
-  });
-
-  it("partner's higher-rev override does NOT make my identical slot drift (copy-on-write respected)", () => {
-    const mine = tpl({ id: "resv", name: "Reservation", rev: 1, updatedAt: 1 });
-    const partnerOverride = tpl({ id: "resv", name: "Reservation (25%)", rev: 2, updatedAt: 2 });
-    const merged = mergePairTemplates([mine], [partnerOverride]);
-    const p = personalTpl({ id: "resv", name: "Reservation" });
-    expect(reconcileSlot([p], [mine], merged, NOW)).toBeNull();
-  });
-
-  it("republish revs come from the MERGED view, landing ABOVE a partner override", () => {
+  it("revs come from the MERGED view, landing ABOVE a partner override", () => {
     const mine = tpl({ id: "resv", name: "Reservation", rev: 1, updatedAt: 1 });
     const partnerOverride = tpl({ id: "resv", name: "Reservation (25%)", rev: 4, updatedAt: 2 });
     const merged = mergePairTemplates([mine], [partnerOverride]);
-    const p = personalTpl({ id: "resv", name: "Reservation v3" });
-    const next = reconcileSlot([p], [mine], merged, NOW);
-    expect(next![0].rev).toBe(5);
+    const next = upsertMyTemplateSlot([mine], merged, content({ id: "resv", name: "v3" }), NOW);
+    expect(next[0].rev).toBe(5);
   });
 
-  it("is deterministic: identical inputs give deep-equal outputs", () => {
-    const cur = tpl({ id: "a", rev: 1, updatedAt: 1 });
-    const p = [personalTpl({ id: "a", name: "Renamed" }), personalTpl({ id: "b" })];
-    const r1 = reconcileSlot(p, [cur], [cur], NOW);
-    const r2 = reconcileSlot(p, [cur], [cur], NOW);
-    expect(r1).toEqual(r2);
+  it("strips stale bookkeeping (rev/updatedAt/deleted) off the input before enveloping", () => {
+    const stale = { ...tpl({ id: "resv", rev: 9, updatedAt: 5, deleted: true as const }) };
+    const next = upsertMyTemplateSlot([], [], stale, NOW);
+    expect(next).toHaveLength(1);
+    expect(next[0].rev).toBe(1); // computed from merged, not copied from the input
+    expect(next[0].updatedAt).toBe(NOW);
+    expect(next[0]).not.toHaveProperty("deleted");
+  });
+
+  it("a tombstoned id republishes LIVE above the tombstone", () => {
+    const tomb = tpl({ id: "resv", rev: 3, updatedAt: 1, deleted: true });
+    const t = content({ id: "resv", name: "Reservation" });
+    const next = upsertMyTemplateSlot([tomb], [tomb], t, NOW);
+    expect(next).toEqual([{ ...t, rev: 4, updatedAt: NOW }]);
+    expect(next[0]).not.toHaveProperty("deleted");
+  });
+
+  it("does not mutate the input slot", () => {
+    const slot = [tpl({ id: "a", rev: 1 })];
+    const copy = structuredClone(slot);
+    upsertMyTemplateSlot(slot, slot, content({ id: "a", name: "Renamed" }), NOW);
+    upsertMyTemplateSlot(slot, slot, content({ id: "b" }), NOW);
+    expect(slot).toEqual(copy);
+  });
+});
+
+describe("removeTemplateFromSlot (account-scoped delete)", () => {
+  it("drops the id — absence, not a tombstone; other entries keep order", () => {
+    const a = tpl({ id: "a", name: "Alpha" });
+    const b = tpl({ id: "b", name: "Bravo" });
+    const next = removeTemplateFromSlot([a, b], "a");
+    expect(next).toEqual([b]);
+    expect(next.some((t) => t.deleted)).toBe(false);
+  });
+
+  it("unknown id → same contents; never mutates the input", () => {
+    const slot = [tpl({ id: "a" })];
+    const copy = structuredClone(slot);
+    expect(removeTemplateFromSlot(slot, "nope")).toEqual(copy);
+    removeTemplateFromSlot(slot, "a");
+    expect(slot).toEqual(copy);
+  });
+
+  it("removing my override resurfaces the partner's original via the merge", () => {
+    const partnerOriginal = tpl({ id: "resv", name: "Reservation", rev: 1, updatedAt: 1 });
+    const myOverride = tpl({ id: "resv", name: "Reservation (25%)", rev: 2, updatedAt: 2 });
+    const next = removeTemplateFromSlot([myOverride], "resv");
+    expect(next).toEqual([]);
+    const after = visibleTemplates(mergePairTemplates(next, [partnerOriginal]));
+    expect(after.map((t) => t.name)).toEqual(["Reservation"]);
+  });
+
+  it("removing my own (un-overridden) type removes it for both members", () => {
+    const mine = tpl({ id: "resv", name: "Reservation" });
+    const next = removeTemplateFromSlot([mine], "resv");
+    expect(visibleTemplates(mergePairTemplates(next, []))).toEqual([]);
   });
 });

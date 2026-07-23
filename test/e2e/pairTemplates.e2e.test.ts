@@ -1,26 +1,31 @@
-// E2E for SHARED transaction types per account + cross-member dismissals.
+// E2E for ACCOUNT-SCOPED transaction types + cross-member dismissals.
 //
-// The design under test (v2): types are ALWAYS shared to the account — each
-// member's encrypted slot on the Pair (templates_a_* / templates_b_*,
-// sealed under the active sheet's K_sheet via set_pair_templates) is a
-// MIRROR of their personal template list, computed by the pure
-// reconcileSlot and published only on drift. The encoded blob is a
-// versioned v2 envelope {v:2, templates, dismissed} — `dismissed` carries
-// the OpenChat messageIds of "✕ dismissed" pending cards so a dismissal
-// syncs to ALL members; legacy v1 bare-array blobs still decode. Both
-// members read BOTH slots through the existing get_pair and merge
-// client-side (src/features/templates/pairTemplates.ts). The canister is
-// untouched: the blob stays opaque bytes under the same 64 000-byte guard.
+// The design under test (v3, account-scoped): a transaction type belongs to
+// the ACCOUNT (pair) where it was created. The type manager writes it into
+// the author's OWN encrypted slot on that Pair (templates_a_* /
+// templates_b_*, sealed under the active sheet's K_sheet via
+// set_pair_templates) through the pure slot CRUD (upsertMyTemplateSlot /
+// removeTemplateFromSlot — the same core usePairTemplates publishes with).
+// It is visible to BOTH members of that account, in that account ONLY:
+// there is no user-global type, no personal mirror, and nothing follows the
+// author into their other accounts. The encoded blob is a versioned v2
+// envelope {v:2, templates, dismissed} — `dismissed` carries the OpenChat
+// messageIds of "✕ dismissed" pending cards so a dismissal syncs to ALL
+// members; legacy v1 bare-array blobs still decode. Both members read BOTH
+// slots through the existing get_pair and merge client-side
+// (src/features/templates/pairTemplates.ts). The canister is untouched: the
+// blob stays opaque bytes under the same 64 000-byte guard.
 //
-// The headline case: A SAVES a personal "Reservation" type (no share
-// action exists); the mirror publishes it; B — using only B's OWN identity
-// and B's OWN wrapped sheet key (never A's self-derived user key) — sees
-// it. Runs against the LIVE local replica (:8080); skips cleanly when it's
-// down (env.ts).
+// The headline cases: A creates a type on pair A↔B and B — using only B's
+// OWN identity and B's OWN wrapped sheet key — sees it there; and the type
+// does NOT appear in A's OTHER pair A↔C (the isolation contract). Runs
+// against the LIVE local replica (:8080); skips cleanly when it's down
+// (env.ts).
 
 import { it, expect } from "vitest";
 import { describeE2E, freshIdentity, iouActor, optVal } from "./env";
 import {
+  deriveUserKey,
   deriveUserKeypair,
   newSheetKey,
   wrapSheetKey,
@@ -36,7 +41,8 @@ import {
   decodePairSlot,
   mergePairTemplates,
   mergeDismissed,
-  reconcileSlot,
+  upsertMyTemplateSlot,
+  removeTemplateFromSlot,
   visibleTemplates,
   nextRev,
 } from "../../src/features/templates/pairTemplates";
@@ -79,9 +85,8 @@ function pubkeyOf(m: Awaited<ReturnType<typeof member>>) {
   return Array.from(new TextEncoder().encode(m.kp.publicKeyB64));
 }
 
-/** A pair with two real members who both hold K (via their OWN wrapped slots). */
-async function pairedAccount() {
-  const A = await member();
+/** A pair whose creator is `A` (fresh unless given), joined by a fresh B. */
+async function pairedAccountFor(A: Awaited<ReturnType<typeof member>>) {
   const { pairId, sheetId, K } = await soloAccount(A);
   const B = await member();
   await B.actor.accept_invite(
@@ -90,6 +95,11 @@ async function pairedAccount() {
     pubkeyOf(B),
   );
   return { A, B, pairId, sheetId, K };
+}
+
+/** A pair with two real members who both hold K (via their OWN wrapped slots). */
+async function pairedAccount() {
+  return pairedAccountFor(await member());
 }
 
 /** Encrypt + publish a member's slot (v2 payload) under K_sheet. */
@@ -130,9 +140,19 @@ async function readPairSlots(
   };
 }
 
-// The PERSONAL template (no rev/updatedAt bookkeeping — that's the mirror's
-// job) and its published envelope shape.
-const reservationPersonal: TxnTemplate = {
+/** The merged visible view a member sees on a pair. */
+async function sharedViewOf(
+  m: Awaited<ReturnType<typeof member>>,
+  pairId: string,
+  K: Uint8Array,
+): Promise<SharedTemplate[]> {
+  const { a, b } = await readPairSlots(m, pairId, K);
+  return visibleTemplates(mergePairTemplates(a.templates, b.templates));
+}
+
+// The template CONTENT (no rev/updatedAt bookkeeping — enveloping is the
+// slot CRUD's job) and its published envelope shape.
+const reservationContent: TxnTemplate = {
   id: "resv-1",
   name: "Reservation",
   direction: "credit",
@@ -144,22 +164,22 @@ const reservationPersonal: TxnTemplate = {
 };
 
 const reservation: SharedTemplate = {
-  ...reservationPersonal,
+  ...reservationContent,
   rev: 1,
   updatedAt: Date.now(),
 };
 
-describeE2E("IOU shared transaction types per account (pair template slots)", () => {
-  // The headline path under MIRROR semantics: saving a personal type IS the
-  // share — A's reconcile publishes it; B sees it with B's own key.
-  it("mirror: A saves a personal type; the reconciled slot publishes; B decrypts it via get_pair + B's OWN wrapped K_sheet", async () => {
+describeE2E("IOU account-scoped transaction types (pair template slots)", () => {
+  // (a) The headline create path: the manager's upsert publishes into MY
+  // slot on THIS pair; the partner sees it with their own key.
+  it("create: A adds a type on pair A↔B via upsertMyTemplateSlot; B decrypts it via get_pair + B's OWN wrapped K_sheet", async () => {
     const { A, B, pairId, sheetId, K } = await pairedAccount();
 
-    // What the reconcile effect does after addTemplate: personal vs empty slot.
-    const slot = reconcileSlot([reservationPersonal], [], [], Date.now());
-    expect(slot).not.toBeNull(); // drift: brand-new type
-    expect(slot![0].rev).toBe(1);
-    await publishSlot(A, pairId, K, slot!);
+    // What upsertMyTemplate does after the manager's Save: envelope the
+    // content at nextRev(merged) into MY slot and publish.
+    const slot = upsertMyTemplateSlot([], [], reservationContent, Date.now());
+    expect(slot[0].rev).toBe(1);
+    await publishSlot(A, pairId, K, slot);
 
     // B's view: B's own identity, B's own wrapped key — never A's user key.
     const K_B = await unwrapSheetKey(
@@ -167,33 +187,145 @@ describeE2E("IOU shared transaction types per account (pair template slots)", ()
       B.kp.privateKey,
       B.kp.publicKey,
     );
-    const { a, b } = await readPairSlots(B, pairId, K_B);
-    const shared = visibleTemplates(mergePairTemplates(a.templates, b.templates));
-
+    const shared = await sharedViewOf(B, pairId, K_B);
     expect(shared).toHaveLength(1);
     expect(shared[0].name).toBe("Reservation");
     expect(shared[0].fee_percent).toBe(20);
     expect(shared[0].fee_fixed_minor).toBe(100_000);
     expect(shared[0].keywords).toEqual(["reservation", "deposit"]);
-
-    // And a second reconcile pass against the published slot is a NO-OP —
-    // the mirror only publishes on real drift (no publish loop).
-    expect(reconcileSlot([reservationPersonal], slot!, slot!, Date.now())).toBeNull();
   });
 
-  it("mirror: deleting the personal type publishes a slot WITHOUT it (absence, not tombstone) — it disappears for both members", async () => {
+  // (b) THE new assertion: account scoping. The create above touches ONE
+  // pair record; the author's other accounts never see the type.
+  it("ISOLATION: a type created on pair A↔B does NOT appear in A's other pair A↔C — C's view is empty and A's slot there is untouched", async () => {
+    const A = await member();
+    const { pairId: pairAB, K: K_AB } = await pairedAccountFor(A);
+    const { B: C, pairId: pairAC, sheetId: sheetAC, K: K_AC } = await pairedAccountFor(A);
+
+    // A creates the type in account A↔B ONLY (the manager is account-scoped:
+    // it publishes into the pair it was opened on — nothing else).
+    await publishSlot(A, pairAB, K_AB, upsertMyTemplateSlot([], [], reservationContent, Date.now()));
+
+    // It IS visible in A↔B…
+    expect((await sharedViewOf(A, pairAB, K_AB)).map((t) => t.name)).toEqual(["Reservation"]);
+
+    // …and pair A↔C is COMPLETELY untouched: A's slot there was never
+    // written (no ciphertext at all), so C's merged view is empty.
+    const pairAC_rec = optVal(await C.actor.get_pair(pairAC)) as any;
+    expect(optVal(pairAC_rec.templates_a_enc)).toBeNull(); // A's A↔C slot never written
+    expect(optVal(pairAC_rec.templates_b_enc)).toBeNull();
+
+    // C's own view through C's own wrapped key: nothing.
+    const K_C = await unwrapSheetKey(
+      u8(optVal(await C.actor.get_sheet_wrapped_key(sheetAC))!),
+      C.kp.privateKey,
+      C.kp.publicKey,
+    );
+    expect(await sharedViewOf(C, pairAC, K_C)).toEqual([]);
+  });
+
+  // (c) Copy-on-write via the SAME upsert: editing a partner's type is a
+  // same-id upsert into MY slot; removing my override resurfaces theirs.
+  it("copy-on-write: B edits A's type (same-id upsert) and the override wins for both; removing B's override resurfaces A's original", async () => {
     const { A, B, pairId, K } = await pairedAccount();
-    const slot = reconcileSlot([reservationPersonal], [], [], Date.now())!;
+    await publishSlot(A, pairId, K, upsertMyTemplateSlot([], [], reservationContent, Date.now()));
+    const aBytesBefore = optVal((optVal(await A.actor.get_pair(pairId)) as any).templates_a_enc)!;
+
+    // B "edits a copy": the manager calls upsertMyTemplate under the SAME id
+    // — enveloped at nextRev(merged), it lands in B's slot as an override.
+    const slots0 = await readPairSlots(B, pairId, K);
+    const merged0 = mergePairTemplates(slots0.a.templates, slots0.b.templates);
+    const bSlot = upsertMyTemplateSlot(
+      slots0.b.templates,
+      merged0,
+      { ...reservationContent, name: "Reservation (25%)", fee_percent: 25 },
+      Date.now(),
+    );
+    expect(bSlot[0].rev).toBe(2); // above A's rev-1 original
+    await publishSlot(B, pairId, K, bSlot);
+
+    const shared1 = await sharedViewOf(A, pairId, K);
+    expect(shared1).toHaveLength(1);
+    expect(shared1[0].name).toBe("Reservation (25%)");
+    expect(shared1[0].rev).toBe(2);
+    // A's slot bytes untouched by B's override
+    expect(Array.from(u8(optVal((optVal(await A.actor.get_pair(pairId)) as any).templates_a_enc)!))).toEqual(
+      Array.from(u8(aBytesBefore)),
+    );
+
+    // B removes the override (drop the id — absence, not tombstone) → A's
+    // original (still in A's untouched slot) resurfaces for both members.
+    await publishSlot(B, pairId, K, removeTemplateFromSlot(bSlot, reservationContent.id));
+    const shared2 = await sharedViewOf(A, pairId, K);
+    expect(shared2).toHaveLength(1);
+    expect(shared2[0].name).toBe("Reservation");
+    expect(shared2[0].rev).toBe(1);
+  });
+
+  // (d) Deleting my own type removes it for BOTH members.
+  it("delete: A removes their own type — the id is dropped from A's slot (absence, not tombstone) and it disappears for both members", async () => {
+    const { A, B, pairId, K } = await pairedAccount();
+    const slot = upsertMyTemplateSlot([], [], reservationContent, Date.now());
     await publishSlot(A, pairId, K, slot);
 
-    // A deletes the personal type → the mirror reconciles to an EMPTY slot.
-    const next = reconcileSlot([], slot, slot, Date.now());
-    expect(next).toEqual([]); // drop, no deleted:true envelope
-    await publishSlot(A, pairId, K, next!);
+    await publishSlot(A, pairId, K, removeTemplateFromSlot(slot, reservationContent.id));
 
     const { a, b } = await readPairSlots(B, pairId, K);
     expect(a.templates).toEqual([]); // truly absent — not a tombstone
     expect(visibleTemplates(mergePairTemplates(a.templates, b.templates))).toEqual([]);
+  });
+
+  // (e) Type CRUD and the dismissed list share the slot payload — every
+  // publish carries the CURRENT dismissed list forward unchanged.
+  it("dismissed list survives type CRUD publishes (upsert then remove both preserve it)", async () => {
+    const { A, pairId, K } = await pairedAccount();
+    const dismissed = ["msg-11", "msg-22"];
+    await publishSlot(A, pairId, K, [], dismissed);
+
+    // Upsert a type — the hook publishes {templates: next, dismissed: mine}.
+    let mine = (await readPairSlots(A, pairId, K)).a;
+    const upserted = upsertMyTemplateSlot(mine.templates, mine.templates, reservationContent, Date.now());
+    await publishSlot(A, pairId, K, upserted, mine.dismissed);
+    mine = (await readPairSlots(A, pairId, K)).a;
+    expect(mine.templates.map((t) => t.name)).toEqual(["Reservation"]);
+    expect(mine.dismissed).toEqual(dismissed);
+
+    // Remove the type — dismissed still rides along untouched.
+    await publishSlot(A, pairId, K, removeTemplateFromSlot(mine.templates, reservationContent.id), mine.dismissed);
+    mine = (await readPairSlots(A, pairId, K)).a;
+    expect(mine.templates).toEqual([]);
+    expect(mine.dismissed).toEqual(dismissed);
+  });
+
+  // (f) Legacy migration: a pre-rework PERSONAL type (user-level blob) is
+  // added to an account via the same upsert, KEEPING its personal id so a
+  // partner's same-id copy merges sanely.
+  it("legacy migration: a personal-store type 'added to this account' lands in the slot under its original id; B sees it", async () => {
+    const { A, B, pairId, K } = await pairedAccount();
+
+    // The pre-rework personal store: one AES-GCM blob under the self-derived
+    // user key on A's UserRecord (exactly what TemplatesContext reads).
+    const K_user = await deriveUserKey(A.principal);
+    const personal: TxnTemplate[] = [{ ...reservationContent, id: "legacy-resv" }];
+    const enc = await encryptWithSheetKey(K_user, new TextEncoder().encode(JSON.stringify(personal)));
+    await A.actor.set_user_templates(Array.from(enc.ciphertext), Array.from(enc.iv));
+
+    // "Legacy personal types → Add to this account": decrypt the store, then
+    // upsert the content into THIS pair's slot keeping the personal id.
+    const user = optVal(await A.actor.get_my_user()) as any;
+    const bytes = await decryptWithSheetKey(K_user, u8(optVal(user.templates_iv)!), u8(optVal(user.templates_enc)!));
+    const loaded = JSON.parse(new TextDecoder().decode(bytes)) as TxnTemplate[];
+    expect(loaded.map((t) => t.id)).toEqual(["legacy-resv"]);
+
+    const slots = await readPairSlots(A, pairId, K);
+    const merged = mergePairTemplates(slots.a.templates, slots.b.templates);
+    await publishSlot(A, pairId, K, upsertMyTemplateSlot(slots.a.templates, merged, loaded[0], Date.now()));
+
+    const shared = await sharedViewOf(B, pairId, K);
+    expect(shared).toHaveLength(1);
+    expect(shared[0].id).toBe("legacy-resv"); // id preserved for sane same-id merges
+    expect(shared[0].name).toBe("Reservation");
+    expect(shared[0].rev).toBe(1);
   });
 
   it("slot routing: B's publish fills the b-slot and leaves A's a-slot byte-identical", async () => {
@@ -216,55 +348,8 @@ describeE2E("IOU shared transaction types per account (pair template slots)", ()
     expect(Array.from(u8(optVal(pair.templates_a_enc)!))).toEqual(Array.from(u8(before))); // a untouched
 
     // and the merged view (either member) now shows BOTH types
-    const a = await readSlot(K, pair.templates_a_enc, pair.templates_a_iv);
-    const b = await readSlot(K, pair.templates_b_enc, pair.templates_b_iv);
-    const names = visibleTemplates(mergePairTemplates(a.templates, b.templates)).map(
-      (t) => t.name,
-    );
+    const names = (await sharedViewOf(A, pairId, K)).map((t) => t.name);
     expect(names).toEqual(["Rent", "Reservation"]);
-  });
-
-  it("mirror copy-on-write: B's personal copy (same id) overrides A's type; deleting B's copy resurfaces A's original", async () => {
-    const { A, B, pairId, K } = await pairedAccount();
-    await publishSlot(A, pairId, K, reconcileSlot([reservationPersonal], [], [], Date.now())!);
-    const aBytesBefore = optVal((optVal(await A.actor.get_pair(pairId)) as any).templates_a_enc)!;
-
-    // B "edits a copy": the edited copy joins B's PERSONAL list under the
-    // SAME id; B's mirror publishes it as a same-id override at nextRev.
-    const slots0 = await readPairSlots(B, pairId, K);
-    const merged0 = mergePairTemplates(slots0.a.templates, slots0.b.templates);
-    const personalCopy: TxnTemplate = {
-      ...reservationPersonal,
-      name: "Reservation (25%)",
-      fee_percent: 25,
-    };
-    const bSlot = reconcileSlot([personalCopy], slots0.b.templates, merged0, Date.now());
-    expect(bSlot).not.toBeNull();
-    expect(bSlot![0].rev).toBe(2); // above A's rev-1 original
-    await publishSlot(B, pairId, K, bSlot!);
-
-    const slots1 = await readPairSlots(A, pairId, K);
-    const shared1 = visibleTemplates(mergePairTemplates(slots1.a.templates, slots1.b.templates));
-    expect(shared1).toHaveLength(1);
-    expect(shared1[0].name).toBe("Reservation (25%)");
-    expect(shared1[0].rev).toBe(2);
-    // A's slot bytes untouched by B's override
-    expect(Array.from(u8(optVal((optVal(await A.actor.get_pair(pairId)) as any).templates_a_enc)!))).toEqual(
-      Array.from(u8(aBytesBefore)),
-    );
-
-    // B deletes the personal copy → B's mirror DROPS the id → A's original
-    // (still in A's untouched slot) resurfaces for both members.
-    const merged1 = mergePairTemplates(slots1.a.templates, slots1.b.templates);
-    const bSlot2 = reconcileSlot([], bSlot!, merged1, Date.now());
-    expect(bSlot2).toEqual([]);
-    await publishSlot(B, pairId, K, bSlot2!);
-
-    const slots2 = await readPairSlots(A, pairId, K);
-    const shared2 = visibleTemplates(mergePairTemplates(slots2.a.templates, slots2.b.templates));
-    expect(shared2).toHaveLength(1);
-    expect(shared2[0].name).toBe("Reservation");
-    expect(shared2[0].rev).toBe(1);
   });
 
   it("legacy tombstone interop: an old-client deleted:true envelope still hides the type and keeps rev bookkeeping", async () => {
@@ -396,10 +481,7 @@ describeE2E("IOU shared transaction types per account (pair template slots)", ()
 
     // Self-heal: B republishes under K2 → both types visible again.
     await publishSlot(B, pairId, K2, [bTemplate]);
-    const { a: a2, b: b2 } = await readPairSlots(A, pairId, K2);
-    const names = visibleTemplates(mergePairTemplates(a2.templates, b2.templates)).map(
-      (t) => t.name,
-    );
+    const names = (await sharedViewOf(A, pairId, K2)).map((t) => t.name);
     expect(names).toEqual(["Rent", "Reservation"]);
   });
 

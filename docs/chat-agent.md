@@ -218,7 +218,8 @@ card across members:
 - **Dismiss syncs to ALL members (supersedes the earlier per-user design).** "✕" appends the card's
   `context.messageId` to the dismisser's own encrypted pair slot — the slot payload is a versioned
   v2 envelope `{v:2, templates, dismissed}` (`pairTemplates.ts`; legacy bare-array v1 blobs still
-  decode) — via the same `set_pair_templates` publish the template mirror uses. Every member's
+  decode) — via the same `set_pair_templates` publish the account-scoped type CRUD uses (every
+  publish carries the current dismissed list forward, so type edits never drop a dismissal). Every member's
   `visibleInbox` filters against the MERGED dismissed union of both slots (de-duped, capped at 300
   ids with the oldest pruned — inbox envelopes expire server-side anyway), so the partner's card
   disappears on their next pair-slot load (also triggered when the tab regains visibility). The
@@ -239,19 +240,28 @@ card across members:
   `per_user_keys=false` debugging), the auto-derived inbox readout, and the legacy off-chain relay
   cards — live behind a collapsed **Advanced** disclosure (auto-expanded when a relay config already
   exists). The "set up relay first" placeholder card is gone.
-- **Shared account types**: transaction types (templates) are **always shared to the account** —
-  there is NO Share toggle. Each member gets an encrypted slot on the Pair (`set_pair_templates`,
-  additive `opt` fields, SCHEMA_VERSION 7) sealed under **K_sheet** (the `set_member_name`
-  pattern), so the partner decrypts with their own wrapped sheet key — no key sharing, canister
-  stays ciphertext-blind. A member's slot is a **mirror of their personal template list**: a
-  reconcile effect (`reconcileSlot`, `src/features/templates/pairTemplates.ts`) publishes only on
-  real drift — new/changed ids upserted at the next rev, ids deleted from the personal list DROPPED
-  from the slot (absence, not tombstone, so a removed copy-on-write override resurfaces the
-  partner's original; legacy tombstones still decode + hide). Client merge is pure + rev-based:
-  higher rev wins, deterministic + commutative ties; "Edit a copy" of a partner type adds the copy
-  to MY personal list under the same id (the mirror publishes it as my override). Partner-authored
-  types show a "· partner" badge, fold into the OpenChat manifest, and closing a sheet re-seals
-  slots (the full v2 payload) under the rotated key.
+- **Account-scoped types** (supersedes the earlier "personal types mirrored to every pair"
+  design): a transaction type **belongs to the account (pair) it was created in** — visible to
+  BOTH members of that account, in that account ONLY. It does not appear in the author's other
+  accounts and there is no user-global type that follows you across accounts. Each member gets an
+  encrypted slot on the Pair (`set_pair_templates`, additive `opt` fields, SCHEMA_VERSION 7)
+  sealed under **K_sheet** (the `set_member_name` pattern), so the partner decrypts with their own
+  wrapped sheet key — no key sharing, canister stays ciphertext-blind. The sheet's type manager
+  writes ONLY that pair's slot via the pure slot CRUD
+  (`src/features/templates/pairTemplates.ts`): `upsertMyTemplateSlot` envelopes the content at the
+  next merged rev into MY slot (ONE code path for create, edit, AND "Edit a copy" of a partner's
+  type — a same-id upsert is a copy-on-write override; their slot is untouched);
+  `removeTemplateFromSlot` drops the id (absence, not tombstone — removing my override resurfaces
+  the partner's original, removing my own type removes it for both members; legacy tombstones
+  still decode + hide). Client merge is pure + rev-based: higher rev wins, deterministic +
+  commutative ties. Partner-authored types (id not live in MY slot) show a "· partner" badge, and
+  closing a sheet re-seals slots (the full v2 payload) under the rotated key. The **OpenChat
+  manifest** folds the slot types of ALL the user's accounts (`loadAllSharedTemplates` — each
+  account's chat routes through the user's own manifest) on Connect, after every type publish, and
+  once on app load (`ManifestTypesSync`); the personal store feeds nothing. The pre-rework
+  **user-level personal store** (`TemplatesContext`) survives read-only as a migration source: the
+  manager lists "Legacy personal types" with **Add to this account** (an upsert that KEEPS the
+  personal id, so partners' same-id copies merge instead of duplicating) and a legacy Remove.
 
 #### The OpenChat connector — real contract (2026-06-24)
 

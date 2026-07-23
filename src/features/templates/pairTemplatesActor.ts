@@ -96,10 +96,13 @@ export async function rotateMyPairTemplates(
 
 /**
  * All shared templates across every account the user is in (merged view per
- * pair, then deduped by id, first pair wins). Used by ActionInboxSettings to
- * fold partner-authored types into the OpenChat manifest on Connect.
- * Best-effort per pair: an account whose sheet key can't currently be
- * unwrapped is skipped, never fatal.
+ * pair, then deduped by id, first pair wins). THE source for every OpenChat
+ * manifest fold — each account's chat routes through the user's manifest,
+ * so its keyword rules must cover all accounts' types (types are
+ * account-scoped; the legacy personal store feeds nothing). Callers:
+ * ActionInboxSettings (Connect), ManifestTypesSync (app load), and
+ * usePairTemplates' publish (type CRUD). Best-effort per pair: an account
+ * whose sheet key can't currently be unwrapped is skipped, never fatal.
  */
 export async function loadAllSharedTemplates(
   actor: any,

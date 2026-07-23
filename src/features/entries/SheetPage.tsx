@@ -34,9 +34,7 @@ import { useToasts } from "../ui/Toasts";
 import { buildInviteLink } from "../flows/inviteLink";
 import { isProdVetkd } from "../crypto/devVetkd";
 import { usePreferences } from "../settings/usePreferences";
-import { useTemplates } from "../templates/TemplatesContext";
 import { usePairTemplates } from "../templates/PairTemplatesContext";
-import { combineTemplates } from "../templates/pairTemplates";
 import { TemplatesManager } from "../templates/TemplatesManager";
 import { templateToInitial } from "../templates/templateBase";
 import { parseDraft, isDuplicateDraft, extractTs } from "./draft";
@@ -216,19 +214,14 @@ export function SheetPage() {
     createdByMe?: boolean;
   }>(null);
   const [sortKey, setSortKey] = useState<SortKey>("newest");
-  const { templates } = useTemplates();
-  // v1.12.0: SHARED types for this account (per-member encrypted pair slots,
-  // merged client-side) AUGMENT the personal list everywhere templates are
-  // consumed on this page (picker + chat-draft routing).
+  // Types are ACCOUNT-SCOPED: everything templates feed on this page
+  // (picker + chat-draft routing) comes from THIS pair's merged slot view —
+  // the legacy personal store feeds nothing here.
   const pairTemplates = usePairTemplates(sheet?.pair_id as string | undefined, sheetId);
-  const allTemplates = combineTemplates(templates, pairTemplates.shared);
-  // Everything of MINE is shared with the account automatically (the pair
-  // slot mirrors my personal list), so only PARTNER-authored types (not in
-  // my personal store) get a badge.
+  const allTemplates = pairTemplates.shared;
+  // PARTNER-authored types (id not live in MY slot) get a badge.
   const partnerSharedIds = new Set(
-    pairTemplates.shared
-      .filter((s) => !templates.some((p) => p.id === s.id))
-      .map((s) => s.id),
+    pairTemplates.shared.filter((s) => !pairTemplates.myIds.has(s.id)).map((s) => s.id),
   );
   const [addOpen, setAddOpen] = useState(false);
   const [typesOpen, setTypesOpen] = useState(false);
@@ -706,9 +699,10 @@ export function SheetPage() {
           return !isImportedIntoSheet(entries, mid, draftId);
         }),
       ),
-    // resolveTemplateBase is re-created each render but only reads `templates` — dep on that.
+    // resolveTemplateBase is re-created each render but only reads the account's
+    // shared types — dep on those.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [inboxPending, chatLinks, sheetId, entries, templates, pairTemplates.dismissed],
+    [inboxPending, chatLinks, sheetId, entries, pairTemplates.shared, pairTemplates.dismissed],
   );
 
   async function onSubmit(p: EntryPayload) {

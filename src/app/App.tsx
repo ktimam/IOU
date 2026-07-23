@@ -17,6 +17,7 @@ import { PreferencesProvider } from "../features/settings/usePreferences";
 import { SettingsPage } from "../features/settings/SettingsPage";
 import { TemplatesProvider } from "../features/templates/TemplatesContext";
 import { ConsumerKeypairSync } from "../features/openchat/ConsumerKeypairSync";
+import { ManifestTypesSync } from "../features/openchat/ManifestTypesSync";
 import { EmbeddedBanner } from "../features/openchat/EmbeddedBanner";
 import { LinkChatPage } from "../features/openchat/LinkChatPage";
 import { AcceptInvitePage } from "../features/invite/AcceptInvitePage";
@@ -40,6 +41,10 @@ export function App() {
             <ErrorBoundary>
             <DeepLinks />
             <ConsumerKeypairSync />
+            {/* App-load OpenChat manifest re-sync from ACCOUNT-SCOPED types
+                (needs the sheet-key unwrapper, so it lives inside
+                SheetKeyProvider — see ManifestTypesSync). */}
+            <ManifestTypesSync />
             <EmbeddedBanner />
             <Routes>
               <Route path="/" element={<Hello />} />

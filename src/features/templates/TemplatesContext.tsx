@@ -1,7 +1,15 @@
-// User-level transaction templates ("Reservation" = 20% + 1000 EGP fixed,
-// etc.). Stored as one AES-GCM blob on the caller's UserRecord, encrypted
-// under a self-derived user key, so they're available across every sheet
-// and account. Decrypted into memory here and exposed via useTemplates().
+// LEGACY user-level transaction templates — a READ-ONLY migration source.
+//
+// Before types became ACCOUNT-SCOPED (owned by the pair they were created
+// in — see pairTemplates.ts), templates were user-global: one AES-GCM blob
+// on the caller's UserRecord, encrypted under a self-derived user key.
+// This provider still decrypts that blob so TemplatesManager can offer
+// "Add to this account" on each pre-rework type (an upsert into the pair
+// slot that KEEPS the personal id, so partners' same-id copies merge
+// sanely) — plus a legacy Remove to clear migrated entries. Nothing else
+// reads this store: pickers, chat-draft routing, and the OpenChat manifest
+// are all sourced from the account slots now, and no new personal
+// templates are ever written.
 
 import {
   createContext,
@@ -20,7 +28,6 @@ import {
 } from "../crypto/devVetkd";
 import { unwrap } from "../flows/useActor";
 import type { Direction, TxnType } from "../entries/types";
-import { syncManifestWithTypes } from "../openchat/syncManifest";
 
 // How a template portion's due date is anchored, relative to the
 // transaction date (so the template stays reusable):
@@ -58,15 +65,13 @@ export type TxnTemplate = {
 };
 
 type Ctx = {
+  /** LEGACY pre-rework personal types (decrypted read-only). */
   templates: TxnTemplate[];
   loading: boolean;
   error: string | null;
-  /** Add a template. An explicit `id` (normally absent — one is generated)
-   *  lets "Edit a copy" of a partner-shared type store MY personal copy
-   *  under the SAME id, which the pair-slot mirror then publishes as my
-   *  copy-on-write override. */
-  addTemplate: (t: Omit<TxnTemplate, "id"> & { id?: string }) => Promise<void>;
-  updateTemplate: (t: TxnTemplate) => Promise<void>;
+  /** Remove a LEGACY personal type (the only remaining write — clears a
+   *  migrated/stale entry from the legacy list; account slots are never
+   *  touched by this). */
   removeTemplate: (id: string) => Promise<void>;
 };
 
@@ -112,10 +117,6 @@ export function TemplatesProvider({ children }: { children: ReactNode }) {
       } finally {
         if (!cancelled) setLoading(false);
       }
-      // Re-sync the manifest with the just-loaded types ON APP LOAD: a fresh deploy re-registers the
-      // BASE manifest (no template rules), so without this a participating user's existing types stay
-      // unmapped until their next edit. No-op unless the user participates in OpenChat.
-      if (!cancelled) void syncManifestWithTypes(identity, loaded);
     })();
     return () => {
       cancelled = true;
@@ -136,48 +137,20 @@ export function TemplatesProvider({ children }: { children: ReactNode }) {
     [identity],
   );
 
-  const addTemplate = useCallback(
-    async (t: Omit<TxnTemplate, "id"> & { id?: string }) => {
-      const id =
-        t.id ?? `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
-      const next = [...templates.filter((x) => x.id !== id), { ...t, id }];
-      await persist(next);
-      setTemplates(next);
-      // Keep the registered OpenChat manifest in lock-step with the user's types (no-op unless the
-      // user participates in OpenChat — connected via the 6-digit Connect or explicitly linked).
-      void syncManifestWithTypes(identity, next);
-    },
-    [templates, persist, identity],
-  );
-
-  const updateTemplate = useCallback(
-    async (t: TxnTemplate) => {
-      const next = templates.map((x) => (x.id === t.id ? t : x));
-      await persist(next);
-      setTemplates(next);
-      // Keep the registered OpenChat manifest in lock-step with the user's types (no-op unless the
-      // user participates in OpenChat — connected via the 6-digit Connect or explicitly linked).
-      void syncManifestWithTypes(identity, next);
-    },
-    [templates, persist, identity],
-  );
-
   const removeTemplate = useCallback(
     async (id: string) => {
       const next = templates.filter((t) => t.id !== id);
       await persist(next);
       setTemplates(next);
-      // Keep the registered OpenChat manifest in lock-step with the user's types (no-op unless the
-      // user participates in OpenChat — connected via the 6-digit Connect or explicitly linked).
-      void syncManifestWithTypes(identity, next);
+      // No manifest sync: legacy personal types no longer feed the OpenChat
+      // manifest — it's sourced from the account slots (ManifestTypesSync,
+      // the pair-slot publish path).
     },
-    [templates, persist, identity],
+    [templates, persist],
   );
 
   return (
-    <TemplatesContext.Provider
-      value={{ templates, loading, error, addTemplate, updateTemplate, removeTemplate }}
-    >
+    <TemplatesContext.Provider value={{ templates, loading, error, removeTemplate }}>
       {children}
     </TemplatesContext.Provider>
   );

@@ -1,17 +1,20 @@
-// Create / edit / delete transaction templates. Rendered in a popup from
-// the sheet's "Add type" button (templates are user-level and stored
-// encrypted on-chain, so they're available across every sheet).
+// Create / edit / delete a sheet's transaction types. Rendered in a popup
+// from the sheet's "Add type" button.
 //
-// Types are ALWAYS shared to the account (no Share toggle): when opened in
-// a pair context (the sheet page passes `pair`, the usePairTemplates api),
-// every personal template is automatically mirrored into the caller's OWN
-// encrypted slot on the Pair by the usePairTemplates reconcile effect —
-// saving/editing/deleting a personal type is all it takes for the partner
-// to see the change. Partner-authored shared types are listed read-only
-// with an "Edit a copy" action (copy-on-write: the edited copy is added to
-// MY PERSONAL templates under the SAME id, which the mirror publishes as my
-// override at the next rev; the partner's slot is never touched, and
-// deleting my copy resurfaces their original).
+// Types are ACCOUNT-SCOPED: a type belongs to the account (pair) it was
+// created in — it's written into MY encrypted slot on THAT Pair via the
+// usePairTemplates api (`pair`, passed by the sheet page), visible to both
+// members of this account only, and nothing follows you into your other
+// accounts. Creating, editing, and "Edit a copy" of a partner-authored
+// type are all the SAME operation: upsertMyTemplate — a same-id upsert
+// into MY slot at the next rev (copy-on-write: the partner's slot is never
+// touched; removing my override resurfaces their original). Removing my
+// own type drops the id from my slot — it disappears for both members.
+//
+// The LEGACY user-level personal store (TemplatesContext) is a read-only
+// migration source: pre-rework personal types are listed with "Add to this
+// account" (an upsertMyTemplate that KEEPS the personal id, so partners'
+// same-id copies merge sanely) and an optional legacy Remove.
 
 import { useState } from "react";
 import { orderedCurrencies } from "../settings/currencies";
@@ -33,13 +36,18 @@ type SchedRow = { anchor: DueAnchor; days: number; percent: number };
 export function TemplatesManager({
   onSaved,
   pair,
-}: { onSaved?: () => void; pair?: PairTemplatesApi | null } = {}) {
-  const { templates, addTemplate, updateTemplate, removeTemplate, loading, error } =
-    useTemplates();
+}: {
+  onSaved?: () => void;
+  pair: PairTemplatesApi;
+}) {
+  // LEGACY personal store — read-only migration source (+ legacy remove).
+  const {
+    templates: legacyTemplates,
+    removeTemplate: removeLegacyTemplate,
+    loading: legacyLoading,
+    error: legacyError,
+  } = useTemplates();
   const [editingId, setEditingId] = useState<string | null>(null);
-  // Editing a SHARED template (copy-on-write into my own pair slot) rather
-  // than a personal one — set by "Edit a copy" on a partner-authored type.
-  const [editingShared, setEditingShared] = useState(false);
   const [name, setName] = useState("");
   const [direction, setDirection] = useState<Direction>("credit");
   const [txnType, setTxnType] = useState<TxnType>("iou");
@@ -72,7 +80,6 @@ export function TemplatesManager({
 
   function resetForm() {
     setEditingId(null);
-    setEditingShared(false);
     setName("");
     setDirection("credit");
     setTxnType("iou");
@@ -89,7 +96,6 @@ export function TemplatesManager({
 
   function startEdit(t: TxnTemplate) {
     setEditingId(t.id);
-    setEditingShared(false);
     setName(t.name);
     setDirection(t.direction);
     setTxnType(t.txn_type);
@@ -167,19 +173,11 @@ export function TemplatesManager({
     setBusy(true);
     setErr(null);
     try {
-      if (editingId && editingShared) {
-        // Copy-on-write edit of a partner-authored shared type: add the
-        // edited copy to MY PERSONAL templates under the SAME id — the
-        // pair-slot mirror then publishes it as my override at the next
-        // rev (the partner's slot is never touched).
-        await addTemplate({ id: editingId, ...base });
-      } else if (editingId) {
-        // The pair-slot mirror picks the edit up automatically (types are
-        // always shared to the account — no explicit share step).
-        await updateTemplate({ id: editingId, ...base });
-      } else {
-        await addTemplate(base);
-      }
+      // ONE code path for create, edit, and "Edit a copy" of a partner's
+      // type: upsert into MY slot on THIS account. An existing id (mine →
+      // in-place edit; the partner's → copy-on-write override at the next
+      // rev, their slot untouched); no id → a fresh type is created.
+      await pair.upsertMyTemplate(editingId ? { id: editingId, ...base } : base);
       resetForm();
       onSaved?.();
     } catch (e) {
@@ -189,17 +187,24 @@ export function TemplatesManager({
     }
   }
 
-  function startEditShared(t: TxnTemplate) {
-    startEdit(t);
-    setEditingShared(true);
+  async function migrateLegacy(t: TxnTemplate) {
+    setBusy(true);
+    setErr(null);
+    try {
+      // KEEP the personal id so a partner migrating their same-id copy
+      // merges into the same account type instead of duplicating it.
+      await pair.upsertMyTemplate(t);
+    } catch (e) {
+      setErr((e as Error).message);
+    } finally {
+      setBusy(false);
+    }
   }
 
-  // Partner-authored shared types: visible in the account's merged view but
-  // not mine personally (my slot mirrors my personal list, so "not in my
-  // personal list" ≡ "not published by me").
-  const partnerShared = pair
-    ? pair.shared.filter((s) => !templates.some((p) => p.id === s.id))
-    : [];
+  // THIS ACCOUNT's types, split by author: ids live in MY slot are mine to
+  // Edit/Remove; the rest of the merged view is partner-authored.
+  const myTypes = pair.shared.filter((s) => pair.myIds.has(s.id));
+  const partnerTypes = pair.shared.filter((s) => !pair.myIds.has(s.id));
 
   function summary(t: TxnTemplate): string {
     const parts: string[] = [
@@ -237,17 +242,18 @@ export function TemplatesManager({
       <h2>Transaction types</h2>
       <p className="muted small">
         Save presets like “Reservation” (e.g. 20% + a fixed fee, split due
-        dates). Pick one from <strong>+ Add ▾</strong> on any sheet to
-        pre-fill an entry. Stored encrypted on your account, usable
-        everywhere.{pair ? " Your types are automatically shared with this account." : ""}
+        dates). Pick one from <strong>+ Add ▾</strong> on this sheet to
+        pre-fill an entry. Types belong to <strong>this account</strong>:
+        both of you see them here, encrypted end-to-end — nothing follows
+        you into your other accounts.
       </p>
 
-      {loading && <p className="muted small">Loading…</p>}
-      {error && <p className="err">{error}</p>}
+      {pair.loading && <p className="muted small">Loading…</p>}
+      {pair.error && <p className="err">{pair.error}</p>}
 
-      {templates.length > 0 && (
+      {myTypes.length > 0 && (
         <ul>
-          {templates.map((t) => (
+          {myTypes.map((t) => (
             <li key={t.id} style={{ marginBottom: 6 }}>
               <strong>{t.name}</strong>{" "}
               <span className="muted small">{summary(t)}</span>{" "}
@@ -256,12 +262,13 @@ export function TemplatesManager({
               </button>{" "}
               <button
                 className="secondary small"
+                disabled={busy}
                 onClick={() => {
                   if (window.confirm(`Delete the “${t.name}” type? This can't be undone.`)) {
-                    // The pair-slot mirror drops it from my slot on the next
-                    // reconcile — if it overrode a partner's type, theirs
-                    // resurfaces; if it was mine alone it disappears for both.
-                    void removeTemplate(t.id);
+                    // Drops the id from MY slot — if it overrode a partner's
+                    // type, theirs resurfaces; if it was mine alone it
+                    // disappears for both members.
+                    void pair.removeMyTemplate(t.id).catch((e) => setErr((e as Error).message));
                     if (editingId === t.id) resetForm();
                   }
                 }}
@@ -273,24 +280,64 @@ export function TemplatesManager({
         </ul>
       )}
 
-      {pair && partnerShared.length > 0 && (
+      {partnerTypes.length > 0 && (
         <div className="col" style={{ gap: 4, marginTop: 8 }}>
-          <strong className="small">Shared with this account</strong>
+          <strong className="small">Added by your partner</strong>
           <p className="muted small" style={{ margin: 0 }}>
-            Types your partner shared. Use “Edit a copy” to publish your own
-            version — theirs stays untouched.
+            Types your partner added to this account. Use “Edit a copy” to
+            publish your own version — theirs stays untouched, and removing
+            your copy brings theirs back.
           </p>
           <ul>
-            {partnerShared.map((t) => (
+            {partnerTypes.map((t) => (
               <li key={t.id} style={{ marginBottom: 6 }}>
                 <strong>{t.name}</strong>{" "}
                 <span className="muted small">{summary(t)}</span>{" "}
                 <button
                   className="secondary small"
                   disabled={busy}
-                  onClick={() => startEditShared(t)}
+                  onClick={() => startEdit(t)}
                 >
                   Edit a copy
+                </button>
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
+
+      {legacyTemplates.length > 0 && (
+        <div className="col" style={{ gap: 4, marginTop: 8 }}>
+          <strong className="small">Legacy personal types</strong>
+          <p className="muted small" style={{ margin: 0 }}>
+            Saved before types became account-scoped. They no longer appear
+            in pickers — add the ones you still use to this account (repeat
+            in any other account that needs them), then remove them here.
+          </p>
+          {legacyLoading && <p className="muted small">Loading…</p>}
+          {legacyError && <p className="err">{legacyError}</p>}
+          <ul>
+            {legacyTemplates.map((t) => (
+              <li key={t.id} style={{ marginBottom: 6 }}>
+                <strong>{t.name}</strong>{" "}
+                <span className="muted small">{summary(t)}</span>{" "}
+                <button
+                  className="secondary small"
+                  disabled={busy}
+                  onClick={() => void migrateLegacy(t)}
+                >
+                  Add to this account
+                </button>{" "}
+                <button
+                  className="secondary small"
+                  disabled={busy}
+                  onClick={() => {
+                    if (window.confirm(`Remove the legacy “${t.name}” type? Copies already added to accounts are kept.`)) {
+                      void removeLegacyTemplate(t.id).catch((e) => setErr((e as Error).message));
+                    }
+                  }}
+                >
+                  Remove
                 </button>
               </li>
             ))}

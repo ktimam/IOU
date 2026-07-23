@@ -36,9 +36,7 @@ import {
 } from "./consumerKeypair";
 import { claimAiAppLinkCode, registerAiApp, revokeAiAppUserKey } from "./registerAiApp";
 import { getActionInboxConfig, invalidateInboxCache } from "./actionInboxClient";
-import { useTemplates } from "../templates/TemplatesContext";
 import { loadAllSharedTemplates } from "../templates/pairTemplatesActor";
-import { combineTemplates } from "../templates/pairTemplates";
 import { useSheetKey } from "../flows/SheetKeyContext";
 import { createActor } from "../../backend/declarations";
 import { syncManifestWithTypes } from "./syncManifest";
@@ -54,8 +52,7 @@ type LinkStatus =
 
 export function ActionInboxSettings({ children }: { children?: ReactNode }) {
   const { identity } = useAuth();
-  const { templates } = useTemplates();
-  // For folding SHARED (per-account) types into the manifest on Connect.
+  // For folding the ACCOUNT-SCOPED types into the manifest on Connect.
   const { unwrapFor } = useSheetKey();
   const [pubKeyPem, setPubKeyPem] = useState<string>("");
   const [fingerprint, setFingerprint] = useState<string>("");
@@ -134,6 +131,19 @@ export function ActionInboxSettings({ children }: { children?: ReactNode }) {
         });
         return;
       }
+      // Register the user's ACCOUNT-SCOPED types too (slot-sourced, all
+      // accounts), so the manifest can route chat messages to them.
+      // Best-effort: if the fold fails, register the base manifest — the
+      // app-load sync / next type edit re-folds the keyword rules.
+      let manifestTemplates: Awaited<ReturnType<typeof loadAllSharedTemplates>> = [];
+      try {
+        if (identity) {
+          const actor = createActor(await buildAgent(identity)) as any;
+          manifestTemplates = await loadAllSharedTemplates(actor, unwrapFor);
+        }
+      } catch {
+        /* base manifest */
+      }
       const outcome = await registerAiApp({
         host: OC_IC_URL,
         userIndexCanisterId: OC_USER_INDEX_CANISTER_ID,
@@ -143,8 +153,7 @@ export function ActionInboxSettings({ children }: { children?: ReactNode }) {
         // Route deposits to IOU's own inbox — MUST be sent on every upsert or deposits go NotConfigured.
         inboxCanisterId: OC_ACTION_INBOX_CANISTER_ID,
         identity,
-        // Register the user's saved types too, so the manifest can route chat messages to them.
-        templates,
+        templates: manifestTemplates,
       });
       if (outcome.kind === "success") {
         // The manifest (and its routed inbox) just changed — drop the resolver cache so the next poll
@@ -209,22 +218,21 @@ export function ActionInboxSettings({ children }: { children?: ReactNode }) {
           } catch {
             /* best-effort */
           }
-          // Fold PERSONAL + all accounts' SHARED types into the manifest, so
-          // a keyword on a partner-authored shared template routes chat
-          // extraction on THIS member's manifest too. Best-effort: any
-          // failure falls back to the personal list (previous behavior).
+          // Fold ALL MY ACCOUNTS' types (each account's chat routes through
+          // MY manifest) into the manifest — sourced from the pair slots
+          // ONLY; the legacy personal store feeds nothing. Best-effort: if
+          // the slot fold itself fails, SKIP the sync rather than clobber
+          // the registered keyword rules with an empty list (the app-load
+          // sync / next type edit will re-fold).
           void (async () => {
-            let manifestTemplates = templates;
             try {
-              if (identity) {
-                const actor = createActor(await buildAgent(identity)) as any;
-                const shared = await loadAllSharedTemplates(actor, unwrapFor);
-                manifestTemplates = combineTemplates(templates, shared);
-              }
+              if (!identity) return;
+              const actor = createActor(await buildAgent(identity)) as any;
+              const manifestTemplates = await loadAllSharedTemplates(actor, unwrapFor);
+              void syncManifestWithTypes(identity, manifestTemplates);
             } catch {
-              /* personal-only fallback */
+              /* skip — re-synced on app load or the next type edit */
             }
-            void syncManifestWithTypes(identity, manifestTemplates);
           })();
           setConnect({
             kind: "ok",
