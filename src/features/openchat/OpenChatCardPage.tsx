@@ -24,7 +24,9 @@ import { IOU_ICON_DATA_URI } from "./actionManifest";
 import {
   parseInit,
   initToFormState,
+  initEntries,
   buildConfirmPayload,
+  buildMultiConfirmPayload,
   buildReady,
   buildResize,
   buildConfirm,
@@ -85,6 +87,9 @@ export function OpenChatCardPage() {
   const rootRef = useRef<HTMLDivElement>(null);
   const [ctx, setCtx] = useState<CardInitContext>({ theme: "dark", readonly: false });
   const [form, setForm] = useState<CardFormState>(() => initToFormState({}));
+  // MULTI mode: a non-null list of per-entry form states (initEntries detected data.entries).
+  // null → SINGLE mode, which renders exactly today's one-entry UI from `form`.
+  const [multi, setMulti] = useState<CardFormState[] | null>(null);
 
   const post = useCallback((msg: unknown) => {
     // Post to the embedder. targetOrigin "*" per the contract — the HOST
@@ -104,7 +109,13 @@ export function OpenChatCardPage() {
       const parsed = parseInit(event.data);
       if (!parsed) return; // ignore devtools / HMR / foreign messages
       setCtx(parsed.context);
-      setForm(initToFormState(parsed.data));
+      const entries = initEntries(parsed.data);
+      if (entries) {
+        setMulti(entries); // MULTI: render N editable entry blocks
+      } else {
+        setMulti(null); // SINGLE: today's one-entry UI
+        setForm(initToFormState(parsed.data));
+      }
     }
     window.addEventListener("message", onMessage);
     post(buildReady());
@@ -153,8 +164,28 @@ export function OpenChatCardPage() {
   };
   const onCancel = () => post(buildCancel());
 
+  // MULTI-mode edit + confirm. Edits patch one entry in the list; the single "Add all" button gates
+  // on every entry having a valid (>0) amount and hands back the UNWRAPPED array (parseDraftBatch).
+  const setEntry = useCallback(
+    <K extends keyof CardFormState>(idx: number, key: K, value: CardFormState[K]) =>
+      setMulti((m) => (m ? m.map((e, i) => (i === idx ? { ...e, [key]: value } : e)) : m)),
+    [],
+  );
+  const multiAllValid = !!multi && multi.length > 0 && multi.every(isAmountValid);
+  const onConfirmAll = () => {
+    if (!multi || !multiAllValid) return;
+    post(buildConfirm(buildMultiConfirmPayload(multi)));
+  };
+
   const { readonly } = ctx;
   const themeVars = THEME_VARS[ctx.theme] as CSSProperties;
+
+  // Header subtitle. SINGLE mode keeps today's exact copy; MULTI mode names the entry count.
+  const subtitle = readonly
+    ? "View only"
+    : multi
+      ? `Review and edit ${multi.length} ${multi.length === 1 ? "entry" : "entries"} before adding to your ledger`
+      : "Review and edit before adding to your ledger";
 
   const rootStyle: CSSProperties = {
     ...themeVars,
@@ -185,13 +216,63 @@ export function OpenChatCardPage() {
           <img src={IOU_ICON_DATA_URI} alt="" width={28} height={28} style={{ borderRadius: 7 }} />
           <div style={{ display: "flex", flexDirection: "column" }}>
             <strong style={{ fontSize: "1.05rem", letterSpacing: 0.2 }}>Add to IOU</strong>
-            <span style={{ fontSize: "0.75rem", color: "var(--text-dim)" }}>
-              {readonly ? "View only" : "Review and edit before adding to your ledger"}
-            </span>
+            <span style={{ fontSize: "0.75rem", color: "var(--text-dim)" }}>{subtitle}</span>
           </div>
         </div>
 
-        {readonly ? (
+        {multi ? (
+          readonly ? (
+            // MULTI + readonly: every entry rendered read-only, numbered, no buttons.
+            <div style={{ display: "flex", flexDirection: "column", gap: 12, marginTop: 12 }}>
+              {multi.map((entry, i) => (
+                <div key={i} style={entryBlockStyle}>
+                  <EntryHeading index={i} total={multi.length} />
+                  <ReadonlyView form={entry} />
+                </div>
+              ))}
+            </div>
+          ) : (
+            // MULTI + editable: N compact entry blocks + a single "Add all N entries" confirm.
+            <div style={{ display: "flex", flexDirection: "column", gap: 12, marginTop: 12 }}>
+              {multi.map((entry, i) => (
+                <EntryRow
+                  key={i}
+                  index={i}
+                  total={multi.length}
+                  entry={entry}
+                  onChange={(k, v) => setEntry(i, k, v)}
+                />
+              ))}
+              <div style={{ display: "flex", gap: 8, justifyContent: "flex-end", marginTop: 4 }}>
+                <button
+                  type="button"
+                  onClick={onCancel}
+                  style={{ ...btnStyle, background: "transparent", color: "var(--text)", border: "1px solid var(--border)" }}
+                >
+                  Cancel
+                </button>
+                <button
+                  type="button"
+                  onClick={onConfirmAll}
+                  disabled={!multiAllValid}
+                  style={{
+                    ...btnStyle,
+                    background: multiAllValid ? "var(--accent)" : "#2a3038",
+                    color: multiAllValid ? "var(--on-accent)" : "#5b646e",
+                    cursor: multiAllValid ? "pointer" : "not-allowed",
+                  }}
+                >
+                  Add all {multi.length} entries
+                </button>
+              </div>
+              {!multiAllValid && (
+                <span style={{ fontSize: "0.75rem", color: "var(--text-dim)", textAlign: "right" }}>
+                  Each entry needs an amount greater than 0 to add.
+                </span>
+              )}
+            </div>
+          )
+        ) : readonly ? (
           <ReadonlyView form={form} />
         ) : (
           <div style={{ display: "flex", flexDirection: "column", gap: 12, marginTop: 12 }}>
@@ -344,6 +425,118 @@ function Field({
       <span style={{ fontSize: "0.75rem", color: "var(--text-dim)" }}>{label}</span>
       {children}
     </label>
+  );
+}
+
+// True when a form state's amount parses to a positive number — the same rule the single card uses
+// to gate its confirm. Gates each MULTI row and the "Add all" button.
+function isAmountValid(s: CardFormState): boolean {
+  const n = Number(s.amount);
+  return s.amount.trim() !== "" && Number.isFinite(n) && n > 0;
+}
+
+// A subtle bordered container that separates one entry from the next in MULTI mode.
+const entryBlockStyle: CSSProperties = {
+  display: "flex",
+  flexDirection: "column",
+  gap: 10,
+  padding: 12,
+  borderRadius: 12,
+  border: "1px solid var(--border)",
+  background: "var(--surface-2)",
+};
+
+// "Entry i of N" caption above each MULTI block.
+function EntryHeading({ index, total }: { index: number; total: number }) {
+  return (
+    <span
+      style={{
+        fontSize: "0.6875rem",
+        fontWeight: 700,
+        letterSpacing: 0.6,
+        textTransform: "uppercase",
+        color: "var(--accent)",
+      }}
+    >
+      Entry {index + 1} of {total}
+    </span>
+  );
+}
+
+// One editable entry in MULTI mode: amount / currency / direction on one wrapping line, note below.
+// Reuses the single card's Field + inputStyle + DIRECTION_LABELS so styling and theming match
+// exactly. Purely presentational — edits flow up through onChange; no session/canister/identity use.
+function EntryRow({
+  index,
+  total,
+  entry,
+  onChange,
+}: {
+  index: number;
+  total: number;
+  entry: CardFormState;
+  onChange: <K extends keyof CardFormState>(key: K, value: CardFormState[K]) => void;
+}) {
+  const currencyOptions = useMemo(
+    () => orderedCurrencies(entry.currency, [entry.currency]),
+    [entry.currency],
+  );
+  const valid = isAmountValid(entry);
+  return (
+    <div style={entryBlockStyle}>
+      <EntryHeading index={index} total={total} />
+      <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+        <Field label="Amount" style={{ flex: "1 1 90px" }}>
+          <input
+            type="number"
+            inputMode="decimal"
+            step="0.01"
+            min="0"
+            value={entry.amount}
+            onChange={(e) => onChange("amount", e.target.value)}
+            placeholder="0.00"
+            style={inputStyle}
+          />
+        </Field>
+        <Field label="Currency" style={{ flex: "1 1 90px" }}>
+          <select
+            value={entry.currency}
+            onChange={(e) => onChange("currency", e.target.value)}
+            style={inputStyle}
+          >
+            {currencyOptions.map((c) => (
+              <option key={c} value={c}>
+                {c}
+              </option>
+            ))}
+          </select>
+        </Field>
+        <Field label="Direction" style={{ flex: "1 1 140px" }}>
+          <select
+            value={entry.direction}
+            onChange={(e) => onChange("direction", e.target.value as Direction)}
+            style={inputStyle}
+          >
+            <option value="credit">{DIRECTION_LABELS.credit}</option>
+            <option value="debt">{DIRECTION_LABELS.debt}</option>
+          </select>
+        </Field>
+      </div>
+      <Field label="Note">
+        <input
+          type="text"
+          value={entry.note}
+          onChange={(e) => onChange("note", e.target.value)}
+          placeholder="lunch, taxi, reservation…"
+          style={inputStyle}
+        />
+      </Field>
+      {!valid && (
+        <span style={{ fontSize: "0.6875rem", color: "var(--debt)" }}>
+          Enter an amount greater than 0.
+        </span>
+      )}
+    </div>
   );
 }
 

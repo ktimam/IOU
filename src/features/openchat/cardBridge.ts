@@ -42,8 +42,14 @@ export type CardInitContext = {
   readonly: boolean;
 };
 
+// The init `data` is EITHER a bare EntryDraft (SINGLE mode — the current, byte-identical behavior)
+// OR an object carrying a non-empty `entries` array (MULTI mode — a batch of EntryDrafts rendered
+// as N editable rows). `entries` is optional, so a single-entry card's data still satisfies this
+// type. initEntries(data) is the sole detector: non-empty entries → MULTI, else → SINGLE.
+export type CardInitData = EntryDraft & { entries?: EntryDraft[] };
+
 export type CardInit = {
-  data: EntryDraft;
+  data: CardInitData;
   context: CardInitContext;
 };
 
@@ -82,7 +88,20 @@ export function parseInit(msg: unknown): CardInit | null {
   if (msg.type !== CARD_MSG.init) return null;
   if (msg.version !== CARD_INIT_VERSION) return null;
 
-  const data: EntryDraft = isPlainObject(msg.data) ? (msg.data as EntryDraft) : {};
+  let data: CardInitData;
+  if (isPlainObject(msg.data)) {
+    const raw = msg.data as Record<string, unknown>;
+    if (Array.isArray(raw.entries)) {
+      // MULTI: validate `entries` is an array of objects — drop any non-object element so a
+      // malformed row can't crash initToFormState. A non-array `entries` falls through to SINGLE.
+      const entries = raw.entries.filter(isPlainObject) as EntryDraft[];
+      data = { ...(raw as EntryDraft), entries };
+    } else {
+      data = raw as EntryDraft;
+    }
+  } else {
+    data = {};
+  }
 
   const ctxIn = isPlainObject(msg.context) ? msg.context : {};
   const context: CardInitContext = {
@@ -111,6 +130,20 @@ export function initToFormState(data: EntryDraft): CardFormState {
 }
 
 /**
+ * MULTI-mode fan-out. When the init `data` carries a non-empty `entries` array (the multi-entry
+ * card), seed one editable form state per element using the SAME initToFormState logic the single
+ * card uses — so each row prefills, defaults, and normalizes identically. Returns null for the
+ * SINGLE path (absent / empty / non-array entries), which tells the page to render exactly today's
+ * one-entry UI. Non-object elements are treated as an empty draft (defensive; parseInit already
+ * filters them out on the wire).
+ */
+export function initEntries(data: CardInitData): CardFormState[] | null {
+  const entries = data?.entries;
+  if (!Array.isArray(entries) || entries.length === 0) return null;
+  return entries.map((e) => initToFormState(isPlainObject(e) ? (e as EntryDraft) : {}));
+}
+
+/**
  * Build the confirm payload from the edited form. Emits the EntryDraft shape
  * parseDraft accepts ({kind?, amount, currency, direction, date?, note}) plus a
  * demo `tags` array only when at least one is selected. `amount` is a JS number
@@ -135,6 +168,15 @@ export function buildConfirmPayload(state: CardFormState): CardConfirmPayload {
   return payload;
 }
 
+/**
+ * MULTI-mode confirm payload: the edited array of EntryDrafts, one element per row, each built with
+ * the SAME buildConfirmPayload the single card uses. Handed back UNWRAPPED (a top-level array, not
+ * `{ entries: [...] }`) — IOU's canister side (parseDraftBatch) imports the array element-by-element.
+ */
+export function buildMultiConfirmPayload(states: CardFormState[]): CardConfirmPayload[] {
+  return states.map((s) => buildConfirmPayload(s));
+}
+
 // ── Outbound message builders (iframe → host) ────────────────────────────────
 // Thin, so the page can't misspell a bridge type and tests can assert the wire.
 
@@ -146,9 +188,12 @@ export function buildResize(height: number): { type: typeof CARD_MSG.resize; hei
   return { type: CARD_MSG.resize, height };
 }
 
+// Accepts a single EntryDraft (SINGLE mode) or an array of them (MULTI mode). The payload is passed
+// through verbatim — the host distinguishes the two by whether payload is an array (parseDraftBatch
+// handles both), so the same bridge type carries both shapes.
 export function buildConfirm(
-  payload: CardConfirmPayload,
-): { type: typeof CARD_MSG.confirm; payload: CardConfirmPayload } {
+  payload: CardConfirmPayload | CardConfirmPayload[],
+): { type: typeof CARD_MSG.confirm; payload: CardConfirmPayload | CardConfirmPayload[] } {
   return { type: CARD_MSG.confirm, payload };
 }
 

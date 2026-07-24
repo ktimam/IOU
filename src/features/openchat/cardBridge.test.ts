@@ -2,7 +2,9 @@ import { describe, it, expect } from "vitest";
 import {
   parseInit,
   initToFormState,
+  initEntries,
   buildConfirmPayload,
+  buildMultiConfirmPayload,
   buildReady,
   buildResize,
   buildConfirm,
@@ -10,7 +12,7 @@ import {
   CARD_MSG,
   type CardFormState,
 } from "./cardBridge";
-import { parseDraft } from "../entries/draft";
+import { parseDraft, parseDraftBatch } from "../entries/draft";
 
 describe("parseInit — accepts only a well-formed oc:card:init", () => {
   it("accepts a valid init and normalizes data + context", () => {
@@ -198,5 +200,128 @@ describe("outbound message builders", () => {
     const p = { amount: 1, currency: "USD", direction: "credit" as const };
     expect(buildConfirm(p)).toEqual({ type: "oc:card:confirm", payload: p });
     expect(buildCancel()).toEqual({ type: "oc:card:cancel" });
+  });
+
+  it("wraps a MULTI-mode array payload under the same confirm type (unwrapped array)", () => {
+    const arr = [
+      { amount: 1, currency: "USD", direction: "credit" as const },
+      { amount: 2, currency: "EUR", direction: "debt" as const },
+    ];
+    expect(buildConfirm(arr)).toEqual({ type: "oc:card:confirm", payload: arr });
+  });
+});
+
+// ── MULTI mode (data.entries) ────────────────────────────────────────────────
+
+describe("parseInit — MULTI mode (data.entries)", () => {
+  it("carries a non-empty entries array through as data.entries", () => {
+    const parsed = parseInit({
+      type: "oc:card:init",
+      version: 1,
+      data: {
+        entries: [
+          { amount: 10, currency: "usd", direction: "credit", note: "a" },
+          { amount: 20, currency: "eur", direction: "debt", note: "b" },
+        ],
+      },
+      context: { theme: "dark", readonly: false },
+    });
+    expect(parsed).not.toBeNull();
+    expect(Array.isArray(parsed?.data.entries)).toBe(true);
+    expect(parsed?.data.entries?.length).toBe(2);
+  });
+
+  it("keeps only object elements (validate array-of-objects)", () => {
+    const parsed = parseInit({
+      type: "oc:card:init",
+      version: 1,
+      data: { entries: [{ amount: 1 }, 5, null, "x", { amount: 2 }] },
+    });
+    expect(parsed?.data.entries?.length).toBe(2);
+  });
+
+  it("a bare EntryDraft (no entries) stays SINGLE — no entries key added", () => {
+    const parsed = parseInit({
+      type: "oc:card:init",
+      version: 1,
+      data: { amount: 7, currency: "usd" },
+    });
+    expect(parsed?.data.entries).toBeUndefined();
+  });
+});
+
+describe("initEntries — MULTI vs SINGLE detection", () => {
+  it("returns one form state per entry (MULTI), each via the single initToFormState logic", () => {
+    const states = initEntries({
+      entries: [
+        { kind: "iou", amount: 100, currency: "egp", direction: "debt", note: "rent" },
+        { amount: 5, currency: "usd", direction: "credit", note: "lunch" },
+      ],
+    });
+    expect(states).not.toBeNull();
+    expect(states).toHaveLength(2);
+    expect(states![0]).toEqual<CardFormState>({
+      kind: "iou",
+      amount: "100",
+      currency: "EGP",
+      direction: "debt",
+      note: "rent",
+      date: "",
+      tags: [],
+    });
+    expect(states![1].currency).toBe("USD");
+    expect(states![1].direction).toBe("credit");
+    // byte-identical to calling initToFormState per element
+    expect(states![1]).toEqual(
+      initToFormState({ amount: 5, currency: "usd", direction: "credit", note: "lunch" }),
+    );
+  });
+
+  it("returns null for the SINGLE / absent path", () => {
+    expect(initEntries({})).toBeNull();
+    expect(initEntries({ amount: 5 })).toBeNull(); // bare EntryDraft (single)
+    expect(initEntries({ entries: [] })).toBeNull(); // empty → single
+    expect(initEntries({ entries: undefined })).toBeNull(); // absent → single
+  });
+});
+
+describe("buildMultiConfirmPayload — edited array round-trip", () => {
+  const states: CardFormState[] = [
+    { kind: "iou", amount: "42.50", currency: "usd", direction: "credit", note: "dinner", date: "", tags: [] },
+    { kind: "", amount: "300", currency: "jpy", direction: "debt", note: "", date: "", tags: [] },
+  ];
+
+  it("yields an UNWRAPPED array, one element per state, each matching buildConfirmPayload", () => {
+    const payload = buildMultiConfirmPayload(states);
+    expect(Array.isArray(payload)).toBe(true);
+    expect(payload).toHaveLength(2);
+    // element 0 round-trips amount/currency/direction/note (+ kind)
+    expect(payload[0]).toMatchObject({
+      amount: 42.5,
+      currency: "USD",
+      direction: "credit",
+      note: "dinner",
+      kind: "iou",
+    });
+    // element 1: kind "" omitted, currency uppercased, amount coerced to number
+    expect(payload[1]).toMatchObject({ amount: 300, currency: "JPY", direction: "debt" });
+    expect("kind" in payload[1]).toBe(false);
+    // each element is exactly what the single builder produces
+    expect(payload[0]).toEqual(buildConfirmPayload(states[0]));
+    expect(payload[1]).toEqual(buildConfirmPayload(states[1]));
+  });
+
+  it("imports element-by-element through parseDraftBatch (the canister side)", () => {
+    const payload = buildMultiConfirmPayload([
+      { kind: "", amount: "10", currency: "USD", direction: "credit", note: "a", date: "", tags: [] },
+      { kind: "", amount: "20", currency: "EUR", direction: "debt", note: "b", date: "", tags: [] },
+    ]);
+    const { drafts, errors } = parseDraftBatch(payload);
+    expect(errors).toEqual([]);
+    expect(drafts).toHaveLength(2);
+    expect(drafts[0].initial.amount_minor).toBe(1000);
+    expect(drafts[0].initial.direction).toBe("credit");
+    expect(drafts[1].initial.amount_minor).toBe(2000);
+    expect(drafts[1].initial.direction).toBe("debt");
   });
 });
