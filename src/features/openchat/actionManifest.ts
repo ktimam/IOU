@@ -271,6 +271,18 @@ export const iouActionManifest: IouActionManifest = {
       url: resolvePublicOrigin(),
       display: "sheet",
     },
+    // "card": IOU's OWN app-rendered confirmable card (see fork-notes/08-app-rendered-cards.md).
+    // OpenChat looks the app up by the card's actionId, finds this surface, and embeds
+    // /openchat/card in the chat bubble instead of drawing its own rows. display: "sheet" =
+    // embedded iframe. UNLIKE the session-backed surfaces above, embedding storage-partitioning is
+    // FINE here: the card page needs no IOU session — it only renders the editable card (prefilled
+    // over the postMessage bridge) and collects the edited values back. Absent ⇒ OpenChat falls
+    // back to today's OC-rendered card (backward compatible).
+    {
+      kind: "card",
+      url: `${resolvePublicOrigin()}/openchat/card`,
+      display: "sheet",
+    },
   ],
 };
 

@@ -158,6 +158,16 @@ describe("iouActionManifest", () => {
     expect(s!.url).toMatch(/^https?:\/\/[^/]+$/);
   });
 
+  it("declares a card surface (IOU's app-rendered confirmable card, embedded in the chat bubble)", () => {
+    const s = iouActionManifest.surfaces.find((x) => x.kind === "card");
+    expect(s).toBeDefined();
+    // Embedded (display "sheet") — the card renderer is storage-partitioned but needs no session;
+    // it only renders + collects over the postMessage bridge (fork-notes/08-app-rendered-cards.md).
+    expect(s!.display).toBe("sheet");
+    // Absolute origin (resolvable at registration time) + the /openchat/card renderer route.
+    expect(s!.url).toMatch(/^https?:\/\/[^/]+\/openchat\/card$/);
+  });
+
   it("surface URL parses once the placeholder is substituted", () => {
     const s = iouActionManifest.surfaces.find((x) => x.kind === "chat_link")!;
     const substituted = s.url.replace("{chatKey}", "group:aaaaa-aa");

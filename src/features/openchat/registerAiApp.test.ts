@@ -85,19 +85,23 @@ describe("buildManifestWire", () => {
     expect(encoded.byteLength).toBeGreaterThan(0);
   });
 
-  it("carries the chat_link + connect + home surfaces with snake-label display variants", () => {
+  it("carries the chat_link + connect + home + card surfaces with snake-label display variants", () => {
     const manifest = buildManifestWire("", undefined, () => {});
     const surfaces = manifest.surfaces as { kind: string; url: string; display: Record<string, null> }[];
-    expect(surfaces).toHaveLength(3);
+    expect(surfaces).toHaveLength(4);
     const chatLink = surfaces.find((s) => s.kind === "chat_link")!;
     expect(chatLink.url).toContain("/openchat/link-chat?chat={chatKey}");
     const connect = surfaces.find((s) => s.kind === "connect")!;
     expect(connect.url).toContain("/settings#openchat-connect");
     const home = surfaces.find((s) => s.kind === "home")!;
+    const card = surfaces.find((s) => s.kind === "card")!;
+    expect(card.url).toContain("/openchat/card");
     // Per-variant #[serde(rename)] labels: the candid wire variant is a single lowercase key
     // ("sheet"/"external"), never the PascalCase Rust ident.
     expect(chatLink.display).toEqual({ external: null });
     expect(connect.display).toEqual({ external: null });
     expect(home.display).toEqual({ sheet: null });
+    // The app-rendered card is embedded (storage-partitioned but session-less).
+    expect(card.display).toEqual({ sheet: null });
   });
 });
