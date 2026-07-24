@@ -111,6 +111,11 @@ export function OpenChatCardPage() {
   // Announce readiness once; accept init (and re-inits) + the busy signal from the host.
   useEffect(() => {
     function onMessage(event: MessageEvent) {
+      // Only accept messages from our EMBEDDER (the OpenChat host). A co-resident sibling frame in the
+      // same tab has its own window as event.source — never window.parent — so this rejects a forged
+      // oc:card:init (overwriting the values the user is about to confirm) or oc:card:busy (freezing/
+      // unlocking the buttons) injected sideways. Standalone (parent === self) still self-delivers.
+      if (event.source !== window.parent) return;
       // Progress signal: the host is (or finished) round-tripping our confirm/cancel. Drives the
       // in-frame button lock + spinner. busy=false clears the phase; busy=true keeps it (the click
       // already set which action), defaulting to "confirm" if somehow unset.

@@ -31,6 +31,11 @@ export const CARD_MSG = {
 // The init protocol version this page speaks. parseInit rejects any other.
 export const CARD_INIT_VERSION = 1 as const;
 
+// Upper bound on how many entries a MULTI card will render. A real "several transactions in one
+// message" extraction is a handful; this only exists so a hostile/oversized init can't ask the page to
+// render hundreds of thousands of EntryRows and hang the frame. Excess entries are dropped.
+export const MAX_CARD_ENTRIES = 100;
+
 export type CardTheme = "light" | "dark";
 
 // The normalized init context the page renders against. `data` is the extraction
@@ -94,8 +99,9 @@ export function parseInit(msg: unknown): CardInit | null {
     const raw = msg.data as Record<string, unknown>;
     if (Array.isArray(raw.entries)) {
       // MULTI: validate `entries` is an array of objects — drop any non-object element so a
-      // malformed row can't crash initToFormState. A non-array `entries` falls through to SINGLE.
-      const entries = raw.entries.filter(isPlainObject) as EntryDraft[];
+      // malformed row can't crash initToFormState, and cap the count so an oversized init can't hang
+      // the frame. A non-array `entries` falls through to SINGLE.
+      const entries = raw.entries.filter(isPlainObject).slice(0, MAX_CARD_ENTRIES) as EntryDraft[];
       data = { ...(raw as EntryDraft), entries };
     } else {
       data = raw as EntryDraft;

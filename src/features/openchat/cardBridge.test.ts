@@ -11,6 +11,7 @@ import {
   buildConfirm,
   buildCancel,
   CARD_MSG,
+  MAX_CARD_ENTRIES,
   type CardFormState,
 } from "./cardBridge";
 import { parseDraft, parseDraftBatch, baseWithDefaultCurrency } from "../entries/draft";
@@ -272,6 +273,12 @@ describe("parseInit — MULTI mode (data.entries)", () => {
     expect(parsed).not.toBeNull();
     expect(Array.isArray(parsed?.data.entries)).toBe(true);
     expect(parsed?.data.entries?.length).toBe(2);
+  });
+
+  it("caps entries at MAX_CARD_ENTRIES so an oversized init can't hang the frame", () => {
+    const many = Array.from({ length: 5000 }, (_, i) => ({ amount: i + 1, currency: "USD", direction: "credit" }));
+    const parsed = parseInit({ type: "oc:card:init", version: 1, data: { entries: many }, context: { theme: "dark", readonly: false } });
+    expect(parsed?.data.entries?.length).toBe(MAX_CARD_ENTRIES);
   });
 
   it("keeps only object elements (validate array-of-objects)", () => {
