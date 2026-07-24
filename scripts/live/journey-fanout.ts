@@ -273,8 +273,31 @@ async function main() {
   // neither satisfy the posted-gate nor receive the confirm click (live 2026-07-22: the journey
   // confirmed a leftover invalid "hi" card instead of its own 350 EGP one). Step 5 additionally
   // asserts the matched card shows this run's amount before clicking.
-  const card = confirmerOC.locator(".action-card").filter({ hasText: `journey ${nonce}` }).last();
-  const confirmBtn = card.locator("button").filter({ hasText: /^(Add to IOU|Confirm)$/i });
+  // IOU now renders its own card in an <iframe> (app-owned card), so this run's note
+  // (`journey ${nonce}`) and amount (350) live in the iframe's editable INPUTS, not the outer
+  // .action-card innerText. findOurFrame() returns the frameLocator for the card whose inputs carry
+  // our unique note; the app-card bridge confirm is screened by pending && !readonly (no OC
+  // disclosure checkbox — the app owns any disclosure), so confirming is just the iframe's button.
+  async function findOurFrame(): Promise<ReturnType<typeof confirmerOC.frameLocator> | null> {
+    for (const c of await confirmerOC.locator(".action-card:has(iframe)").all()) {
+      const inputs = c.frameLocator("iframe").locator("input");
+      const cnt = await inputs.count().catch(() => 0);
+      for (let i = 0; i < cnt; i++) {
+        if ((await inputs.nth(i).inputValue().catch(() => "")).includes(`journey ${nonce}`)) {
+          return c.frameLocator("iframe");
+        }
+      }
+    }
+    return null;
+  }
+  async function ourCardPosted(): Promise<boolean> {
+    for (let i = 0; i < 16; i++) {
+      const f = await findOurFrame();
+      if (f && (await f.getByRole("button", { name: /Add to IOU/i }).count().catch(() => 0))) return true;
+      await confirmerOC.waitForTimeout(2000);
+    }
+    return false;
+  }
   // v1 vs v2 propose UI: the classic tree has .bubble-wrapper + a hover menu with a TEXT item; the
   // v2 (components_mobile) tree opens an icon-button sheet on LONG-PRESS, where the propose item is
   // the AutoFix (wand) ICON button — no text, so target its SVG path.
@@ -319,7 +342,7 @@ async function main() {
         await proposerOC.getByText("Propose action", { exact: true }).click({ timeout: 12000 });
       }
       console.log(`[${PROPOSER.user}] proposed (attempt ${attempt}, manual JSON — no model)`);
-      posted = await confirmBtn.waitFor({ timeout: 30000 }).then(() => true).catch(() => false);
+      posted = await ourCardPosted();
     } catch (e) {
       console.log(`[${PROPOSER.user}] propose attempt ${attempt} failed: ${(e as Error).message.slice(0, 90)}`);
     }
@@ -333,18 +356,22 @@ async function main() {
   check(posted, `the action card posted (confirm visible on ${CONFIRMER.user}'s side)`);
   if (!posted) throw new Error("card never posted");
 
-  // 5. The confirmer (the NON-proposer) confirms — on the nonce-scoped card only (see above).
-  //    Belt-and-braces before clicking: the matched card must carry this run's amount 350 (a
-  //    mis-scoped or stale card fails here instead of getting confirmed). The IOU manifest
-  //    declares a DISCLOSURE, so the confirm button stays disabled until the acknowledgment
-  //    checkbox ON THIS CARD is ticked.
-  const cardText = (await card.innerText()).replace(/\s+/g, " ");
-  const cardIsOurs = cardText.includes("350");
-  check(cardIsOurs, `the matched card carries this run's amount 350 ("${cardText.slice(0, 80)}")`);
+  // 5. The confirmer (the NON-proposer) confirms — on the nonce-scoped iframe card only (see above).
+  //    Belt-and-braces before clicking: the matched iframe must carry this run's amount 350 in one of
+  //    its inputs (a mis-scoped or stale card fails here instead of getting confirmed). The app-owned
+  //    card has no OC disclosure checkbox — confirm is the iframe's "Add to IOU" button.
+  const frame = await findOurFrame();
+  check(!!frame, `this run's app-card iframe found on ${CONFIRMER.user}'s side (note "journey ${nonce}")`);
+  if (!frame) throw new Error("this run's card iframe not found — refusing to confirm");
+  const inputVals: string[] = [];
+  const fin = frame.locator("input");
+  const finCount = await fin.count().catch(() => 0);
+  for (let i = 0; i < finCount; i++) inputVals.push(await fin.nth(i).inputValue().catch(() => ""));
+  const cardIsOurs = inputVals.includes("350");
+  check(cardIsOurs, `the matched card carries this run's amount 350 (${JSON.stringify(inputVals)})`);
   if (!cardIsOurs) throw new Error("matched card is not this run's draft — refusing to confirm");
-  await card.locator('input[type="checkbox"]').check({ timeout: 15000 });
-  await confirmBtn.click();
-  console.log(`[${CONFIRMER.user}] confirmed`);
+  await frame.getByRole("button", { name: /Add to IOU/i }).click({ timeout: 15000 });
+  console.log(`[${CONFIRMER.user}] confirmed (app-card iframe)`);
   await confirmerOC.waitForTimeout(6000);
 
   // 6. Fan-out: ONE confirm → +1 envelope in EACH member's own bucket.

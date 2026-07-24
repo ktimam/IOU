@@ -171,9 +171,30 @@ async function main() {
   await proposerOC.keyboard.press("Enter");
   await proposerOC.waitForTimeout(2500);
 
-  // v1 propose (manager): hover the just-sent bubble → .menu-icon → "Propose action".
-  const card = confirmerOC.locator(".action-card").filter({ hasText: `multi-a ${nonce}` }).last();
-  const confirmBtn = card.locator("button").filter({ hasText: /^(Add to IOU|Confirm)$/i });
+  // v1 propose (manager): hover the just-sent bubble → .menu-icon → "Propose action". IOU renders
+  // its own card in an <iframe>, so this run's entry NOTES live in the iframe's editable inputs (not
+  // the outer .action-card innerText). A MULTI card's confirm is the iframe's "Add all N entries"
+  // button (no OC disclosure checkbox — the app owns the card).
+  async function findOurFrame(): Promise<ReturnType<typeof confirmerOC.frameLocator> | null> {
+    for (const c of await confirmerOC.locator(".action-card:has(iframe)").all()) {
+      const inputs = c.frameLocator("iframe").locator("input");
+      const cnt = await inputs.count().catch(() => 0);
+      for (let i = 0; i < cnt; i++) {
+        if ((await inputs.nth(i).inputValue().catch(() => "")).includes(`multi-a ${nonce}`)) {
+          return c.frameLocator("iframe");
+        }
+      }
+    }
+    return null;
+  }
+  async function ourCardPosted(): Promise<boolean> {
+    for (let i = 0; i < 16; i++) {
+      const f = await findOurFrame();
+      if (f && (await f.getByRole("button", { name: /Add all \d+ entries/i }).count().catch(() => 0))) return true;
+      await confirmerOC.waitForTimeout(2000);
+    }
+    return false;
+  }
   let posted = false;
   for (let attempt = 1; attempt <= 3 && !posted; attempt++) {
     try {
@@ -183,7 +204,7 @@ async function main() {
       await proposerOC.waitForTimeout(500);
       await bubble.locator(".menu-icon").first().click({ timeout: 12000 });
       await proposerOC.getByText("Propose action", { exact: true }).click({ timeout: 12000 });
-      posted = await confirmBtn.waitFor({ timeout: 30000 }).then(() => true).catch(() => false);
+      posted = await ourCardPosted();
     } catch (e) {
       console.log(`propose attempt ${attempt} failed: ${(e as Error).message.slice(0, 90)}`);
     }
@@ -192,12 +213,13 @@ async function main() {
       await proposerOC.waitForTimeout(1000);
     }
   }
-  check(posted, "the multi-entry action card posted (confirm visible on confirmer's side)");
+  check(posted, "the multi-entry action card posted (Add all N entries visible on confirmer's side)");
   if (!posted) throw new Error("card never posted");
 
-  // 3. Confirm once (ONE deposit / ONE messageId per member).
-  await card.locator('input[type="checkbox"]').check({ timeout: 15000 }).catch(() => {});
-  await confirmBtn.click();
+  // 3. Confirm once (ONE deposit / ONE messageId per member) via the iframe's "Add all N entries".
+  const frame = await findOurFrame();
+  if (!frame) throw new Error("this run's multi card iframe not found — refusing to confirm");
+  await frame.getByRole("button", { name: /Add all \d+ entries/i }).click({ timeout: 15000 });
   await confirmerOC.waitForTimeout(6000);
   const afterBucket = await bucketCount(a, fpConfirmer);
   check(afterBucket === beforeBucket + 1, `ONE deposit for the whole batch (${beforeBucket} → ${afterBucket})`);
