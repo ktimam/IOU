@@ -346,4 +346,19 @@ describe("buildMultiConfirmPayload — edited array round-trip", () => {
     expect(drafts[1].initial.amount_minor).toBe(2000);
     expect(drafts[1].initial.direction).toBe("debt");
   });
+
+  it("omits currency PER ROW left on Default ('') so each defers to the IOU default at import", () => {
+    // A mixed batch: row 0 on "Default", row 1 picked EUR — the default is a per-element decision.
+    const payload = buildMultiConfirmPayload([
+      { kind: "", amount: "10", currency: "", direction: "credit", note: "a", date: "", tags: [] },
+      { kind: "", amount: "20", currency: "eur", direction: "debt", note: "b", date: "", tags: [] },
+    ]);
+    expect("currency" in payload[0]).toBe(false);
+    expect(payload[1].currency).toBe("EUR");
+    // At import the currency-less element resolves to the injected default, the EUR element keeps EUR.
+    const { drafts, errors } = parseDraftBatch(payload, undefined, "EGP");
+    expect(errors).toEqual([]);
+    expect(drafts[0].initial.currency).toBe("EGP");
+    expect(drafts[1].initial.currency).toBe("EUR");
+  });
 });
