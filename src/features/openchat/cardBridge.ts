@@ -25,6 +25,7 @@ export const CARD_MSG = {
   cancel: "oc:card:cancel",
   // host → iframe (app)
   init: "oc:card:init",
+  busy: "oc:card:busy",
 } as const;
 
 // The init protocol version this page speaks. parseInit rejects any other.
@@ -113,6 +114,17 @@ export function parseInit(msg: unknown): CardInit | null {
   };
 
   return { data, context };
+}
+
+// Parse an inbound `oc:card:busy` — the host's progress signal while a confirm/cancel round-trips
+// (deposit + fan-out). Returns { busy } or null for anything else, so the page's one listener can try
+// this alongside parseInit. Like parseInit it trusts only the SHAPE (a bare boolean), never any
+// origin-carried data — the message conveys no secret and drives presentation only.
+export function parseBusy(msg: unknown): { busy: boolean } | null {
+  if (!isPlainObject(msg)) return null;
+  if (msg.type !== CARD_MSG.busy) return null;
+  if (typeof msg.busy !== "boolean") return null;
+  return { busy: msg.busy };
 }
 
 /** Seed the editable form from the (loose, untrusted) extraction object. */

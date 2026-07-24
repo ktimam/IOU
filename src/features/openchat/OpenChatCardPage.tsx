@@ -23,6 +23,7 @@ import { orderedCurrencies } from "../settings/currencies";
 import { IOU_ICON_DATA_URI } from "./actionManifest";
 import {
   parseInit,
+  parseBusy,
   initToFormState,
   initEntries,
   buildConfirmPayload,
@@ -90,6 +91,10 @@ export function OpenChatCardPage() {
   // MULTI mode: a non-null list of per-entry form states (initEntries detected data.entries).
   // null → SINGLE mode, which renders exactly today's one-entry UI from `form`.
   const [multi, setMulti] = useState<CardFormState[] | null>(null);
+  // "confirm"/"cancel" while that action round-trips through the host (deposit + fan-out); "idle"
+  // otherwise. Drives the button lock + spinner so a press is acknowledged and can't be double-fired.
+  const [phase, setPhase] = useState<"idle" | "confirm" | "cancel">("idle");
+  const submitting = phase !== "idle";
 
   const post = useCallback((msg: unknown) => {
     // Post to the embedder. targetOrigin "*" per the contract — the HOST
@@ -103,9 +108,17 @@ export function OpenChatCardPage() {
     }
   }, []);
 
-  // Announce readiness once; accept init (and re-inits) from the host.
+  // Announce readiness once; accept init (and re-inits) + the busy signal from the host.
   useEffect(() => {
     function onMessage(event: MessageEvent) {
+      // Progress signal: the host is (or finished) round-tripping our confirm/cancel. Drives the
+      // in-frame button lock + spinner. busy=false clears the phase; busy=true keeps it (the click
+      // already set which action), defaulting to "confirm" if somehow unset.
+      const busyMsg = parseBusy(event.data);
+      if (busyMsg) {
+        setPhase((p) => (busyMsg.busy ? (p === "idle" ? "confirm" : p) : "idle"));
+        return;
+      }
       const parsed = parseInit(event.data);
       if (!parsed) return; // ignore devtools / HMR / foreign messages
       setCtx(parsed.context);
@@ -159,10 +172,15 @@ export function OpenChatCardPage() {
     }));
 
   const onConfirm = () => {
-    if (!amountValid) return;
+    if (!amountValid || submitting) return;
+    setPhase("confirm"); // instant feedback; the host's busy signal keeps/clears it
     post(buildConfirm(buildConfirmPayload(form)));
   };
-  const onCancel = () => post(buildCancel());
+  const onCancel = () => {
+    if (submitting) return;
+    setPhase("cancel");
+    post(buildCancel());
+  };
 
   // MULTI-mode edit + confirm. Edits patch one entry in the list; the single "Add all" button gates
   // on every entry having a valid (>0) amount and hands back the UNWRAPPED array (parseDraftBatch).
@@ -173,7 +191,8 @@ export function OpenChatCardPage() {
   );
   const multiAllValid = !!multi && multi.length > 0 && multi.every(isAmountValid);
   const onConfirmAll = () => {
-    if (!multi || !multiAllValid) return;
+    if (!multi || !multiAllValid || submitting) return;
+    setPhase("confirm");
     post(buildConfirm(buildMultiConfirmPayload(multi)));
   };
 
@@ -247,22 +266,23 @@ export function OpenChatCardPage() {
                 <button
                   type="button"
                   onClick={onCancel}
-                  style={{ ...btnStyle, background: "transparent", color: "var(--text)", border: "1px solid var(--border)" }}
+                  disabled={submitting}
+                  style={{ ...btnStyle, background: "transparent", color: "var(--text)", border: "1px solid var(--border)", cursor: submitting ? "not-allowed" : "pointer", opacity: submitting && phase !== "cancel" ? 0.5 : 1 }}
                 >
-                  Cancel
+                  {phase === "cancel" ? <><Spinner /> Cancelling…</> : "Cancel"}
                 </button>
                 <button
                   type="button"
                   onClick={onConfirmAll}
-                  disabled={!multiAllValid}
+                  disabled={!multiAllValid || submitting}
                   style={{
                     ...btnStyle,
-                    background: multiAllValid ? "var(--accent)" : "#2a3038",
-                    color: multiAllValid ? "var(--on-accent)" : "#5b646e",
-                    cursor: multiAllValid ? "pointer" : "not-allowed",
+                    background: (multiAllValid && !submitting) || phase === "confirm" ? "var(--accent)" : "#2a3038",
+                    color: (multiAllValid && !submitting) || phase === "confirm" ? "var(--on-accent)" : "#5b646e",
+                    cursor: multiAllValid && !submitting ? "pointer" : "not-allowed",
                   }}
                 >
-                  Add all {multi.length} entries
+                  {phase === "confirm" ? <><Spinner /> Adding…</> : `Add all ${multi.length} entries`}
                 </button>
               </div>
               {!multiAllValid && (
@@ -363,22 +383,23 @@ export function OpenChatCardPage() {
               <button
                 type="button"
                 onClick={onCancel}
-                style={{ ...btnStyle, background: "transparent", color: "var(--text)", border: "1px solid var(--border)" }}
+                disabled={submitting}
+                style={{ ...btnStyle, background: "transparent", color: "var(--text)", border: "1px solid var(--border)", cursor: submitting ? "not-allowed" : "pointer", opacity: submitting && phase !== "cancel" ? 0.5 : 1 }}
               >
-                Cancel
+                {phase === "cancel" ? <><Spinner /> Cancelling…</> : "Cancel"}
               </button>
               <button
                 type="button"
                 onClick={onConfirm}
-                disabled={!amountValid}
+                disabled={!amountValid || submitting}
                 style={{
                   ...btnStyle,
-                  background: amountValid ? "var(--accent)" : "#2a3038",
-                  color: amountValid ? "var(--on-accent)" : "#5b646e",
-                  cursor: amountValid ? "pointer" : "not-allowed",
+                  background: (amountValid && !submitting) || phase === "confirm" ? "var(--accent)" : "#2a3038",
+                  color: (amountValid && !submitting) || phase === "confirm" ? "var(--on-accent)" : "#5b646e",
+                  cursor: amountValid && !submitting ? "pointer" : "not-allowed",
                 }}
               >
-                Add to IOU
+                {phase === "confirm" ? <><Spinner /> Adding…</> : "Add to IOU"}
               </button>
             </div>
             {!amountValid && (
@@ -542,6 +563,19 @@ function EntryRow({
         </span>
       )}
     </div>
+  );
+}
+
+// Inline processing spinner shown on the button that is round-tripping (self-contained SMIL
+// animation → no CSS keyframes needed). `currentColor` inherits the button's text color.
+function Spinner() {
+  return (
+    <svg width="13" height="13" viewBox="0 0 24 24" style={{ verticalAlign: "-2px", marginRight: 6 }} aria-hidden="true">
+      <circle cx="12" cy="12" r="9" fill="none" stroke="currentColor" strokeOpacity="0.3" strokeWidth="3" />
+      <path d="M12 3a9 9 0 0 1 9 9" fill="none" stroke="currentColor" strokeWidth="3" strokeLinecap="round">
+        <animateTransform attributeName="transform" type="rotate" from="0 12 12" to="360 12 12" dur="0.7s" repeatCount="indefinite" />
+      </path>
+    </svg>
   );
 }
 

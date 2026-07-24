@@ -1,6 +1,7 @@
 import { describe, it, expect } from "vitest";
 import {
   parseInit,
+  parseBusy,
   initToFormState,
   initEntries,
   buildConfirmPayload,
@@ -230,6 +231,26 @@ describe("outbound message builders", () => {
       { amount: 2, currency: "EUR", direction: "debt" as const },
     ];
     expect(buildConfirm(arr)).toEqual({ type: "oc:card:confirm", payload: arr });
+  });
+});
+
+describe("parseBusy — host progress signal", () => {
+  it("accepts a well-formed oc:card:busy with a boolean", () => {
+    expect(parseBusy({ type: "oc:card:busy", busy: true })).toEqual({ busy: true });
+    expect(parseBusy({ type: "oc:card:busy", version: 1, busy: false })).toEqual({ busy: false });
+  });
+
+  it("returns null for the wrong type, a non-boolean busy, or a non-object", () => {
+    expect(parseBusy({ type: "oc:card:init", busy: true })).toBeNull();
+    expect(parseBusy({ type: "oc:card:busy", busy: "yes" })).toBeNull();
+    expect(parseBusy({ type: "oc:card:busy" })).toBeNull();
+    expect(parseBusy(null)).toBeNull();
+    expect(parseBusy("oc:card:busy")).toBeNull();
+  });
+
+  it("does not collide with parseInit (each ignores the other's message)", () => {
+    expect(parseInit({ type: "oc:card:busy", busy: true })).toBeNull();
+    expect(parseBusy({ type: CARD_MSG.init, version: 1, data: {}, context: {} })).toBeNull();
   });
 });
 
