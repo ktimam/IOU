@@ -1,11 +1,14 @@
-// AUTOMATED live verification of DEFAULT CURRENCY (Issue 3):
-//   a message with NO currency now (a) POSTS a card — previously OpenChat's gate required currency and
-//   dropped it (live 2026-07-23: "paid 120 for groceries" → no card) — and (b) imports into IOU using
-//   the user's default currency (prefs.defaultCurrency, "USD" unless changed).
+// AUTOMATED live verification of DEFAULT CURRENCY (Issue 3) under the APP-RENDERED card:
+//   a message with NO currency (a) still POSTS a card — the gate no longer requires currency — and
+//   (b) the app card DEFERS the currency to the user's IOU default instead of inventing one. The
+//   card iframe is storage-partitioned and cannot read prefs.defaultCurrency, so it must show the
+//   "Default currency" option ("") and DEPOSIT a draft with NO currency; the real IOU app fills the
+//   default (baseWithDefaultCurrency) at import. This proves the app-card migration did not regress
+//   Issue 3 for non-USD users (a hardcoded USD in the card would).
 //
-// Manual seam supplies a deterministic no-currency extraction. Roles: proposer manager (v1 :9241),
-// confirmer father (OC :9222, IOU :9231). Prereq: manager↔father paired + the chat linked to a sheet
-// (journey-fanout.ts establishes both).  pnpm exec tsx scripts/live/verify-default-currency.ts
+// Manual seam supplies a deterministic no-currency extraction. Proposer+confirmer manager (v1 :9241);
+// deposit read on father IOU :9231 (fan-out gives both members the envelope). Exit 1 on any failure.
+//   pnpm exec tsx scripts/live/verify-default-currency.ts
 import { chromium, type Page } from "@playwright/test";
 
 let failures = 0;
@@ -14,104 +17,97 @@ function check(cond: boolean, label: string): void {
   if (!cond) failures++;
 }
 
-const connections = new Map<number, ReturnType<typeof chromium.connectOverCDP>>();
-async function attach(port: number, urlPart: string): Promise<Page> {
-  if (!connections.has(port)) connections.set(port, chromium.connectOverCDP(`http://127.0.0.1:${port}`));
-  const ctx = (await connections.get(port)!).contexts()[0];
-  return ctx.pages().find((p) => p.url().includes(urlPart)) ?? ctx.pages()[0];
+async function ocPage(port: number): Promise<Page> {
+  const b = await chromium.connectOverCDP(`http://127.0.0.1:${port}`);
+  return b.contexts()[0].pages().find((x) => x.url().includes("5003"))!;
+}
+async function iouPage(port: number): Promise<Page> {
+  const b = await chromium.connectOverCDP(`http://127.0.0.1:${port}`);
+  return b.contexts()[0].pages().find((x) => x.url().includes("3000"))!;
+}
+async function inboxDrafts(p: Page): Promise<Record<string, unknown>[]> {
+  await p.goto("http://127.0.0.1:3000/pairs", { waitUntil: "domcontentloaded" });
+  await p.waitForTimeout(2000);
+  return (await p.evaluate(`(async () => {
+    const inbox = await import('/src/features/openchat/actionInboxClient.ts');
+    const cfg = await inbox.getActionInboxConfig();
+    return (await inbox.pollActionInbox({ config: cfg, maxResults: 80 })).map(d => d.draft);
+  })()`)) as Record<string, unknown>[];
 }
 
 async function main() {
-  const managerOC = await attach(9241, "localhost:5003");
-  const fatherOC = await attach(9222, "localhost:5003");
-  const fatherIOU = await attach(9231, "127.0.0.1:3000");
+  const oc = await ocPage(9241);
+  const fatherIou = await iouPage(9231);
 
-  // Open the manager↔father DM on both OC sides; resolve manager's id (the chat key on father's side).
-  await managerOC.goto("http://localhost:5003/chats", { waitUntil: "domcontentloaded" });
-  await managerOC.waitForTimeout(3000);
-  await managerOC.locator(".chat-summary, .chat_summary").filter({ hasText: /father/i }).first().click({ timeout: 15000 });
-  await managerOC.waitForTimeout(2500);
-  await fatherOC.goto("http://localhost:5003/chats", { waitUntil: "domcontentloaded" }).catch(() => {});
-  await fatherOC.waitForTimeout(3000);
-  await fatherOC.locator(".chat-summary, .chat_summary").filter({ hasText: /manager/i }).first().click({ timeout: 15000 });
-  await fatherOC.waitForTimeout(2500);
-  const managerId = /user\/([a-z0-9-]+)/.exec(fatherOC.url())?.[1];
-  check(!!managerId, `manager user id resolved on father's side (${managerId})`);
+  // Fresh code + no model + manual seam.
+  await oc.evaluate(`(async () => { try { const w = await import('/src/utils/webInference.ts'); if (w.clearWebModel) await w.clearWebModel(); } catch {} localStorage.removeItem('openchat_web_model_url'); try{indexedDB.deleteDatabase('openchat_web_model');}catch{} localStorage.setItem('oc:manualExtract','1'); })()`).catch(() => {});
+  await oc.reload({ waitUntil: "domcontentloaded" }); await oc.waitForTimeout(3000);
+  await oc.goto("http://localhost:5003/chats", { waitUntil: "domcontentloaded" }); await oc.waitForTimeout(2500);
+  await oc.locator(".chat-summary, .chat_summary").filter({ hasText: /father/i }).first().click({ timeout: 12000 });
+  await oc.waitForTimeout(2500);
+  await oc.evaluate(`localStorage.setItem("oc:manualExtract","1")`);
 
-  // Propose a NO-CURRENCY extraction via the manual seam.
-  await managerOC.evaluate(`localStorage.setItem("oc:manualExtract","1")`);
-  const nonce = Date.now() % 100000;
-  const note = `nocur ${nonce}`;
-  const extraction = JSON.stringify({ kind: "iou", amount: 120, direction: "credit", note });
-  const handler = (d: import("@playwright/test").Dialog) => {
-    void d.accept(/JSON/i.test(d.message()) ? extraction : "1").catch(() => {});
-  };
-  managerOC.on("dialog", handler);
-  const composer = managerOC.locator(".ProseMirror").first();
-  await composer.click({ timeout: 10000 });
-  await managerOC.keyboard.type(`${note}: paid 120 for groceries`);
-  await managerOC.keyboard.press("Enter");
-  await managerOC.waitForTimeout(2500);
+  // 1. Propose a NO-CURRENCY extraction with a run-unique amount so the deposit is identifiable.
+  const n = Date.now() % 100000;
+  const uniqAmt = 130000 + n;
+  const note = `nocur ${n}`;
+  const ex = JSON.stringify({ kind: "iou", amount: uniqAmt, direction: "credit", note });
+  const h = (d: import("@playwright/test").Dialog) => { void d.accept(/JSON/i.test(d.message()) ? ex : "1").catch(() => {}); };
+  oc.on("dialog", h);
+  const composer = oc.locator(".ProseMirror").first();
+  await composer.click({ timeout: 10000 }); await oc.keyboard.type(`${note}: paid for groceries`); await oc.keyboard.press("Enter");
+  await oc.waitForTimeout(2500);
+  const bubble = oc.locator(".bubble-wrapper").last();
+  await bubble.hover().catch(() => {}); await oc.waitForTimeout(400);
+  await bubble.locator(".menu-icon").first().click({ timeout: 12000 }).catch(() => {});
+  await oc.getByText("Propose action", { exact: true }).click({ timeout: 12000 }).catch(() => {});
+  await oc.waitForTimeout(4000);
+  oc.off("dialog", h);
 
-  const card = fatherOC.locator(".action-card").filter({ hasText: note }).last();
-  const confirmBtn = card.locator("button").filter({ hasText: /^(Add to IOU|Confirm)$/i });
-  let posted = false;
-  for (let attempt = 1; attempt <= 3 && !posted; attempt++) {
-    const bubble = managerOC.locator(".bubble-wrapper").last();
-    await bubble.hover().catch(() => {});
-    await managerOC.waitForTimeout(400);
-    await bubble.locator(".menu-icon").first().click({ timeout: 12000 }).catch(() => {});
-    await managerOC.getByText("Propose action", { exact: true }).click({ timeout: 12000 }).catch(() => {});
-    posted = await confirmBtn.waitFor({ timeout: 25000 }).then(() => true).catch(() => false);
-    if (!posted) await managerOC.keyboard.press("Escape").catch(() => {});
+  // 2. The no-currency message STILL posts a card (gate passes). Find THIS run's card among any stale
+  //    ones by matching our unique note+amount in the iframe's input VALUES (notes/amounts live in
+  //    editable inputs, not innerText) — and assert we actually found it, so a stale no-currency card
+  //    can't pass the currency check by coincidence.
+  await oc.waitForTimeout(2500);
+  const candidates = await oc.locator(".action-card:not(.collapsed):has(iframe)").all();
+  check(candidates.length > 0, "a NO-CURRENCY message POSTS a card (currency no longer required at the gate)");
+  let frame: ReturnType<typeof oc.frameLocator> | null = null;
+  for (const c of candidates) {
+    const f = c.frameLocator("iframe");
+    const inputs = f.locator("input");
+    const cnt = await inputs.count().catch(() => 0);
+    const vals: string[] = [];
+    for (let i = 0; i < cnt; i++) vals.push(await inputs.nth(i).inputValue().catch(() => ""));
+    if (vals.some((v) => v.includes(note)) && vals.some((v) => v === String(uniqAmt))) { frame = f; break; }
   }
-  managerOC.off("dialog", handler);
-  check(posted, "a NO-CURRENCY message POSTS a card (currency no longer required at the gate)");
-  if (!posted) throw new Error("no-currency card never posted — the manifest gate still blocks it");
+  check(!!frame, `this run's app-card iframe found (note "${note}" + amount ${uniqAmt} in inputs)`);
+  if (!frame) { process.exit(1); }
 
-  // Confirm on father's OC side (one deposit).
-  await card.locator('input[type="checkbox"]').check({ timeout: 15000 }).catch(() => {});
-  await confirmBtn.click();
-  await fatherOC.waitForTimeout(6000);
+  // 3. The card DEFERS currency: its currency <select> is on "Default" ("") — it did NOT invent USD.
+  const currencySelect = frame.locator("select").first();
+  const curVal = await currencySelect.inputValue().catch(() => "?");
+  check(curVal === "", `the card's currency defaults to "Default currency" ("") — got "${curVal}" (no invented USD)`);
 
-  // Father's IOU: open the linked sheet, import the card, and assert the entry defaults to USD.
-  const chatKey = `direct:${managerId}`;
-  const linkedSheet = (await fatherIOU.evaluate((key: string) => {
-    try {
-      return (JSON.parse(localStorage.getItem("iou.openchat.chatSheetLinks.v1") || "{}") as Record<string, string>)[key] ?? null;
-    } catch {
-      return null;
-    }
-  }, chatKey)) as string | null;
-  check(!!linkedSheet, `manager chat linked to a sheet (${linkedSheet})`);
-  if (!linkedSheet) throw new Error("link the chat to a sheet first (journey-fanout establishes it)");
+  // 4. Confirm leaving currency on Default → the deposit omits currency.
+  await frame.getByRole("button", { name: /Add to IOU/i }).click({ timeout: 10000 });
+  await oc.waitForTimeout(6000);
 
-  const card2 = fatherIOU.locator("li").filter({ hasText: new RegExp(note) }).first();
-  let sawCard = false;
-  for (let i = 0; i < 12 && !sawCard; i++) {
-    await fatherIOU.goto(`http://127.0.0.1:3000/sheet/${linkedSheet}`, { waitUntil: "domcontentloaded" });
-    await fatherIOU.waitForTimeout(4000);
-    sawCard = await card2.isVisible().catch(() => false);
+  // 5. The deposited draft carries our unique amount and NO currency field (deferred to import).
+  let mine: Record<string, unknown> | undefined;
+  for (let i = 0; i < 8 && !mine; i++) {
+    await oc.waitForTimeout(2000);
+    const drafts = await inboxDrafts(fatherIou);
+    mine = drafts.find((d) => Number((d as any).amount) === uniqAmt);
   }
-  check(sawCard, `the no-currency card reached IOU's pending list ("${note}")`);
-  if (sawCard) {
-    // Single entry → the EntryForm (openAdd) flow. Its currency field must be pre-filled with the
-    // default (USD). Import → confirm → assert the entry lands with USD.
-    await card2.getByRole("button", { name: /Review & add/ }).click({ timeout: 10000 });
-    await fatherIOU.waitForTimeout(1500);
-    const curVal = await fatherIOU.locator('label:has(span:text-is("Currency")) select').first().inputValue().catch(() => "");
-    check(/^USD$/i.test(curVal.trim()), `the EntryForm currency defaults to USD (got "${curVal}")`);
-    await fatherIOU.getByRole("button", { name: /^Add entry$/ }).click({ timeout: 10000 });
-    await fatherIOU.waitForTimeout(4000);
-    const hist = (await fatherIOU.locator("section.history, .history").first().innerText().catch(() => "")).replace(/\s+/g, " ");
-    check(new RegExp(note).test(hist) && /USD/.test(hist), `the entry landed with USD in history`);
+  check(!!mine, `a deposit with amount ${uniqAmt} exists`);
+  if (mine) {
+    const hasCur = "currency" in mine && String((mine as any).currency ?? "").trim() !== "";
+    console.log("   [deposit]", JSON.stringify(mine));
+    check(!hasCur, "the deposited draft OMITS currency (the IOU app fills prefs.defaultCurrency at import)");
   }
 
-  if (failures > 0) {
-    console.error(`\nDEFAULT-CURRENCY VERIFY FAILED — ${failures} assertion(s)`);
-    process.exit(1);
-  }
-  console.log("\n🏁 DEFAULT-CURRENCY LIVE VERIFY PASSED: no-currency message → card posts → imports as USD");
+  if (failures > 0) { console.error(`\nDEFAULT-CURRENCY VERIFY FAILED — ${failures} assertion(s)`); process.exit(1); }
+  console.log("\n🏁 DEFAULT-CURRENCY (app-card): no-currency message → card posts, defers currency to the IOU default → deposit omits currency");
   process.exit(0);
 }
 main().catch((e) => { console.error("FAILED:", e?.message ?? e); process.exit(1); });

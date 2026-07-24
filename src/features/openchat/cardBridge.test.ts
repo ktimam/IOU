@@ -12,7 +12,7 @@ import {
   CARD_MSG,
   type CardFormState,
 } from "./cardBridge";
-import { parseDraft, parseDraftBatch } from "../entries/draft";
+import { parseDraft, parseDraftBatch, baseWithDefaultCurrency } from "../entries/draft";
 
 describe("parseInit — accepts only a well-formed oc:card:init", () => {
   it("accepts a valid init and normalizes data + context", () => {
@@ -97,9 +97,12 @@ describe("initToFormState — prefill", () => {
     });
   });
 
-  it("defaults currency to USD and direction to credit when absent", () => {
+  it("leaves currency EMPTY (defer to IOU default) and direction credit when absent", () => {
     const s = initToFormState({ amount: 5 });
-    expect(s.currency).toBe("USD");
+    // "" is the "Default currency" sentinel: the storage-partitioned card can't read the user's
+    // prefs.defaultCurrency, so it must NOT invent USD — buildConfirmPayload omits currency and the
+    // real IOU app fills the default at import (baseWithDefaultCurrency).
+    expect(s.currency).toBe("");
     expect(s.direction).toBe("credit");
     expect(s.amount).toBe("5");
     // kind absent → "" (omitted from payload so parseDraft re-infers)
@@ -140,6 +143,25 @@ describe("buildConfirmPayload — edited values", () => {
       expect(r.value.initial.direction).toBe("credit");
       expect(r.value.initial.currency).toBe("USD");
     }
+  });
+
+  it("OMITS currency when left on Default ('') so the IOU default is filled at import", () => {
+    const payload = buildConfirmPayload({
+      kind: "iou",
+      amount: "120",
+      currency: "",
+      direction: "credit",
+      note: "groceries",
+      date: "",
+      tags: [],
+    });
+    expect("currency" in payload).toBe(false);
+    // The real sheet import parses the currency-less draft against a base carrying the user's
+    // default (baseWithDefaultCurrency), so the entry resolves to that default — not a card-invented
+    // USD. A user whose IOU default is EGP gets EGP.
+    const r = parseDraft(payload, baseWithDefaultCurrency(undefined, "EGP"));
+    expect(r.ok).toBe(true);
+    if (r.ok) expect(r.value.initial.currency).toBe("EGP");
   });
 
   it("round-trips direction / currency / amount edits", () => {

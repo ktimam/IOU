@@ -119,10 +119,15 @@ export function parseInit(msg: unknown): CardInit | null {
 export function initToFormState(data: EntryDraft): CardFormState {
   const kind = data.kind === "settlement" || data.kind === "iou" ? data.kind : "";
   const amount = data.amount != null ? String(data.amount) : "";
+  // Empty ("") is the sentinel for "no currency in the extraction → let the REAL IOU app fill the
+  // user's default (prefs.defaultCurrency) at import". The card iframe is storage-partitioned and
+  // CANNOT read those prefs, so it must NOT invent a currency (a hardcoded "USD" here would silently
+  // override a user whose IOU default is, say, EGP). The card shows a "Default currency" option for
+  // this state; buildConfirmPayload omits currency so baseWithDefaultCurrency resolves it.
   const currency =
     typeof data.currency === "string" && data.currency.trim() !== ""
       ? data.currency.trim().toUpperCase()
-      : "USD";
+      : "";
   const direction: Direction = data.direction === "debt" ? "debt" : "credit";
   const note = typeof data.note === "string" ? data.note : "";
   const date = typeof data.date === "string" ? data.date : "";
@@ -158,10 +163,13 @@ export function buildConfirmPayload(state: CardFormState): CardConfirmPayload {
 
   const payload: CardConfirmPayload = {
     amount,
-    currency: state.currency.trim().toUpperCase(),
     direction: state.direction,
     note: state.note,
   };
+  // Omit currency when the user left it on "Default" ("") so the REAL IOU app injects
+  // prefs.defaultCurrency at import (baseWithDefaultCurrency). A picked currency is passed through.
+  const currency = state.currency.trim().toUpperCase();
+  if (currency !== "") payload.currency = currency;
   if (state.kind !== "") payload.kind = state.kind;
   if (state.date.trim() !== "") payload.date = state.date;
   if (state.tags.length > 0) payload.tags = state.tags;

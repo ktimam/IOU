@@ -295,6 +295,9 @@ export function OpenChatCardPage() {
                   onChange={(e) => set("currency", e.target.value)}
                   style={inputStyle}
                 >
+                  {/* "" defers to the user's IOU default (prefs.defaultCurrency), resolved at import
+                      — the iframe is storage-partitioned and can't read that setting itself. */}
+                  <option value="">Default currency</option>
                   {currencyOptions.map((c) => (
                     <option key={c} value={c}>
                       {c}
@@ -504,6 +507,8 @@ function EntryRow({
             onChange={(e) => onChange("currency", e.target.value)}
             style={inputStyle}
           >
+            {/* "" → the user's IOU default currency, filled at import (see single-mode note). */}
+            <option value="">Default</option>
             {currencyOptions.map((c) => (
               <option key={c} value={c}>
                 {c}
@@ -544,7 +549,7 @@ function EntryRow({
 // values, no inputs, no buttons.
 function ReadonlyView({ form }: { form: CardFormState }) {
   const rows: { label: string; value: string }[] = [
-    { label: "Amount", value: form.amount ? `${form.amount} ${form.currency}` : "—" },
+    { label: "Amount", value: form.amount ? `${form.amount} ${form.currency || "(default currency)"}` : "—" },
     { label: "Direction", value: DIRECTION_LABELS[form.direction] },
     { label: "Note", value: form.note || "—" },
   ];
