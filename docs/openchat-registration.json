@@ -1,7 +1,7 @@
 {
   "name": "iou.entry.import",
   "description": "Extracts a single money transaction (a settlement that already happened, or an IOU / future obligation) from a chat message or image, and on confirm delivers an encrypted entry draft to the IOU app.",
-  "promptTemplate": "You are extracting a single money transaction for a 2-person\nshared ledger. The input is a chat message: plain text, an image (for example a receipt, a bank\ntransfer screenshot, or a booking confirmation), or both. Respond with ONLY one compact JSON\nobject and nothing else - no prose, no code fences, and do not repeat the schema.\nThe object may contain these fields:\n- \"kind\": \"iou\" when the money is a future obligation (a reservation, a booking, rent, an\n  instalment, or money owed to be paid later); \"settlement\" when the money has already moved\n  (already paid, sent, transferred, or received).\n- \"amount\": the amount in major currency units, as a JSON number (never a string).\n- \"currency\": the 3-letter ISO currency code.\n- \"direction\": \"credit\" when the amount is owed TO the user; \"debt\" when the user owes it.\n- \"date\": the transaction or due date, formatted YYYY-MM-DD.\n- \"note\": a short description taken from the input.\nInclude a field only when the input supports it; omit any field you are unsure of. Never invent\nan amount, a counterparty, or any other value that is not present in the input.",
+  "promptTemplate": "You are extracting money transactions for a 2-person shared\nledger. The input is a chat message: plain text, an image (for example a receipt, a bank transfer\nscreenshot, or a booking confirmation), or both. Respond with ONLY compact JSON and nothing else -\nno prose, no code fences, and do not repeat the schema. When the message describes a SINGLE\ntransaction, respond with ONE JSON object. When it describes MULTIPLE distinct transactions,\nrespond with a JSON ARRAY of such objects, one object per transaction.\nEach object may contain these fields:\n- \"kind\": \"iou\" when the money is a future obligation (a reservation, a booking, rent, an\n  instalment, or money owed to be paid later); \"settlement\" when the money has already moved\n  (already paid, sent, transferred, or received).\n- \"amount\": the amount in major currency units, as a JSON number (never a string).\n- \"currency\": the 3-letter ISO currency code. OPTIONAL - omit it when the message states no\n  currency; IOU then uses the user's default currency.\n- \"direction\": \"credit\" when the amount is owed TO the user; \"debt\" when the user owes it.\n- \"date\": the transaction or due date as YYYY-MM-DD. Infer the year from \"Today is\" below. For a\n  date RANGE like \"1-7 July\" or \"July 1-7\", use the START date (for example 2026-07-01). For a\n  relative date like \"tomorrow\" or \"next Friday\", resolve it against today.\n- \"note\": a short description taken from the input.\nInclude a field only when the input supports it; omit any field you are unsure of. Never invent\nan amount, a counterparty, or any other value that is not present in the input.",
   "responseSchema": {
     "type": "object",
     "properties": {
@@ -12,7 +12,8 @@
         ]
       },
       "amount": {
-        "type": "number"
+        "type": "number",
+        "exclusiveMinimum": 0
       },
       "currency": {
         "type": "string",
@@ -33,8 +34,7 @@
       }
     },
     "required": [
-      "amount",
-      "currency"
+      "amount"
     ]
   },
   "card": {
@@ -90,6 +90,15 @@
             "due",
             "owed",
             "owes",
+            "i owe",
+            "you owe",
+            "we owe",
+            "they owe",
+            "owe me",
+            "owe you",
+            "owe him",
+            "owe her",
+            "owe them",
             "instalment",
             "installment"
           ]
