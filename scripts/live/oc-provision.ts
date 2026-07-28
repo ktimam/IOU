@@ -7,7 +7,7 @@
 import { chromium, type Page } from "@playwright/test";
 import { writeFileSync, mkdirSync } from "node:fs";
 import { dirname } from "node:path";
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawn } from "node:child_process";
 import { createRequire } from "node:module";
 import http from "node:http";
 
@@ -36,6 +36,21 @@ function foreground(): void {
       { encoding: "utf8", timeout: 15000 });
     console.log(`  [${USER} focus] ${out.trim()}`);
   } catch (e) { console.log(`  [${USER} focus] ${(e as Error).message.slice(0, 80)}`); }
+}
+
+// Hold the target window RESTORED + foreground for the WHOLE ceremony, in ONE detached process.
+// A single pre-click foreground() is not enough: (a) focus-window.ps1 MINIMIZES competing windows, so
+// provisioning another profile leaves this one minimized — and a minimized window is
+// visibilityState="hidden", which fails WebAuthn's focus check even when SetForegroundWindow succeeds;
+// (b) OpenChat fetches a registration challenge and only THEN calls create(), and focus is routinely
+// lost in that gap (every powershell spawn briefly owns the foreground). Returns a kill function.
+function holdForeground(seconds: number): () => void {
+  const p = spawn("powershell.exe",
+    ["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", `${HERE}/hold-focus.ps1`,
+     "-Match", FOCUS, "-ProcName", FOCUS_PROC, "-Seconds", String(seconds)],
+    { detached: true, stdio: "ignore", windowsHide: true });
+  p.unref();
+  return () => { try { p.kill(); } catch {} };
 }
 
 function httpJson(path: string): Promise<any> {
@@ -112,12 +127,17 @@ async function main() {
   const va = await cdp("WebAuthn.addVirtualAuthenticator", { options: { protocol: "ctap2", transport: "internal", hasResidentKey: true, hasUserVerification: true, isUserVerified: true, automaticPresenceSimulation: true } });
   const authId = va.authenticatorId;
 
-  // Foreground (sole window) + click Proceed immediately (WebAuthn needs the OS-foreground window;
-  // any delay lets another window steal focus).
+  // Activate the TAB (a background tab is hidden even in a foreground window), then hold the window
+  // restored+foreground for the whole ceremony — not just the instant before the click.
   await page.bringToFront();
-  foreground();
-  await sleep(300);
-  console.log(`[${USER}] focus=${await page.evaluate(`document.hasFocus()`)} proceed:`, await clickExact(page, "(Proceed|Start my journey)"));
+  const releaseFocus = holdForeground(120);
+  await sleep(1200);
+  const vis: any = await page.evaluate(`JSON.stringify({focus:document.hasFocus(),vis:document.visibilityState})`);
+  console.log(`[${USER}] ${vis} proceed:`, await clickExact(page, "(Proceed|Start my journey)"));
+  // Fail FAST and legibly rather than spinning 90s on a ceremony WebAuthn will always refuse.
+  if (!/"focus":true/.test(String(vis)) || !/"vis":"visible"/.test(String(vis))) {
+    console.error(`[${USER}] window not focused+visible — WebAuthn will refuse. Is the window minimized?`);
+  }
 
   let done = false;
   for (let i = 0; i < 45; i++) {
@@ -127,6 +147,7 @@ async function main() {
     if (i % 4 === 0) console.log(`  [${USER}] +${i * 2}s creds=${creds.length} modalOpen=${modal}`);
     if (creds.length > 0 && !modal) { done = true; break; }
   }
+  releaseFocus();
   if (!done) {
     const tail = await page.evaluate(`document.body.innerText.replace(/\\s+/g,' ').slice(-240)`).catch(() => "");
     console.error(`[${USER}] signup did not complete. tail: ${tail}`);
