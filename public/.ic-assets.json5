@@ -1,6 +1,19 @@
 // Asset-canister response headers (served by iou_assets on IC + local).
 // Explicit CSP tuned for this app: self-hosted fonts, React inline styles,
 // the @dfinity/agent BLS wasm, and IC connectivity (local replica + mainnet).
+//
+// Framing posture — read before touching either entry below:
+//   Everything defaults to un-embeddable (`frame-ancestors 'none'` + `X-Frame-Options: DENY`).
+//   The ONE exception is the index.html document, which OpenChat embeds as a storage-partitioned
+//   iframe for two declared surfaces (see actionManifest.ts): the "card" surface (/openchat/card,
+//   IOU's app-rendered confirmable card) and the "home" surface (/ , display:"sheet"). IOU is a
+//   single-page app, so `/openchat/card`, `/`, and every other route are the SAME physical asset —
+//   index.html — served via client-side routing. The asset canister matches these globs against
+//   ASSET KEYS (physical files), never request paths, so a `/openchat/card` match would hit nothing;
+//   the only place a framing carve-out can live is on index.html itself. Relaxing it to the OpenChat
+//   origin(s) is low-risk: a cross-origin embed is storage-partitioned, so the framed app sees no IOU
+//   session (signed-out shell) and the card page is session-free by design and does nothing
+//   privileged. Every other asset (JS/CSS/fonts/…) stays 'none'/DENY.
 [
   {
     "match": "**/*",
@@ -8,6 +21,31 @@
       "Content-Security-Policy": "default-src 'self'; connect-src 'self' http://127.0.0.1:40436 https://icp-api.io https://*.icp0.io https://*.ic0.app; script-src 'self' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self'; object-src 'none'; base-uri 'self'; form-action 'self'; frame-ancestors 'none';",
       "X-Content-Type-Options": "nosniff",
       "X-Frame-Options": "DENY",
+      "Referrer-Policy": "same-origin",
+      "Permissions-Policy": "geolocation=(), microphone=(), camera=(), payment=()"
+    },
+    "disable_security_policy_warning": true
+  },
+  {
+    // index.html only — the document OpenChat is allowed to frame. This entry comes AFTER `**/*`, so
+    // its headers override the defaults for index.html (later match wins). The FULL header set is
+    // re-declared (not just the two framing keys) so index.html keeps the same nosniff / Referrer /
+    // Permissions hardening regardless of how the canister merges overlapping matches.
+    //
+    // Two framing changes vs. `**/*`:
+    //   1. `frame-ancestors 'none'` → the OpenChat web origin allowlist (an allowlist DENIES every
+    //      origin not listed, so this is still closed to the world — only OpenChat can frame IOU).
+    //      Prod is https://oc.app. Add other real OpenChat deployment origins here as needed
+    //      (e.g. https://test.oc.app, a fork's custom domain, or a local http://localhost:5003 /
+    //      http://localhost:5001 when embedding a locally-deployed asset canister from local OpenChat).
+    //   2. `X-Frame-Options` dropped to "" — XFO can only say DENY/SAMEORIGIN, never an allowlist, so a
+    //      lingering DENY would veto the frame-ancestors allowlist in stricter/older engines. Empty is
+    //      treated as absent, leaving CSP frame-ancestors as the sole (allowlist-capable) authority.
+    "match": "index.html",
+    "headers": {
+      "Content-Security-Policy": "default-src 'self'; connect-src 'self' http://127.0.0.1:40436 https://icp-api.io https://*.icp0.io https://*.ic0.app; script-src 'self' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self'; object-src 'none'; base-uri 'self'; form-action 'self'; frame-ancestors https://oc.app;",
+      "X-Content-Type-Options": "nosniff",
+      "X-Frame-Options": "",
       "Referrer-Policy": "same-origin",
       "Permissions-Policy": "geolocation=(), microphone=(), camera=(), payment=()"
     },
