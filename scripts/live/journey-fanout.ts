@@ -310,11 +310,15 @@ async function main() {
     try {
       if (isV2) {
         const autoFix = proposerOC.locator('button:has(path[d^="M7.5,5.6"])').first(); // AutoFix icon
-        // Long-press until the action sheet actually shows the AutoFix button (cooldowns/timing can
-        // swallow a press), then click it.
-        // The v2 MenuTrigger suppresses long-press during the SCROLL cooldown (longpressCooldown =
-        // scrollStatus.isCooldown) — and the just-sent message auto-scrolls the chat. Let the
-        // scroll settle before pressing, and back off between press retries.
+        // Open the v2 action sheet, then click the AutoFix item. The gesture depends on the device:
+        // MenuTrigger only wires the longpress action when `isTouchDevice`; on a NON-touch device
+        // (this harness's desktop Chrome at a narrow width) a long press is just a click, and a click
+        // must NOT open the menu — that was the bug where opening a chat also opened its context menu
+        // — so the desktop equivalent is a RIGHT-CLICK (oncontextmenu). Try right-click first and keep
+        // the long press as the fallback for a genuinely touch-enabled run.
+        // The v2 MenuTrigger also suppresses long-press during the SCROLL cooldown (longpressCooldown
+        // = scrollStatus.isCooldown) — and the just-sent message auto-scrolls the chat. Let the scroll
+        // settle before pressing, and back off between retries.
         await proposerOC.waitForTimeout(3000);
         let sheetOpen = false;
         for (let press = 0; press < 3 && !sheetOpen; press++) {
@@ -323,13 +327,17 @@ async function main() {
           // last message sits above/below the viewport and presses land at negative Y. Scroll first.
           await msg.scrollIntoViewIfNeeded().catch(() => {});
           await proposerOC.waitForTimeout(800);
-          const box = await msg.boundingBox();
-          if (!box) throw new Error("v2: no message box");
-          await proposerOC.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
-          await proposerOC.mouse.down();
-          await proposerOC.waitForTimeout(900);
-          await proposerOC.mouse.up();
+          await msg.click({ button: "right", timeout: 6000 }).catch(() => {});
           sheetOpen = await autoFix.waitFor({ state: "visible", timeout: 4000 }).then(() => true).catch(() => false);
+          if (!sheetOpen) {
+            const box = await msg.boundingBox();
+            if (!box) throw new Error("v2: no message box");
+            await proposerOC.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
+            await proposerOC.mouse.down();
+            await proposerOC.waitForTimeout(900);
+            await proposerOC.mouse.up();
+            sheetOpen = await autoFix.waitFor({ state: "visible", timeout: 4000 }).then(() => true).catch(() => false);
+          }
           if (!sheetOpen) await proposerOC.waitForTimeout(1500); // let any scroll cooldown lapse
         }
         if (!sheetOpen) throw new Error("v2: action sheet never opened");
