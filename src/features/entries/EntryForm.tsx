@@ -3,7 +3,7 @@
 //
 // v1 input shape:
 //   - date (defaults to "now")
-//   - currency (one of sheet.enabled_currencies)
+//   - currency (any ISO code; defaults to the user's single default currency)
 //   - amount (in major units, e.g. 12.50)
 //   - direction (credit / debt, with "I am owed" / "I owe" copy)
 //   - description
@@ -21,7 +21,6 @@ import { orderedCurrencies } from "../settings/currencies";
 type SchedRow = { date: string; percent: number };
 
 interface EntryFormProps {
-  enabledCurrencies: string[];
   myPrincipal: string;
   partnerPrincipal: string;
   // A full entry (edit) or a partial set of defaults (e.g. from a template).
@@ -34,7 +33,6 @@ interface EntryFormProps {
 }
 
 export function EntryForm({
-  enabledCurrencies,
   myPrincipal,
   partnerPrincipal,
   initial,
@@ -46,14 +44,15 @@ export function EntryForm({
   const [date, setDate] = useState(
     new Date(initial?.ts ?? Date.now()).toISOString().slice(0, 10),
   );
-  // The dropdown now offers every ISO currency (not just the sheet's enabled set),
-  // so the default is simply the user's preferred currency.
+  // A sheet has no currency of its own, so the only default is the user's single
+  // default currency (Settings -> Default currency). An entry being EDITED keeps its own.
   const [currency, setCurrency] = useState(
-    initial?.currency ?? prefs.defaultCurrency ?? enabledCurrencies[0] ?? "USD",
+    initial?.currency ?? prefs.defaultCurrency ?? "USD",
   );
-  // Default first, then USD/EUR/GBP, then the rest alphabetically; the sheet's own
-  // codes are folded in so anything already in use never drops out.
-  const currencyOptions = orderedCurrencies(prefs.defaultCurrency, enabledCurrencies);
+  // Default first, then USD/EUR/GBP, then every other ISO code alphabetically. The
+  // entry's own code is folded in so an edited entry's currency never drops out of
+  // the list (e.g. a legacy or non-ISO code).
+  const currencyOptions = orderedCurrencies(prefs.defaultCurrency, [currency]);
   // The amount field holds the GROSS (face value). For an entry with a fee
   // the stored amount_minor is the net, so seed from the fee's gross.
   // Templates may carry no amount at all → leave it blank.
@@ -101,10 +100,11 @@ export function EntryForm({
 
   // Convert state
   const [convertEnabled, setConvertEnabled] = useState(!!initial?.convert);
+  // Converting to the SAME currency is meaningless, so the target starts as the user's
+  // default and falls back to USD/EUR when that IS the entry's currency.
   const [convertTo, setConvertTo] = useState(
     initial?.convert?.to_currency ??
-      enabledCurrencies.find((c) => c !== currency) ??
-      enabledCurrencies[0] ??
+      [prefs.defaultCurrency, "USD", "EUR"].find((c) => c && c !== currency) ??
       "USD",
   );
   const [rate, setRate] = useState<FxRate | null>(null);

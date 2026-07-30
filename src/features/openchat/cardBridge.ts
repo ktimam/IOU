@@ -134,18 +134,61 @@ export function parseBusy(msg: unknown): { busy: boolean } | null {
 }
 
 /** Seed the editable form from the (loose, untrusted) extraction object. */
-export function initToFormState(data: EntryDraft): CardFormState {
+// Currency symbols worth honouring when a message writes the symbol instead of the ISO code.
+const CURRENCY_SYMBOLS: Record<string, string> = {
+  $: "USD",
+  "£": "GBP",
+  "€": "EUR",
+  "¥": "JPY",
+  "₹": "INR",
+  "ج.م": "EGP",
+};
+
+/**
+ * Did the MESSAGE actually state this currency, or did the extraction model invent it?
+ *
+ * The model routinely emits a currency the message never mentions ("Owe 300 uber" -> USD), and the
+ * prompt asking it to omit one is not binding on a small on-device model. We can check deterministically
+ * because IOU's own `from_message` rule copies the message text into `note` — so the note IS the
+ * message. A currency counts as stated when its ISO code appears as a WHOLE word (so "USD" does not
+ * match inside a longer token) or when a symbol that maps to it appears.
+ *
+ * Unverifiable (no note) counts as NOT stated: deferring to the user's own default currency is the
+ * safer, more predictable outcome, and it is exactly what they asked for.
+ */
+export function currencyStatedIn(text: string, code: string): boolean {
+  const c = code.trim().toUpperCase();
+  if (c === "" || text.trim() === "") return false;
+  if (new RegExp(`(?:^|[^A-Za-z])${c}(?:[^A-Za-z]|$)`, "i").test(text)) return true;
+  return Object.entries(CURRENCY_SYMBOLS).some(([sym, mapped]) => mapped === c && text.includes(sym));
+}
+
+export function initToFormState(data: EntryDraft, seedCurrency = ""): CardFormState {
   const kind = data.kind === "settlement" || data.kind === "iou" ? data.kind : "";
   const amount = data.amount != null ? String(data.amount) : "";
-  // Empty ("") is the sentinel for "no currency in the extraction → let the REAL IOU app fill the
-  // user's default (prefs.defaultCurrency) at import". The card iframe is storage-partitioned and
-  // CANNOT read those prefs, so it must NOT invent a currency (a hardcoded "USD" here would silently
-  // override a user whose IOU default is, say, EGP). The card shows a "Default currency" option for
-  // this state; buildConfirmPayload omits currency so baseWithDefaultCurrency resolves it.
+  // Empty ("") is the sentinel for "no currency → let the REAL IOU app fill the user's default
+  // (prefs.defaultCurrency) at import". The card iframe is storage-partitioned and CANNOT read those
+  // prefs, so it must NOT invent a currency; it shows a "Your IOU default" option for this state and
+  // buildConfirmPayload omits currency so baseWithDefaultCurrency resolves it against the default of
+  // whoever pressed Add to IOU.
+  //
+  // `seedCurrency` overrides that deferral with the DEPLOYMENT's card currency (Config.card_currency,
+  // fetched anonymously — see cardCurrency.ts). It is app-level on purpose: the frame cannot identify
+  // its viewer (measured: no localStorage / IndexedDB / caches / BroadcastChannel / Storage Access),
+  // and a value keyed by the chat is contested between users (an OpenChat direct-chat key names only
+  // the COUNTERPARTY, so it is shared by everyone who chats with that person). One global value is
+  // the only thing every viewer resolves identically, so both members of a card see — and import —
+  // the same code. Unset => "" => today's per-user deferral, unchanged.
+  //
+  // We land in that state both when the extraction omits a currency AND when it supplies one the
+  // message never stated — the model guesses "USD" for a bare "Owe 300 uber", which otherwise sailed
+  // straight past the default-currency logic and imported as USD for an EGP user. A currency the
+  // message DID state is still honoured (see currencyStatedIn); the user can always pick one anyway.
+  const claimed = typeof data.currency === "string" ? data.currency.trim() : "";
   const currency =
-    typeof data.currency === "string" && data.currency.trim() !== ""
-      ? data.currency.trim().toUpperCase()
-      : "";
+    claimed !== "" && currencyStatedIn(String(data.note ?? ""), claimed)
+      ? claimed.toUpperCase()
+      : seedCurrency.trim().toUpperCase(); // the app card currency, else "" (resolve at import)
   const direction: Direction = data.direction === "debt" ? "debt" : "credit";
   const note = typeof data.note === "string" ? data.note : "";
   const date = typeof data.date === "string" ? data.date : "";
@@ -160,10 +203,10 @@ export function initToFormState(data: EntryDraft): CardFormState {
  * one-entry UI. Non-object elements are treated as an empty draft (defensive; parseInit already
  * filters them out on the wire).
  */
-export function initEntries(data: CardInitData): CardFormState[] | null {
+export function initEntries(data: CardInitData, seedCurrency = ""): CardFormState[] | null {
   const entries = data?.entries;
   if (!Array.isArray(entries) || entries.length === 0) return null;
-  return entries.map((e) => initToFormState(isPlainObject(e) ? (e as EntryDraft) : {}));
+  return entries.map((e) => initToFormState(isPlainObject(e) ? (e as EntryDraft) : {}, seedCurrency));
 }
 
 /**

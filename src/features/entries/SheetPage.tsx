@@ -1039,8 +1039,7 @@ export function SheetPage() {
           ) : (
             <>with {partnerName ? partnerName : <code>{them.slice(0, 8)}…</code>}</>
           )}{" "}
-          · {isActive(sheet.state) ? "Active" : "Closed"} ·{" "}
-          {sheet.enabled_currencies.join(", ")}
+          · {isActive(sheet.state) ? "Active" : "Closed"}
         </p>
       </header>
 
@@ -1204,7 +1203,6 @@ export function SheetPage() {
             <CloseSheetButton
               sheetId={sheet.id}
               pairId={pairId}
-              currencies={sheet.enabled_currencies}
               closingDays={Number(sheet.closing_window_days)}
               // Pass VIEWER-ORIENTED payloads (same as the displayed balances): the closing
               // user authors the carry-forward entries, so the outstanding balance — and thus
@@ -1504,7 +1502,6 @@ export function SheetPage() {
               </label>
             )}
             <EntryForm
-              enabledCurrencies={sheet.enabled_currencies}
               myPrincipal={me}
               partnerPrincipal={them}
               initial={modal.initial ?? undefined}

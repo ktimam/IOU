@@ -65,7 +65,6 @@ async function soloAccount(A: Awaited<ReturnType<typeof member>>) {
   const wrapA = await wrapSheetKey(K, A.kp.publicKey, A.kp.privateKey);
   const sheet = await A.actor.create_sheet({
     pair_id: cp.pair_id,
-    enabled_currencies: ["EGP"],
     closing_window_days: 30,
     wrapped_key_a: Array.from(wrapA),
     wrapped_key_b: [],
@@ -451,7 +450,6 @@ describeE2E("IOU account-scoped transaction types (pair template slots)", () => 
     const K2 = newSheetKey();
     await A.actor.create_sheet({
       pair_id: pairId,
-      enabled_currencies: ["EGP"],
       closing_window_days: 30,
       wrapped_key_a: Array.from(await wrapSheetKey(K2, A.kp.publicKey, A.kp.privateKey)),
       wrapped_key_b: Array.from(await wrapSheetKey(K2, B.kp.publicKey, B.kp.privateKey)),

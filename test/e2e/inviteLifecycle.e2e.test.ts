@@ -60,7 +60,6 @@ describeE2E("IOU invite-link auto-join + lifecycle E2E", () => {
     const wrapA = await wrapSheetKey(K, aKp.publicKey, aKp.privateKey);
     const sheet = await A.actor.create_sheet({
       pair_id: pairId,
-      enabled_currencies: ["USD"],
       closing_window_days: 30,
       wrapped_key_a: Array.from(wrapA),
       wrapped_key_b: [], // solo placeholder

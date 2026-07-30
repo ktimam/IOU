@@ -120,8 +120,7 @@ export function ArchivedSheetsPage() {
               <p className="muted small">
                 Closed{" "}
                 {new Date(closedAtNum / 1_000_000).toLocaleString()} ·{" "}
-                with {prefs.partnerNames[pairId] || `${them.slice(0, 8)}…`} ·{" "}
-                {sh.enabled_currencies.join(", ")}
+                with {prefs.partnerNames[pairId] || `${them.slice(0, 8)}…`}
               </p>
               <h3>
                 {prefs.sheetNames[sh.id] || `Sheet ${sh.id.slice(0, 8)}…`}

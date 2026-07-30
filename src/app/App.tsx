@@ -17,6 +17,7 @@ import { PreferencesProvider } from "../features/settings/usePreferences";
 import { SettingsPage } from "../features/settings/SettingsPage";
 import { TemplatesProvider } from "../features/templates/TemplatesContext";
 import { ConsumerKeypairSync } from "../features/openchat/ConsumerKeypairSync";
+import { DefaultCurrencySync } from "../features/settings/DefaultCurrencySync";
 import { ManifestTypesSync } from "../features/openchat/ManifestTypesSync";
 import { EmbeddedBanner } from "../features/openchat/EmbeddedBanner";
 import { LinkChatPage } from "../features/openchat/LinkChatPage";
@@ -59,6 +60,9 @@ function AuthedApp() {
             <ErrorBoundary>
             <DeepLinks />
             <ConsumerKeypairSync />
+            {/* Pulls the user's ONE default currency from the canister (and pushes a
+                browser-only value up once), so it follows them across devices. */}
+            <DefaultCurrencySync />
             {/* App-load OpenChat manifest re-sync from ACCOUNT-SCOPED types
                 (needs the sheet-key unwrapper, so it lives inside
                 SheetKeyProvider — see ManifestTypesSync). */}

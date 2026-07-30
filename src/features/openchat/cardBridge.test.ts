@@ -2,6 +2,7 @@ import { describe, it, expect } from "vitest";
 import {
   parseInit,
   parseBusy,
+  currencyStatedIn,
   initToFormState,
   initEntries,
   buildConfirmPayload,
@@ -85,7 +86,9 @@ describe("initToFormState — prefill", () => {
       amount: 1000,
       currency: "egp",
       direction: "debt",
-      note: "Reservation",
+      // The note must STATE the currency for it to be seeded — an unstated one now defers to the
+      // user's default (see the currencyStatedIn tests below).
+      note: "Reservation 1000 EGP",
       date: "2026-08-01",
     });
     expect(s).toEqual<CardFormState>({
@@ -93,7 +96,7 @@ describe("initToFormState — prefill", () => {
       amount: "1000",
       currency: "EGP",
       direction: "debt",
-      note: "Reservation",
+      note: "Reservation 1000 EGP",
       date: "2026-08-01",
       tags: [],
     });
@@ -101,7 +104,7 @@ describe("initToFormState — prefill", () => {
 
   it("leaves currency EMPTY (defer to IOU default) and direction credit when absent", () => {
     const s = initToFormState({ amount: 5 });
-    // "" is the "Default currency" sentinel: the storage-partitioned card can't read the user's
+    // "" is the "Your IOU default" sentinel: the storage-partitioned card can't read the user's
     // prefs.defaultCurrency, so it must NOT invent USD — buildConfirmPayload omits currency and the
     // real IOU app fills the default at import (baseWithDefaultCurrency).
     expect(s.currency).toBe("");
@@ -304,8 +307,8 @@ describe("initEntries — MULTI vs SINGLE detection", () => {
   it("returns one form state per entry (MULTI), each via the single initToFormState logic", () => {
     const states = initEntries({
       entries: [
-        { kind: "iou", amount: 100, currency: "egp", direction: "debt", note: "rent" },
-        { amount: 5, currency: "usd", direction: "credit", note: "lunch" },
+        { kind: "iou", amount: 100, currency: "egp", direction: "debt", note: "rent 100 EGP" },
+        { amount: 5, currency: "usd", direction: "credit", note: "lunch 5 USD" },
       ],
     });
     expect(states).not.toBeNull();
@@ -315,15 +318,16 @@ describe("initEntries — MULTI vs SINGLE detection", () => {
       amount: "100",
       currency: "EGP",
       direction: "debt",
-      note: "rent",
+      note: "rent 100 EGP",
       date: "",
       tags: [],
     });
     expect(states![1].currency).toBe("USD");
     expect(states![1].direction).toBe("credit");
-    // byte-identical to calling initToFormState per element
+    // byte-identical to calling initToFormState per element (same note, so the same currency rule
+    // applies to both — a MULTI entry is seeded exactly like a single one)
     expect(states![1]).toEqual(
-      initToFormState({ amount: 5, currency: "usd", direction: "credit", note: "lunch" }),
+      initToFormState({ amount: 5, currency: "usd", direction: "credit", note: "lunch 5 USD" }),
     );
   });
 
@@ -388,5 +392,137 @@ describe("buildMultiConfirmPayload — edited array round-trip", () => {
     expect(errors).toEqual([]);
     expect(drafts[0].initial.currency).toBe("EGP");
     expect(drafts[1].initial.currency).toBe("EUR");
+  });
+});
+
+describe("currencyStatedIn / model-invented currency defers to the user's default", () => {
+  it("treats a currency the message never stated as NOT stated", () => {
+    // The real report: child wrote "Owe 300 uber" (no currency) and the on-device model emitted USD,
+    // so an EGP user's entry imported as USD.
+    expect(currencyStatedIn("Owe 300 uber", "USD")).toBe(false);
+    expect(currencyStatedIn("cleaning fee 350", "EGP")).toBe(false);
+    expect(currencyStatedIn("", "USD")).toBe(false);
+  });
+
+  it("honours a currency the message DID state (code or symbol)", () => {
+    expect(currencyStatedIn("Owe 300 USD for uber", "USD")).toBe(true);
+    expect(currencyStatedIn("owe 300 usd", "USD")).toBe(true);
+    expect(currencyStatedIn("rent 5000 EGP", "EGP")).toBe(true);
+    expect(currencyStatedIn("paid $300", "USD")).toBe(true);
+    expect(currencyStatedIn("paid £20", "GBP")).toBe(true);
+  });
+
+  it("does not match a code inside a longer word", () => {
+    expect(currencyStatedIn("usduber", "USD")).toBe(false);
+    expect(currencyStatedIn("crusade", "USD")).toBe(false);
+  });
+
+  it("initToFormState DROPS an unstated currency so the IOU default wins at import", () => {
+    const s = initToFormState({ amount: 300, currency: "USD", direction: "debt", note: "Owe 300 uber" });
+    expect(s.currency).toBe("");                       // -> "Your IOU default" in the card
+    const payload = buildConfirmPayload(s);
+    expect("currency" in payload).toBe(false);          // -> omitted on the wire
+    const r = parseDraft(payload, baseWithDefaultCurrency(undefined, "EGP"));
+    expect(r.ok).toBe(true);
+    if (r.ok) expect(r.value.initial.currency).toBe("EGP");   // the presser's default
+  });
+
+  it("initToFormState KEEPS a currency the message stated", () => {
+    const s = initToFormState({ amount: 300, currency: "usd", direction: "debt", note: "Owe 300 USD uber" });
+    expect(s.currency).toBe("USD");
+    expect(buildConfirmPayload(s).currency).toBe("USD");
+  });
+});
+
+// The default currency is a PER-USER fact, and the card must leave it to import to resolve.
+//
+// A tempting shortcut is to have the card show a code fetched by chatKey (we built and reverted
+// exactly that — see the MemoryId 21 note in lib.rs). It cannot work: an OpenChat direct-chat key
+// names only the COUNTERPARTY, so `direct:<father>` is the same string for every user who chats with
+// him — mother's and child's values collide on one entry. And it answers the wrong question: a
+// father-created sheet is USD, so an EGP user's "Owe 300 uber" would import as USD, which is the very
+// bug the deferral exists to prevent. These tests pin the per-user contract so that shortcut can't
+// come back unnoticed.
+// The DEPLOYMENT's card currency (Config.card_currency), fetched anonymously by the frame.
+//
+// It is app-level, not per viewer, because the frame cannot identify its viewer (measured: no
+// localStorage / IndexedDB / caches / BroadcastChannel / Storage Access from inside OpenChat's
+// `credentialless` iframe) and a chat-keyed value is contested between users (an OpenChat direct-chat
+// key names only the counterparty). Both members of a card therefore see and import the SAME code —
+// an accepted trade-off, since it is a pre-selection anyone can change before confirming.
+describe("app card currency seed", () => {
+  it("fills a message that stated no currency, and travels in the payload", () => {
+    const s = initToFormState({ amount: 300, direction: "debt", note: "Owe 300 uber" }, "EGP");
+    expect(s.currency).toBe("EGP");
+    expect(buildConfirmPayload(s).currency).toBe("EGP");
+  });
+
+  it("overrides a currency the model INVENTED (the note never stated it)", () => {
+    const s = initToFormState(
+      { amount: 300, currency: "USD", direction: "debt", note: "Owe 300 uber" },
+      "EGP",
+    );
+    expect(s.currency).toBe("EGP");
+  });
+
+  it("does NOT override a currency the message actually stated", () => {
+    const s = initToFormState(
+      { amount: 300, currency: "USD", direction: "debt", note: "Owe 300 USD uber" },
+      "EGP",
+    );
+    expect(s.currency).toBe("USD");
+  });
+
+  it("unset (\"\") keeps today's per-user deferral", () => {
+    const s = initToFormState({ amount: 300, currency: "USD", direction: "debt", note: "Owe 300 uber" });
+    expect(s.currency).toBe("");
+    expect("currency" in buildConfirmPayload(s)).toBe(false);
+  });
+
+  it("normalizes a sloppy seed rather than putting junk on the wire", () => {
+    expect(initToFormState({ amount: 1, note: "x" }, "  egp ").currency).toBe("EGP");
+  });
+
+  it("seeds every entry of a MULTI card", () => {
+    const states = initEntries(
+      { entries: [{ amount: 1, currency: "USD", note: "a" }, { amount: 2, note: "b" }, { amount: 3, currency: "USD", note: "c 3 USD" }] },
+      "EGP",
+    );
+    // invented -> seeded, absent -> seeded, stated -> kept
+    expect(states?.map((x) => x.currency)).toEqual(["EGP", "EGP", "USD"]);
+  });
+});
+
+describe("with NO app card currency set, the default is resolved PER USER at import", () => {
+  it("the SAME confirmed card yields each presser's own default", () => {
+    // "Owe 300 uber" — no currency in the message (the model's invented USD is dropped upstream).
+    const payload = buildConfirmPayload(
+      initToFormState({ amount: 300, currency: "USD", direction: "debt", note: "Owe 300 uber" }),
+    );
+    expect("currency" in payload).toBe(false); // nothing on the wire to override the presser
+
+    const child = parseDraft(payload, baseWithDefaultCurrency(undefined, "EGP"));
+    const father = parseDraft(payload, baseWithDefaultCurrency(undefined, "USD"));
+    expect(child.ok && child.value.initial.currency).toBe("EGP");
+    expect(father.ok && father.value.initial.currency).toBe("USD");
+  });
+
+  it("MULTI mode defers every entry the message left unstated", () => {
+    const states = initEntries({
+      entries: [
+        { amount: 1, currency: "USD", note: "a" }, // invented → dropped
+        { amount: 2, note: "b" }, // absent → dropped
+        { amount: 3, currency: "USD", note: "c 3 USD" }, // stated → kept
+      ],
+    });
+    expect(states?.map((x) => x.currency)).toEqual(["", "", "USD"]);
+    const wire = buildMultiConfirmPayload(states ?? []);
+    expect(wire.map((p) => "currency" in p)).toEqual([false, false, true]);
+  });
+
+  it("never invents a currency from anything but the message itself", () => {
+    // No chat key, no sheet, no cached pick can enter here — the signature takes only the extraction.
+    expect(initToFormState({ amount: 300, currency: "EGP", note: "Owe 300 uber" }).currency).toBe("");
+    expect(initToFormState({ amount: 300, note: "Owe 300 uber" }).currency).toBe("");
   });
 });

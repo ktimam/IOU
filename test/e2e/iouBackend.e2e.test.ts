@@ -57,7 +57,6 @@ describeE2E("IOU backend — two-user pair/sheet/entry E2E", () => {
     const wrapB = await wrapSheetKey(K, bKp.publicKey, aKp.privateKey); // A wraps for B
     const sheet = await A.actor.create_sheet({
       pair_id: pairId,
-      enabled_currencies: ["USD", "EGP"],
       closing_window_days: 30,
       wrapped_key_a: Array.from(wrapA),
       wrapped_key_b: Array.from(wrapB),

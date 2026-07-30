@@ -173,7 +173,6 @@ async function main() {
   const wrappedKeyB = await wrapSheetKey(K_sheet, partnerKp.publicKey, partnerKp.privateKey);
   const sheetReq = {
     pair_id: pairId,
-    enabled_currencies: ["USD", "EGP"],
     closing_window_days: 365,
     wrapped_key_a: Array.from(wrappedKeyA),
     wrapped_key_b: Array.from(wrappedKeyB),
@@ -368,13 +367,6 @@ async function main() {
   }
   ok(nonMemberTrapped, "non-member list_entries traps");
 
-  // ─── 8. add_currency as tester ───
-  console.log("\n=== add_currency (tester) ===");
-  await (tester as any).add_currency(sheetId, "EUR");
-  const sheetAfter = unwrap(await (tester as any).get_sheet(sheetId));
-  console.log("currencies:", sheetAfter.enabled_currencies);
-  ok(sheetAfter.enabled_currencies.includes("EUR"), "EUR is enabled");
-
   // ─── 9. close_sheet as partner ───
   console.log("\n=== close_sheet (partner) ===");
   await (partner as any).close_sheet(sheetId, []);
@@ -387,7 +379,6 @@ async function main() {
   console.log("\n=== start_new_sheet (tester) ===");
   const newSheet = await (tester as any).start_new_sheet({
     pair_id: pairId,
-    enabled_currencies: ["USD"],
     closing_window_days: 365,
     wrapped_key_a: Array.from(new TextEncoder().encode("wrapA-fake-002")),
     wrapped_key_b: Array.from(new TextEncoder().encode("wrapB-fake-002")),

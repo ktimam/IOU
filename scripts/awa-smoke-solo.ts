@@ -65,7 +65,6 @@ async function main() {
   const pairId = cp.pair_id;
   const sheet = await creator.create_sheet({
     pair_id: pairId,
-    enabled_currencies: ["USD"],
     closing_window_days: 365,
     wrapped_key_a: [1, 2, 3, 4],
     wrapped_key_b: [],

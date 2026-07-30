@@ -27,7 +27,6 @@ import { useNavigate } from "react-router-dom";
 interface CloseSheetButtonProps {
   sheetId: string;
   pairId: string;
-  currencies: string[];
   closingDays: number;
   entries: EntryPayload[];
 }
@@ -35,7 +34,6 @@ interface CloseSheetButtonProps {
 export function CloseSheetButton({
   sheetId,
   pairId,
-  currencies,
   closingDays,
   entries,
 }: CloseSheetButtonProps) {
@@ -66,7 +64,9 @@ export function CloseSheetButton({
       const { sheet: newSheet, K_sheet } = await createSheetForPair(
         actor,
         state.identity,
-        { pairId, currencies, closingDays },
+        // A sheet has no currency of its own. The carry-forward entries below are written in each
+        // balance's OWN currency, so multi-currency balances survive the rotation untouched.
+        { pairId, closingDays },
       );
       // 3. Re-publish account + your names under the new sheet's key.
       await publishAccountNames(actor, K_sheet, {

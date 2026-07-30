@@ -31,7 +31,6 @@ export const idlFactory = ({ IDL }) => {
     'wrapped_key_a' : IDL.Vec(IDL.Nat8),
     'wrapped_key_b' : IDL.Vec(IDL.Nat8),
     'pair_id' : IDL.Text,
-    'enabled_currencies' : IDL.Vec(IDL.Text),
   });
   const SheetState = IDL.Variant({ 'Closed' : IDL.Null, 'Active' : IDL.Null });
   const Sheet = IDL.Record({
@@ -47,7 +46,6 @@ export const idlFactory = ({ IDL }) => {
     'wrapped_key_a' : IDL.Vec(IDL.Nat8),
     'wrapped_key_b' : IDL.Vec(IDL.Nat8),
     'pair_id' : IDL.Text,
-    'enabled_currencies' : IDL.Vec(IDL.Text),
   });
   const EditEntryReq = IDL.Record({
     'iv' : IDL.Vec(IDL.Nat8),
@@ -97,7 +95,6 @@ export const idlFactory = ({ IDL }) => {
     'signer_pubkey' : IDL.Vec(IDL.Nat8),
   });
   return IDL.Service({
-    'add_currency' : IDL.Func([IDL.Text, IDL.Text], [], []),
     'add_entry' : IDL.Func([AddEntryReq], [Entry], []),
     'close_sheet' : IDL.Func([IDL.Text, IDL.Vec(ClosingBalance)], [], []),
     'create_pair' : IDL.Func([], [CreatePairResult], []),

@@ -4,7 +4,6 @@ import { useAuth } from "../auth/AuthProvider";
 import { useActor } from "./useActor";
 import { useSheetKey } from "./SheetKeyContext";
 import { usePreferences } from "../settings/usePreferences";
-import { COMMON_CURRENCIES } from "../settings/currencies";
 import { createSheetForPair, publishAccountNames } from "./createSheet";
 
 export function NewSheet() {
@@ -16,9 +15,6 @@ export function NewSheet() {
   const { prefs, cacheSheetName } = usePreferences();
   const nav = useNavigate();
   const [sheetName, setSheetName] = useState("");
-  const [currencies, setCurrencies] = useState<string[]>([
-    prefs.defaultCurrency || "USD",
-  ]);
   const [closingDays, setClosingDays] = useState(365);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -32,20 +28,10 @@ export function NewSheet() {
 
   if (state.kind !== "authenticated") return null;
 
-  function toggleCurrency(c: string) {
-    setCurrencies((cur) =>
-      cur.includes(c) ? cur.filter((x) => x !== c) : [...cur, c],
-    );
-  }
-
   async function doCreate() {
     if (!actor || !pairId) return;
     if (state.kind !== "authenticated") {
       setError("Please sign in first");
-      return;
-    }
-    if (currencies.length === 0) {
-      setError("Pick at least one currency");
       return;
     }
     setBusy(true);
@@ -53,7 +39,6 @@ export function NewSheet() {
     try {
       const { sheet, K_sheet } = await createSheetForPair(actor, state.identity, {
         pairId,
-        currencies,
         closingDays,
         name: sheetName,
       });
@@ -103,26 +88,6 @@ export function NewSheet() {
       </div>
 
       <div className="card">
-        <h2>Currencies</h2>
-        <p className="muted" style={{ fontSize: "0.875rem" }}>
-          Pick the currencies you'll use in this sheet. You can add more
-          later.
-        </p>
-        <div className="row" style={{ flexWrap: "wrap", gap: 8 }}>
-          {COMMON_CURRENCIES.map((c) => (
-            <button
-              key={c}
-              className={currencies.includes(c) ? "" : "secondary"}
-              onClick={() => toggleCurrency(c)}
-              style={{ fontSize: "0.875rem", padding: "6px 12px" }}
-            >
-              {c}
-            </button>
-          ))}
-        </div>
-      </div>
-
-      <div className="card">
         <h2>Closing window</h2>
         <p className="muted" style={{ fontSize: "0.875rem" }}>
           After this many days of inactivity, the sheet can be closed and a
@@ -140,8 +105,9 @@ export function NewSheet() {
       {error && <p style={{ color: "var(--debt)" }}>{error}</p>}
 
       <div className="cta">
-        <button onClick={doCreate} disabled={busy || currencies.length === 0}>
-          {busy ? "Creating…" : "Create sheet"}
+        {/* Gate on the ACTOR too — see NewPair: an early click silently no-ops otherwise. */}
+        <button onClick={doCreate} disabled={busy || !actor}>
+          {busy ? "Creating…" : !actor ? "Connecting…" : "Create sheet"}
         </button>
       </div>
     </div>

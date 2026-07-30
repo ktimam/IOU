@@ -50,7 +50,7 @@ describeE2E("Leave-time key reads — creator leaves, promoted member still read
     K1 = newSheetKey();
     const wrapA1 = await wrapSheetKey(K1, A.kp.publicKey, A.kp.privateKey);
     sheet1 = (await A.actor.create_sheet({
-      pair_id: pairId, enabled_currencies: ["USD"], closing_window_days: 30,
+      pair_id: pairId, closing_window_days: 30,
       wrapped_key_a: Array.from(wrapA1), wrapped_key_b: [], name_enc: [], name_iv: [],
     })).id;
 
@@ -70,7 +70,7 @@ describeE2E("Leave-time key reads — creator leaves, promoted member still read
     const wrapA2 = await wrapSheetKey(K2, A.kp.publicKey, A.kp.privateKey);
     const crossB2 = await wrapSheetKeyTagged(K2, B.kp.publicKey, A.kp.privateKey, A.kp.publicKeyB64);
     sheet2 = (await A.actor.create_sheet({
-      pair_id: pairId, enabled_currencies: ["USD"], closing_window_days: 30,
+      pair_id: pairId, closing_window_days: 30,
       wrapped_key_a: Array.from(wrapA2), wrapped_key_b: Array.from(crossB2), name_enc: [], name_iv: [],
     })).id;
   });

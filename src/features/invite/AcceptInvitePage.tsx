@@ -126,8 +126,9 @@ export function AcceptInvitePage() {
         immediately — no extra steps.
       </p>
       <div className="cta">
-        <button onClick={onAccept} disabled={busy}>
-          {busy ? "Joining…" : "Accept invite"}
+        {/* Gate on the ACTOR too — see NewPair: an early click silently no-ops otherwise. */}
+        <button onClick={onAccept} disabled={busy || !actor}>
+          {busy ? "Joining…" : !actor ? "Connecting…" : "Accept invite"}
         </button>
       </div>
       {err && <p className="err">{err}</p>}

@@ -275,6 +275,99 @@ form — NOT `{entries:[…]}`.
 New/changed unit coverage: `draft.test.ts` (+22 — `baseWithDefaultCurrency`, `parseDraftBatch`,
 `parsedToPayload`, `batchSummary`), `actionManifest.test.ts` (+1 — the array-prompt instruction).
 
+##### One user-level default currency; per-sheet defaults removed (2026-07-30)
+
+Sheets no longer have a currency of their own. There is ONE default currency, set at the user level
+(Settings → Default currency), and it governs everywhere: every entry form pre-selects it, new
+accounts/sheets seed from it, and it is stamped onto any chat import that names no currency. Two
+members of the same sheet therefore each get their own default — verified live: on sheet
+`c819f76d…` (created as USD) the child's form pre-selects **EGP** and the father's **USD**.
+
+Removed, UI side: the "Currencies" multiselect on New sheet, the per-sheet currency in the sheet
+header and the archived-sheets list, and the sheet's currency list as an entry-form fallback (the
+picker always offers all 157 ISO codes with the user's default first).
+
+Removed, CANISTER side: `enabled_currencies` is gone from `Sheet` and `CreateSheetReq`, and the
+`add_currency` endpoint is deleted — a sheet has no currency field at all, so `CreateSheetOpts` has
+nothing to pass. The canister never validated an entry's currency against that list anyway (entries
+are E2E encrypted, so it cannot read the currency), which is why the removal needs no data migration:
+sheets stored before the upgrade still carry the field in their bytes and Candid ignores unknown record
+fields on decode. Verified live against a sheet created BEFORE the upgrade — it still loads, renders
+its balances and accepts entries (`scripts/live/verify-sheet-no-currency.ts`).
+
+Guards: `scripts/live/verify-user-level-currency.ts` (run against two profiles with different
+defaults), `scripts/live/verify-sheet-no-currency.ts` (the migration), and `createSheet.test.ts`
+"a sheet carries no currency at all".
+
+##### The default currency is canister-backed (2026-07-30)
+
+It used to live ONLY in this browser (`localStorage["iou:prefs:v1"]`), so it did not follow the user to
+another device — a second browser silently fell back to USD. It is now stored per principal on the
+canister as `UserRecord.default_currency` (plaintext: a 3-letter code is not PII, and it is only ever
+returned by the caller-scoped `get_my_user`, so no one else can read it), set via
+`set_default_currency` (ISO-validated, uppercased). localStorage stays as a cache so pickers render
+instantly before the query lands.
+
+`DefaultCurrencySync` (mounted in App next to `ConsumerKeypairSync`) reconciles once per session via
+the pure `reconcileDefaultCurrency`: the CANISTER wins whenever it holds a valid code — so a device
+with a stale cache adopts the newer choice instead of fighting it — and only when the canister has
+nothing does the cached value win and get pushed up (the one-time migration for existing users). The
+cache is always materialized, so the browser never silently depends on the `DEFAULTS` constant.
+
+While adding the field, the three `UserRecord` setters were folded onto one `upsert_my_user` helper.
+They each rebuilt the whole record by hand, so adding a field meant remembering to copy it through in
+every other setter — forgetting would have silently wiped it (saving your username would have erased
+your default currency).
+
+Schema v8 -> v9 (additive `opt`, no migration). Guard:
+`scripts/live/verify-default-currency-canister.ts` — it CHOOSES a non-fallback code through the real UI,
+deletes ONLY the cached prefs key (never the whole localStorage: that would destroy the profile's dev
+identity, which has no recovery path), reloads, and asserts the code comes back from the canister.
+Verified live on two profiles: child EGP, and father GBP -> wipe -> GBP -> restored to USD.
+
+##### The card CAN show a code — one per deployment (2026-07-30)
+
+`Config.card_currency` is a deployment-wide currency the card pre-selects, set in Settings → "Chat card
+currency" and read by the frame through the ANONYMOUS `get_config` query. Zero OpenChat changes. Unset
+(the default) keeps the per-user deferral below, so nothing changes until someone sets one; selecting
+"Not set" clears it again (`set_card_currency("")`).
+
+It is app-level ON PURPOSE, and that is the whole design: the frame cannot identify its viewer, so the
+only value every viewer resolves identically is a global one. Both members of a card therefore see —
+and, since a non-empty currency travels in the confirm payload, IMPORT — the same code. That is the
+accepted trade-off, and it is only a PRE-SELECTION: whoever confirms can change it in the dropdown
+first, and a currency the MESSAGE itself stated always beats it (`currencyStatedIn`).
+
+Gate: `set_card_currency` is creator-only once a creator principal has been claimed (fresh deployments
+start with `creator_principal` = anonymous, so the first user can set it). Schema stays v9 — the field
+is an additive `opt` on the Config cell, so existing deployments decode with None
+(`config_decodes_pre_card_currency_records_as_none`). Guard:
+`scripts/live/verify-card-app-currency.ts` — sets it, asserts EVERY listed profile's card pre-selects
+it, clears it, asserts they all go back to deferring, and checks a stated currency wins throughout.
+Verified live on child + father: both cards showed EGP.
+
+##### Why the card cannot show each viewer's OWN default (2026-07-30)
+
+The default currency is a **per-user** fact and is resolved at import, where identity exists. The card
+iframe cannot show the literal code (`EGP`), and an attempt to fix that was built, live-verified, and
+reverted after three measurements on the live setup:
+
+- An OpenChat **direct-chat key names only the counterparty** — child and mother both store
+  `direct:<father>` (pointing at *different* sheets), so any map keyed by chat key is shared between
+  them. The existing `chat_sheet_links` map escapes this only because it is caller-keyed, and an
+  anonymous reader cannot supply a caller.
+- The value it could serve (the linked sheet's founding currency) is a **per-sheet** fact: the
+  father-created sheet is USD, so the child's card showed USD *and confirmed USD*, storing the wrong
+  currency for an EGP user — the very bug the deferral prevents.
+- The frame cannot cache a pick either: with `credentialless` (what OpenChat uses) its `localStorage`
+  is wiped on every host reload, and without it the frame will not load at all (COEP).
+
+So the model's invented currency is dropped unless the message actually stated it (`currencyStatedIn`),
+the card omits currency from the confirm payload, and `baseWithDefaultCurrency` stamps the confirming
+user's own default at import. Guard: `scripts/live/card-default-currency.ts`. Full reasoning and the
+burned MemoryId 21 note: `open-chat-cycle/fork-notes/08-app-rendered-cards.md` (2026-07-30 addendum)
+and `src/lib.rs`.
+
 ##### Setting up an on-device model (the no-model guide's destination)
 
 When a message can't be extracted because no on-device model is selected, propose fails with a guide

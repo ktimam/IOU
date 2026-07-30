@@ -182,7 +182,6 @@ describe("createSheetForPair — partner can read a sheet created after they joi
     const identity = { getPrincipal: () => principalLike(A_PRINCIPAL) } as any;
     await createSheetForPair(actor as any, identity, {
       pairId: "pair-1",
-      currencies: ["USD"],
       closingDays: 30,
     });
 
@@ -233,7 +232,6 @@ describe("createSheetForPair — partner can read a sheet created after they joi
     const identity = { getPrincipal: () => principalLike(A_PRINCIPAL) } as any;
     await createSheetForPair(actor as any, identity, {
       pairId: "pair-1",
-      currencies: ["USD"],
       closingDays: 30,
     });
 
@@ -265,7 +263,6 @@ describe("createSheetForPair — partner can read a sheet created after they joi
     const identity = { getPrincipal: () => principalLike(B_PRINCIPAL) } as any;
     await createSheetForPair(actor as any, identity, {
       pairId: "pair-1",
-      currencies: ["USD"],
       closingDays: 30,
     });
 
@@ -322,8 +319,7 @@ describe("createSheetForPair — partner can read a sheet created after they joi
     await expect(
       createSheetForPair(actor as any, identity, {
         pairId: "pair-1",
-        currencies: ["USD"],
-        closingDays: 30,
+          closingDays: 30,
       }),
     ).rejects.toThrow(/hasn't published their key/i);
   });
@@ -349,7 +345,6 @@ describe("createSheetForPair — solo account seal", () => {
 
     const { K_sheet } = await createSheetForPair(actor as any, identity, {
       pairId: "pair-solo",
-      currencies: ["USD"],
       closingDays: 30,
     });
 
@@ -373,7 +368,7 @@ describe("createSheetForPair — rotation (new sheet on an already-shared pair)"
     const bPubBytes = Array.from(new TextEncoder().encode(bKp.publicKeyB64));
     const { actor, captured } = makeSheetActor({ [B_PRINCIPAL]: bPubBytes });
     const identity = { getPrincipal: () => principalLike(A_PRINCIPAL) } as any;
-    const opts = { pairId: "pair-1", currencies: ["USD"], closingDays: 30 };
+    const opts = { pairId: "pair-1", closingDays: 30 };
 
     const r1 = await createSheetForPair(actor as any, identity, opts);
     const req1 = { ...captured.req }; // snapshot before the second call overwrites captured.req
@@ -393,5 +388,43 @@ describe("createSheetForPair — rotation (new sheet on an already-shared pair)"
     // A's own (self-wrapped) slot recovers the matching key too.
     const ka1 = await recoverSheetKey(new Uint8Array(req1.wrapped_key_a), aKp);
     expect(Array.from(ka1)).toEqual(Array.from(r1.K_sheet));
+  });
+});
+
+// A sheet has NO currency of its own — v1.12.0 removed `enabled_currencies` from the canister's
+// Sheet and CreateSheetReq entirely (and with it `add_currency`). The one default currency is a
+// USER-level setting (prefs.defaultCurrency) that pre-selects the entry form; balances are grouped by
+// whatever currencies the entries actually use. These tests fail if any currency field creeps back
+// into sheet creation.
+describe("createSheetForPair — a sheet carries no currency at all", () => {
+  it("sends NO currency field in create_sheet", async () => {
+    const bKp = await deriveUserKeypair(B_PRINCIPAL);
+    const bPubBytes = Array.from(new TextEncoder().encode(bKp.publicKeyB64));
+    const { actor, captured } = makeSheetActor({ [B_PRINCIPAL]: bPubBytes });
+    const identity = { getPrincipal: () => principalLike(A_PRINCIPAL) } as any;
+
+    await createSheetForPair(actor as any, identity, { pairId: "pair-1", closingDays: 30 });
+
+    expect("enabled_currencies" in captured.req).toBe(false);
+    expect(Object.keys(captured.req).some((k) => /currenc/i.test(k))).toBe(false);
+    // The rest of the request is unchanged.
+    expect(captured.req.pair_id).toBe("pair-1");
+    expect(captured.req.closing_window_days).toBe(30);
+  });
+
+  it("CreateSheetOpts has no currency to pass (compile-time + runtime)", async () => {
+    const bKp = await deriveUserKeypair(B_PRINCIPAL);
+    const bPubBytes = Array.from(new TextEncoder().encode(bKp.publicKeyB64));
+    const { actor, captured } = makeSheetActor({ [B_PRINCIPAL]: bPubBytes });
+    const identity = { getPrincipal: () => principalLike(A_PRINCIPAL) } as any;
+
+    // Only pairId / closingDays / name exist on the opts type; a stray currency would be a tsc error.
+    await createSheetForPair(actor as any, identity, {
+      pairId: "pair-1",
+      closingDays: 365,
+      name: "June",
+    });
+    expect("enabled_currencies" in captured.req).toBe(false);
+    expect(captured.req.closing_window_days).toBe(365);
   });
 });

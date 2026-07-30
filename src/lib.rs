@@ -10,7 +10,7 @@
 //
 // Phase 2 (this file):
 //   * create_pair, join_pair, get_my_pairs, get_pair
-//   * create_sheet, get_sheet, get_sheet_wrapped_key, add_currency,
+//   * create_sheet, get_sheet, get_sheet_wrapped_key,
 //     close_sheet, start_new_sheet
 //
 // Storage: ic-stable-structures (MemoryManager + StableBTreeMap /
@@ -41,6 +41,16 @@ pub struct UserRecord {
     // self-derived user key). Optional ⇒ Candid-backward-compatible.
     pub templates_enc: Option<Vec<u8>>,
     pub templates_iv: Option<Vec<u8>>,
+    // v1.12.0: the user's ONE default currency (ISO 4217, uppercase). Was
+    // browser-only (localStorage "iou:prefs:v1"), so it did not follow the user
+    // to another device; now canister-backed with localStorage as a cache.
+    //
+    // Stored in PLAINTEXT, unlike the display name: a 3-letter currency code is
+    // not PII, it is only ever returned by `get_my_user` (caller-scoped, so no
+    // one else can read it), and keeping it key-free is what lets a fresh device
+    // adopt it before any sheet key has been unwrapped. Optional ⇒ old records
+    // decode with None.
+    pub default_currency: Option<String>,
 }
 
 impl Storable for UserRecord {
@@ -57,6 +67,15 @@ impl Storable for UserRecord {
 pub struct Config {
     pub creator_principal: Principal,
     pub deployed_at: u64,
+    // v1.12.0: the currency IOU's app-rendered confirmable card pre-selects, for the WHOLE
+    // deployment. Deliberately app-level rather than per user: the card renders in an iframe that
+    // OpenChat storage-partitions, so it has no IOU session and cannot tell one viewer from another,
+    // and anything keyed by the chat would collide (an OpenChat direct-chat key names only the
+    // COUNTERPARTY, so every user chatting with the same person shares it — see the MemoryId 21
+    // note). One global value is the only thing every viewer resolves identically. `get_config` is
+    // anonymous, so the card can read it with no identity. None = unset, and the card falls back to
+    // deferring the currency to whoever imports it. Additive `opt` ⇒ old records decode with None.
+    pub card_currency: Option<String>,
 }
 
 impl Storable for Config {
@@ -136,7 +155,11 @@ pub struct Sheet {
     pub id: String,
     pub pair_id: String,
     pub state: SheetState,
-    pub enabled_currencies: Vec<String>,
+    // NOTE: v1.12.0 REMOVED `enabled_currencies: Vec<String>`. A sheet has no currency of its own:
+    // any entry may use any ISO code, balances are grouped by what the entries actually use, and the
+    // one default currency is a USER-level setting. The canister could never validate an entry's
+    // currency anyway (entries are E2E encrypted). Old stored sheets still carry the field; Candid
+    // ignores unknown record fields on decode, so `Decode!` reads them unchanged.
     pub closing_window_days: u32,
     pub last_entry_at: Option<u64>,
     pub wrapped_key_a: Vec<u8>,    // sealed to member_a's vetkd pub
@@ -345,10 +368,21 @@ impl Storable for RecoveryKey {
 //                delivery after an adversarial review showed wrapping the
 //                user-global consumer key under K_sheet leaks a member's
 //                OTHER accounts' drafts to a co-member.)
+//   MemoryId 21:    (was CHAT_CARD_CURRENCY for ~1 hour during v1.12.0
+//                development, never released; orphaned. An anonymously
+//                readable chat_key -> ISO-code map, so the app-rendered
+//                card could SHOW a currency instead of "Your IOU default".
+//                REVERTED: an OpenChat direct-chat key names only the
+//                COUNTERPARTY, so every user chatting with X shares the key
+//                `direct:X` — two users' links collide on one entry. It also
+//                answered the wrong question (what the shared sheet is
+//                denominated in, not what the confirming user's default is),
+//                which regressed the import back to the founder's currency.
+//                The default currency is resolved PER USER at import instead.)
 //
 //   DO NOT re-use these orphaned MemoryIds for a new structure
 //   with a different key/value type — see issue #7. If you need
-//   a new region, use the next free number (currently 21+).
+//   a new region, use the next free number (currently 22+).
 
 // v1.5.0 (schema v3 -> v4): added optional encrypted name fields to Pair,
 // Sheet, PairSummary, CreateSheetReq.
@@ -360,7 +394,20 @@ impl Storable for RecoveryKey {
 // (per-member SHARED transaction-template slots). Same additive-`opt`
 // pattern — old Pair records decode with the new fields = None. No
 // MemoryId changes.
-const SCHEMA_VERSION: u32 = 7;
+// v1.12.0 (schema v8 -> v9): added optional `default_currency` to UserRecord —
+// the user's ONE default currency, moved off browser-only localStorage so it
+// follows them across devices. Additive-`opt`, so old UserRecords decode with
+// None (and the app then pushes the cached browser value up once).
+// v1.12.0 (schema v7 -> v8): REMOVED `enabled_currencies` from Sheet and
+// CreateSheetReq, and deleted the `add_currency` endpoint. A sheet has no
+// currency of its own — the one default currency is a USER-level setting, and
+// the canister never validated an entry's currency anyway (entries are E2E
+// encrypted, so it cannot read it). This is the REMOVAL direction of the same
+// Candid rule: a record with MORE fields still decodes, so pre-upgrade sheets
+// (which carry the field in their bytes) read back unchanged and skip it. No
+// data migration, no MemoryId changes. See
+// `sheet_decodes_pre_v1_12_records_that_still_carry_enabled_currencies`.
+const SCHEMA_VERSION: u32 = 9;
 
 thread_local! {
     static MEMORY_MANAGER: RefCell<MemoryManager<DefaultMemoryImpl>> =
@@ -382,7 +429,7 @@ thread_local! {
     static CONFIG: RefCell<StableCell<Config, Memory>> = RefCell::new(
         StableCell::init(
             MEMORY_MANAGER.with(|m| m.borrow().get(MemoryId::new(2))),
-            Config { creator_principal: Principal::anonymous(), deployed_at: 0 },
+            Config { creator_principal: Principal::anonymous(), deployed_at: 0, card_currency: None },
         )
             .expect("CONFIG cell init")
     );
@@ -784,8 +831,10 @@ fn inspect_message() {
         "get_my_user",
         "set_display_name",
         "set_user_templates",
+        "set_default_currency",
         "get_config",
         "set_creator_principal",
+        "set_card_currency",
         // Phase 2: pair lifecycle
         "create_pair",
         "join_pair",
@@ -803,7 +852,6 @@ fn inspect_message() {
         "get_sheet",
         "list_archived_sheets",
         "get_sheet_wrapped_key",
-        "add_currency",
         "close_sheet",
         "start_new_sheet",
         // v1.5.0: encrypted names
@@ -858,7 +906,9 @@ fn inspect_message() {
     let require_auth_methods: &[&str] = &[
         "set_display_name",
         "set_user_templates",
+        "set_default_currency",
         "set_creator_principal",
+        "set_card_currency",
         "create_pair",
         "join_pair",
         "issue_invite",
@@ -868,7 +918,6 @@ fn inspect_message() {
         "unarchive_pair",
         "delete_pair",
         "create_sheet",
-        "add_currency",
         "close_sheet",
         "start_new_sheet",
         "add_entry",
@@ -919,6 +968,33 @@ fn get_my_user() -> Option<UserRecord> {
     USERS.with(|u| u.borrow().get(&ic_cdk::api::msg_caller()).clone())
 }
 
+/// Read-modify-write the CALLER's UserRecord, creating it if absent, and return the stored result.
+///
+/// Every field `f` does not touch is preserved. This exists because each setter used to rebuild the
+/// whole record by hand: adding a field meant remembering to copy it through in every other setter,
+/// and forgetting silently WIPED it (e.g. saving your name would have erased your default currency).
+/// `created_at` is set only on first write.
+fn upsert_my_user(f: impl FnOnce(&mut UserRecord)) -> UserRecord {
+    let caller = ic_cdk::api::msg_caller();
+    let now = ic_cdk::api::time();
+    USERS.with(|u| {
+        let mut map = u.borrow_mut();
+        let mut rec = map.get(&caller).unwrap_or(UserRecord {
+            user_principal: caller,
+            wrapped_display_name: Vec::new(),
+            display_name_iv: Vec::new(),
+            created_at: now,
+            templates_enc: None,
+            templates_iv: None,
+            default_currency: None,
+        });
+        rec.user_principal = caller;
+        f(&mut rec);
+        map.insert(caller, rec.clone());
+        rec
+    })
+}
+
 #[ic_cdk::update]
 fn set_display_name(wrapped_display_name: Vec<u8>, display_name_iv: Vec<u8>) -> UserRecord {
     require_authed();
@@ -928,23 +1004,25 @@ fn set_display_name(wrapped_display_name: Vec<u8>, display_name_iv: Vec<u8>) -> 
     if display_name_iv.is_empty() {
         ic_cdk::trap("displayNameIv is empty");
     }
-    let caller = ic_cdk::api::msg_caller();
-    let now = ic_cdk::api::time();
-    USERS.with(|u| {
-        let mut map = u.borrow_mut();
-        let existing = map.get(&caller);
-        // Preserve templates + original created_at when updating the name.
-        let rec = UserRecord {
-            user_principal: caller,
-            wrapped_display_name,
-            display_name_iv,
-            created_at: existing.as_ref().map(|e| e.created_at).unwrap_or(now),
-            templates_enc: existing.as_ref().and_then(|e| e.templates_enc.clone()),
-            templates_iv: existing.as_ref().and_then(|e| e.templates_iv.clone()),
-        };
-        map.insert(caller, rec.clone());
-        rec
+    upsert_my_user(|rec| {
+        rec.wrapped_display_name = wrapped_display_name;
+        rec.display_name_iv = display_name_iv;
     })
+}
+
+/// set_default_currency: the caller's ONE default currency (ISO 4217, stored uppercase).
+///
+/// A sheet has no currency of its own, so this single per-user value is what pre-selects every entry
+/// form and is stamped onto a chat import that names no currency. Caller-keyed and only ever returned
+/// by `get_my_user`, so no other principal can read or write it.
+#[ic_cdk::update]
+fn set_default_currency(iso: String) -> UserRecord {
+    require_authed();
+    let code = iso.trim().to_ascii_uppercase();
+    if code.len() != 3 || !code.chars().all(|c| c.is_ascii_alphabetic()) {
+        ic_cdk::trap("currency must be a 3-letter ISO 4217 code");
+    }
+    upsert_my_user(|rec| rec.default_currency = Some(code))
 }
 
 /// set_user_templates: store the caller's encrypted transaction templates
@@ -959,27 +1037,9 @@ fn set_user_templates(templates_enc: Vec<u8>, templates_iv: Vec<u8>) -> UserReco
     if templates_iv.len() < 12 || templates_iv.len() > 16 {
         ic_cdk::trap("templates iv length out of range");
     }
-    let caller = ic_cdk::api::msg_caller();
-    let now = ic_cdk::api::time();
-    USERS.with(|u| {
-        let mut map = u.borrow_mut();
-        let existing = map.get(&caller);
-        let rec = UserRecord {
-            user_principal: caller,
-            wrapped_display_name: existing
-                .as_ref()
-                .map(|e| e.wrapped_display_name.clone())
-                .unwrap_or_default(),
-            display_name_iv: existing
-                .as_ref()
-                .map(|e| e.display_name_iv.clone())
-                .unwrap_or_default(),
-            created_at: existing.as_ref().map(|e| e.created_at).unwrap_or(now),
-            templates_enc: Some(templates_enc),
-            templates_iv: Some(templates_iv),
-        };
-        map.insert(caller, rec.clone());
-        rec
+    upsert_my_user(|rec| {
+        rec.templates_enc = Some(templates_enc);
+        rec.templates_iv = Some(templates_iv);
     })
 }
 
@@ -1033,6 +1093,40 @@ fn set_creator_principal(p: Principal) {
         let _ = cfg.set(Config {
             creator_principal: p,
             deployed_at: ic_cdk::api::time(),
+            // Preserve — this setter rebuilds the whole record.
+            card_currency: current.card_currency.clone(),
+        });
+    });
+}
+
+/// set_card_currency: the deployment-wide currency IOU's confirmable card pre-selects.
+///
+/// Gated like `set_creator_principal`: the creator sets it, and while no creator has been claimed any
+/// signed-in user may (fresh deployments start with `creator_principal` = anonymous). It is ONE value
+/// for every user of this canister — see the `card_currency` field comment for why it cannot be
+/// per-user — and it is only a PRE-SELECTION: whoever confirms a card can change it in the dropdown
+/// before importing.
+#[ic_cdk::update]
+fn set_card_currency(iso: String) {
+    require_authed();
+    let caller = ic_cdk::api::msg_caller();
+    // An EMPTY string CLEARS it, so a deployment can go back to per-user deferral without a second
+    // endpoint (and so the Settings "Not set" option actually does something).
+    let code = iso.trim().to_ascii_uppercase();
+    if !code.is_empty() && (code.len() != 3 || !code.chars().all(|c| c.is_ascii_alphabetic())) {
+        ic_cdk::trap("currency must be a 3-letter ISO 4217 code (or empty to clear)");
+    }
+    CONFIG.with(|c| {
+        let mut cfg = c.borrow_mut();
+        let current = cfg.get().clone();
+        let is_unset = current.creator_principal == Principal::anonymous();
+        if !is_unset && current.creator_principal != caller {
+            ic_cdk::trap("only the creator can set the card currency");
+        }
+        let _ = cfg.set(Config {
+            creator_principal: current.creator_principal,
+            deployed_at: current.deployed_at,
+            card_currency: if code.is_empty() { None } else { Some(code) },
         });
     });
 }
@@ -1210,7 +1304,6 @@ fn get_pair(pair_id: String) -> Option<Pair> {
 #[derive(Clone, CandidType, Deserialize)]
 pub struct CreateSheetReq {
     pub pair_id: String,
-    pub enabled_currencies: Vec<String>,
     pub closing_window_days: u32,
     pub wrapped_key_a: Vec<u8>,
     pub wrapped_key_b: Vec<u8>,
@@ -1228,27 +1321,8 @@ async fn create_sheet(req: CreateSheetReq) -> Sheet {
     let caller = ic_cdk::api::msg_caller();
     require_authed();
     // v1 constraints we enforce:
-    if req.enabled_currencies.is_empty() {
-        ic_cdk::trap("at least one currency is required");
-    }
-    if req.enabled_currencies.len() > 16 {
-        ic_cdk::trap("at most 16 currencies per sheet");
-    }
     if req.closing_window_days < 30 || req.closing_window_days > 730 {
         ic_cdk::trap("closing_window_days must be 30..=730");
-    }
-    // V8 fix: normalize ISO codes to uppercase on every write path
-    // (add_currency also does this now). Prevents the
-    // `["usd"]` + add_currency("USD") -> duplicates bug.
-    let enabled_currencies: Vec<String> = req
-        .enabled_currencies
-        .iter()
-        .map(|c| c.to_ascii_uppercase())
-        .collect();
-    for c in &enabled_currencies {
-        if !c.chars().all(|ch| ch.is_ascii_alphabetic()) || c.len() != 3 {
-            ic_cdk::trap("currency must be a 3-letter ISO 4217 code");
-        }
     }
     // v1.3.2: fix for issue #3 (create_sheet async TOCTOU). Same
     // pattern as create_pair (#2): do all the awaits first, then
@@ -1301,7 +1375,6 @@ async fn create_sheet(req: CreateSheetReq) -> Sheet {
             id: id.clone(),
             pair_id: req.pair_id,
             state: SheetState::Active,
-            enabled_currencies,
             closing_window_days: req.closing_window_days,
             last_entry_at: None,
             wrapped_key_a: req.wrapped_key_a,
@@ -1381,38 +1454,6 @@ fn get_sheet_wrapped_key(sheet_id: String) -> Option<Vec<u8>> {
             }
         })
     })
-}
-
-/// add_currency: enables a new currency on an active sheet.
-#[ic_cdk::update]
-fn add_currency(sheet_id: String, iso: String) {
-    let caller = ic_cdk::api::msg_caller();
-    require_authed();
-    if iso.len() != 3 || !iso.chars().all(|ch| ch.is_ascii_alphabetic()) {
-        ic_cdk::trap("currency must be a 3-letter ISO 4217 code");
-    }
-    // V8 fix: normalize ISO codes to uppercase on every write path
-    // (create_sheet also does this now). Prevents the
-    // `["usd"]` + add_currency("USD") -> duplicates bug.
-    let iso_upper: String = iso.to_ascii_uppercase();
-    let ok = update_sheet_field(&sheet_id, |sheet| {
-        if sheet.member_a != caller && sheet.member_b != caller {
-            ic_cdk::trap("not a member of this sheet");
-        }
-        if let SheetState::Closed = sheet.state {
-            ic_cdk::trap("sheet is closed");
-        }
-        if sheet.enabled_currencies.len() >= 16 {
-            ic_cdk::trap("at most 16 currencies per sheet");
-        }
-        if sheet.enabled_currencies.contains(&iso_upper) {
-            return; // already enabled, no-op
-        }
-        sheet.enabled_currencies.push(iso_upper);
-    });
-    if !ok {
-        ic_cdk::trap("sheet not found");
-    }
 }
 
 // ───────────────────────── v1.5.0: E2E-encrypted names ─────────────────────────
@@ -3159,6 +3200,157 @@ mod tests {
     }
 
     #[test]
+    fn config_decodes_pre_card_currency_records_as_none() {
+        // Additive `opt` on the Config CELL: a Config written before v1.12.0 must decode with
+        // card_currency = None, so an existing deployment upgrades without trapping and the card
+        // simply falls back to per-user deferral until someone sets one.
+        #[derive(CandidType, Deserialize)]
+        struct OldConfig {
+            creator_principal: Principal,
+            deployed_at: u64,
+        }
+        let old = OldConfig { creator_principal: p(1), deployed_at: 99 };
+        let bytes = Encode!(&old).expect("encode old config");
+        let new = Config::from_bytes(std::borrow::Cow::Owned(bytes));
+        assert_eq!(new.creator_principal, p(1));
+        assert_eq!(new.deployed_at, 99);
+        assert_eq!(new.card_currency, None);
+    }
+
+    #[test]
+    fn config_round_trips_with_card_currency() {
+        let cfg = Config {
+            creator_principal: p(2),
+            deployed_at: 7,
+            card_currency: Some("EGP".into()),
+        };
+        let back = Config::from_bytes(cfg.to_bytes());
+        assert_eq!(back.card_currency, Some("EGP".to_string()));
+        assert_eq!(back.creator_principal, p(2));
+        assert_eq!(back.deployed_at, 7);
+    }
+
+    #[test]
+    fn user_record_decodes_pre_default_currency_records_as_none() {
+        // Additive-`opt`: a UserRecord written before v1.12.0 (no default_currency) must decode with
+        // None so the app knows to push the browser-cached value up once, instead of trapping.
+        #[derive(CandidType, Deserialize)]
+        struct OldUserRecord {
+            user_principal: Principal,
+            wrapped_display_name: Vec<u8>,
+            display_name_iv: Vec<u8>,
+            created_at: u64,
+            templates_enc: Option<Vec<u8>>,
+            templates_iv: Option<Vec<u8>>,
+        }
+        let old = OldUserRecord {
+            user_principal: p(1),
+            wrapped_display_name: vec![1, 2, 3],
+            display_name_iv: vec![0u8; 12],
+            created_at: 42,
+            templates_enc: Some(vec![7]),
+            templates_iv: Some(vec![0u8; 12]),
+        };
+        let bytes = Encode!(&old).expect("encode old user");
+        let new = UserRecord::from_bytes(std::borrow::Cow::Owned(bytes));
+        assert_eq!(new.user_principal, p(1));
+        assert_eq!(new.wrapped_display_name, vec![1, 2, 3]);
+        assert_eq!(new.created_at, 42);
+        assert_eq!(new.templates_enc, Some(vec![7]));
+        assert_eq!(new.default_currency, None);
+    }
+
+    #[test]
+    fn user_record_round_trips_with_default_currency() {
+        // Forward path through the same Storable the stable map uses.
+        let rec = UserRecord {
+            user_principal: p(2),
+            wrapped_display_name: vec![9],
+            display_name_iv: vec![0u8; 12],
+            created_at: 7,
+            templates_enc: None,
+            templates_iv: None,
+            default_currency: Some("EGP".into()),
+        };
+        let back = UserRecord::from_bytes(rec.to_bytes());
+        assert_eq!(back.default_currency, Some("EGP".to_string()));
+        assert_eq!(back.created_at, 7);
+        assert_eq!(back.wrapped_display_name, vec![9]);
+    }
+
+    #[test]
+    fn schema_version_bumped_for_user_default_currency() {
+        // v1.12.0 added UserRecord.default_currency (schema v8 -> v9).
+        const {
+            assert!(
+                SCHEMA_VERSION >= 9,
+                "SCHEMA_VERSION must be >= 9 after adding UserRecord.default_currency"
+            )
+        };
+    }
+
+    #[test]
+    fn sheet_decodes_pre_v1_12_records_that_still_carry_enabled_currencies() {
+        // Candid backward-compat for a field REMOVAL (the mirror of the additive case above).
+        // v1.12.0 dropped `enabled_currencies` from Sheet: a sheet has no currency of its own, and the
+        // canister could never validate an entry's currency anyway (entries are E2E encrypted). Every
+        // sheet written BEFORE that upgrade still has the field in its stored bytes, so decoding must
+        // skip it rather than fail — otherwise `Sheet::from_bytes`' `.unwrap()` would trap the canister
+        // on the first read of any pre-existing sheet.
+        #[derive(CandidType, Deserialize)]
+        struct OldSheet {
+            id: String,
+            pair_id: String,
+            state: SheetState,
+            enabled_currencies: Vec<String>,
+            closing_window_days: u32,
+            last_entry_at: Option<u64>,
+            wrapped_key_a: Vec<u8>,
+            wrapped_key_b: Vec<u8>,
+            member_a: Principal,
+            member_b: Principal,
+            created_at: u64,
+            closed_at: Option<u64>,
+            closing_balances: Option<Vec<ClosingBalance>>,
+            name_enc: Option<Vec<u8>>,
+            name_iv: Option<Vec<u8>>,
+        }
+        let old = OldSheet {
+            id: "c819f76d77f260b3".into(),
+            pair_id: "pair-1".into(),
+            state: SheetState::Active,
+            enabled_currencies: vec!["USD".into(), "EGP".into()],
+            closing_window_days: 365,
+            last_entry_at: Some(11),
+            wrapped_key_a: vec![1, 2, 3],
+            wrapped_key_b: vec![4, 5, 6],
+            member_a: p(1),
+            member_b: p(2),
+            created_at: 42,
+            closed_at: None,
+            closing_balances: None,
+            name_enc: Some(vec![9, 9]),
+            name_iv: Some(vec![0u8; 12]),
+        };
+        let bytes = Encode!(&old).expect("encode old sheet");
+        // Decode through the SAME path the stable map uses.
+        let new = Sheet::from_bytes(std::borrow::Cow::Owned(bytes));
+        assert_eq!(new.id, "c819f76d77f260b3");
+        assert_eq!(new.pair_id, "pair-1");
+        assert_eq!(new.closing_window_days, 365);
+        assert_eq!(new.last_entry_at, Some(11));
+        assert_eq!(new.wrapped_key_a, vec![1, 2, 3]);
+        assert_eq!(new.wrapped_key_b, vec![4, 5, 6]);
+        assert_eq!(new.member_a, p(1));
+        assert_eq!(new.member_b, p(2));
+        assert_eq!(new.name_enc, Some(vec![9, 9]));
+        // And a fresh sheet still round-trips (no currency field to carry).
+        let round = Sheet::from_bytes(new.to_bytes());
+        assert_eq!(round.id, new.id);
+        assert_eq!(round.closing_window_days, 365);
+    }
+
+    #[test]
     fn pair_round_trips_with_template_slots_via_storable() {
         // Forward path: a post-upgrade Pair carrying both slots survives
         // the Storable encode/decode used by the stable map.
@@ -3193,6 +3385,17 @@ mod tests {
             assert!(
                 SCHEMA_VERSION >= 7,
                 "SCHEMA_VERSION must be >= 7 after the v1.12.0 Pair template slots"
+            )
+        };
+    }
+
+    #[test]
+    fn schema_version_bumped_for_sheet_currency_removal() {
+        // v1.12.0 removed Sheet.enabled_currencies + add_currency (schema v7 -> v8).
+        const {
+            assert!(
+                SCHEMA_VERSION >= 8,
+                "SCHEMA_VERSION must be >= 8 after removing Sheet.enabled_currencies"
             )
         };
     }

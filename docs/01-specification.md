@@ -84,7 +84,17 @@ A **Sheet** is one balance-sheet relationship inside a pair.
 
 - Exactly two members.
 - Lives in a pair; cannot be moved between pairs (use the export-and-replace flow).
-- Has an "enabled currencies" list (start: `EGP`, `USD`; user can add more).
+- Has **no currency of its own**. A sheet is multi-currency: any entry may use any ISO code and
+  balances are grouped by the currencies the entries actually use. v1.12.0 REMOVED
+  `enabled_currencies` from `Sheet` and `CreateSheetReq` (and the `add_currency` endpoint with it) —
+  the canister could never validate an entry's currency anyway, since entries are E2E encrypted and
+  it cannot see the currency at all. Sheets stored before that upgrade still carry the field in their
+  bytes; Candid ignores unknown record fields on decode, so they read back unchanged.
+- The default currency is a **single user-level setting** (Settings → Default currency), stored per
+  principal on the canister (`UserRecord.default_currency`) with localStorage as a cache, so it follows
+  the user across devices. It pre-selects every entry, seeds new accounts/sheets, and is stamped onto
+  anything imported from a chat that names no currency — so two members of the SAME sheet each get
+  their own default.
 - Has a state: `active` (accepting new entries) or `closed` (read-only, see §3.6).
 - Has a closing window (default 365 days, configurable at sheet creation).
 - Identified by a `sheetId`. Per-sheet symmetric key is `K_sheet` (see §3.7).

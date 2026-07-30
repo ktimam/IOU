@@ -21,6 +21,7 @@ import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties }
 import type { Direction } from "../entries/types";
 import { orderedCurrencies } from "../settings/currencies";
 import { IOU_ICON_DATA_URI } from "./actionManifest";
+import { fetchCardCurrency } from "./cardCurrency";
 import {
   parseInit,
   parseBusy,
@@ -48,6 +49,7 @@ const DIRECTION_LABELS: Record<Direction, string> = {
 // ignores the `tags` field, so this is purely illustrative of an app-owned
 // control that OpenChat knows nothing about.
 const DEMO_TAGS = ["work", "personal", "reimbursable", "recurring", "shared"];
+
 
 // Theme token sets. IOU is natively dark (mint-on-charcoal, the Vault look); the
 // light set keeps the same mint identity but darkens the accent for contrast on
@@ -95,6 +97,25 @@ export function OpenChatCardPage() {
   // otherwise. Drives the button lock + spinner so a press is acknowledged and can't be double-fired.
   const [phase, setPhase] = useState<"idle" | "confirm" | "cancel">("idle");
   const submitting = phase !== "idle";
+  // The DEPLOYMENT's card currency (Config.card_currency), fetched anonymously once on mount. Undefined
+  // until it resolves — and it may never (unset, offline, older canister), in which case the card keeps
+  // deferring the currency to whoever imports, exactly as before. See cardCurrency.ts for why this is
+  // app-level rather than per viewer.
+  const [appCurrency, setAppCurrency] = useState<string | undefined>(undefined);
+  // Mirror for the message handler, which closes over state from its mount-time render.
+  const appCurrencyRef = useRef<string | undefined>(undefined);
+
+  useEffect(() => {
+    let cancelled = false;
+    void fetchCardCurrency().then((c) => {
+      if (cancelled || !c) return;
+      appCurrencyRef.current = c;
+      setAppCurrency(c);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   const post = useCallback((msg: unknown) => {
     // Post to the embedder. targetOrigin "*" per the contract — the HOST
@@ -127,18 +148,32 @@ export function OpenChatCardPage() {
       const parsed = parseInit(event.data);
       if (!parsed) return; // ignore devtools / HMR / foreign messages
       setCtx(parsed.context);
-      const entries = initEntries(parsed.data);
+      // Seed with the app card currency when it is already known (init usually arrives first, so the
+      // effect below adopts it on arrival instead).
+      const seed = appCurrencyRef.current ?? "";
+      const entries = initEntries(parsed.data, seed);
       if (entries) {
         setMulti(entries); // MULTI: render N editable entry blocks
       } else {
         setMulti(null); // SINGLE: today's one-entry UI
-        setForm(initToFormState(parsed.data));
+        setForm(initToFormState(parsed.data, seed));
       }
     }
     window.addEventListener("message", onMessage);
     post(buildReady());
     return () => window.removeEventListener("message", onMessage);
   }, [post]);
+
+  // The fetch usually lands AFTER init, so adopt it wherever the card is still deferring
+  // (currency ""). Keyed on appCurrency alone, so a user who deliberately picks "Your IOU default"
+  // afterwards is never overridden.
+  useEffect(() => {
+    if (!appCurrency) return;
+    setForm((f) => (f.currency === "" ? { ...f, currency: appCurrency } : f));
+    setMulti((m) =>
+      m ? m.map((e) => (e.currency === "" ? { ...e, currency: appCurrency } : e)) : m,
+    );
+  }, [appCurrency]);
 
   // Size the host iframe to content: post the border-box height whenever it
   // changes (ResizeObserver fires once on observe, giving the initial height).
@@ -211,15 +246,38 @@ export function OpenChatCardPage() {
       ? `Review and edit ${multi.length} ${multi.length === 1 ? "entry" : "entries"} before adding to your ledger`
       : "Review and edit before adding to your ledger";
 
+  // NOTE: no `minHeight: "100vh"` here. This element is the one the ResizeObserver measures, and
+  // inside the iframe `100vh` IS the height the host most recently applied — so the measurement was
+  // always max(content, currentFrameHeight) and `oc:card:resize` became a one-way ratchet: the card
+  // could grow but never shrink. That is why an expanded card stayed too tall (a consumed card
+  // re-expanded into a fresh iframe still sized to the old editable-form height, and the much shorter
+  // read-only view could not pull it back down). The viewport height lives on the html/body element
+  // below instead, so the frame is still fully painted without contaminating the measurement.
   const rootStyle: CSSProperties = {
     ...themeVars,
     background: "var(--bg)",
     color: "var(--text)",
-    minHeight: "100vh",
     padding: 16,
     fontFamily: "var(--font, 'Manrope', system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif)",
     boxSizing: "border-box",
   };
+
+  // Paint the themed background on the document itself. Without the 100vh above, a frame that is
+  // taller than the content (the host clamps to MIN_CARD_HEIGHT) would otherwise show the global
+  // stylesheet's background in that band — wrong in the light theme.
+  useEffect(() => {
+    const bg = (themeVars as Record<string, string>)["--bg"];
+    if (!bg) return;
+    const html = document.documentElement;
+    const prevHtml = html.style.background;
+    const prevBody = document.body.style.background;
+    html.style.background = bg;
+    document.body.style.background = bg;
+    return () => {
+      html.style.background = prevHtml;
+      document.body.style.background = prevBody;
+    };
+  }, [themeVars]);
 
   return (
     <div ref={rootRef} style={rootStyle} data-theme={ctx.theme}>
@@ -322,7 +380,9 @@ export function OpenChatCardPage() {
                 >
                   {/* "" defers to the user's IOU default (prefs.defaultCurrency), resolved at import
                       — the iframe is storage-partitioned and can't read that setting itself. */}
-                  <option value="">Default currency</option>
+                  {/* "" → resolved to YOUR IOU default currency at import; the frame cannot read it
+                      (see initToFormState), so it names the source instead of guessing a code. */}
+                  <option value="">Your IOU default</option>
                   {currencyOptions.map((c) => (
                     <option key={c} value={c}>
                       {c}
@@ -534,7 +594,7 @@ function EntryRow({
             style={inputStyle}
           >
             {/* "" → the user's IOU default currency, filled at import (see single-mode note). */}
-            <option value="">Default</option>
+            <option value="">Your default</option>
             {currencyOptions.map((c) => (
               <option key={c} value={c}>
                 {c}
@@ -588,7 +648,7 @@ function Spinner() {
 // values, no inputs, no buttons.
 function ReadonlyView({ form }: { form: CardFormState }) {
   const rows: { label: string; value: string }[] = [
-    { label: "Amount", value: form.amount ? `${form.amount} ${form.currency || "(default currency)"}` : "—" },
+    { label: "Amount", value: form.amount ? `${form.amount} ${form.currency || "(your IOU default)"}` : "—" },
     { label: "Direction", value: DIRECTION_LABELS[form.direction] },
     { label: "Note", value: form.note || "—" },
   ];

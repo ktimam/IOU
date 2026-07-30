@@ -40,9 +40,12 @@ async function fetchWrapPubkey(actor: any, principal: any): Promise<CryptoKey | 
   return importPublicKeyB64Wrap(b64);
 }
 
+// A sheet carries NO currency. There is one default currency and it is a USER-level setting
+// (prefs.defaultCurrency): it pre-selects the entry form, and balances are grouped by whatever
+// currencies the entries actually use. v1.12.0 removed `enabled_currencies` from the canister's
+// Sheet + CreateSheetReq entirely, so there is nothing here to pass.
 export type CreateSheetOpts = {
   pairId: string;
-  currencies: string[];
   closingDays: number;
   name?: string;
 };
@@ -124,7 +127,6 @@ export async function createSheetForPair(
 
   const sheet = await actor.create_sheet({
     pair_id: opts.pairId,
-    enabled_currencies: opts.currencies.map((c) => c.toUpperCase()),
     closing_window_days: Math.max(30, Math.min(730, opts.closingDays)),
     wrapped_key_a: Array.from(wrapA),
     wrapped_key_b: Array.from(wrapB),

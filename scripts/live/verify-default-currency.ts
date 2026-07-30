@@ -57,7 +57,7 @@ async function main() {
   const composer = oc.locator(".ProseMirror").first();
   await composer.click({ timeout: 10000 }); await oc.keyboard.type(`${note}: paid for groceries`); await oc.keyboard.press("Enter");
   await oc.waitForTimeout(2500);
-  const bubble = oc.locator(".bubble-wrapper").last();
+  const bubble = oc.locator(".bubble-wrapper").first();
   await bubble.hover().catch(() => {}); await oc.waitForTimeout(400);
   await bubble.locator(".menu-icon").first().click({ timeout: 12000 }).catch(() => {});
   await oc.getByText("Propose action", { exact: true }).click({ timeout: 12000 }).catch(() => {});

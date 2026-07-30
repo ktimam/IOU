@@ -42,7 +42,6 @@ export function NewPair() {
       const pairId: string = out.pair_id;
       const { sheet, K_sheet } = await createSheetForPair(actor, state.identity, {
         pairId,
-        currencies: [prefs.defaultCurrency || "USD"],
         closingDays: 365,
         name: sheetName,
       });
@@ -95,8 +94,11 @@ export function NewPair() {
         </div>
         {error && <p style={{ color: "var(--debt)" }}>{error}</p>}
         <div className="cta">
-          <button onClick={doCreate} disabled={busy}>
-            {busy ? "Creating…" : "Create account"}
+          {/* Gate on the ACTOR, not just `busy`: doCreate returns silently when the actor is
+              still being built (agent + root key), so an early click used to do nothing at all —
+              no spinner, no error, no navigation. */}
+          <button onClick={doCreate} disabled={busy || !actor}>
+            {busy ? "Creating…" : !actor ? "Connecting…" : "Create account"}
           </button>
         </div>
       </div>

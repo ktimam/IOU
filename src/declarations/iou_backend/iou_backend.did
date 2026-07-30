@@ -52,7 +52,6 @@ type Sheet = record {
     id : text;
     pair_id : text;
     state : SheetState;
-    enabled_currencies : vec text;
     closing_window_days : nat32;
     last_entry_at : opt nat64;
     wrapped_key_a : vec nat8;
@@ -71,7 +70,6 @@ type CreatePairResult = record {
 
 type CreateSheetReq = record {
     pair_id : text;
-    enabled_currencies : vec text;
     closing_window_days : nat32;
     wrapped_key_a : vec nat8;
     wrapped_key_b : vec nat8;
@@ -159,7 +157,6 @@ service : {
     create_sheet : (CreateSheetReq) -> (Sheet);
     get_sheet : (text) -> (opt Sheet) query;
     get_sheet_wrapped_key : (text) -> (opt vec nat8) query;
-    add_currency : (text, text) -> ();
     close_sheet : (text, vec ClosingBalance) -> ();
     start_new_sheet : (CreateSheetReq) -> (Sheet);
 

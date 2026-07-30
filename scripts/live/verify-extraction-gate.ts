@@ -25,7 +25,7 @@ async function propose(p: Page, text: string, extraction: string): Promise<void>
   await p.waitForTimeout(2500);
   // v1 propose (proven journey pattern): hover the just-sent bubble (it is the LAST one), then the
   // revealed .menu-icon, then the "Propose action" menu item.
-  const bubble = p.locator(".bubble-wrapper").last();
+  const bubble = p.locator(".bubble-wrapper").first();
   await bubble.scrollIntoViewIfNeeded().catch(() => {});
   await bubble.hover();
   await p.waitForTimeout(400);

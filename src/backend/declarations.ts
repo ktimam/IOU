@@ -34,10 +34,15 @@ export const idlFactory = ({ IDL: idl }: { IDL: IDL }) => {
     created_at: idl.Nat64,
     templates_enc: idl.Opt(idl.Vec(idl.Nat8)),
     templates_iv: idl.Opt(idl.Vec(idl.Nat8)),
+    // v1.12.0: the user's ONE default currency (ISO 4217). Caller-scoped: only
+    // get_my_user returns it.
+    default_currency: idl.Opt(idl.Text),
   });
   const Config = idl.Record({
     creator_principal: idl.Principal,
     deployed_at: idl.Nat64,
+    // v1.12.0: deployment-wide currency the app-rendered card pre-selects (anonymously readable).
+    card_currency: idl.Opt(idl.Text),
   });
   const SheetState = idl.Variant({
     Active: idl.Null,
@@ -87,7 +92,6 @@ export const idlFactory = ({ IDL: idl }: { IDL: IDL }) => {
     id: idl.Text,
     pair_id: idl.Text,
     state: SheetState,
-    enabled_currencies: idl.Vec(idl.Text),
     closing_window_days: idl.Nat32,
     last_entry_at: idl.Opt(idl.Nat64),
     wrapped_key_a: idl.Vec(idl.Nat8),
@@ -106,7 +110,6 @@ export const idlFactory = ({ IDL: idl }: { IDL: IDL }) => {
   });
   const CreateSheetReq = idl.Record({
     pair_id: idl.Text,
-    enabled_currencies: idl.Vec(idl.Text),
     closing_window_days: idl.Nat32,
     wrapped_key_a: idl.Vec(idl.Nat8),
     wrapped_key_b: idl.Vec(idl.Nat8),
@@ -187,8 +190,10 @@ export const idlFactory = ({ IDL: idl }: { IDL: IDL }) => {
       [UserRecord],
       [],
     ),
+    set_default_currency: idl.Func([idl.Text], [UserRecord], []),
     get_config: idl.Func([], [Config], ["query"]),
     set_creator_principal: idl.Func([idl.Principal], [], []),
+    set_card_currency: idl.Func([idl.Text], [], []),
     // Phase 2
     create_pair: idl.Func([], [CreatePairResult], []),
     join_pair: idl.Func([idl.Text], [idl.Text], []),
@@ -208,7 +213,6 @@ export const idlFactory = ({ IDL: idl }: { IDL: IDL }) => {
       [idl.Opt(idl.Vec(idl.Nat8))],
       ["query"],
     ),
-    add_currency: idl.Func([idl.Text, idl.Text], [], []),
     close_sheet: idl.Func([idl.Text, idl.Vec(ClosingBalance)], [], []),
     start_new_sheet: idl.Func([CreateSheetReq], [Sheet], []),
     // v1.5.0: E2E-encrypted names

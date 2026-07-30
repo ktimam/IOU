@@ -165,9 +165,12 @@ export const IOU_EXTRACTION_RULES: AiActionRule[] = [
           "due",
           "owed",
           "owes",
-          // Present-tense "owe": bare "owe" is too noisy a substring ("power", "shower", "flower"),
-          // so match the natural pronoun phrasings instead. Keywords are trimmed then substring-
-          // matched (case-insensitive), so internal spaces survive but leading/trailing ones don't.
+          // Bare present-tense "owe" — the most natural phrasing ("Owe 300 uber"). This was previously
+          // omitted because keywords were matched as raw SUBSTRINGS, where "owe" fires on "power",
+          // "shower" and "flower"; OpenChat now matches keywords on WORD BOUNDARIES, so it is safe and
+          // a message that just says "owe …" finally gets a suggestion. The pronoun phrasings below
+          // are now redundant for matching but kept: they are also read as the type vocabulary.
+          "owe",
           "i owe",
           "you owe",
           "we owe",

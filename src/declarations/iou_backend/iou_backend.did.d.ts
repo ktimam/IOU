@@ -28,7 +28,6 @@ export interface CreateSheetReq {
   'wrapped_key_a' : Uint8Array | number[],
   'wrapped_key_b' : Uint8Array | number[],
   'pair_id' : string,
-  'enabled_currencies' : Array<string>,
 }
 export type Direction = { 'Debt' : null } |
   { 'Credit' : null };
@@ -93,7 +92,6 @@ export interface Sheet {
   'wrapped_key_a' : Uint8Array | number[],
   'wrapped_key_b' : Uint8Array | number[],
   'pair_id' : string,
-  'enabled_currencies' : Array<string>,
 }
 export type SheetState = { 'Closed' : null } |
   { 'Active' : null };
@@ -109,7 +107,6 @@ export interface UserRecord {
   'display_name_iv' : Uint8Array | number[],
 }
 export interface _SERVICE {
-  'add_currency' : ActorMethod<[string, string], undefined>,
   'add_entry' : ActorMethod<[AddEntryReq], Entry>,
   'close_sheet' : ActorMethod<[string, Array<ClosingBalance>], undefined>,
   'create_pair' : ActorMethod<[], CreatePairResult>,

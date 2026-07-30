@@ -285,14 +285,13 @@ pass(`A transport key: ${transportA.publicKey.length}-byte G1, B transport key: 
 // We need a real sheet so vetkd_wrap_sheet_key doesn't trap. To
 // keep the smoke independent of devVetkd's wrap/unwrap, use the
 // simplest possible sheet create: zero-wrapped-keys (the canister
-// only requires non-empty enabled_currencies + valid pair).
+// only requires a valid pair).
 // Actually the create_sheet REQUIRES wrapped_key_a and wrapped_key_b.
 // We can pass dummy 32-byte values — they'll never be unwrapped
 // because the IBE path doesn't need them.
 const dummyWrapped = new Array(32).fill(0);
 const createSheetReq = {
   pair_id: pairId,
-  enabled_currencies: ["USD"],
   closing_window_days: 365,
   wrapped_key_a: dummyWrapped,
   wrapped_key_b: dummyWrapped,
