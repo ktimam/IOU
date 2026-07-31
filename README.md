@@ -105,6 +105,9 @@ scripts/                         # build, deploy, smoke helpers
 docs/                            # specs, architecture, plan, etc.
 ```
 
+Known-but-unfixed things live in [docs/open-items.md](docs/open-items.md) — each with how to
+reproduce it and what "done" means, so they stop living in chat history.
+
 ## Prerequisites
 
 - **Node 20+** (or 22+ for Capacitor 8). Tested on Node 20.18.
