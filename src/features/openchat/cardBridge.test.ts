@@ -98,7 +98,6 @@ describe("initToFormState — prefill", () => {
       direction: "debt",
       note: "Reservation 1000 EGP",
       date: "2026-08-01",
-      tags: [],
     });
   });
 
@@ -131,15 +130,12 @@ describe("buildConfirmPayload — edited values", () => {
       direction: "credit",
       note: "dinner",
       date: "2026-06-24",
-      tags: [],
     });
     expect(payload.amount).toBe(42.5);
     expect(payload.currency).toBe("USD");
     expect(payload.direction).toBe("credit");
     expect(payload.kind).toBe("iou");
     expect(payload.date).toBe("2026-06-24");
-    // demo tags omitted when none selected
-    expect("tags" in payload).toBe(false);
 
     const r = parseDraft(payload);
     expect(r.ok).toBe(true);
@@ -158,7 +154,6 @@ describe("buildConfirmPayload — edited values", () => {
       direction: "credit",
       note: "groceries",
       date: "",
-      tags: [],
     });
     expect("currency" in payload).toBe(false);
     // The real sheet import parses the currency-less draft against a base carrying the user's
@@ -177,7 +172,6 @@ describe("buildConfirmPayload — edited values", () => {
       direction: "credit",
       note: "",
       date: "",
-      tags: [],
     };
     const flipped = buildConfirmPayload({ ...base, direction: "debt", currency: "jpy", amount: "300" });
     expect(flipped.direction).toBe("debt");
@@ -189,20 +183,6 @@ describe("buildConfirmPayload — edited values", () => {
     expect("date" in flipped).toBe(false);
   });
 
-  it("includes the demo tags only when at least one is selected", () => {
-    const payload = buildConfirmPayload({
-      kind: "settlement",
-      amount: "10",
-      currency: "USD",
-      direction: "credit",
-      note: "",
-      date: "",
-      tags: ["work", "reimbursable"],
-    });
-    expect((payload as { tags?: string[] }).tags).toEqual(["work", "reimbursable"]);
-    // parseDraft ignores the unknown `tags` field (safe/demonstrative)
-    expect(parseDraft(payload).ok).toBe(true);
-  });
 
   it("keeps a non-numeric amount as a raw string so downstream validation surfaces it", () => {
     const payload = buildConfirmPayload({
@@ -212,7 +192,6 @@ describe("buildConfirmPayload — edited values", () => {
       direction: "credit",
       note: "",
       date: "",
-      tags: [],
     });
     expect(payload.amount).toBe("");
     expect(parseDraft(payload).ok).toBe(false);
@@ -320,7 +299,6 @@ describe("initEntries — MULTI vs SINGLE detection", () => {
       direction: "debt",
       note: "rent 100 EGP",
       date: "",
-      tags: [],
     });
     expect(states![1].currency).toBe("USD");
     expect(states![1].direction).toBe("credit");
@@ -341,8 +319,8 @@ describe("initEntries — MULTI vs SINGLE detection", () => {
 
 describe("buildMultiConfirmPayload — edited array round-trip", () => {
   const states: CardFormState[] = [
-    { kind: "iou", amount: "42.50", currency: "usd", direction: "credit", note: "dinner", date: "", tags: [] },
-    { kind: "", amount: "300", currency: "jpy", direction: "debt", note: "", date: "", tags: [] },
+    { kind: "iou", amount: "42.50", currency: "usd", direction: "credit", note: "dinner", date: "" },
+    { kind: "", amount: "300", currency: "jpy", direction: "debt", note: "", date: "" },
   ];
 
   it("yields an UNWRAPPED array, one element per state, each matching buildConfirmPayload", () => {
@@ -367,8 +345,8 @@ describe("buildMultiConfirmPayload — edited array round-trip", () => {
 
   it("imports element-by-element through parseDraftBatch (the canister side)", () => {
     const payload = buildMultiConfirmPayload([
-      { kind: "", amount: "10", currency: "USD", direction: "credit", note: "a", date: "", tags: [] },
-      { kind: "", amount: "20", currency: "EUR", direction: "debt", note: "b", date: "", tags: [] },
+      { kind: "", amount: "10", currency: "USD", direction: "credit", note: "a", date: "" },
+      { kind: "", amount: "20", currency: "EUR", direction: "debt", note: "b", date: "" },
     ]);
     const { drafts, errors } = parseDraftBatch(payload);
     expect(errors).toEqual([]);
@@ -382,8 +360,8 @@ describe("buildMultiConfirmPayload — edited array round-trip", () => {
   it("omits currency PER ROW left on Default ('') so each defers to the IOU default at import", () => {
     // A mixed batch: row 0 on "Default", row 1 picked EUR — the default is a per-element decision.
     const payload = buildMultiConfirmPayload([
-      { kind: "", amount: "10", currency: "", direction: "credit", note: "a", date: "", tags: [] },
-      { kind: "", amount: "20", currency: "eur", direction: "debt", note: "b", date: "", tags: [] },
+      { kind: "", amount: "10", currency: "", direction: "credit", note: "a", date: "" },
+      { kind: "", amount: "20", currency: "eur", direction: "debt", note: "b", date: "" },
     ]);
     expect("currency" in payload[0]).toBe(false);
     expect(payload[1].currency).toBe("EUR");

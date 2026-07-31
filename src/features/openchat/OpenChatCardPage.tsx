@@ -45,10 +45,6 @@ const DIRECTION_LABELS: Record<Direction, string> = {
   debt: "You owe",
 };
 
-// A small, clearly-demonstrative tag vocabulary for the multiselect. parseDraft
-// ignores the `tags` field, so this is purely illustrative of an app-owned
-// control that OpenChat knows nothing about.
-const DEMO_TAGS = ["work", "personal", "reimbursable", "recurring", "shared"];
 
 
 // Theme token sets. IOU is natively dark (mint-on-charcoal, the Vault look); the
@@ -205,11 +201,6 @@ export function OpenChatCardPage() {
   const set = <K extends keyof CardFormState>(key: K, value: CardFormState[K]) =>
     setForm((f) => ({ ...f, [key]: value }));
 
-  const toggleTag = (tag: string) =>
-    setForm((f) => ({
-      ...f,
-      tags: f.tags.includes(tag) ? f.tags.filter((t) => t !== tag) : [...f.tags, tag],
-    }));
 
   const onConfirm = () => {
     if (!amountValid || submitting) return;
@@ -331,7 +322,7 @@ export function OpenChatCardPage() {
                   edge — the buttons slide out of the card to the LEFT, where scrollWidth cannot even
                   see them. Worst while cancelling, because that label GROWS ("Cancel" -> spinner +
                   "Cancelling…") whereas confirm shrinks: measured 69px outside at a 240px frame. */}
-              <div style={{ display: "flex", flexWrap: "wrap", gap: 8, justifyContent: "flex-end", marginTop: 4 }}>
+              <div style={{ display: "flex", gap: 8, justifyContent: "flex-end", marginTop: 4, minWidth: 0 }}>
                 <button
                   type="button"
                   onClick={onCancel}
@@ -340,6 +331,10 @@ export function OpenChatCardPage() {
                 >
                   {phase === "cancel" ? <><Spinner /> Cancelling…</> : "Cancel"}
                 </button>
+                {/* Hidden once Cancel is pressed: the action is already decided, so still offering
+                    "Add" is misleading — and dropping it leaves a single button, which is what keeps
+                    the widest state (spinner + "Cancelling…") inside a narrow frame. */}
+                {phase !== "cancel" && (
                 <button
                   type="button"
                   onClick={onConfirmAll}
@@ -353,6 +348,7 @@ export function OpenChatCardPage() {
                 >
                   {phase === "confirm" ? <><Spinner /> Adding…</> : `Add all ${multi.length} entries`}
                 </button>
+                )}
               </div>
               {!multiAllValid && (
                 <span style={{ fontSize: "0.75rem", color: "var(--text-dim)", textAlign: "right" }}>
@@ -419,38 +415,8 @@ export function OpenChatCardPage() {
               />
             </Field>
 
-            {/* Demonstration multiselect (IOU-owned vocabulary OpenChat knows
-                nothing about). Included in the payload as tags[] only when any
-                are selected; parseDraft ignores the unknown field. */}
-            <Field label="Tags (demo — optional)">
-              <div style={{ display: "flex", flexWrap: "wrap", gap: 6, marginTop: 2 }}>
-                {DEMO_TAGS.map((tag) => {
-                  const on = form.tags.includes(tag);
-                  return (
-                    <button
-                      key={tag}
-                      type="button"
-                      aria-pressed={on}
-                      onClick={() => toggleTag(tag)}
-                      style={{
-                        padding: "5px 12px",
-                        borderRadius: 999,
-                        fontSize: "0.8125rem",
-                        fontWeight: 600,
-                        cursor: "pointer",
-                        border: `1px solid ${on ? "transparent" : "var(--border)"}`,
-                        background: on ? "var(--accent)" : "transparent",
-                        color: on ? "var(--on-accent)" : "var(--text)",
-                      }}
-                    >
-                      {tag}
-                    </button>
-                  );
-                })}
-              </div>
-            </Field>
 
-            <div style={{ display: "flex", flexWrap: "wrap", gap: 8, justifyContent: "flex-end", marginTop: 4 }}>
+            <div style={{ display: "flex", gap: 8, justifyContent: "flex-end", marginTop: 4, minWidth: 0 }}>
               <button
                 type="button"
                 onClick={onCancel}
@@ -459,6 +425,8 @@ export function OpenChatCardPage() {
               >
                 {phase === "cancel" ? <><Spinner /> Cancelling…</> : "Cancel"}
               </button>
+              {/* Hidden once Cancel is pressed — see the multi-entry row. */}
+              {phase !== "cancel" && (
               <button
                 type="button"
                 onClick={onConfirm}
@@ -472,6 +440,7 @@ export function OpenChatCardPage() {
               >
                 {phase === "confirm" ? <><Spinner /> Adding…</> : "Add to IOU"}
               </button>
+              )}
             </div>
             {!amountValid && (
               <span style={{ fontSize: "0.75rem", color: "var(--text-dim)", textAlign: "right" }}>
@@ -502,7 +471,11 @@ const btnStyle: CSSProperties = {
   fontSize: "1rem",
   fontWeight: 600,
   border: 0,
-  padding: "10px 18px",
+  // Horizontal padding is the FLOOR a button can shrink to (measured: at a 79px row the pair bottomed
+  // out at 37+36+8 = 81px, 2px over, with the labels already ellipsized to nothing). vw inside the
+  // frame is the FRAME's width, so this keeps the roomy 18px at normal sizes and tightens to 8px in a
+  // narrow bubble — which is what lets Cancel and Add stay SIDE BY SIDE instead of wrapping.
+  padding: "10px clamp(8px, 4vw, 18px)",
   borderRadius: 12,
   // A flex item will not shrink below its text, so in a narrow frame a button pushes the row past the
   // card's edge (and with justify-content: flex-end it escapes to the LEFT, where scrollWidth cannot
@@ -512,6 +485,9 @@ const btnStyle: CSSProperties = {
   whiteSpace: "nowrap",
   overflow: "hidden",
   textOverflow: "ellipsis",
+  // Cancel carries a 1px border while btnStyle sets none, and under content-box that border is added
+  // ON TOP of the shrunk width — measured as exactly 2px outside the card at a 160px frame.
+  boxSizing: "border-box",
 };
 
 function Field({
@@ -667,7 +643,6 @@ function ReadonlyView({ form }: { form: CardFormState }) {
     { label: "Note", value: form.note || "—" },
   ];
   if (form.date) rows.push({ label: "Date", value: form.date });
-  if (form.tags.length) rows.push({ label: "Tags", value: form.tags.join(", ") });
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 8, marginTop: 12 }}>
       {rows.map((r) => (

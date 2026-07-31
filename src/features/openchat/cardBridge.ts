@@ -59,8 +59,8 @@ export type CardInit = {
   context: CardInitContext;
 };
 
-// The editable form the page collects. Every field is a plain string except the
-// demo `tags` multiselect. `kind` is a passthrough (not edited by the card UI):
+// The editable form the page collects. Every field is a plain string. `kind` is a passthrough
+// (not edited by the card UI):
 // "" means the extraction carried no kind, so buildConfirmPayload omits it and
 // parseDraft re-infers it. `date` is likewise a passthrough of the prefill date.
 export type CardFormState = {
@@ -75,13 +75,10 @@ export type CardFormState = {
   direction: Direction;
   note: string;
   date: string;
-  tags: string[];
 };
 
-// The confirm payload handed back to the host. It is an EntryDraft (which IOU's
-// parseDraft already accepts) plus a demonstrative `tags` array parseDraft
-// ignores as an unknown field.
-export type CardConfirmPayload = EntryDraft & { tags?: string[] };
+// The confirm payload handed back to the host: an EntryDraft, which IOU's parseDraft already accepts.
+export type CardConfirmPayload = EntryDraft;
 
 function isPlainObject(v: unknown): v is Record<string, unknown> {
   return typeof v === "object" && v !== null && !Array.isArray(v);
@@ -211,7 +208,6 @@ export function initToFormState(data: EntryDraft, seedCurrency = ""): CardFormSt
     direction,
     note,
     date,
-    tags: [],
   };
 }
 
@@ -231,10 +227,10 @@ export function initEntries(data: CardInitData, seedCurrency = ""): CardFormStat
 
 /**
  * Build the confirm payload from the edited form. Emits the EntryDraft shape
- * parseDraft accepts ({kind?, amount, currency, direction, date?, note}) plus a
- * demo `tags` array only when at least one is selected. `amount` is a JS number
- * when the field parses to a finite value, else the raw string (so downstream
- * validation surfaces a bad amount rather than silently coercing it).
+ * parseDraft accepts ({kind?, amount, currency, direction, date?, note, message}).
+ * `amount` is a JS number when the field parses to a finite value, else the raw
+ * string (so downstream validation surfaces a bad amount rather than silently
+ * coercing it).
  */
 export function buildConfirmPayload(state: CardFormState): CardConfirmPayload {
   const trimmedAmount = state.amount.trim();
@@ -256,7 +252,6 @@ export function buildConfirmPayload(state: CardFormState): CardConfirmPayload {
   if ((state.message ?? "").trim() !== "") payload.message = state.message;
   if (state.kind !== "") payload.kind = state.kind;
   if (state.date.trim() !== "") payload.date = state.date;
-  if (state.tags.length > 0) payload.tags = state.tags;
   return payload;
 }
 
