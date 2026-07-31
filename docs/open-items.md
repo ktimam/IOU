@@ -41,13 +41,27 @@ apply.
 type in account B; the card shows B's type. For the public read:
 `pnpm exec tsx scripts/live/query-oc-manifest.ts --uix <user_index>`.
 
-**Done when** a type's name and keywords never leave the account that owns them. The candidate design
-(IOU-only, no fork change) is to stop publishing the roster and do the routing locally at import
-instead: drop the `template` keyword_map from the manifest, and have IOU match the note/message
-against THIS account's types when the draft is imported. Same feature, no leak — the loss is the
-Template row on the card at propose time, which the storage-partitioned card iframe cannot populate
-anyway. Current behaviour is pinned in `actionManifest.test.ts` so the change is a deliberate edit,
-not silent drift.
+**Done when** BOTH of these hold. Stated by the user 2026-07-31, and they pull against each other —
+this is the whole difficulty, so do not accept a design that quietly drops one:
+
+- **R1.** When a card is created, the transaction is matched against the types of the sheet LINKED TO
+  THAT CHAT, and the matched type is shown on the card. The Template row stays.
+- **R2.** A type's name and its keywords are never visible outside the shared sheet that owns them —
+  not to the public directory, and not in a chat linked to a different account.
+
+Note that both members of a linked chat are, by construction, the two members of that sheet, so
+showing the type inside THAT chat is fine. The harm is the public roster and the type surfacing in
+some OTHER account's chat.
+
+An earlier sketch — stop publishing the roster and match locally at IMPORT instead — satisfies R2 but
+NOT R1: the match would land after the card, so the Template row would disappear. Recorded here so it
+is not re-proposed as if it were free.
+
+The tension is real: matching at card-creation time happens inside OpenChat, which only has what was
+registered (public), while the types are readable only with an IOU session — and the card iframe is
+storage-partitioned with no session (measured; see `cardCurrency.ts`). Current behaviour is pinned in
+`actionManifest.test.ts` and `resolveTemplateBase.test.ts`, so whatever lands is a deliberate edit to
+those tests rather than silent drift.
 
 ---
 
