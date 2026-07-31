@@ -73,6 +73,25 @@ export function repointChatLinks(
   return { next, affected };
 }
 
+/**
+ * Which OTHER chats already import into `sheetId`?
+ *
+ * Nothing stops several chats pointing at one sheet — links are keyed by (caller, chat key) alone, and
+ * that is legitimate (you may want two chats feeding one ledger). But the chooser never said so, so a
+ * mis-click was invisible: a father ended up with his child's AND his manager's chats both importing
+ * into FatherChild, while the House sheet he believed was linked had nothing pointing at it at all.
+ * Surfacing the collision is the honest substitute for a check IOU cannot make — a chat key carries no
+ * evidence of which account it belongs to, so the app cannot verify you are linking a chat to the sheet
+ * you share with that same person.
+ */
+export function otherChatsLinkedTo(
+  sheetId: string,
+  links: ChatSheetLinks,
+  thisChatKey: string,
+): string[] {
+  return Object.keys(links).filter((k) => k !== thisChatKey && links[k] === sheetId);
+}
+
 export function readCachedLinks(): ChatSheetLinks {
   try {
     const raw = globalThis.localStorage?.getItem(LS_KEY);

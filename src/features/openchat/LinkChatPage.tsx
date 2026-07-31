@@ -27,6 +27,8 @@ import {
   storeChatSheetLink,
   removeChatSheetLink,
   readCachedLinks,
+  otherChatsLinkedTo,
+  type ChatSheetLinks,
   writeCachedLinks,
 } from "./chatSheetLinks";
 
@@ -86,6 +88,9 @@ export function LinkChatPage() {
   const [saveErr, setSaveErr] = useState<string | null>(null);
   const [unlinking, setUnlinking] = useState(false);
   const [unlinked, setUnlinked] = useState(false); // "this chat is no longer linked" confirmation
+  // EVERY chat->sheet link this user has, not just this chat's — needed to warn when the sheet being
+  // chosen is already claimed by another chat (nothing prevents that, and it used to be invisible).
+  const [allLinks, setAllLinks] = useState<ChatSheetLinks>({});
 
   // Load the sheet list (with decrypted names, best-effort) and the current mapping.
   useEffect(() => {
@@ -95,11 +100,13 @@ export function LinkChatPage() {
       try {
         // Existing mapping first, so the preselection is ready when the list lands.
         let mapped: string | null = null;
+        let all: ChatSheetLinks = {};
         try {
-          const links = await fetchChatSheetLinks(actor);
-          mapped = links[chatKey] ?? null;
+          all = await fetchChatSheetLinks(actor);
+          mapped = all[chatKey] ?? null;
         } catch {
-          mapped = readCachedLinks()[chatKey] ?? null; // canister unreachable — cached copy
+          all = readCachedLinks(); // canister unreachable — cached copy
+          mapped = all[chatKey] ?? null;
         }
 
         const list = await actor.get_my_pairs();
@@ -134,12 +141,17 @@ export function LinkChatPage() {
           const other = principalToText(p.other_principal);
           const fallback = accountName || partnerName || (other ? `${other.slice(0, 12)}…` : sheetId);
           const name = sheetName || fallback;
-          const subtitle = sheetName ? fallback : partnerName && name !== partnerName ? partnerName : "";
-          opts.push({ sheetId, name, subtitle: subtitle === name ? "" : subtitle });
+          // Say what this line MEANS. A bare "manager" under "House" reads as "House is linked to
+          // manager" on a page whose whole subject is links — it is actually who the ACCOUNT is shared
+          // with. That ambiguity had a user believing a sheet was linked when nothing pointed at it.
+          const shared = sheetName ? fallback : partnerName && name !== partnerName ? partnerName : "";
+          const subtitle = shared && shared !== name ? `shared with ${shared}` : "";
+          opts.push({ sheetId, name, subtitle });
         }
 
         if (cancelled) return;
         setSheets(opts);
+        setAllLinks(all);
         setExisting(mapped);
         setSelected(mapped && opts.some((o) => o.sheetId === mapped) ? mapped : null);
       } catch (e) {
@@ -273,11 +285,22 @@ export function LinkChatPage() {
                 <span>
                   {s.name}
                   {s.sheetId === existing && (
-                    <span className="muted small"> (current)</span>
+                    <span className="small" style={{ color: "var(--credit)" }}>
+                      {" "}
+                      — this chat imports here
+                    </span>
                   )}
                   {s.subtitle && (
                     <span className="muted small" style={{ display: "block" }}>
                       {s.subtitle}
+                    </span>
+                  )}
+                  {/* Several chats MAY feed one sheet — that is legal and sometimes wanted. But it was
+                      never shown, so a mis-click stayed invisible until drafts landed in the wrong
+                      ledger. Name the collision instead of hiding it. */}
+                  {otherChatsLinkedTo(s.sheetId, allLinks, chatKey).length > 0 && (
+                    <span className="muted small" style={{ display: "block" }}>
+                      ⚠ another chat already imports here
                     </span>
                   )}
                 </span>

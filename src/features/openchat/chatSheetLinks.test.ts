@@ -7,6 +7,7 @@ import {
   draftBelongsOnSheet,
   repointChatLinks,
   type ChatSheetLinks,
+  otherChatsLinkedTo,
 } from "./chatSheetLinks";
 
 // IOU sheet ids are 16 hex chars (8 raw_rand bytes from now_id()), so the
@@ -147,5 +148,33 @@ describe("chatSheetLinks repoint on close-and-rotate (P0-7)", () => {
     const { next } = repointChatLinks({ "direct:wife": S1 }, S1, S2);
     expect(draftBelongsOnSheet("direct:wife", next, S2)).toBe(true); // now lands on active S2
     expect(draftBelongsOnSheet("direct:wife", next, S1)).toBe(false); // no longer on archived S1
+  });
+});
+
+
+// A father had his child's AND his manager's chats both importing into FatherChild, while the House
+// sheet he believed was linked had nothing pointing at it. Nothing was wrong with the data model —
+// links are keyed by (caller, chat key), so many-to-one is legal — but the chooser never showed the
+// collision, so the mis-click was invisible until drafts landed in the wrong ledger.
+describe("otherChatsLinkedTo — surface a sheet another chat already claims", () => {
+  const FC = "c819f76d77f260b3";
+  const HOUSE = "0a73358c07734ae8";
+  const links = { "direct:child": FC, "direct:manager": FC, "direct:mother": "e7e5df7a5d551d34" };
+
+  it("names the other chats importing into the same sheet", () => {
+    expect(otherChatsLinkedTo(FC, links, "direct:child")).toEqual(["direct:manager"]);
+    expect(otherChatsLinkedTo(FC, links, "direct:manager")).toEqual(["direct:child"]);
+  });
+
+  it("never counts the chat being edited as a collision with itself", () => {
+    expect(otherChatsLinkedTo("e7e5df7a5d551d34", links, "direct:mother")).toEqual([]);
+  });
+
+  it("is empty for a sheet nothing points at — the House case", () => {
+    expect(otherChatsLinkedTo(HOUSE, links, "direct:manager")).toEqual([]);
+  });
+
+  it("is empty when there are no links at all", () => {
+    expect(otherChatsLinkedTo(FC, {}, "direct:child")).toEqual([]);
   });
 });
