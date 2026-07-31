@@ -156,9 +156,9 @@ import {
   writeCachedLinks,
   fetchChatSheetLinks,
   storeChatSheetLink,
-  draftBelongsOnSheet,
   type ChatSheetLinks,
 } from "../openchat/chatSheetLinks";
+import { placeDraftOnSheet } from "../openchat/draftVisibility";
 
 // Build entry-form defaults from a template.
 // templateToInitial (template → entry defaults, incl. relative-schedule anchoring) is extracted to
@@ -721,7 +721,13 @@ export function SheetPage() {
     () =>
       collapseByMessageId(
         inboxPending.filter((p) => {
-          if (!draftBelongsOnSheet(p.context?.chat, chatLinks, sheetId)) return false;
+          // Routing (Layer 0 of placeDraftOnSheet): a partner's fanned-out copy carries THEIR view of
+          // the chat key, which names US and matches nothing we linked — so it used to read as
+          // "unpinned" and show on EVERY sheet. placeDraftOnSheet canonicalizes it via the confirmer
+          // before routing. `viewerOcUserId` is deliberately omitted: IOU does not learn its own
+          // OpenChat id yet, so attribution stays inert and this can only ever HIDE a draft that
+          // belongs on another sheet — never one of the viewer's own.
+          if (placeDraftOnSheet({ context: p.context, chatLinks, sheetId }) === "hidden") return false;
           const mid = p.context?.messageId;
           // Dismissed by ANY member (merged pair-slot union) → hidden for everyone.
           if (mid !== undefined && pairTemplates.dismissed.has(mid)) return false;
