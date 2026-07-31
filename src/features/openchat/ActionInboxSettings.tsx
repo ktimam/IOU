@@ -41,6 +41,7 @@ import { useSheetKey } from "../flows/SheetKeyContext";
 import { createActor } from "../../backend/declarations";
 import { syncManifestWithTypes } from "./syncManifest";
 import { OC_ACTION_INBOX_CANISTER_ID, OC_CONNECTED_KEY, OC_IC_URL, OC_LINKED_KEY, OC_USER_INDEX_CANISTER_ID } from "./ocConfig";
+import { forgetOpenChatUserId, rememberOpenChatUserId } from "./ocViewer";
 
 const LS_INBOX = "iou.openchat.actionInbox.v1";
 
@@ -214,7 +215,14 @@ export function ActionInboxSettings({ children }: { children?: ReactNode }) {
           // the manifest so a connect-only user's chat messages route to their types — no separate
           // "Link to OpenChat" needed. (Previously connect touched neither, so types stayed unmapped.)
           try {
-            if (identity) localStorage.setItem(OC_CONNECTED_KEY, identity.getPrincipal().toText());
+            if (identity) {
+              const me = identity.getPrincipal().toText();
+              localStorage.setItem(OC_CONNECTED_KEY, me);
+              // The claim response now names the OpenChat user whose code this was — the only moment
+              // the two identities are proven to be the same person. Kept for a future "did I confirm
+              // this?" check; nothing reads it today.
+              if (outcome.openChatUserId) rememberOpenChatUserId(me, outcome.openChatUserId);
+            }
           } catch {
             /* best-effort */
           }
@@ -291,6 +299,8 @@ export function ActionInboxSettings({ children }: { children?: ReactNode }) {
       // participant (a later type edit won't re-register unless they're still explicitly linked).
       try {
         localStorage.removeItem(OC_CONNECTED_KEY);
+        // The id is only meaningful for the delivery key OpenChat currently holds.
+        if (identity) forgetOpenChatUserId(identity.getPrincipal().toText());
       } catch {
         /* best-effort */
       }

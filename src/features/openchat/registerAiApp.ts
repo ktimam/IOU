@@ -164,8 +164,12 @@ export function buildIdl() {
   // single-use 6-digit link code OpenChat displayed to that user. No caller guard — the code IS
   // the authorization — so an anonymous agent works.
   const ClaimAiAppLinkCodeArgs = IDL.Record({ code: IDL.Text, public_key: IDL.Text });
+  // Success now carries the OpenChat user whose code was claimed. Claiming is the ONLY point where
+  // this app's identity and an OpenChat identity are proven to be the same person: a fanned-out
+  // deposit carries `confirmedBy`, but nothing else tells IOU which of those ids is ITSELF. We decode
+  // and persist it now so a future "was this confirmed by me?" check needs no OpenChat change.
   const ClaimAiAppLinkCodeResponse = IDL.Variant({
-    Success: IDL.Null,
+    Success: IDL.Record({ user_id: IDL.Principal }),
     CodeNotFound: IDL.Null,
     CodeExpired: IDL.Null,
     InvalidRequest: IDL.Text,
@@ -518,7 +522,7 @@ export type ClaimLinkCodeOptions = {
 };
 
 export type ClaimLinkCodeOutcome =
-  | { kind: "success" }
+  | { kind: "success"; openChatUserId?: string }
   | { kind: "code_not_found" }
   | { kind: "code_expired" }
   | { kind: "invalid_request"; message: string }
@@ -542,7 +546,11 @@ export async function claimAiAppLinkCode(opts: ClaimLinkCodeOptions): Promise<Cl
 
   const response = await actor.claim_ai_app_link_code({ code: opts.code, public_key: opts.publicKeyPem });
   if ("Success" in response) {
-    return { kind: "success" };
+    const uid = response.Success?.user_id;
+    return {
+      kind: "success",
+      ...(uid ? { openChatUserId: typeof uid === "string" ? uid : uid.toText() } : {}),
+    };
   }
   if ("CodeNotFound" in response) {
     return { kind: "code_not_found" };
