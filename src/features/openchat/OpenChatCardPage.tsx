@@ -325,7 +325,13 @@ export function OpenChatCardPage() {
                   onChange={(k, v) => setEntry(i, k, v)}
                 />
               ))}
-              <div style={{ display: "flex", gap: 8, justifyContent: "flex-end", marginTop: 4 }}>
+              {/* WRAP is load-bearing, not cosmetic. The host sizes this frame with `max-width: 100%`, so in a
+                  narrow bubble it is far below its 420px preference, while a flex row cannot shrink a
+                  button below its text. With justify-content: flex-end the excess overflows the START
+                  edge — the buttons slide out of the card to the LEFT, where scrollWidth cannot even
+                  see them. Worst while cancelling, because that label GROWS ("Cancel" -> spinner +
+                  "Cancelling…") whereas confirm shrinks: measured 69px outside at a 240px frame. */}
+              <div style={{ display: "flex", flexWrap: "wrap", gap: 8, justifyContent: "flex-end", marginTop: 4 }}>
                 <button
                   type="button"
                   onClick={onCancel}
@@ -444,7 +450,7 @@ export function OpenChatCardPage() {
               </div>
             </Field>
 
-            <div style={{ display: "flex", gap: 8, justifyContent: "flex-end", marginTop: 4 }}>
+            <div style={{ display: "flex", flexWrap: "wrap", gap: 8, justifyContent: "flex-end", marginTop: 4 }}>
               <button
                 type="button"
                 onClick={onCancel}
@@ -498,6 +504,14 @@ const btnStyle: CSSProperties = {
   border: 0,
   padding: "10px 18px",
   borderRadius: 12,
+  // A flex item will not shrink below its text, so in a narrow frame a button pushes the row past the
+  // card's edge (and with justify-content: flex-end it escapes to the LEFT, where scrollWidth cannot
+  // see it). minWidth 0 lets it shrink and the label ellipsize instead — the last line of defence
+  // after the row's flex-wrap, for frames too narrow to fit even ONE button.
+  minWidth: 0,
+  whiteSpace: "nowrap",
+  overflow: "hidden",
+  textOverflow: "ellipsis",
 };
 
 function Field({
