@@ -25,6 +25,36 @@ describe("template routing", () => {
     }
   });
 
+  it("folds every account's types into one per-USER manifest by design; containment is resolveTemplateBase", () => {
+    // The user's report: "Reservation is proposed in the child chat despite that there is no
+    // Reservation type in the linked account." This is that, pinned rather than fixed.
+    //
+    // OpenChat registers ONE manifest per app+user and has no per-chat rule set, so
+    // ManifestTypesSync folds loadAllSharedTemplates — EVERY account the user is in — into a single
+    // roster (ManifestTypesSync.tsx, via loadAllSharedTemplates). House's "Reservation" therefore
+    // routes deterministically in the child chat, and always will until a chat→account gate exists
+    // at propose time. What stops that from doing damage is IMPORT-side containment: a name this
+    // account does not own seeds no fee, no schedule, no currency (resolveTemplateBase.test.ts).
+    //
+    // Pinned here so that adding scoping is a deliberate edit to this test, not a silent drift.
+    const twoAccounts = [
+      { id: "house-1", name: "Reservation", keywords: ["reservation", "booking"] }, // House account
+      { id: "child-1", name: "Allowance", keywords: ["allowance"] }, // the child account
+    ];
+    const rules = buildIouRules(twoAccounts);
+    const km = rules.find((r) => r.kind === "keyword_map" && r.field === "template");
+    expect(km && km.kind === "keyword_map" && km.map.map((m) => m.value)).toEqual([
+      "Reservation",
+      "Allowance",
+    ]);
+    // The image/vision path skips the keyword_map post-pass and picks from the roster instruction,
+    // so the leak is the same size there. (Which name the MODEL picks is not deterministic and is
+    // deliberately not asserted — only the offered roster and the keyword post-pass are.)
+    const roster = rules.find((r) => r.kind === "instruction" && /saved types/.test(r.text));
+    expect(roster && roster.kind === "instruction" && roster.text).toContain("Reservation");
+    expect(roster && roster.kind === "instruction" && roster.text).toContain("Allowance");
+  });
+
   it("advertises the `template` field in the schema only when something is routable", () => {
     expect((buildIouOutputSchema(templates).properties as Record<string, unknown>).template).toEqual({
       type: "string",
@@ -204,6 +234,32 @@ describe("registered wire — every from_message field survives to the card", ()
       expect(Object.keys(schema.properties ?? {})).toContain(field);
       expect(action.card.rows.map((r) => r.field)).toContain(field);
     }
+  });
+
+  it("declares a card row for every field the confirm payload carries", async () => {
+    // This is the guard that keeps cardBridge.test.ts's "no declared row may be dropped" armed.
+    // That test loops over the REGISTERED rows and checks buildConfirmPayload keeps each one — but
+    // the rows come from docs/openchat-registration.json, which is HAND-EDITED and untouched by
+    // gen-openchat-registration.ts. Deleting the {label:"Template", valueKey:"template"} row there
+    // disarms it silently: the loop just iterates one row fewer and still passes. Then Template
+    // stops rendering on the card and stops riding the confirm payload, and the entry lands with
+    // none of its type's defaults — with the whole suite green.
+    const { buildManifestWire } = await import("./registerAiApp");
+    const rows = (buildManifestWire("") as unknown as {
+      actions: { card: { rows: { field: string }[] } }[];
+    }).actions[0].card.rows;
+    expect(rows.map((r) => r.field)).toEqual(
+      expect.arrayContaining([
+        "amount",
+        "currency",
+        "kind",
+        "template",
+        "direction",
+        "date",
+        "note",
+        "message",
+      ]),
+    );
   });
 
   it("stamps the raw message on `message`, never on `note`", () => {

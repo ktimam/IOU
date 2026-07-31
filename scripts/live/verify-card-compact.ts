@@ -1,3 +1,10 @@
+// SUPERSEDED IN CI: every assertion here now lives in test/ui/openchatCard.ui.spec.ts — the touch
+// target and the height ratchet under "D12 …: compact enough, tappable everywhere" (which also
+// re-checks the touch target at a 240px frame), the editable Type/Template round-trip and the
+// datalist suggestions under "D8 …". The BASELINE and TOUCH_TARGET numbers below travelled with them,
+// provenance comments and all. Nothing here ever needed a live OpenChat. Keep it as an eyeball probe
+// against a real browser session; put NEW assertions in test/ui.
+//
 // Live check: the card got SMALLER without becoming harder to tap, and Type/Template are really
 // editable — not read-only text dressed up as fields.
 //

@@ -37,10 +37,10 @@ import { usePreferences } from "../settings/usePreferences";
 import { usePairTemplates } from "../templates/PairTemplatesContext";
 import { TemplatesManager } from "../templates/TemplatesManager";
 import { templateToInitial } from "../templates/templateBase";
+import { resolveTemplateBase as resolveTemplateBaseFor } from "./resolveTemplateBase";
 import {
   parseDraft,
   isDuplicateDraft,
-  extractTs,
   baseWithDefaultCurrency,
   parseDraftBatch,
   parsedToPayload,
@@ -56,13 +56,13 @@ import {
 } from "../relay/relay";
 import { pollActionInbox, getActionInboxConfig } from "../openchat/actionInboxClient";
 import {
-  collapseByMessageId,
   parseImportedMessageIds,
   serializeImportedMessageIds,
   deriveDeployTag,
   planScopedInboxKey,
   isImportedIntoSheet,
 } from "../openchat/inboxDedupe";
+import { visibleInboxFor } from "../openchat/inboxFilter";
 
 // The two inbox dedup sets below (dismissed inbox ids; imported messageIds) persist so a handled
 // draft stays gone across refreshes — the inbox is append-only and the poll cursor is in-memory.
@@ -158,7 +158,6 @@ import {
   storeChatSheetLink,
   type ChatSheetLinks,
 } from "../openchat/chatSheetLinks";
-import { placeDraftOnSheet } from "../openchat/draftVisibility";
 
 // Build entry-form defaults from a template.
 // templateToInitial (template → entry defaults, incl. relative-schedule anchoring) is extracted to
@@ -284,22 +283,12 @@ export function SheetPage() {
   // JSON, dedupe by draft_id, then open the prefilled EntryForm to confirm.
   // Nothing is written until the user confirms in the form (no auto-write).
   // Resolve the template a chat message was routed to (the manifest keyword_map / model sets
-  // `raw.template` to the template's NAME — see actionManifest buildTemplateRules) into a defaults
-  // baseline, so parseDraft can fill gaps the extraction left. Matched case-insensitively by name,
-  // with an id fallback for any older id-based manifest. Unknown/deleted/renamed → no match →
-  // undefined → parseDraft behaves as before.
-  const resolveTemplateBase = (raw: unknown): Partial<EntryPayload> | undefined => {
-    if (raw == null || typeof raw !== "object") return undefined;
-    const ref = (raw as { template?: unknown }).template;
-    if (typeof ref !== "string" || ref.trim() === "") return undefined;
-    const key = ref.trim().toLowerCase();
-    const t =
-      allTemplates.find((x) => x.name.trim().toLowerCase() === key) ??
-      allTemplates.find((x) => x.id === ref);
-    // Anchor the template's due schedule at the draft's transaction date (same date the entry gets),
-    // so "due in 0 days" lands on the reservation date, not today.
-    return t ? templateToInitial(t, extractTs(raw as { note?: unknown; date?: unknown })) : undefined;
-  };
+  // `raw.template` to the template's NAME) against THIS account's types, so parseDraft can fill gaps
+  // the extraction left. Unknown/deleted/renamed — and any name that only exists on ANOTHER of the
+  // user's accounts, which the single per-user manifest roster makes routable here — resolves to no
+  // base, so no foreign fee/schedule/currency can reach this sheet. See resolveTemplateBase.ts.
+  const resolveTemplateBase = (raw: unknown): Partial<EntryPayload> | undefined =>
+    resolveTemplateBaseFor(allTemplates, raw).base;
 
   const openFromDraft = () => {
     setDraftErrors([]);
@@ -702,46 +691,21 @@ export function SheetPage() {
     }
   }, [entries, sortKey, showDeleted]);
 
-  // Inbox drafts whose source chat is pinned to a DIFFERENT sheet are hidden
-  // here — they show up on their mapped sheet's page instead. Drafts without
-  // context (wrapper-less deposits) and unmapped chats stay visible.
-  //
-  // Cross-member sync: a card ANY member already imported is hidden by matching the sheet's
-  // decrypted entries — import_message_id for mid-bearing cards, the derived content-hash
-  // draft_id only for wrapper-less ones (see isImportedIntoSheet for why mid-bearing cards
-  // never fall back to the content hash). A card ANY member DISMISSED is hidden via the merged
-  // pair-slot dismissed union (pairTemplates.dismissed). The partner's import/dismissal reaches
-  // us on the next entries/slots reload, so both members' pending lists converge without
-  // sharing any local state.
-  //
-  // A double-confirm race can surface two cards for the same messageId; collapse
-  // them by keeping the first (earliest — poll appends in order). Drafts with no
-  // messageId (wrapper-less) are never collapsed — each undefined stays distinct.
+  // Inbox drafts whose source chat is pinned to a DIFFERENT sheet are hidden here — they show up on
+  // their mapped sheet's page instead — as are cards any member already imported or dismissed. The
+  // whole decision (and the reasoning behind each layer) is in visibleInboxFor; this is its only
+  // caller, which is why that seam is unit-tested against the sheets it must NOT leak onto.
   const visibleInbox = useMemo(
     () =>
-      collapseByMessageId(
-        inboxPending.filter((p) => {
-          // Routing (Layer 0 of placeDraftOnSheet): a partner's fanned-out copy carries THEIR view of
-          // the chat key, which names US and matches nothing we linked — so it used to read as
-          // "unpinned" and show on EVERY sheet. placeDraftOnSheet canonicalizes it via the confirmer
-          // before routing. `viewerOcUserId` is deliberately omitted: IOU does not learn its own
-          // OpenChat id yet, so attribution stays inert and this can only ever HIDE a draft that
-          // belongs on another sheet — never one of the viewer's own.
-          if (placeDraftOnSheet({ context: p.context, chatLinks, sheetId }) === "hidden") return false;
-          const mid = p.context?.messageId;
-          // Dismissed by ANY member (merged pair-slot union) → hidden for everyone.
-          if (mid !== undefined && pairTemplates.dismissed.has(mid)) return false;
-          // Only wrapper-less cards need the parsed draftId (the fallback key); mid-bearing
-          // cards match exclusively on import_message_id, so skip the parse for them. A multi-entry
-          // wrapper-less card keys off its FIRST entry's draftId.
-          let draftId: string | undefined;
-          if (mid === undefined) {
-            const parsed = parseDraftBatch(p.draft, resolveTemplateBase, prefs.defaultCurrency);
-            draftId = parsed.drafts[0]?.draftId;
-          }
-          return !isImportedIntoSheet(entries, mid, draftId);
-        }),
-      ),
+      visibleInboxFor({
+        inboxPending,
+        chatLinks,
+        sheetId,
+        entries,
+        dismissed: pairTemplates.dismissed,
+        resolveTemplateBase,
+        defaultCurrency: prefs.defaultCurrency,
+      }),
     // resolveTemplateBase is re-created each render but only reads the account's
     // shared types — dep on those.
     // eslint-disable-next-line react-hooks/exhaustive-deps

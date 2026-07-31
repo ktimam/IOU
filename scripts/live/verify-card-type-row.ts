@@ -1,3 +1,9 @@
+// SUPERSEDED IN CI: every assertion here now lives in test/ui/openchatCard.ui.spec.ts, under the
+// "D8 …" tests — the routed single card, the card with no type routed (empty field, nothing added to
+// the payload), the per-row multi card, and a readonly pass this harness never had. Nothing here ever
+// needed a live OpenChat. Keep it as an eyeball probe against a real browser session; put NEW
+// assertions in test/ui.
+//
 // Live check: the app-rendered card SHOWS the transaction kind and the routed saved type, and hands
 // the type back on confirm.
 //

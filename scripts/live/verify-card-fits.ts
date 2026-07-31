@@ -1,3 +1,10 @@
+// SUPERSEDED IN CI: every assertion here now lives in test/ui/openchatCard.ui.spec.ts ("D3 …:
+// buttons stay inside the card at every width, idle and cancelling"), where it runs on `pnpm test:ui`
+// against both single- and multi-entry cards and measures BOTH edges against the .card box rather
+// than only the row's start edge. Nothing in this file ever needed a live OpenChat — it was hand-run
+// only because it was written while chasing one. Keep it as an eyeball probe against a real browser
+// session (a real bubble, a real host-applied frame width); put NEW assertions in test/ui.
+//
 // Live check: the app-rendered card's buttons stay INSIDE the frame at every width, in every phase.
 //
 // The host sizes IOU's card iframe with `width: 420px; max-width: 100%`, so in a narrow bubble the

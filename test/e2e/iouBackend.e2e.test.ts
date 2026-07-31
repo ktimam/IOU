@@ -16,6 +16,7 @@ import {
   decryptEntryPayload,
 } from "../../src/features/crypto/devVetkd";
 import { encodeEntry, decodeEntry, type EntryPayload } from "../../src/features/entries/types";
+import { currencyFromUserRecord } from "../../src/features/settings/defaultCurrency";
 import { computeBalances } from "../../src/features/entries/balance";
 import { parseDraft } from "../../src/features/entries/draft";
 import { sheetIdToNat64, nat64ToSheetId } from "../../src/features/openchat/chatSheetLinks";
@@ -190,5 +191,35 @@ describeE2E("IOU backend — two-user pair/sheet/entry E2E", () => {
     expect(decoded.draft_id).toBe("d:e2e-import"); // idempotency key survived the round-trip
     expect(decoded.amount_minor).toBe(4250);
     await A.actor.remove_chat_sheet_link("group:import-e2e");
+  });
+
+  it("default currency: canister rejects non-ISO junk, stores uppercase, and is caller-keyed", async () => {
+    // The ISO guard lives ONLY on the canister (set_default_currency, src/lib.rs) — the client-side
+    // normalizer in defaultCurrency.ts drops junk before it is ever sent, so every unit test passes
+    // whether or not the canister checks anything. Drop that trap and a stray "EGYPT" (or a code from
+    // a future build that isn't three letters) is accepted and persisted, and every picker and chat
+    // import then reads a default no currency table knows, silently falling back to USD on the money.
+    await expect(A.actor.set_default_currency("EGYPT")).rejects.toThrow(/3-letter ISO/i);
+    await expect(A.actor.set_default_currency("E1P")).rejects.toThrow(/3-letter ISO/i);
+
+    // Trimmed and uppercased BY THE CANISTER. Asserted on the raw candid field, not through
+    // currencyFromUserRecord: that helper uppercases too, so reading the default only through it
+    // would keep passing with the canister's normalization gone — and the two devices that wrote
+    // "egp" and "EGP" would then be storing values that never compare equal.
+    await A.actor.set_default_currency("  eGp  ");
+    const recA = optVal(await A.actor.get_my_user()) as { default_currency: [] | [string] };
+    expect(optVal(recA.default_currency)).toBe("EGP");
+    expect(currencyFromUserRecord(recA)).toBe("EGP");
+
+    // Caller-keyed is the entire point of a per-USER default. A third identity that has never chosen
+    // one must still read nothing — a canister-global default would stamp A's EGP onto every other
+    // user's entry forms and chat imports instead of letting them fall back.
+    const C = await iouActor(freshIdentity());
+    expect(currencyFromUserRecord(optVal(await C.get_my_user()))).toBeUndefined();
+
+    // ...and the WRITE is caller-keyed too, not just the read: B choosing its own must not clobber A's.
+    await B.actor.set_default_currency("usd");
+    expect(currencyFromUserRecord(optVal(await B.actor.get_my_user()))).toBe("USD");
+    expect(currencyFromUserRecord(optVal(await A.actor.get_my_user()))).toBe("EGP");
   });
 });
