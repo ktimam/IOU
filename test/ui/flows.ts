@@ -204,7 +204,13 @@ export async function linkChatToSheet(page: Page, chatKey: string, sheetName: st
   const row = page.locator("label").filter({ hasText: sheetName }).first();
   await row.locator('input[name="link-chat-sheet"]').check();
   await page.getByRole("button", { name: "Save" }).click();
-  await page.getByText(/will be imported into/i).first().waitFor({ timeout: T });
+  // Wait for the SAVE ACKNOWLEDGEMENT, not just any "…imported into…" text. The page's static intro
+  // paragraph ("Entries you confirm in this OpenChat chat will be imported into the sheet you pick
+  // here", LinkChatPage.tsx:244) also matches /will be imported into/i and is earlier in the DOM, so
+  // `.first()` on that pattern resolved before the click had even landed — this helper returned with
+  // the set_chat_sheet_link update still in flight, and the caller's next page.goto cancelled it.
+  // The "Drafts from this chat…" line renders only from setSavedTo, i.e. after the call resolved.
+  await page.getByText(/Drafts from this chat will be imported into/i).waitFor({ timeout: T });
 }
 
 /** Read the visible text of the Balances section (for assertions / logging). */
