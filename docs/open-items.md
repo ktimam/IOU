@@ -122,21 +122,19 @@ runs proposing on "hi".
 
 ---
 
-## 6. `test/ui/openchat.ui.spec.ts:61` — chat→sheet link
+## 6. ~~`test/ui/openchat.ui.spec.ts:61` — chat→sheet link~~ — FIXED (`ee85f1b`)
 
-**What.** The Playwright spec covering link → "(current)" → unlink → per-user isolation fails. The
-FEATURE works (linking a sheet to a chat behaves correctly in the app); the test does not.
+Kept as a note because the *mistake* is the reusable part, not the fix.
 
-**Reproduce.**
+The spec asserted on the literal "(current)", which `365d659` had renamed to "— this chat imports
+here". The feature was never broken. It was diagnosed as "pre-existing, not us" on the strength of
+re-running it with `SheetPage.tsx` stashed — but the breaking change was in `LinkChatPage.tsx`, from
+a commit three hours earlier. **Stashing one file only rules out that file**; if a bisect is worth
+doing, do it against a commit, not a guess.
 
-```bash
-pnpm test:ui test/ui/openchat.ui.spec.ts --grep "chat.sheet link"
-```
+The assertions are now structural (a checked `input[name="link-chat-sheet"]` on the named sheet's row,
+an unlink control by role) rather than copy, so rewording cannot break it again — verified by renaming
+the marker in the product and watching the test still pass.
 
-**Confirmed pre-existing** — fails identically with `src/features/entries/SheetPage.tsx` stashed, so
-the `inboxFilter` / `resolveTemplateBase` extraction did not cause it. Prime suspect is a stale
-assertion: `LinkChatPage.tsx` recently changed its subtitle to "shared with &lt;name&gt;" and added
-"— this chat imports here" / "⚠ another chat already imports here".
-
-**Done when** it passes and still catches a real regression in linking, unlinking, or cross-user
-leakage — not when it has been weakened into passing.
+Related trap, still true: **`pnpm exec tsc --noEmit` does not typecheck `test/ui`** — `tsconfig.json`
+has `"include": ["src"]`. Playwright specs are unprotected by the repo typecheck; check them directly.
