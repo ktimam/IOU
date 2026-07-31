@@ -176,3 +176,40 @@ describe("iouActionManifest", () => {
     expect(url.searchParams.get("chat")).toBe("group:aaaaa-aa");
   });
 });
+
+// The wire is assembled from TWO sources that no single script keeps in step: the rules and the
+// response schema are regenerated into docs/openchat-registration.json by
+// scripts/gen-openchat-registration.ts, but `card.rows` is HAND-EDITED there and left untouched by
+// that script (registerAiApp.ts reads the rows straight from the paste JSON). So a `from_message`
+// rule can silently lose the schema property or the card row it depends on, and nothing would fail.
+//
+// That matters because of how the evidence reaches a RECEIVED card: reverseMapRows rebuilds the
+// extraction from the card's visible rows, so a field with no row simply is not there for the
+// partner — currency verification and date recovery would quietly fall back. This is the invariant
+// that catches it.
+describe("registered wire — every from_message field survives to the card", () => {
+  it("declares each from_message field in BOTH the response schema and the card rows", async () => {
+    const { buildManifestWire } = await import("./registerAiApp");
+    const wire = buildManifestWire("") as unknown as {
+      actions: { response_schema: string; rules: unknown[]; card: { rows: { field: string; label: string }[] } }[];
+    };
+    const action = wire.actions[0];
+    const schema = JSON.parse(action.response_schema) as { properties?: Record<string, unknown> };
+    const fromMessageFields = buildIouRules([])
+      .filter((r): r is Extract<typeof r, { kind: "from_message" }> => r.kind === "from_message")
+      .map((r) => r.field);
+
+    expect(fromMessageFields.length).toBeGreaterThan(0);
+    for (const field of fromMessageFields) {
+      expect(Object.keys(schema.properties ?? {})).toContain(field);
+      expect(action.card.rows.map((r) => r.field)).toContain(field);
+    }
+  });
+
+  it("stamps the raw message on `message`, never on `note`", () => {
+    // note is the model's own per-entry description now; stamping the message over it gave every row
+    // of a multi-transaction card the whole message.
+    const fromMessage = buildIouRules([]).filter((r) => r.kind === "from_message");
+    expect(fromMessage.map((r) => (r as { field: string }).field)).toEqual(["message"]);
+  });
+});

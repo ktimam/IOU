@@ -190,7 +190,12 @@ export const IOU_EXTRACTION_RULES: AiActionRule[] = [
       },
     ],
   },
-  { kind: "from_message", field: "note", maxLength: 200 },
+  // Stamp the raw message onto `message`, NOT `note`. OpenChat applies this rule to EVERY element of
+  // a multi-transaction extraction with the same text, so pointing it at `note` gave all three rows of
+  // "Owe me 300 uber 150 food / 500 movies" the whole message as their description. `note` is now left
+  // as the model wrote it (per transaction); `message` is the evidence currencyStatedIn and extractTs
+  // read. Still unconditional: the evidence must be present on every row, never on some of them.
+  { kind: "from_message", field: "message", maxLength: 200 },
   { kind: "normalize", field: "amount", ops: ["k_m_suffix"] },
   { kind: "normalize", field: "currency", ops: ["uppercase", "trim"] },
   { kind: "instruction", text: "Amounts like '26k' mean 26000." },
@@ -217,6 +222,8 @@ export const iouActionManifest: IouActionManifest = {
       direction: { enum: ["credit", "debt"] },
       date: { type: "string", pattern: "^\\d{4}-\\d{2}-\\d{2}$" },
       note: { type: "string" },
+      // Declared so conformToSchema keeps it — an undeclared key is dropped before the card is built.
+      message: { type: "string" },
     },
     // Only `amount` is required — it can't be recovered if absent. `currency` is intentionally NOT
     // required: IOU fills a missing currency from the user's default (prefs.defaultCurrency) on
@@ -231,6 +238,7 @@ export const iouActionManifest: IouActionManifest = {
       { key: "currency", label: "Currency" },
       { key: "direction", label: "Direction" },
       { key: "note", label: "Note" },
+      { key: "message", label: "Message" },
     ],
     directionLabels: {
       credit: "Owed to you",

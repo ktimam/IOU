@@ -26,6 +26,13 @@ export type EntryDraft = {
   date?: string; // YYYY-MM-DD; default today (UTC)
   counterparty?: string; // informational (folded into the note)
   note?: string;
+  // The RAW message text, stamped by the manifest's `from_message` rule. It used to be written over
+  // `note`, which meant every entry of a multi-transaction message got the whole message as its
+  // description ("Owe me 300 uber 150 food" on all three rows). `note` is now the model's own
+  // per-entry description and this carries the evidence that currency verification and date recovery
+  // need. Absent on drafts from before the split (and on pasted JSON) — every reader falls back to
+  // `note`, so those behave exactly as they did.
+  message?: string;
   fee_percent?: number; // IOU only, 0..100
   fee_fixed?: number | string; // IOU only, MAJOR units
   schedule?: DraftSchedulePortion[]; // IOU only
@@ -135,8 +142,22 @@ function todayTsUtc(): number {
  * matched template's due schedule anchors on the SAME date the entry gets — otherwise a portion
  * "due in 0 days" lands on today instead of the reservation date.
  */
-export function extractTs(d: { note?: unknown; date?: unknown }): number {
-  const noteDate = typeof d.note === "string" ? looseDateToTs(d.note) : null;
+export function messageEvidence(d: { message?: unknown; note?: unknown }): string {
+  if (typeof d.message === "string" && d.message.trim() !== "") return d.message;
+  // Pre-split drafts (and the paste path) carry the raw text in `note` instead.
+  return typeof d.note === "string" ? d.note : "";
+}
+
+function hasText(v: unknown): v is string {
+  return typeof v === "string" && v.trim() !== "";
+}
+
+function isPlainDraft(v: unknown): v is EntryDraft {
+  return typeof v === "object" && v !== null && !Array.isArray(v);
+}
+
+export function extractTs(d: { message?: unknown; note?: unknown; date?: unknown }): number {
+  const noteDate = looseDateToTs(messageEvidence(d));
   if (noteDate != null) return noteDate;
   if (typeof d.date === "string") {
     const t = dateToTs(d.date) ?? looseDateToTs(d.date);
@@ -211,8 +232,9 @@ export function parseDraft(input: unknown, base?: Partial<EntryPayload>): ParseR
   // trustworthy than the model's date field; parse it FIRST. For an image (no note text) fall back
   // to the model's date field (from vision), then to today.
   const ts = extractTs(d);
-  // Surface a malformed `date` only when the note didn't already supply the date (note wins in extractTs).
-  const noteDate = typeof d.note === "string" ? looseDateToTs(d.note) : null;
+  // Surface a malformed `date` only when the message text didn't already supply the date (it wins in
+  // extractTs). Same evidence source, so the two can never disagree about whether a date was found.
+  const noteDate = looseDateToTs(messageEvidence(d));
   if (noteDate == null) {
     if (typeof d.date === "string") {
       if (dateToTs(d.date) == null && looseDateToTs(d.date) == null) errors.push("date must be YYYY-MM-DD");
@@ -375,9 +397,20 @@ export function parseDraftBatch(
   const errors: string[] = [];
   const usedIds = new Set<string>();
 
+  // A SINGLE-entry message keeps its old behaviour: when the model supplied no note of its own, the
+  // raw message text is the description. That is what `note` always used to be, and for one
+  // transaction it reads correctly. We deliberately do NOT do this for a MULTI-entry message — there,
+  // stamping the whole message on a row is the very bug this split fixes, so a row the model failed
+  // to describe is better left to the template default than labelled with all three transactions.
+  const single = elements.length === 1;
+
   elements.forEach((el, i) => {
     const elBase = baseWithDefaultCurrency(resolve(el), dflt);
-    const res = parseDraft(el, elBase);
+    const withNote =
+      single && isPlainDraft(el) && !hasText(el.note) && hasText(el.message)
+        ? { ...el, note: el.message }
+        : el;
+    const res = parseDraft(withNote, elBase);
     if (!res.ok) {
       // One error entry per invalid element. Prefix array elements so the human can tell which one;
       // a lone object keeps parseDraft's raw errors (unchanged single-entry behaviour).

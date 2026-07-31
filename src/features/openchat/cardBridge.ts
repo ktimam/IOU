@@ -64,6 +64,11 @@ export type CardInit = {
 // "" means the extraction carried no kind, so buildConfirmPayload omits it and
 // parseDraft re-infers it. `date` is likewise a passthrough of the prefill date.
 export type CardFormState = {
+  // The raw message text the extraction came from, passed straight through — never edited, never
+  // shown. It is the evidence currency verification and date recovery run on at import, so the card
+  // has to hand it back or those fall back to the (now per-entry) note and lose the date. Optional so
+  // a hand-built state (tests, the standalone page) stays valid without it.
+  message?: string;
   kind: "iou" | "settlement" | "";
   amount: string;
   currency: string;
@@ -184,15 +189,30 @@ export function initToFormState(data: EntryDraft, seedCurrency = ""): CardFormSt
   // message never stated — the model guesses "USD" for a bare "Owe 300 uber", which otherwise sailed
   // straight past the default-currency logic and imported as USD for an EGP user. A currency the
   // message DID state is still honoured (see currencyStatedIn); the user can always pick one anyway.
+  // The MESSAGE is the evidence, not the note: since the note became the model's own per-entry
+  // description ("uber"), checking it would miss a currency the user actually typed. Falls back to
+  // the note for cards posted before the split, where the note WAS the message.
+  const evidence = typeof data.message === "string" && data.message.trim() !== ""
+    ? data.message
+    : String(data.note ?? "");
   const claimed = typeof data.currency === "string" ? data.currency.trim() : "";
   const currency =
-    claimed !== "" && currencyStatedIn(String(data.note ?? ""), claimed)
+    claimed !== "" && currencyStatedIn(evidence, claimed)
       ? claimed.toUpperCase()
       : seedCurrency.trim().toUpperCase(); // the app card currency, else "" (resolve at import)
   const direction: Direction = data.direction === "debt" ? "debt" : "credit";
   const note = typeof data.note === "string" ? data.note : "";
   const date = typeof data.date === "string" ? data.date : "";
-  return { kind, amount, currency, direction, note, date, tags: [] };
+  return {
+    ...(typeof data.message === "string" ? { message: data.message } : {}),
+    kind,
+    amount,
+    currency,
+    direction,
+    note,
+    date,
+    tags: [],
+  };
 }
 
 /**
@@ -231,6 +251,9 @@ export function buildConfirmPayload(state: CardFormState): CardConfirmPayload {
   // prefs.defaultCurrency at import (baseWithDefaultCurrency). A picked currency is passed through.
   const currency = state.currency.trim().toUpperCase();
   if (currency !== "") payload.currency = currency;
+  // Pass the evidence straight back so the import can still verify the currency and recover the
+  // date; omitted when absent so nothing new appears on a card that never carried it.
+  if ((state.message ?? "").trim() !== "") payload.message = state.message;
   if (state.kind !== "") payload.kind = state.kind;
   if (state.date.trim() !== "") payload.date = state.date;
   if (state.tags.length > 0) payload.tags = state.tags;

@@ -31,6 +31,9 @@
       },
       "note": {
         "type": "string"
+      },
+      "message": {
+        "type": "string"
       }
     },
     "required": [
@@ -67,6 +70,10 @@
       {
         "label": "Note",
         "valueKey": "note"
+      },
+      {
+        "label": "Message",
+        "valueKey": "message"
       }
     ],
     "confirmLabel": "Add to IOU",
@@ -118,7 +125,7 @@
     },
     {
       "kind": "from_message",
-      "field": "note",
+      "field": "message",
       "maxLength": 200
     },
     {

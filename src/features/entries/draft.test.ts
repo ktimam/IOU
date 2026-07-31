@@ -7,6 +7,7 @@ import {
   parseDraftBatch,
   parsedToPayload,
   batchSummary,
+  messageEvidence,
 } from "./draft";
 import type { EntryPayload } from "./types";
 
@@ -420,5 +421,61 @@ describe("batchSummary", () => {
   it("shows a can't-import line when nothing parsed", () => {
     const res = parseDraftBatch({ amount: 0, currency: "USD" });
     expect(batchSummary(res)).toMatch(/can't import/i);
+  });
+});
+
+// `note` used to carry TWO meanings: the human description of one transaction AND the raw message
+// text that currency verification and date recovery mine. With one entry those are the same string,
+// so the overload was invisible. With three they cannot be — every row of
+// "Owe me 300 uber 150 food / 500 movies" got the whole message as its description. The manifest now
+// stamps the raw text on `message` and leaves `note` as the model wrote it.
+describe("message vs note — the evidence is separate from the description", () => {
+  const MSG = "Owe me 300 uber 150 food 500 movies";
+
+  it("keeps each entry's OWN note in a multi-entry batch", () => {
+    const { drafts } = parseDraftBatch([
+      { amount: 300, currency: "EGP", note: "uber", message: MSG },
+      { amount: 150, currency: "EGP", note: "food", message: MSG },
+      { amount: 500, currency: "EGP", note: "movies", message: MSG },
+    ]);
+    expect(drafts.map((d) => d.initial.note)).toEqual(["uber", "food", "movies"]);
+  });
+
+  it("recovers the DATE from `message`, not from the per-entry note", () => {
+    // "Reservation" alone carries no date; the message does. Before the split this worked only
+    // because note WAS the message — a short note would have silently dated the entry today.
+    const { drafts } = parseDraftBatch([
+      { amount: 25000, currency: "EGP", note: "Reservation", message: "Reservation 1-7 Aug 25000 EGP" },
+    ]);
+    const ts = drafts[0].initial.ts ?? 0;
+    expect(new Date(ts).toISOString().slice(5, 10)).toBe("08-01");
+  });
+
+  it("falls back to `note` for drafts written before the split", () => {
+    // A card posted before this change carries the raw text in `note` and no `message` at all.
+    const { drafts } = parseDraftBatch([{ amount: 25000, currency: "EGP", note: "Reservation 1-7 Aug 25000 EGP" }]);
+    expect(new Date(drafts[0].initial.ts ?? 0).toISOString().slice(5, 10)).toBe("08-01");
+  });
+
+  it("a SINGLE entry with no model note falls back to the message (today's behaviour)", () => {
+    const { drafts } = parseDraftBatch([{ amount: 300, currency: "EGP", message: "Owe 300 for uber" }]);
+    expect(drafts[0].initial.note).toBe("Owe 300 for uber");
+  });
+
+  it("a MULTI entry with no model note does NOT get the whole message stamped on it", () => {
+    // Leaving it empty is right: labelling one row with all three transactions is the original bug.
+    const { drafts } = parseDraftBatch([
+      { amount: 300, currency: "EGP", message: MSG },
+      { amount: 150, currency: "EGP", note: "food", message: MSG },
+    ]);
+    expect(drafts[0].initial.note).toBe("");
+    expect(drafts[1].initial.note).toBe("food");
+  });
+
+  it("messageEvidence prefers message, falls back to note, else empty", () => {
+    expect(messageEvidence({ message: "m", note: "n" })).toBe("m");
+    expect(messageEvidence({ note: "n" })).toBe("n");
+    expect(messageEvidence({ message: "   ", note: "n" })).toBe("n");
+    expect(messageEvidence({})).toBe("");
   });
 });
