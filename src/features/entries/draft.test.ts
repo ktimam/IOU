@@ -479,3 +479,61 @@ describe("message vs note — the evidence is separate from the description", ()
     expect(messageEvidence({})).toBe("");
   });
 });
+
+// ── The reported message, end to end on IOU's side ───────────────────────────
+//
+// The OpenChat half of this pipeline is pinned in aiAction.test.ts against a reply captured verbatim
+// from the on-device model. This is the same payload arriving HERE — the array the app card hands
+// back on "Add all N entries" — so the two halves are guarded against the same real case and a drop
+// cannot hide in the seam between the repos.
+//
+// The user reported this message twice: first every entry got the whole message as its note and one
+// value was duplicated while another vanished, then later that only two entries arrived at all.
+describe("parseDraftBatch — 'Owe me 300 uber 150 food\n\n500 movies'", () => {
+  // Exactly what the model produced, post-passed, as the card hands it over.
+  const CONFIRMED = [
+    { kind: "iou", amount: 300, currency: "USD", direction: "credit", note: "Uber ride", message: "Owe me 300 uber 150 food\n\n500 movies" },
+    { kind: "iou", amount: 150, currency: "USD", direction: "credit", note: "Food", message: "Owe me 300 uber 150 food\n\n500 movies" },
+    { kind: "iou", amount: 500, currency: "USD", direction: "credit", note: "Movies", message: "Owe me 300 uber 150 food\n\n500 movies" },
+  ];
+
+  // Read back in MAJOR units so the expectations match the message the user typed.
+  // NaN rather than 0 for a missing amount: a dropped value must fail the comparison loudly instead
+  // of reading as a legitimate zero.
+  const majors = (ds: ReturnType<typeof parseDraftBatch>["drafts"]) =>
+    ds.map((d) => (d.initial.amount_minor ?? NaN) / 100);
+
+  it("imports ALL THREE — two from one line, one from the next", () => {
+    const { drafts, errors } = parseDraftBatch(CONFIRMED);
+    expect(errors).toEqual([]);
+    expect(majors(drafts)).toEqual([300, 150, 500]);
+  });
+
+  it("gives each entry its own note, not the shared message", () => {
+    // The message is carried on every element as EVIDENCE (currency verification, date recovery). It
+    // must never become the description — that was the first bug: three rows all reading
+    // "Owe me 300 uber 150 food 500 movies".
+    const { drafts } = parseDraftBatch(CONFIRMED);
+    expect(drafts.map((d) => d.initial.note)).toEqual(["Uber ride", "Food", "Movies"]);
+    for (const d of drafts) {
+      expect(d.initial.note).not.toContain("500 movies");
+    }
+  });
+
+  it("keeps 150 even though 300 appears first on the same line", () => {
+    // Named for the exact report ("it repeated 300 egp and didn't use 150 egp"). Distinct amounts on
+    // one line must stay distinct entries — no merge, no dedupe by line.
+    const { drafts } = parseDraftBatch(CONFIRMED);
+    const amounts = majors(drafts);
+    expect(amounts).toContain(150);
+    expect(amounts.filter((a) => a === 300)).toHaveLength(1);
+  });
+
+  it("keeps the good entries when one element is unusable", () => {
+    // A partial import beats no import: the user can add the rest by hand, but a rejected CARD loses
+    // everything and gives no hint which element was at fault.
+    const { drafts, errors } = parseDraftBatch([CONFIRMED[0], { amount: 0, currency: "USD", note: "Food" }, CONFIRMED[2]]);
+    expect(majors(drafts)).toEqual([300, 500]);
+    expect(errors.length).toBeGreaterThan(0);
+  });
+});
