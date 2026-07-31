@@ -7,6 +7,7 @@ import {
   buildIouOutputSchema,
 } from "./actionManifest";
 import { parseDraft } from "../entries/draft";
+import registration from "../../../docs/openchat-registration.json";
 
 describe("template routing", () => {
   const templates = [
@@ -267,5 +268,34 @@ describe("registered wire — every from_message field survives to the card", ()
     // of a multi-transaction card the whole message.
     const fromMessage = buildIouRules([]).filter((r) => r.kind === "from_message");
     expect(fromMessage.map((r) => (r as { field: string }).field)).toEqual(["message"]);
+  });
+});
+
+// The prompt is the ONLY lever we have over how the model splits a message, and the split it gets
+// wrong is the one a human writes most naturally: two amounts on one line.
+//
+// Verified live against Qwen3-VL 2B in the child profile. Without this guidance the model returned
+// TWO objects for "Owe me 300 uber 150 food\n\n500 movies" — it merged "300 uber 150 food" into a
+// single 300 and dropped the 150 — and the card duly showed two entries. With it, three. The rest of
+// the pipeline was innocent throughout: it faithfully carried whatever the model emitted.
+//
+// This asserts the INSTRUCTION survives, not the model's behaviour (which no unit test can pin). If
+// it is ever reworded, reword this too — and re-run the live check, because the wording is load-bearing.
+describe("the extraction prompt tells the model a single line can hold several transactions", () => {
+  // \s+ not a literal space: the prompt is a wrapped template literal, so these phrases
+  // straddle newlines in the actual string.
+  it("says one object per amount, and forbids merging or dropping one", () => {
+    const p = IOU_EXTRACTION_PROMPT;
+    expect(p).toMatch(/one LINE can hold several\s+transactions/i);
+    expect(p).toMatch(/one object for\s+EACH/i);
+    expect(p).toMatch(/never merge two\s+amounts/i);
+    expect(p).toMatch(/never leave an amount\s+out/i);
+  });
+
+  it("ships that guidance in the REGISTERED wire, not just the local constant", () => {
+    // The model only ever sees what was registered on-chain; a prompt edit that is not re-registered
+    // changes nothing (this cost a full round of live testing to learn).
+    const doc = registration as { promptTemplate?: string };
+    expect(doc.promptTemplate ?? "").toMatch(/one LINE can hold several\s+transactions/i);
   });
 });

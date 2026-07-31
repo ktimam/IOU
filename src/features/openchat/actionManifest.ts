@@ -130,7 +130,9 @@ ledger. The input is a chat message: plain text, an image (for example a receipt
 screenshot, or a booking confirmation), or both. Respond with ONLY compact JSON and nothing else -
 no prose, no code fences, and do not repeat the schema. When the message describes a SINGLE
 transaction, respond with ONE JSON object. When it describes MULTIPLE distinct transactions,
-respond with a JSON ARRAY of such objects, one object per transaction.
+respond with a JSON ARRAY of such objects, one object per transaction. One LINE can hold several
+transactions: read every amount in the input and emit one object for EACH of them. Never merge two
+amounts into one object, and never leave an amount out.
 Each object may contain these fields:
 - "kind": "iou" when the money is a future obligation (a reservation, a booking, rent, an
   instalment, or money owed to be paid later); "settlement" when the money has already moved
