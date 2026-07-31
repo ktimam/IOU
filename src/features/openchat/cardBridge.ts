@@ -70,6 +70,19 @@ export type CardFormState = {
   // a hand-built state (tests, the standalone page) stays valid without it.
   message?: string;
   kind: "iou" | "settlement" | "";
+  // The SAVED TYPE this message routed to, by NAME (the manifest's keyword_map / the model sets it —
+  // see buildTemplateRules). A passthrough like `kind`: shown, never edited here, and handed straight
+  // back on confirm.
+  //
+  // Handing it back is the load-bearing part. The confirm payload REPLACES the stored extraction
+  // rather than merging with it (respond_to_action_card.rs `resolve_confirm_payload`), so a field this
+  // card drops is gone for good — and dropping this one cost the import its type defaults: SheetPage's
+  // resolveTemplateBase looks up `template` by name to seed the fee %, due schedule, and default
+  // currency/note/direction, and silently gets `undefined` when it is absent.
+  //
+  // Not editable, and cannot be: the frame is storage-partitioned and cannot read the account's saved
+  // types, so it has no roster to offer. It can only carry what the extraction chose.
+  template?: string;
   amount: string;
   currency: string;
   direction: Direction;
@@ -200,9 +213,13 @@ export function initToFormState(data: EntryDraft, seedCurrency = ""): CardFormSt
   const direction: Direction = data.direction === "debt" ? "debt" : "credit";
   const note = typeof data.note === "string" ? data.note : "";
   const date = typeof data.date === "string" ? data.date : "";
+  // Carried only when the extraction actually routed to a type, so a card that never had one gains
+  // no empty field (and buildConfirmPayload emits nothing new for it).
+  const template = typeof data.template === "string" ? data.template.trim() : "";
   return {
     ...(typeof data.message === "string" ? { message: data.message } : {}),
     kind,
+    ...(template !== "" ? { template } : {}),
     amount,
     currency,
     direction,
@@ -251,6 +268,12 @@ export function buildConfirmPayload(state: CardFormState): CardConfirmPayload {
   // date; omitted when absent so nothing new appears on a card that never carried it.
   if ((state.message ?? "").trim() !== "") payload.message = state.message;
   if (state.kind !== "") payload.kind = state.kind;
+  // Hand the routed type back by name. Without this the import cannot resolve the type's defaults
+  // (fee %, due schedule, currency/note/direction) — the payload REPLACES the stored extraction, so
+  // anything the card omits is lost, not inherited. parseDraft itself ignores the field; SheetPage's
+  // resolveTemplateBase is what consumes it.
+  const template = (state.template ?? "").trim();
+  if (template !== "") payload.template = template;
   if (state.date.trim() !== "") payload.date = state.date;
   return payload;
 }

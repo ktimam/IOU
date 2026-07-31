@@ -45,6 +45,14 @@ const DIRECTION_LABELS: Record<Direction, string> = {
   debt: "You owe",
 };
 
+// Same vocabulary as the real entry form's "Type" fieldset (IOU = owed, has a due date; Settlement =
+// paid now), short enough for a card row. The classic OC-rendered card printed the raw wire value
+// ("iou"), which was never meant to be read by a human.
+const KIND_LABELS: Record<"iou" | "settlement", string> = {
+  iou: "IOU",
+  settlement: "Settlement",
+};
+
 
 
 // Theme token sets. IOU is natively dark (mint-on-charcoal, the Vault look); the
@@ -361,6 +369,7 @@ export function OpenChatCardPage() {
           <ReadonlyView form={form} />
         ) : (
           <div style={{ display: "flex", flexDirection: "column", gap: 12, marginTop: 12 }}>
+            <MetaLine form={form} />
             <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
               <Field label="Amount" style={{ flex: "1 1 120px" }}>
                 <input
@@ -542,6 +551,32 @@ function EntryHeading({ index, total }: { index: number; total: number }) {
   );
 }
 
+// The two DECLARED card rows the classic OpenChat table used to draw, which the iframe replaced
+// wholesale: the transaction kind ("Type") and the saved type this message routed to ("Template").
+//
+// Read-only on purpose, and it cannot be otherwise: the frame is storage-partitioned, so it cannot
+// read the account's saved types and has no roster to build a picker from. It shows what the
+// extraction chose and hands it back untouched — changing it is the real IOU app's job.
+//
+// Renders nothing when the extraction carried neither, mirroring the classic renderer, which dropped
+// any declared row whose value was empty.
+function MetaLine({ form }: { form: CardFormState }) {
+  const parts: { label: string; value: string }[] = [];
+  if (form.kind !== "") parts.push({ label: "Type", value: KIND_LABELS[form.kind] });
+  const template = (form.template ?? "").trim();
+  if (template !== "") parts.push({ label: "Template", value: template });
+  if (parts.length === 0) return null;
+  return (
+    <div style={{ display: "flex", flexWrap: "wrap", gap: "4px 12px", fontSize: "0.75rem", minWidth: 0 }}>
+      {parts.map((p) => (
+        <span key={p.label} style={{ color: "var(--text-dim)" }}>
+          {p.label} <span style={{ color: "var(--text)", fontWeight: 600 }}>{p.value}</span>
+        </span>
+      ))}
+    </div>
+  );
+}
+
 // One editable entry in MULTI mode: amount / currency / direction on one wrapping line, note below.
 // Reuses the single card's Field + inputStyle + DIRECTION_LABELS so styling and theming match
 // exactly. Purely presentational — edits flow up through onChange; no session/canister/identity use.
@@ -564,6 +599,9 @@ function EntryRow({
   return (
     <div style={entryBlockStyle}>
       <EntryHeading index={index} total={total} />
+      {/* Per ENTRY, not per card: a multi-transaction message can route each entry to a different
+          saved type, and each row hands its own back on confirm. */}
+      <MetaLine form={entry} />
       <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
         <Field label="Amount" style={{ flex: "1 1 90px" }}>
           <input
@@ -639,9 +677,14 @@ function Spinner() {
 function ReadonlyView({ form }: { form: CardFormState }) {
   const rows: { label: string; value: string }[] = [
     { label: "Amount", value: form.amount ? `${form.amount} ${form.currency || "(your IOU default)"}` : "—" },
-    { label: "Direction", value: DIRECTION_LABELS[form.direction] },
-    { label: "Note", value: form.note || "—" },
   ];
+  // Between Currency and Direction, which is where the classic OC-rendered table put them — and, like
+  // that renderer, only when they carry a value.
+  if (form.kind !== "") rows.push({ label: "Type", value: KIND_LABELS[form.kind] });
+  const template = (form.template ?? "").trim();
+  if (template !== "") rows.push({ label: "Template", value: template });
+  rows.push({ label: "Direction", value: DIRECTION_LABELS[form.direction] });
+  rows.push({ label: "Note", value: form.note || "—" });
   if (form.date) rows.push({ label: "Date", value: form.date });
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 8, marginTop: 12 }}>

@@ -504,3 +504,89 @@ describe("with NO app card currency set, the default is resolved PER USER at imp
     expect(initToFormState({ amount: 300, note: "Owe 300 uber" }).currency).toBe("");
   });
 });
+
+// The app card's confirm payload REPLACES the stored extraction rather than merging with it
+// (respond_to_action_card.rs `resolve_confirm_payload` substitutes the whole blob), so a declared row
+// this bridge does not model is DESTROYED on confirm — not inherited.
+//
+// `template` was lost exactly that way. It names the saved TYPE the message routed to, and SheetPage's
+// resolveTemplateBase looks it up to seed the entry's fee %, due schedule and default
+// currency/note/direction. The card never modelled the field, so every chat import silently landed
+// without its type's defaults — and nothing failed, because the only invariant covering the wire
+// (actionManifest.test.ts) checks the `from_message` fields alone.
+describe("every registered card row survives init → confirm", () => {
+  it("carries each declared row from the extraction into the confirm payload", async () => {
+    // Driven from the REGISTERED wire, not a hand-written list: a row added to the registration fails
+    // here until the bridge carries it, which is the check that was missing.
+    const { buildManifestWire } = await import("./registerAiApp");
+    const wire = buildManifestWire("") as unknown as {
+      actions: { card: { rows: { field: string; label: string }[] } }[];
+    };
+    const rows = wire.actions[0].card.rows;
+    expect(rows.length).toBeGreaterThan(0);
+
+    const extraction = {
+      kind: "iou" as const,
+      amount: 250,
+      currency: "EUR",
+      template: "Reservation",
+      direction: "debt" as const,
+      date: "2026-07-30",
+      note: "deposit",
+      // The currency is STATED here on purpose: an unstated one is deliberately dropped so the
+      // importer's own default wins (currencyStatedIn), which would fail this check for the wrong reason.
+      message: "Reservation deposit 250 EUR",
+    };
+    const payload = buildConfirmPayload(initToFormState(extraction)) as Record<string, unknown>;
+    for (const row of rows) {
+      expect(payload[row.field], `declared row "${row.label}" (${row.field}) was dropped by the card`).toBeDefined();
+    }
+  });
+});
+
+describe("template — the saved type a message routed to", () => {
+  const routed = { amount: 1000, note: "deposit", template: "Reservation" };
+
+  it("round-trips the type NAME (what resolveTemplateBase looks up)", () => {
+    expect(initToFormState(routed).template).toBe("Reservation");
+    expect(buildConfirmPayload(initToFormState(routed)).template).toBe("Reservation");
+  });
+
+  it("adds NOTHING when the extraction routed to no type", () => {
+    const state = initToFormState({ amount: 1000, note: "deposit" });
+    expect(state.template).toBeUndefined();
+    expect("template" in buildConfirmPayload(state)).toBe(false);
+  });
+
+  it("treats a blank/whitespace template as none, so no empty name reaches the lookup", () => {
+    expect(initToFormState({ amount: 1, note: "x", template: "   " }).template).toBeUndefined();
+    expect("template" in buildConfirmPayload({ ...initToFormState({ amount: 1, note: "x" }), template: "  " })).toBe(
+      false,
+    );
+  });
+
+  it("trims a padded name rather than passing it through unmatched", () => {
+    // resolveTemplateBase matches on the trimmed lowercase name; an untrimmed one would miss and
+    // silently fall back to no defaults — the very failure this field exists to prevent.
+    expect(buildConfirmPayload({ ...initToFormState({ amount: 1, note: "x" }), template: " Reservation " }).template).toBe(
+      "Reservation",
+    );
+  });
+
+  it("keeps each MULTI row's own type independent", () => {
+    // A multi-transaction message can route each entry to a different saved type; the rows must not
+    // share one.
+    const states = initEntries({
+      entries: [
+        { amount: 1000, note: "deposit", template: "Reservation" },
+        { amount: 150, note: "food" },
+        { amount: 300, note: "fee", template: "Manager expense" },
+      ],
+    });
+    expect(states).not.toBeNull();
+    if (!states) return;
+    expect(states.map((s) => s.template)).toEqual(["Reservation", undefined, "Manager expense"]);
+    const payloads = buildMultiConfirmPayload(states);
+    expect(payloads.map((p) => p.template)).toEqual(["Reservation", undefined, "Manager expense"]);
+  });
+});
