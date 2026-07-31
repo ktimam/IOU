@@ -40,11 +40,18 @@ async function driveCard(page: Page, data: Record<string, unknown>, confirmLabel
     );
   }, data);
   await page.waitForTimeout(1200);
-  const text = (await page.evaluate(() => document.body.innerText)) as string;
+  // Type and Template are EDITABLE now, so what they show lives in a control's value, not in
+  // innerText — reading the text would silently miss it (it did, the first time this ran).
+  const kinds = await page.getByLabel("Type", { exact: true }).evaluateAll((els) =>
+    els.map((e) => (e as HTMLSelectElement).value),
+  );
+  const templates = await page.getByLabel("Template", { exact: true }).evaluateAll((els) =>
+    els.map((e) => (e as HTMLInputElement).value),
+  );
   await page.locator("button").filter({ hasText: confirmLabel }).first().click();
   await page.waitForTimeout(600);
   const payload = await page.evaluate(() => (window as unknown as { __confirm?: unknown }).__confirm);
-  return { text, payload };
+  return { kinds, templates, payload };
 }
 
 async function main() {
@@ -55,7 +62,7 @@ async function main() {
   try {
     // ---- SINGLE, routed to a saved type.
     {
-      const { text, payload } = await driveCard(
+      const { kinds, templates, payload } = await driveCard(
         page,
         {
           kind: "iou",
@@ -67,8 +74,8 @@ async function main() {
         },
         /^Add to IOU$/i,
       );
-      check(/\bType\b/.test(text) && /\bIOU\b/.test(text), "single: the Type row is shown");
-      check(text.includes("Reservation"), "single: the routed saved type is shown");
+      check(kinds[0] === "iou", "single: the Type field shows the extracted kind", `kind=${kinds[0]}`);
+      check(templates[0] === "Reservation", "single: the routed saved type is shown", `template=${templates[0]}`);
       const p = payload as { template?: string; kind?: string };
       check(p?.template === "Reservation", "single: the type survives confirm", `template=${p?.template}`);
       check(p?.kind === "iou", "single: the kind survives confirm", `kind=${p?.kind}`);
@@ -76,12 +83,14 @@ async function main() {
 
     // ---- SINGLE, no type routed: nothing new must appear.
     {
-      const { text, payload } = await driveCard(
+      const { templates, payload } = await driveCard(
         page,
         { amount: 50, direction: "debt", note: "coffee", message: "coffee 50" },
         /^Add to IOU$/i,
       );
-      check(!/\bTemplate\b/.test(text), "no type routed: no empty Template row appears");
+      // The field is always present now that it is editable, so the guarantee moved: it must start
+      // EMPTY and contribute nothing, rather than be absent.
+      check(templates[0] === "", "no type routed: the Template field starts empty", `got="${templates[0]}"`);
       check(
         !("template" in (payload as Record<string, unknown>)),
         "no type routed: nothing new in the payload",
@@ -90,7 +99,7 @@ async function main() {
 
     // ---- MULTI: each row keeps its OWN type (a message can route entries differently).
     {
-      const { text, payload } = await driveCard(
+      const { templates, payload } = await driveCard(
         page,
         {
           entries: [
@@ -100,7 +109,8 @@ async function main() {
         },
         /^Add all 2 entries$/i,
       );
-      check(text.includes("Reservation"), "multi: entry 1 shows its own type");
+      check(templates[0] === "Reservation", "multi: entry 1 shows its own type", `got=${templates[0]}`);
+      check(templates[1] === "", "multi: entry 2 shows no type it never had", `got="${templates[1]}"`);
       const rows = payload as { template?: string }[];
       check(Array.isArray(rows) && rows.length === 2, "multi: two payload rows");
       check(rows?.[0]?.template === "Reservation", "multi: entry 1 keeps its type", `got=${rows?.[0]?.template}`);

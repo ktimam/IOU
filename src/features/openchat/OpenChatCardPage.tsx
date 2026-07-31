@@ -17,7 +17,7 @@
 // It accepts only { type: "oc:card:init", version: 1, data, context } (parseInit
 // ignores everything else — devtools/HMR/foreign frames).
 
-import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
+import { useCallback, useEffect, useId, useMemo, useRef, useState, type CSSProperties } from "react";
 import type { Direction } from "../entries/types";
 import { orderedCurrencies } from "../settings/currencies";
 import { IOU_ICON_DATA_URI } from "./actionManifest";
@@ -304,7 +304,7 @@ export function OpenChatCardPage() {
         {multi ? (
           readonly ? (
             // MULTI + readonly: every entry rendered read-only, numbered, no buttons.
-            <div style={{ display: "flex", flexDirection: "column", gap: 12, marginTop: 12 }}>
+            <div style={{ display: "flex", flexDirection: "column", gap: 8, marginTop: 10 }}>
               {multi.map((entry, i) => (
                 <div key={i} style={entryBlockStyle}>
                   <EntryHeading index={i} total={multi.length} />
@@ -314,7 +314,7 @@ export function OpenChatCardPage() {
             </div>
           ) : (
             // MULTI + editable: N compact entry blocks + a single "Add all N entries" confirm.
-            <div style={{ display: "flex", flexDirection: "column", gap: 12, marginTop: 12 }}>
+            <div style={{ display: "flex", flexDirection: "column", gap: 8, marginTop: 10 }}>
               {multi.map((entry, i) => (
                 <EntryRow
                   key={i}
@@ -322,6 +322,7 @@ export function OpenChatCardPage() {
                   total={multi.length}
                   entry={entry}
                   onChange={(k, v) => setEntry(i, k, v)}
+                  knownTemplates={knownTemplateNames(multi)}
                 />
               ))}
               {/* WRAP is load-bearing, not cosmetic. The host sizes this frame with `max-width: 100%`, so in a
@@ -368,23 +369,27 @@ export function OpenChatCardPage() {
         ) : readonly ? (
           <ReadonlyView form={form} />
         ) : (
-          <div style={{ display: "flex", flexDirection: "column", gap: 12, marginTop: 12 }}>
-            <MetaLine form={form} />
+          <div style={{ display: "flex", flexDirection: "column", gap: 8, marginTop: 10 }}>
+            {/* Three to a wrapping row instead of two-then-one: at card width they sit on one line,
+                and each still has a flex basis wide enough to wrap rather than squash on a narrow
+                bubble. Two rows of controls where there used to be three. */}
             <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
-              <Field label="Amount" style={{ flex: "1 1 120px" }}>
+              <Field label="Amount" style={{ flex: "1 1 96px" }}>
                 <input
                   type="number"
                   inputMode="decimal"
                   step="0.01"
                   min="0"
+                  aria-label="Amount"
                   value={form.amount}
                   onChange={(e) => set("amount", e.target.value)}
                   placeholder="0.00"
                   style={inputStyle}
                 />
               </Field>
-              <Field label="Currency" style={{ flex: "1 1 120px" }}>
+              <Field label="Currency" style={{ flex: "1 1 96px" }}>
                 <select
+                  aria-label="Currency"
                   value={form.currency}
                   onChange={(e) => set("currency", e.target.value)}
                   style={inputStyle}
@@ -401,22 +406,27 @@ export function OpenChatCardPage() {
                   ))}
                 </select>
               </Field>
+              <Field label="Direction" style={{ flex: "1 1 124px" }}>
+                <select
+                  aria-label="Direction"
+                  value={form.direction}
+                  onChange={(e) => set("direction", e.target.value as Direction)}
+                  style={inputStyle}
+                >
+                  <option value="credit">{DIRECTION_LABELS.credit}</option>
+                  <option value="debt">{DIRECTION_LABELS.debt}</option>
+                </select>
+              </Field>
             </div>
 
-            <Field label="Direction">
-              <select
-                value={form.direction}
-                onChange={(e) => set("direction", e.target.value as Direction)}
-                style={inputStyle}
-              >
-                <option value="credit">{DIRECTION_LABELS.credit}</option>
-                <option value="debt">{DIRECTION_LABELS.debt}</option>
-              </select>
-            </Field>
+            <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+              <TypeFields form={form} onChange={set} knownTemplates={knownTemplateNames([form])} />
+            </div>
 
             <Field label="Note">
               <input
                 type="text"
+                aria-label="Note"
                 value={form.note}
                 onChange={(e) => set("note", e.target.value)}
                 placeholder="lunch, taxi, reservation…"
@@ -463,12 +473,25 @@ export function OpenChatCardPage() {
   );
 }
 
+// The card must be COMPACT without becoming un-tappable, so size and touch target are decoupled:
+// the type scales down (0.9375rem here, 0.6875rem labels) while `minHeight` holds every interactive
+// control at TOUCH_TARGET regardless. Shrinking the padding alone would have dragged the hit area
+// down with the text — 8px padding on a 0.875rem font is a ~33px control, well under any touch
+// guideline. verify-card-compact asserts both halves: the heights, and that the card got shorter.
+//
+// 44 is not a round number: it is the WCAG 2.5.5 / Apple HIG target size. The type shrank; the thing
+// a finger has to hit did not.
+const TOUCH_TARGET = 44;
+
 const inputStyle: CSSProperties = {
   fontFamily: "inherit",
-  fontSize: "1rem",
+  fontSize: "0.9375rem",
   border: "1px solid var(--border)",
-  borderRadius: 12,
-  padding: "10px 12px",
+  borderRadius: 10,
+  // Vertical padding is a floor, not the height: minHeight does the real work, so a smaller font
+  // tightens the look and the control stays tappable.
+  padding: "7px 10px",
+  minHeight: TOUCH_TARGET,
   width: "100%",
   background: "var(--surface-2)",
   color: "var(--text)",
@@ -477,15 +500,16 @@ const inputStyle: CSSProperties = {
 
 const btnStyle: CSSProperties = {
   fontFamily: "inherit",
-  fontSize: "1rem",
+  fontSize: "0.9375rem",
   fontWeight: 600,
+  minHeight: TOUCH_TARGET,
   border: 0,
   // Horizontal padding is the FLOOR a button can shrink to (measured: at a 79px row the pair bottomed
   // out at 37+36+8 = 81px, 2px over, with the labels already ellipsized to nothing). vw inside the
   // frame is the FRAME's width, so this keeps the roomy 18px at normal sizes and tightens to 8px in a
   // narrow bubble — which is what lets Cancel and Add stay SIDE BY SIDE instead of wrapping.
-  padding: "10px clamp(8px, 4vw, 18px)",
-  borderRadius: 12,
+  padding: "7px clamp(8px, 4vw, 16px)",
+  borderRadius: 10,
   // A flex item will not shrink below its text, so in a narrow frame a button pushes the row past the
   // card's edge (and with justify-content: flex-end it escapes to the LEFT, where scrollWidth cannot
   // see it). minWidth 0 lets it shrink and the label ellipsize instead — the last line of defence
@@ -509,8 +533,8 @@ function Field({
   style?: CSSProperties;
 }) {
   return (
-    <label style={{ display: "flex", flexDirection: "column", gap: 4, ...style }}>
-      <span style={{ fontSize: "0.75rem", color: "var(--text-dim)" }}>{label}</span>
+    <label style={{ display: "flex", flexDirection: "column", gap: 2, minWidth: 0, ...style }}>
+      <span style={{ fontSize: "0.6875rem", color: "var(--text-dim)" }}>{label}</span>
       {children}
     </label>
   );
@@ -527,9 +551,9 @@ function isAmountValid(s: CardFormState): boolean {
 const entryBlockStyle: CSSProperties = {
   display: "flex",
   flexDirection: "column",
-  gap: 10,
-  padding: 12,
-  borderRadius: 12,
+  gap: 6,
+  padding: 10,
+  borderRadius: 10,
   border: "1px solid var(--border)",
   background: "var(--surface-2)",
 };
@@ -551,30 +575,77 @@ function EntryHeading({ index, total }: { index: number; total: number }) {
   );
 }
 
-// The two DECLARED card rows the classic OpenChat table used to draw, which the iframe replaced
-// wholesale: the transaction kind ("Type") and the saved type this message routed to ("Template").
+// The two DECLARED card rows the classic OpenChat table used to draw, now editable alongside the
+// rest — but by two DIFFERENT mechanisms, because only one of them can have a picker.
 //
-// Read-only on purpose, and it cannot be otherwise: the frame is storage-partitioned, so it cannot
-// read the account's saved types and has no roster to build a picker from. It shows what the
-// extraction chose and hands it back untouched — changing it is the real IOU app's job.
+// `kind` is a closed two-value enum, so it gets a real <select>. "Auto" (the "" state) is a genuine
+// choice, not a placeholder: it means the extraction named no kind and parseDraft should re-infer one
+// from the fee/schedule at import, which is what a card that never carried a kind should keep doing.
 //
-// Renders nothing when the extraction carried neither, mirroring the classic renderer, which dropped
-// any declared row whose value was empty.
-function MetaLine({ form }: { form: CardFormState }) {
-  const parts: { label: string; value: string }[] = [];
-  if (form.kind !== "") parts.push({ label: "Type", value: KIND_LABELS[form.kind] });
-  const template = (form.template ?? "").trim();
-  if (template !== "") parts.push({ label: "Template", value: template });
-  if (parts.length === 0) return null;
+// `template` names one of the ACCOUNT's saved types, and that roster is unreachable from here — it
+// lives as an AES-GCM blob encrypted under the sheet key (lib.rs check_templates_blob), and this frame
+// is storage-partitioned with no IOU session and no way to identify its viewer, so it holds no key and
+// could not decrypt it even if it could fetch it. Hence a text field with a datalist of the names the
+// card ALREADY carries (its own, plus its sibling entries' in a multi card) — enough to re-pick or
+// copy across a routed type without typing it, and free text otherwise. A name matching nothing
+// yields no defaults at import (resolveTemplateBase returns undefined) — the same safe fallback as
+// leaving it blank, never a bad import.
+function TypeFields({
+  form,
+  onChange,
+  knownTemplates,
+}: {
+  form: CardFormState;
+  onChange: <K extends keyof CardFormState>(key: K, value: CardFormState[K]) => void;
+  knownTemplates: string[];
+}) {
+  // One id per instance: a multi card renders this once per row, and a shared id would point every
+  // row's suggestions at the first row's datalist.
+  const listId = useId();
   return (
-    <div style={{ display: "flex", flexWrap: "wrap", gap: "4px 12px", fontSize: "0.75rem", minWidth: 0 }}>
-      {parts.map((p) => (
-        <span key={p.label} style={{ color: "var(--text-dim)" }}>
-          {p.label} <span style={{ color: "var(--text)", fontWeight: 600 }}>{p.value}</span>
-        </span>
-      ))}
-    </div>
+    <>
+      <Field label="Type" style={{ flex: "1 1 108px" }}>
+        <select
+          aria-label="Type"
+          value={form.kind}
+          onChange={(e) => onChange("kind", e.target.value as CardFormState["kind"])}
+          style={inputStyle}
+        >
+          <option value="">Auto</option>
+          <option value="iou">{KIND_LABELS.iou}</option>
+          <option value="settlement">{KIND_LABELS.settlement}</option>
+        </select>
+      </Field>
+      <Field label="Template" style={{ flex: "1 1 128px" }}>
+        <input
+          type="text"
+          aria-label="Template"
+          value={form.template ?? ""}
+          onChange={(e) => onChange("template", e.target.value)}
+          placeholder="none"
+          list={knownTemplates.length > 0 ? listId : undefined}
+          style={inputStyle}
+        />
+        {knownTemplates.length > 0 && (
+          <datalist id={listId}>
+            {knownTemplates.map((t) => (
+              <option key={t} value={t} />
+            ))}
+          </datalist>
+        )}
+      </Field>
+    </>
   );
+}
+
+/** Every saved-type name this card carries, deduped — the only suggestions it can offer (see TypeFields). */
+function knownTemplateNames(states: CardFormState[]): string[] {
+  const seen = new Set<string>();
+  for (const s of states) {
+    const t = (s.template ?? "").trim();
+    if (t !== "") seen.add(t);
+  }
+  return [...seen].sort((a, b) => a.localeCompare(b));
 }
 
 // One editable entry in MULTI mode: amount / currency / direction on one wrapping line, note below.
@@ -585,11 +656,15 @@ function EntryRow({
   total,
   entry,
   onChange,
+  knownTemplates,
 }: {
   index: number;
   total: number;
   entry: CardFormState;
   onChange: <K extends keyof CardFormState>(key: K, value: CardFormState[K]) => void;
+  // Pooled across ALL rows, not just this one: a message that routed one entry to a type usually
+  // wants its siblings on the same one, and copying it should not mean retyping it.
+  knownTemplates: string[];
 }) {
   const currencyOptions = useMemo(
     () => orderedCurrencies(entry.currency, [entry.currency]),
@@ -599,24 +674,23 @@ function EntryRow({
   return (
     <div style={entryBlockStyle}>
       <EntryHeading index={index} total={total} />
-      {/* Per ENTRY, not per card: a multi-transaction message can route each entry to a different
-          saved type, and each row hands its own back on confirm. */}
-      <MetaLine form={entry} />
       <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
-        <Field label="Amount" style={{ flex: "1 1 90px" }}>
+        <Field label="Amount" style={{ flex: "1 1 84px" }}>
           <input
             type="number"
             inputMode="decimal"
             step="0.01"
             min="0"
+            aria-label="Amount"
             value={entry.amount}
             onChange={(e) => onChange("amount", e.target.value)}
             placeholder="0.00"
             style={inputStyle}
           />
         </Field>
-        <Field label="Currency" style={{ flex: "1 1 90px" }}>
+        <Field label="Currency" style={{ flex: "1 1 84px" }}>
           <select
+            aria-label="Currency"
             value={entry.currency}
             onChange={(e) => onChange("currency", e.target.value)}
             style={inputStyle}
@@ -630,8 +704,9 @@ function EntryRow({
             ))}
           </select>
         </Field>
-        <Field label="Direction" style={{ flex: "1 1 140px" }}>
+        <Field label="Direction" style={{ flex: "1 1 118px" }}>
           <select
+            aria-label="Direction"
             value={entry.direction}
             onChange={(e) => onChange("direction", e.target.value as Direction)}
             style={inputStyle}
@@ -641,9 +716,13 @@ function EntryRow({
           </select>
         </Field>
       </div>
+      <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+        <TypeFields form={entry} onChange={onChange} knownTemplates={knownTemplates} />
+      </div>
       <Field label="Note">
         <input
           type="text"
+          aria-label="Note"
           value={entry.note}
           onChange={(e) => onChange("note", e.target.value)}
           placeholder="lunch, taxi, reservation…"
@@ -687,11 +766,13 @@ function ReadonlyView({ form }: { form: CardFormState }) {
   rows.push({ label: "Note", value: form.note || "—" });
   if (form.date) rows.push({ label: "Date", value: form.date });
   return (
-    <div style={{ display: "flex", flexDirection: "column", gap: 8, marginTop: 12 }}>
+    // Nothing here is tappable, so the touch floor does not apply — this view can go as tight as it
+    // reads.
+    <div style={{ display: "flex", flexDirection: "column", gap: 5, marginTop: 10 }}>
       {rows.map((r) => (
         <div key={r.label} style={{ display: "flex", justifyContent: "space-between", gap: 12 }}>
-          <span style={{ fontSize: "0.8125rem", color: "var(--text-dim)" }}>{r.label}</span>
-          <span style={{ fontSize: "0.9375rem", fontWeight: 600, textAlign: "right" }}>{r.value}</span>
+          <span style={{ fontSize: "0.75rem", color: "var(--text-dim)" }}>{r.label}</span>
+          <span style={{ fontSize: "0.875rem", fontWeight: 600, textAlign: "right" }}>{r.value}</span>
         </div>
       ))}
     </div>
