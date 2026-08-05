@@ -196,6 +196,39 @@ describe("iouActionManifest", () => {
 // partner — currency verification and date recovery would quietly fall back. This is the invariant
 // that catches it.
 describe("registered wire — every from_message field survives to the card", () => {
+  it("contains no unbounded JSON Schema pattern keyword at any depth", async () => {
+    const collectKeyPaths = (
+      value: unknown,
+      forbidden: string,
+      path = "$",
+    ): string[] => {
+      if (Array.isArray(value)) {
+        return value.flatMap((entry, index) =>
+          collectKeyPaths(entry, forbidden, `${path}[${index}]`),
+        );
+      }
+      if (value === null || typeof value !== "object") return [];
+      return Object.entries(value as Record<string, unknown>).flatMap(
+        ([key, entry]) => [
+          ...(key === forbidden ? [`${path}.${key}`] : []),
+          ...collectKeyPaths(entry, forbidden, `${path}.${key}`),
+        ],
+      );
+    };
+
+    const { buildManifestWire } = await import("./registerAiApp");
+    const responseSchema = JSON.parse(
+      (buildManifestWire("") as unknown as {
+        actions: { response_schema: string }[];
+      }).actions[0].response_schema,
+    ) as unknown;
+    const documentedSchema = (registration as { responseSchema: unknown })
+      .responseSchema;
+
+    expect(collectKeyPaths(responseSchema, "pattern")).toEqual([]);
+    expect(collectKeyPaths(documentedSchema, "pattern")).toEqual([]);
+  });
+
   it("declares each from_message field in BOTH the response schema and the card rows", async () => {
     const { buildManifestWire } = await import("./registerAiApp");
     const wire = buildManifestWire("") as unknown as {

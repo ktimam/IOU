@@ -218,9 +218,11 @@ export const iouActionManifest: IouActionManifest = {
       // schema check drops zero/negative extractions (e.g. "hi" → amount 0, live 2026-07-22) as
       // no_extraction instead of posting a card parseDraft would reject anyway.
       amount: { type: "number", exclusiveMinimum: 0 },
-      currency: { type: "string", pattern: "^[A-Za-z]{3}$" },
+      // OpenChat deliberately rejects JSON Schema `pattern`: app-supplied regex execution is
+      // unbounded. These are hints only; IOU's authenticated import path remains authoritative.
+      currency: { type: "string" },
       direction: { enum: ["credit", "debt"] },
-      date: { type: "string", pattern: "^\\d{4}-\\d{2}-\\d{2}$" },
+      date: { type: "string" },
       note: { type: "string" },
       // Declared so conformToSchema keeps it — an undeclared key is dropped before the card is built.
       message: { type: "string" },
