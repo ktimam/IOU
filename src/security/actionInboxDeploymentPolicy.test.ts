@@ -1,5 +1,7 @@
+import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
 import path from "node:path";
+import { gzipSync } from "node:zlib";
 import { describe, expect, it } from "vitest";
 
 const root = process.cwd();
@@ -7,6 +9,20 @@ const read = (relative: string): string =>
   readFileSync(path.join(root, relative), "utf8");
 
 describe("local ActionInbox deployment policy", () => {
+  it("compares the exact compressed Wasm blob submitted to dfx", () => {
+    const script = read("scripts/deploy-openchat-inbox.sh");
+    const rawWasm = Buffer.from("exact ActionInbox Wasm bytes");
+    const compressedWasm = gzipSync(rawWasm);
+    const sha256 = (bytes: Uint8Array): string =>
+      createHash("sha256").update(bytes).digest("hex");
+
+    expect(sha256(compressedWasm)).not.toBe(sha256(rawWasm));
+    expect(script).toMatch(
+      /LOCAL_WASM_HASH="\$\(sha256sum "\$WASM" \| awk/,
+    );
+    expect(script).not.toMatch(/gzip -cd "\$WASM" \| sha256sum/);
+  });
+
   it("derives the deploy interface from canonical PR2 Candid and rejects stale Wasm", () => {
     const script = read("scripts/deploy-openchat-inbox.sh");
 

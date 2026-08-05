@@ -169,7 +169,9 @@ DID
 command -v didc >/dev/null 2>&1 || fail "didc is required to validate the generated lifecycle Candid"
 didc check "$GENERATED_DID"
 
-LOCAL_WASM_HASH="$(gzip -cd "$WASM" | sha256sum | awk '{print $1}')"
+# The management canister hashes the exact module blob submitted by dfx. For a .wasm.gz input,
+# `canister status` therefore reports the compressed file's SHA-256, not the decompressed Wasm hash.
+LOCAL_WASM_HASH="$(sha256sum "$WASM" | awk '{print $1}')"
 printf 'ActionInbox preflight OK\n'
 printf '  OpenChat root: %s\n' "$OC_ROOT"
 printf '  canonical Candid: %s\n' "$CANONICAL_DID"
