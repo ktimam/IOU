@@ -1,5 +1,7 @@
 import { defineConfig, devices } from "@playwright/test";
 
+const localBrowserExecutable = process.env.PLAYWRIGHT_EXECUTABLE_PATH;
+
 // UI E2E: drives the real IOU app in a browser with MULTIPLE users (isolated
 // browser contexts, each a distinct dev identity), multiple pairs/sheets, and
 // chat→sheet links. Separate from the vitest layers (unit = src, api-e2e =
@@ -29,6 +31,9 @@ export default defineConfig({
     headless: !process.env.HEADED,
     actionTimeout: 20_000,
     navigationTimeout: 30_000,
+    ...(localBrowserExecutable
+      ? { launchOptions: { executablePath: localBrowserExecutable } }
+      : {}),
   },
   webServer: {
     command: "pnpm dev",
