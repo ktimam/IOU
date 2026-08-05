@@ -2,13 +2,30 @@ apply plugin: 'com.android.application'
 
 // Release signing (v1.1.5). Secrets live in a gitignored keystore.properties
 // (copy keystore.properties.example → keystore.properties and fill in). When it
-// is absent (CI, dev, fresh clone) the release build is simply left unsigned,
-// so the project still builds without the keystore.
+// Debug builds need no keystore; every release task fails closed without one.
 def keystorePropertiesFile = rootProject.file("keystore.properties")
 def keystoreProperties = new Properties()
 def hasKeystore = keystorePropertiesFile.exists()
 if (hasKeystore) {
     keystoreProperties.load(new FileInputStream(keystorePropertiesFile))
+}
+def releaseRequested = gradle.startParameter.taskNames.any {
+    it.toLowerCase(java.util.Locale.ROOT).contains("release")
+}
+if (releaseRequested && !hasKeystore) {
+    throw new GradleException(
+        "Android release signing is required: create android/keystore.properties from the example"
+    )
+}
+if (hasKeystore) {
+    def required = ['storeFile', 'storePassword', 'keyAlias', 'keyPassword']
+    def missing = required.findAll { !keystoreProperties[it]?.toString()?.trim() }
+    if (!missing.isEmpty()) {
+        throw new GradleException("Android release signing properties are incomplete")
+    }
+    if (!file(keystoreProperties['storeFile']).exists()) {
+        throw new GradleException("Android release signing keystore file does not exist")
+    }
 }
 
 android {

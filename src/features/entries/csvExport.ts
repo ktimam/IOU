@@ -80,6 +80,11 @@ function isoDate(ms: number): string {
 
 function escapeCsvCell(s: string): string {
   if (s == null) return "";
+  // Spreadsheet applications may execute imported cells beginning with a formula marker.
+  // Prefix an apostrophe before CSV quoting, including when whitespace/BOM hides the marker.
+  if (/^[\u0000-\u0020\u007f\u00a0\u2000-\u200f\u2028\u2029\u202f\u205f\u2060\u3000\ufeff]*[=+@-]/u.test(s)) {
+    s = `'${s}`;
+  }
   if (/[",\n\r]/.test(s)) {
     return `"${s.replace(/"/g, '""')}"`;
   }

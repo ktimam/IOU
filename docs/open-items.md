@@ -3,11 +3,49 @@
 Known-but-unfixed things, so they stop living in chat history. Each entry says what it is, how to
 see it, and what "done" means — enough to pick up cold.
 
-Last updated: 2026-07-31.
+Last updated: 2026-08-05.
 
 ---
 
-## 1. Cross-account type leak (privacy) — **highest priority**
+## 1. Cross-account type leak (privacy) — **resolved 2026-08-01**
+
+**Resolution.** IOU no longer decrypts, aggregates, or supplies account templates to manifest
+registration. The public rules, response schema, and card rows contain no private template fields;
+matching now happens locally after import against only the linked account. Unit coverage and the
+live registry E2E assert that even a deliberately supplied private roster is absent on read-back.
+
+**Private display follow-up (implemented and tested in IOU; OpenChat activation pending).** IOU now
+supports the missing R1 path without reopening R2: after authorized private hydration, its
+credentialless card iframe displays an `Account type` selector and the read-only card displays the
+selected saved Type. It decrypts only the linked sheet's type roster in iframe memory and returns
+the selection as an AES-GCM reference bound to sheet, chat, message and row. Before private hydration
+it shows no Type. The signed-in IOU importer authenticates and decrypts that reference before
+applying the account-local type. Plaintext type ids, names and keywords remain absent from the
+manifest, public card rows, chat message, URL, storage and logs.
+
+The owner approved both narrowly scoped data flows: OpenChat may send the exact public card and
+exact final confirmation bytes to UserIndex and the registered app canister for attestation, and
+may deliver a short-lived one-time viewer/card/key-bound capability to the explicitly clicked
+sandboxed iframe. IOU now implements both exact app-canister attesters, independently recomputes
+the portable card hash, rejects unknown/duplicate/plaintext Type fields, and accepts a Type only
+as a structurally valid opaque encrypted `template_ref` tied to the current linked active sheet.
+The OpenChat backend/frontend candidate implements the generic transport, final grant and click-only
+capability bridge, but every runtime activation switch remains false. Activation still requires the
+non-empty legacy-inbox drain/export/reinstall decision, durable confirmation-saga recovery,
+snapshot-rollback key reseed, a retired-key erasure threat model, strict generated-contract parity,
+Linux PocketIC coverage, a disposable live backend upgrade, and the four-profile isolation matrix.
+The public leak is fixed, but the running card
+cannot yet receive the private roster. This is not a reason to republish the roster.
+
+The cross-repo ActionInbox wire is synchronized at the source level: authoritative UserIndex signs
+the complete domain-separated v4 record with a dedicated staged/active/verify-only keyring, and
+ActionInbox exposes membership and numeric locators through a replicated update. IOU remotely trusts
+only one to three independently pinned key ids, verifies the full outer signature, decrypts the exact
+lossless v4/base64url envelope, recomputes payload/card/delivery/ack commitments, deduplicates by the
+signed full-width identity, and acknowledges one exact handled action. Exact loopback development
+may discover the recreated local keyring without pins. Independent Rust/WebCrypto goldens and
+negative/boundary suites pass locally; strict generated-contract CI and the complete replica-level
+confirmation→deposit→import→ack matrix remain activation gates.
 
 **What.** IOU registers ONE OpenChat manifest per user, and folds the transaction types of *every*
 account into it (`loadAllSharedTemplates` walks `get_my_pairs()`). OpenChat's registration format has
@@ -41,7 +79,7 @@ apply.
 type in account B; the card shows B's type. For the public read:
 `pnpm exec tsx scripts/live/query-oc-manifest.ts --uix <user_index>`.
 
-**Done when** BOTH of these hold. Stated by the user 2026-07-31, and they pull against each other —
+**Historical product target.** Both of these were requested on 2026-07-31, and they pull against each other —
 this is the whole difficulty, so do not accept a design that quietly drops one:
 
 - **R1.** When a card is created, the transaction is matched against the types of the sheet LINKED TO
@@ -138,7 +176,13 @@ runs proposing on "hi".
 
 ## 6. ~~`test/ui/openchat.ui.spec.ts:61` — chat→sheet link~~ — FIXED (`ee85f1b`)
 
-Kept as a note because the *mistake* is the reusable part, not the fix.
+> Superseded 2026-08-05: the raw `/openchat/link-chat?chat=...` surface was removed
+> and must not be restored. IOU now accepts only canonical app-scoped opaque handles
+> through the authenticated integration boundary; the old path redirects to `/` and
+> discards its query.
+
+Kept as a historical note because the *mistake* is reusable, not because the retired
+surface remains supported.
 
 The spec asserted on the literal "(current)", which `365d659` had renamed to "— this chat imports
 here". The feature was never broken. It was diagnosed as "pre-existing, not us" on the strength of

@@ -9,8 +9,8 @@ manifest uses per-user delivery keys — no key material either.
 The manifest sets **`per_user_keys=true`** (multi-user delivery): OpenChat delivers each user's
 confirmed actions encrypted to **that user's own** registered key, not to a single app-level key.
 Registering the app (this page) stays an **admin** task done once; each *user* additionally pairs
-their own key once via a 6-digit code — see
-[Per-user delivery keys](#per-user-delivery-keys-the-6-digit-pairing-code) below.
+their own key once via a high-entropy claim token — see
+[Per-user delivery keys](#per-user-delivery-keys-the-claim-token) below.
 
 There are two ways to register — both share the exact same candid wire encoding
 (`src/features/openchat/registerAiApp.ts`):
@@ -108,94 +108,186 @@ toggles **IOU** on (Phase A covers group chats only). From then on, members of t
 message -> **Propose action**, review the confirm card, and on confirm an encrypted entry draft is
 delivered to the IOU action inbox — pull it from **Settings -> Action inbox** in the IOU app.
 
-## Per-user delivery keys: the 6-digit pairing code
+## Per-user delivery keys: the claim token
 
 With `per_user_keys=true`, every user gets their confirmed actions encrypted to **their own**
 key — so each user pairs their IOU account with OpenChat **once, ever**:
 
 1. In OpenChat, propose an action from a chat where IOU is enabled. If your key isn't paired yet,
-   OpenChat shows a consent sheet with a **6-digit code** (single-use, valid for 10 minutes).
-2. In the IOU app open **Settings -> Action inbox -> Connect to OpenChat**, enter the code and tap
-   **Connect**. IOU pushes your account's public delivery key to OpenChat's user_index via
-   `claim_ai_app_link_code` — the code itself is the authorization, so no OpenChat credentials are
-   ever entered in IOU.
+   OpenChat shows a **64-character, 256-bit claim token** (single-use, valid for 10 minutes).
+2. In the IOU app open **Settings -> Action inbox -> Connect to OpenChat**, paste the token and tap
+   **Connect**. The signed-in IOU frontend sends the token and public key to `iou_backend`, which
+   calls OpenChat's app-authenticated `c2c_claim_ai_app_link_code`. The token proves the OpenChat
+   user's consent while the exact IOU canister caller proves the registered app; no OpenChat
+   credentials are ever entered in IOU and a browser cannot claim a token directly.
 3. Back in OpenChat, tap **Check connection** on the consent sheet — the propose flow resumes
    automatically once the key is registered.
+
+### Coordinated disconnect (V2)
+
+**Disconnect from OpenChat** is also browser → IOU backend → OpenChat C2C; the browser never calls
+the UserIndex revoke method directly. IOU first returns the signed-in caller's authoritative
+`OpenChatBinding`. While the private key still exists, the browser signs exactly:
+
+`oc-revoke-ai-app-user-key-v2\0 || UserIndex raw || OpenChat user raw || app_id u32 LE || key_version u64 LE || exact PEM || timestamp u64 LE`.
+
+The IOU canister reconstructs the user/app/key-version tuple from its stored revision-bound
+binding and calls the pinned UserIndex's `revoke_ai_app_user_key` as the registered app canister.
+After the await it rechecks the UserIndex pin, exact binding, consumer-key epoch, and PEM. It removes
+the binding only for OpenChat `Success` or `KeyNotFound`; only then does the UI delete the wrapped
+private key. Remote errors, stale bindings, and concurrent key/link changes retain the key by
+default so the user can retry.
+
+The raw `delete_consumer_keypair` method remains an explicit availability escape hatch if
+OpenChat is unreachable. It erases only this caller's IOU key and binding, immediately closing
+private-card access, but may leave an unusable/orphan public key in OpenChat. The normal UI never
+silently falls back to that emergency behavior.
 
 The keypair behind this is **canister-backed**: on first use IOU auto-generates it and stores the
 private key on the IOU backend as an opaque blob, wrapped client-side via the same vetkd
 mechanism the sheet keys use (`set_consumer_keypair` / `get_consumer_keypair` /
-`vetkd_wrap_consumer_key`). Any of your devices can therefore recover it and decrypt older
-drafts; the browser's localStorage is only a cache. No user action is needed for any of this —
-only the one-time 6-digit code entry.
+`vetkd_wrap_consumer_key`). Any authenticated device can therefore recover it and decrypt older
+drafts. Production web keeps the plaintext key only in session memory and recovers it again after
+reload; native production may cache it in platform secure storage. Plaintext localStorage is
+reserved for the explicit local-development adapter and for a one-time migration that deletes the
+legacy record only after the wrapped canister copy is secured. No user action is needed for any of
+this — only the one-time claim-token entry.
+
+Consumer-key writes are compare-and-swap operations. `get_consumer_keypair` returns the key plus a
+canister-owned `mutation_epoch`; `set_consumer_keypair` and `delete_consumer_keypair` must present
+that epoch, and every accepted mutation advances it. Delete removes the opaque key but retains the
+new epoch in stable MemoryId 25 as a tombstone. Consequently an upload prepared before disconnect
+cannot arrive afterwards and resurrect the key, even from another browser, device, or process whose
+in-memory request registry was lost. Existing pre-v1.14 key records lazily start at epoch 0. A
+reconnect must first observe the tombstone epoch, so value cycles cannot create an ABA bypass.
+
+This is an intentionally breaking Candid revision: the two mutation methods gained an expected
+`nat64` and a result, while the read now returns `{ mutation_epoch; keypair }`. Upgrade the backend
+before publishing the matching web/Android assets. A pre-v1.14 cached client then fails closed on
+argument/result decoding and must reload; it cannot perform an unversioned write against the new
+canister. Stable key bytes are not rewritten during this API rollout.
 
 The admin registration paths above register the app manifest carrying `per_user_keys=true` with
 an **empty** app-level key — with per-user delivery the app key is unused. A real app-level key
 only matters for `per_user_keys=false` manifests (see
 [Explicit app-level key (legacy)](#explicit-app-level-key-legacy)).
 
+## Pinning OpenChat's action-signing keyring
+
+An OpenChat deployment outside the local machine must configure one to three independently
+authenticated v4 action-signing key ids in the IOU web build:
+
+```sh
+VITE_OPENCHAT_HOST=https://<openchat replica origin>
+VITE_OPENCHAT_ACTION_SIGNING_KEY_IDS=<64 hex key id>[,<64 hex overlap key id>...]
+```
+
+Each id is SHA-256 over the action-signing-key-id purpose domain followed by the key's canonical
+65-byte uncompressed P-256 point (`0x04 || X || Y`) decoded from its SPKI PEM. It is not a digest
+of the PEM text or SPKI wrapper. IOU accepts upper- or lowercase hexadecimal input and canonicalizes
+it to lowercase; prefixes, separators other than commas, duplicates, surrounding whitespace, more
+than three ids, and every non-64-character item fail closed.
+
+Provision the allowlist from OpenChat governance/release material over a channel independent of the
+UserIndex response. The public `action_signing_keys` query is discovery and health metadata, not
+the remote trust root: IOU derives each returned PEM's id, requires it in the configured allowlist,
+requires v4 purpose `action_inbox_deposit`, and accepts only `Active` or currently unexpired
+`VerifyOnly` keys. A `VerifyOnly` signature is accepted only when its signed `created_at` is at
+or before that key's `verify_until`; the key disappears from the usable set when the overlap
+expires. A substituted query response therefore fails closed unless it contains the private-key
+counterpart of an independently pinned id.
+
+IOU validates `VITE_OPENCHAT_HOST` as an exact HTTP(S) origin with no credentials, path, query, or
+fragment, and every non-loopback origin must use HTTPS. Exact loopback hosts (`localhost`,
+`127.0.0.1`, and `[::1]`) may leave the allowlist empty. That is an intentional local-development
+exception so recreated canisters and the four durable browser accounts continue working across
+runs: IOU trusts the currently active/unexpired key returned by that local UserIndex. Lookalike
+domains never receive the exception. A supplied loopback allowlist is still enforced.
+
+Rotation is two-step and operator controlled. Stage the new key in UserIndex, distribute and add its
+id to every remote consumer allowlist, then activate that exact key in a separate governance action.
+Activation moves the prior key to `VerifyOnly`, removes its private DER from logical serialized
+state, and retains its public entry for the 30-day overlap. Physical zeroization of all transient
+heap copies and old upgrade-memory bytes is a separate OpenChat hardening gate. Remove the retired
+id from consumer builds after the overlap; never
+bridge rotation by temporarily accepting an unpinned remote key.
+
 ## Delivery provenance and the chat → sheet mapping
 
-Since the v2 envelope format, every confirmed action OpenChat deposits carries **delivery
-provenance** inside the encrypted plaintext: a `context` wrapper with the source chat
-(`"group:<chat canister principal>"` or `"channel:<community principal>:<channel id>"`), the
-message id, the confirming user's principal and the confirm timestamp, alongside the unchanged
-draft `payload`. The provenance signature was hardened at the same time: OpenChat now signs
-`ephemeral_public_key ‖ ciphertext ‖ created_at` (created_at as u64 little-endian), so the
-deposit timestamp can no longer be forged. Two consequences:
+The v4 envelope makes every confirmed action carry **delivery provenance** inside the encrypted
+plaintext: the source chat (`"group:<chat canister principal>"` or
+`"channel:<community principal>:<channel id>"`), message/thread identity, confirming user and
+timestamp, exact app/action revision and content hash, and confirmation-lease generation. The
+original final payload is preserved as canonical unpadded base64url bytes, together with a
+recipient-only acknowledgement secret. OpenChat's dedicated UserIndex key signs the complete v4
+outer record. The domain-separated preimage binds signature version and purpose, signing-key id,
+UserIndex and ActionInbox principals, app id and revision, action id, card-context commitment,
+recipient fingerprint, full-width delivery identity, payload hash, acknowledgement-secret hash,
+ECIES point/ciphertext, and `created_at`. IOU verifies that signature before decrypting, then
+recomputes every public commitment from the strict inner envelope.
+
+Two consequences:
 
 - IOU shows *where* a pending draft came from (chat + confirming user) instead of a generic
-  "action-inbox" badge, and tolerates older wrapper-less deposits (whole plaintext = payload,
-  no provenance shown).
-- Deposits made before the v2 change no longer pass signature verification and are dropped —
-  acceptable for the local dev environments this ships in.
+  "action-inbox" badge.
+- On-chain delivery requires the exact v4 wrapper and signature. Pre-v4 signatures, wrapper-less
+  deposits, malformed canonical values, unknown fields, and commitment mismatches are rejected.
+  Wrapper-less JSON remains only as a local parser compatibility case and is never accepted by
+  `pollActionInbox`.
 
-On top of the provenance IOU keeps a per-user **chat → sheet mapping**:
+`actions` is a replicated update, so page membership, ordering, numeric ids, and boundaries come
+from consensus. IOU nevertheless treats the signed 32-byte delivery identity as the durable dedupe
+key, always re-reads from `since_id = 0`, and uses a numeric id only as the exact storage locator
+paired with that action's decrypted 32-byte acknowledgement secret. Acknowledgements delete at most
+that one handled action; there is no range or prefix deletion.
+
+On top of the provenance IOU keeps a per-user **app-scoped chat handle → sheet mapping**:
 
 - The first time you import a draft from a chat that has no mapping yet, the review form shows a
   **"Remember: always import this chat's drafts into this sheet"** checkbox (ticked by default).
   Confirming the entry stores the mapping.
-- Once a chat is mapped, its drafts only appear on the mapped sheet's page — other sheets hide
+- Once a handle is mapped, its drafts only appear on the mapped sheet's page — other sheets hide
   them. Drafts from unmapped chats (or wrapper-less deposits) appear everywhere, as before.
 - The mapping is **canister-backed and caller-keyed** (`set_chat_sheet_link` /
   `remove_chat_sheet_link` / `chat_sheet_links` on the IOU backend), so it follows you across
-  devices; localStorage (`iou.openchat.chatSheetLinks.v1`) is only an optimistic cache. The chat
-  key is opaque text to the canister; the sheet id travels as a `nat64` (IOU sheet ids are 16 hex
-  chars, i.e. exactly 64 bits).
+  devices; localStorage (`iou.openchat.chatSheetLinks.v2`) is only an optimistic cache. The released
+  Candid field is still named `chat_key`, but its value must be a canonical unpadded base64url
+  encoding of exactly 32 bytes. Raw OpenChat chat/user/message coordinates are rejected. The sheet
+  id travels as a `nat64` (IOU sheet ids are 16 hex chars, i.e. exactly 64 bits).
 
-## App surfaces: the in-chat "link this chat" page
+The old `/openchat/link-chat?chat={chatKey}` surface was removed. A URL is a public correlation and
+referrer channel, so it must not carry either a raw OpenChat chat coordinate or the private
+app-scoped handle. The secure mapping is learned only after IOU decrypts a v4 action-inbox envelope;
+the import screen's **Remember** checkbox is the supported mapping flow.
+
+## App surfaces: raw-free external and embedded pages
 
 A **surface** is a page of the IOU app that OpenChat can open on the app's behalf. Surfaces are
 part of the registered manifest (`AiAppManifest.surfaces`); each one carries:
 
-- `kind` — what the surface is for. `"chat_link"` is the kind OpenChat knows today: it opens the
-  surface after the **first confirmed action in a chat**, so the user can configure that chat
-  inside the app. Kinds OpenChat does not recognise are ignored, so new kinds can ship in the
-  manifest ahead of OpenChat support.
-- `url` — a URL **template**. OpenChat substitutes `{chatKey}` (the canonical chat key, the same
-  format the delivery provenance uses: `group:<principal>` / `channel:<principal>:<id>`) and
-  `{appId}` before opening it.
+- `kind` — what the surface is for. Kinds OpenChat does not recognise are ignored.
+- `url` — a credential-free HTTPS URL template. The only supported placeholder is the public
+  `{appId}`. Loopback HTTP is accepted only while OpenChat is explicitly in local test mode.
 - `display` — `"sheet"` (embedded in OpenChat as an iframe inside a bottom sheet) or
   `"external"` (opened in the system browser / a new tab).
 
-IOU registers exactly one surface:
+IOU registers three raw-free surfaces:
 
 ```
-kind:    chat_link
-url:     <app origin>/openchat/link-chat?chat={chatKey}
-display: sheet
+kind: connect   url: <app origin>/settings#openchat-connect   display: external
+kind: home      url: <app origin>/                             display: sheet
+kind: card      url: <app origin>/openchat/card                display: sheet
 ```
 
-The target is the IOU route **`/openchat/link-chat`**: it requires sign-in, lists your active
-sheets with their decrypted names, preselects the chat's current mapping if one exists, and on
-save stores the mapping through the same canister-backed `set_chat_sheet_link` path described
-above — so linking a chat from inside OpenChat and ticking "Remember" on an imported draft are
-the same mapping. No new canister endpoints are involved.
+The card renderer has no IOU browser session. OpenChat supplies only an opaque public-ready signal
+over the generic bridge, then IOU redeems a short-lived, viewer/card/content-bound capability for
+the private app-scoped context. Account type names remain encrypted; the selected type returns as
+an encrypted reference bound to that context.
 
 ### How the deploy step registers it
 
-The surface URL must be **absolute at registration time** — OpenChat stores it verbatim (only
-the placeholders are substituted later). The origin is resolved when the manifest is built
+Every surface URL must be **absolute at registration time** — OpenChat stores it verbatim. The
+origin is resolved when the manifest is built
 (`resolvePublicOrigin()` in `src/features/openchat/actionManifest.ts`):
 
 - **CLI script** (`pnpm register:openchat`, runs under node): `OC_APP_PUBLIC_ORIGIN`, default
@@ -207,18 +299,15 @@ the placeholders are substituted later). The origin is resolved when the manifes
   pnpm register:openchat
   ```
 
-  > **The origin must be the EXACT one you browse IOU on** — scheme, host, *and* port. OpenChat
-  > opens the chat-link page in the system browser, where it reuses your already-signed-in IOU
-  > session; the browser scopes that session (II delegation / dev identity, and hence your
-  > sheets) to the origin. `http://localhost:3000` and `http://127.0.0.1:3000` are **different
-  > origins** — registering one while browsing the other makes the page open cross-origin, see no
-  > session, and re-prompt sign-in as an empty (sheet-less) principal.
+  > **The origin must be the exact one you browse IOU on** — scheme, host, and port. The external
+  > connect surface reuses that origin's signed-in IOU session. `http://localhost:3000` and
+  > `http://127.0.0.1:3000` are different origins.
 
 - **In-app button** ("Link to OpenChat"): `VITE_PUBLIC_ORIGIN`, baked in at build time (same
   default). Add it to `.env.local` / the build environment when the app is not served from
   `http://127.0.0.1:3000`.
 
-`pnpm register:openchat -- --dry-run` prints each surface (`surface "chat_link": <url>`) along
+`pnpm register:openchat -- --dry-run` prints each surface along
 with the candid-encoded size, so a pipeline can verify the origin before a live run. Because
 registration is an upsert, re-running the script after changing the origin simply updates the
 stored URL.
@@ -228,10 +317,10 @@ stored URL.
 Add an entry to `iouActionManifest.surfaces` in `src/features/openchat/actionManifest.ts` — the
 wire mapping in `registerAiApp.ts` (`buildManifestWire` + the `AiAppSurface` IDL) passes every
 entry through, so no other code changes are needed. Keep within OpenChat's validation limits: at
-most **10 surfaces**, `kind` 1–64 chars, `url` 1–2000 chars and parseable once the placeholders
-are substituted. Use `display: "external"` for pages that refuse framing or need a full browser;
-note that unknown kinds are ignored by OpenChat rather than rejected, so shipping a
-forward-looking surface is safe.
+most **10 surfaces**, `kind` 1–64 chars, `url` 1–2000 chars, credential-free HTTPS (or loopback HTTP
+in explicit test mode), and parseable after replacing `{appId}`. Any other placeholder is rejected.
+Use `display: "external"` for pages that need a first-party browser session; unknown kinds are
+ignored by OpenChat rather than rejected.
 
 ## Troubleshooting
 

@@ -1,8 +1,11 @@
 // Deep-link handling (v1.1.5).
 //
-// Maps an external URL that launches the app — a custom-scheme link
+// Maps a non-secret external URL that launches the app — a custom-scheme
 // `iou://<host>/<path>` (Android intent-filter + iOS, see capacitor.config /
-// AndroidManifest) — to an in-app react-router path, then navigates.
+// AndroidManifest) — to an in-app react-router path, then navigates. Custom
+// schemes are not exclusive: another installed app can register `iou://`.
+// Bearer capabilities such as invite codes and K_sheet are therefore NEVER
+// accepted here; invites stay on HTTPS until verified App/Universal Links exist.
 //
 // The mapping (`deepLinkToPath`) is a PURE function so it's unit-testable
 // without the native bridge. `useDeepLinks` wires it to Capacitor's
@@ -26,7 +29,7 @@ const SCHEME = "iou:";
  *   iou://pair/xyz            → /pair/xyz
  *   iou://pairs               → /pairs
  *   iou://settings            → /settings
- *   iou://invite#c=ABCD-1234&s=<sheetId>&k=<key> → /pair/accept#c=…&s=…&k=…
+ *   iou://invite#c=ABCD-1234&s=<sheetId>&k=<key> → null (secret capability)
  */
 export function deepLinkToPath(rawUrl: string): string | null {
   let url: URL;
@@ -61,12 +64,9 @@ export function deepLinkToPath(rawUrl: string): string | null {
       return `/settings${url.hash}`;
     case "me":
       return `/me${url.hash}`;
-    case "invite": {
-      // The invite secret rides in the URL fragment (#c=…&s=…&k=…), which the
-      // URL parser exposes as `url.hash` (leading "#"). Preserve it verbatim so
-      // AcceptInvitePage can read the code/sheet/key client-side.
-      return `/pair/accept${url.hash}`;
-    }
+    // Deliberately no `invite` case. Android/iOS custom schemes can be claimed
+    // by another app, so forwarding the fragment would disclose the one-use
+    // membership code and, in development builds, K_sheet itself.
     default:
       return null;
   }

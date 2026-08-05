@@ -37,8 +37,10 @@ Layers 1–2 live in **this** repo and are green here. Layers 3–4 live in thei
 pnpm test            # (= pnpm exec vitest run) OR: pnpm test:unit
 pnpm exec tsc --noEmit   # type-check (must be clean)
 
-# Layer 2 — E2E against the LIVE local replica. Self-skips with a message if the replica is down.
+# Layer 2 — E2E against the LIVE local replica. Missing infrastructure fails the command.
 pnpm test:e2e        # (= vitest run --config vitest.e2e.config.ts). ~27 tests, ~130s (real round-trips).
+# Intentional local-only skip (never use for a required CI check):
+IOU_E2E_ALLOW_SKIP=1 pnpm test:e2e
 
 # Layer 2b — UI E2E: drives the REAL app in a browser (needs `pnpm dev` on :3000, reused if running).
 pnpm test:ui         # (= playwright test). Multiple users/sheets/chats via the UI, headless. ~55s.
@@ -60,8 +62,9 @@ them from `.env.local` (IOU + OpenChat user_index + action_inbox) and the OpenCh
 `canister_ids.json` (local_user_index). Bring the environment up per the runbooks
 (`docs/local-dev-runbook.md` here, `open-chat-cycle/LOCAL-DEV.md` there): an IC replica on `:8080`
 with the IOU backend, OpenChat `user_index` / `local_user_index`, and the `action_inbox` canister
-deployed. If it isn't up, `pnpm test:e2e` prints a clear skip message and exits green — it is safe to
-run in CI without the env.
+deployed. If it isn't up, `pnpm test:e2e` fails before collecting tests so a required CI check cannot
+report false confidence. A developer who intentionally wants to skip can set
+`IOU_E2E_ALLOW_SKIP=1`; required CI must never set it.
 
 Override the OpenChat `canister_ids.json` path with `OC_CANISTER_IDS_JSON=/abs/path` if your
 `open-chat-cycle` worktree isn't the sibling default.
@@ -100,11 +103,12 @@ wsl -d Ubuntu bash -lc 'source ~/.cargo/env; \
 | EntryForm net/convert/fee (extracted pure helper) | `entries/entryMath.ts` + `entries/entryMath.test.ts` | `buildEntryPayload` reproduces the exact submit math; percent-only/same-ccy/cross-ccy fees; conversion restates currency + applies fee to converted base; schedule validation; fee>gross clamp; kind mapping; `draft_id` carry-through. `EntryForm.tsx` now delegates to it |
 | Template → entry defaults (`TxnTemplate`, incl. `fee_fixed_currency`, relative schedule) | `templates/templateBase.ts` + `templates/templateBase.test.ts` | `templateToInitial`: fee currency (foreign carries `fixed_currency`, same-ccy folds); **relative-schedule anchoring** — `offset_days`, `start_of_next_month` (December → next-year rollover), default-today. `SheetPage.tsx` delegates to it; feeds parseDraft's `base` |
 | `currencies.ts` (`orderedCurrencies`, ISO list) | `settings/currencies.test.ts`, `settings/currencies.more.test.ts` | default-first then USD/EUR/GBP then alpha; dedupe; non-ISO default; `extra` upper/dedupe/blank-skip; ISO integrity (uppercase, no dups, covers COMMON) |
-| `actionInboxCrypto.ts` — ECIES decrypt + provenance | `openchat/actionInboxCrypto.test.ts`, `openchat/actionInboxCrypto.negative.test.ts` | **Rust interop vector** decrypt + fingerprint; v2 preimage layout (binds `created_at`); **wrong recipient key**, **flipped ciphertext byte**, **corrupted ephemeral point**, **flipped signature**, **other-key signature**, **tampered created_at** all rejected; fingerprint == sha256(uncompressed SEC1 point) == `keyFingerprint(pem)` == `fingerprintPublicKey(key)` |
-| `actionInboxClient.ts` — poll + config | `openchat/actionInboxClient.test.ts`, `openchat/actionInboxClient.poll.test.ts` | `parseInboxPlaintext` v2 wrapper split + tolerance; **`pollActionInbox` drops unsigned + not-addressed-to-us**, passes fingerprint/cursor/max_results, throws on missing PEM, drops tampered created_at; `getActionInboxConfig` manifest resolution + **cache memoize / in-flight dedup / TTL expiry / invalidate / env fallback / null** |
+| `actionInboxCrypto.ts` — ECIES decrypt + provenance | `openchat/actionInboxCrypto.test.ts`, `openchat/actionInboxCrypto.negative.test.ts` | **Independent Rust goldens** for the v4 preimage/context hashes and raw P1363 signature; purpose-scoped signing-key id; complete UserIndex/ActionInbox/app/card/recipient/replay/payload/ack/ciphertext/timestamp binding; wrong recipient, every independently tampered field, wrong platform key, and malformed signature rejection |
+| `actionInboxClient.ts` — poll + config | `openchat/actionInboxClient.test.ts`, `openchat/actionInboxClient.poll.test.ts`, `openchat/actionInboxEnvelopeV4.test.ts` | strict on-chain v4 wrapper; one-to-three independently pinned remote key ids; exact-loopback recreated-key discovery; staged/active/verify-only status and cutoff boundaries; remote HTTPS/exact-origin enforcement; replicated `actions` update always read from zero; signed full-width delivery dedupe; exact acknowledgement; manifest-cache memoize/in-flight/TTL/invalidate plus stale-resolution and route-change races |
 | `consumerKeypair.ts` — canister-backed keypair | `openchat/consumerKeypair.test.ts` | generate + device cache; **fingerprint = sha256(raw point)**; four sync branches (adopt+upload / recover-from-canister no-reupload / unwrappable→cache-no-overwrite / unwrappable+no-cache→regenerate+upload); `clearConsumerKeypair` deletes canister+cache; `signRevokeChallenge` proof-of-possession verifies + throws w/o key |
-| `registerAiApp.ts` — manifest wire + registry client | `openchat/registerAiApp.test.ts`, `openchat/registerAiApp.outcomes.test.ts` | `buildManifestWire` (empty key for per-user, `app_canister_id`/**`inbox_canister_id` opt principal**, surfaces, IDL encode); `registerAiApp`/`claimAiAppLinkCode`/`revokeAiAppUserKey` outcome decode; **revoke challenge preimage** (domain‖canisterId‖pem‖ts LE, ts bound); `getRegisteredInboxCanisterId` (opt principal, null, tie-break) |
-| `actionManifest.ts` — extraction manifest + template routing | `openchat/actionManifest.test.ts`, `openchat/actionManifest.caps.test.ts` | schema/prompt/surfaces; template routing by NAME; schema advertises `template` only when routable; **validator caps** (≤50 mappings, ≤50 keywords each, ≤1000-char roster w/ ellipsis, keyword-less excluded); static rules precede template rules; `resolvePublicOrigin` default + trailing-slash strip |
+| `registerAiApp.ts` — public manifest wire + registry client | `openchat/registerAiApp.test.ts`, `openchat/registerAiApp.outcomes.test.ts` | `buildManifestWire` (empty key for per-user, `app_canister_id`/**`inbox_canister_id` opt principal**, surfaces, IDL encode); `registerAiApp` outcome decode; local 64-hex claim-token normalization; `getRegisteredInboxCanisterId` (opt principal, null, tie-break). No browser claim/revoke methods are exposed |
+| Coordinated OpenChat disconnect | `openchat/disconnectOpenChat.test.ts`, `backend/declarations.security.test.ts`, Rust `src/lib.rs` tests | exact V2 proof bytes (**NUL-terminated domain‖UserIndex raw‖user raw‖app-id u32 LE‖key-version u64 LE‖PEM‖timestamp u64 LE**); caller-scoped binding query; app-id zero; missing/malformed V2 coordinates; raw 64-byte signature; all result variants; remote revoke strictly precedes local delete; every non-clean outcome retains the key; backend binding removal only on Success/KeyNotFound, with explicit raw emergency erase tested separately |
+| `actionManifest.ts` — public extraction manifest | `openchat/actionManifest.test.ts`, `openchat/actionManifest.caps.test.ts`, `openchat/registerAiApp.test.ts` | schema/prompt/surfaces; private account template ids/names/keywords never enter rules, schema, or card rows; static rules remain stable; `resolvePublicOrigin` default + trailing-slash strip |
 | `inboxDedupe.ts` — dedup + **deployment-scoped keys** | `openchat/inboxDedupe.test.ts`, `openchat/inboxDedupe.scope.test.ts` | `collapseByMessageId` (first-wins, undefined never collapsed), tolerant parse, capped serialize; **`deriveDeployTag`/`planScopedInboxKey`** — the restart-safe fix: a stale set from another `user_index` deployment is purged and a fresh deployment reads empty (would-regress the "never imports after a restart" bug). `SheetPage.tsx` delegates to these |
 | `chatSheetLinks.ts` — chat→sheet mapping + **routing** | `openchat/chatSheetLinks.test.ts` | 16-hex ↔ nat64 loss-free, range/shape rejects, cache filter; **`draftBelongsOnSheet` routing** (the predicate `SheetPage`'s visible-inbox uses): one user · many chats/sheets → each chat's drafts land ONLY on their pinned sheet; mixed inbox partitions with none crossed / dropped / duplicated; an UNMAPPED chat + a wrapper-less draft (no chat key) show on every sheet |
 | chat→ledger SCENARIOS (real `parseDraft` → stored payload → `computeBalances`/`orientPayload`) | `entries/chatToLedger.scenario.test.ts` | end-to-end confirmable-action → balance, numbers only ASSERTED (no hand-rolled math): S1 owner+manager share ONE sheet (owed = rent − expenses − transfers, exact mirror per viewer); S2 father keeps TWO independent SAR sheets (wife settled, child owes 50, ledgers never net together); **S3 routing** — one father, two chats, two sheets: a single mixed inbox is routed with the real `draftBelongsOnSheet`, each sheet gets only its chat's drafts, routed balances match the hand-partitioned S2, and a mis-pin structurally strips the other sheet |
@@ -124,14 +128,16 @@ wsl -d Ubuntu bash -lc 'source ~/.cargo/env; \
 | IOU backend, two users | `iouBackend.e2e.test.ts` | pair→join→shared sheet; **A encrypts an entry, B unwraps the shared K_sheet and decrypts it** (E2E encryption); cross-currency fee → correct balance; **consumer keypair is caller-keyed + deletable in isolation** (+ canister guards: PEM/iv validation); chat→sheet links caller-scoped + loss-free round-trip; template blob round-trip; **import loop** (decrypted draft → parseDraft → encrypt → add_entry → lands in the linked sheet, draft_id survives) |
 | Invite-link auto-join + lifecycle | `inviteLifecycle.e2e.test.ts` | **`accept_invite`: the invitee self-joins AND seals K_sheet to itself in one message — NO creator grant** (reads its wrapped copy, recovers the same K); the invite is **single-use** (2nd accept rejected); both members read/write; **`delete_pair` guards** (refused while 2 members, refused until archived); **`archive_pair`/`unarchive_pair`** flip `archived_at` (visible in `get_my_pairs`); **`leave_pair`** — the partner leaves → locked out, the creator retains the account solo; **`delete_pair`** erases a solo, archived account (pair + sheets gone) |
 | Invite reissue + re-seal (stale-invite fix) | `inviteReissue.e2e.test.ts` | reproduces the **"invalid or already-consumed invite code"** trap and proves the repairs: **`issue_invite` mints a FRESH code and retires the previous one** (the stored `pair.invite_code` goes stale on consume); **re-invite after a partner LEAVES** works (old code was consumed on join); a **legacy "joined but not granted" pair self-heals** — an already-member caller re-accepts a fresh link and gets their sheet key sealed (fixes "no wrapped key"); a **stranger still can't take a filled slot** even with a fresh code |
-| Registry | `registry.e2e.test.ts` + `registryIdl.ts` | live `iou` inbox read-back (non-destructive); throwaway app **register/upsert/read-back/explore/delete**; claim bad code → CodeNotFound; **revoke unpaired key → KeyNotFound after on-chain proof-of-possession verify**; **per-caller throttle** after repeated failed claims |
-| Action inbox | `actionInbox.e2e.test.ts` | `openchat_public_key` PEM; `actions(fingerprint, since_id)` empty for a fresh key (exact-match, no error on miss); `pollActionInbox` full verify+decrypt path; two fingerprints isolated |
+| Registry | `registry.e2e.test.ts` + `registryIdl.ts` | live `iou` inbox read-back (non-destructive); throwaway app **register/upsert/read-back/explore/delete**. Per-user claim/revoke is not browser-direct and therefore is not exercised by this public registry E2E |
+| Action inbox | `actionInbox.e2e.test.ts` | UserIndex v4 action-signing keyring shape; replicated `actions(fingerprint, since_id)` update is empty for fresh isolated keys; two fingerprints remain isolated. A real confirmation→deposit→verify/decrypt→import→exact-ack chain remains a Linux PocketIC/live-upgrade release gate |
 
 **Cross-reference:** the full *deposit* half of the loop (a real OpenChat group confirm →
-`respond_to_action_card` two-phase → `c2c_deposit_action_confirmed` → `action_inbox`) is exercised
-authoritatively by **Layer 4** on these same canisters (it needs the OpenChat group/user client +
-msgpack transport). Layer 2 proves the **consumer** half end-to-end: registration/read-back, the live
-inbox query + decrypt path, and the IOU import into the linked sheet.
+`respond_to_action_card` two-phase → `c2c_deposit_action_confirmed` → `action_inbox`) has
+compile-time and focused component coverage in the current PR2 tree. It has not yet been exercised
+as one runtime chain against rebuilt canisters. Layer 2 currently proves fresh-key isolation and the
+consumer wire shape; the complete confirmation, replicated read, IOU verification/decryption,
+durable import, and exact acknowledgement must pass in Linux PocketIC and a disposable live upgrade
+before activation.
 
 ### Layer 2b — UI E2E (this repo, `test/ui/`, Playwright)
 
@@ -177,10 +183,10 @@ cmake + MSVC + Ninja (see the repo notes).
 | Deposit pipeline routing | `action_card_inbox_routing_tests.rs` *(existing)* | propose→confirm→deposit routes to the per-app inbox by fingerprint |
 | enabled_ai_apps import | `communities/enabled_ai_apps_import_tests.rs` *(existing)* | per-channel enablement carried over on group→community import |
 | Registry | `ai_app_registry_tests.rs` | register upsert-by-name, test_mode re-own, `InvalidRequest` (empty key / >20 actions), `explore_ai_apps` (TermTooShort/Success), `delete_ai_app` + NotFound |
-| 6-digit link codes | `ai_app_link_code_tests.rs` | create→claim Success + `my_ai_app_keys`; single-use (CodeNotFound on re-claim); CodeExpired after TTL; set/remove_my_ai_app_key |
+| High-entropy claim tokens | `ai_app_link_code_tests.rs` | 256-bit format; create→claim Success + `my_ai_app_keys`; single-use (CodeNotFound on re-claim); CodeExpired after TTL; set/remove_my_ai_app_key |
 | Revoke + throttle | `ai_app_revoke_throttle_tests.rs` | proof-of-possession revoke (`jwt::sign_bytes` over the canonical preimage) Success → KeyNotFound; bad sig → `Error(InvalidSignature)`; stale ts → `Error(Expired)`; per-caller throttle: 10 failed claims → CodeNotFound, 11th → `Error(Throttled)` |
-| Per-user key isolation | `per_user_key_isolation_tests.rs` | A/B confirm to their OWN keys into one inbox; each fingerprint bucket holds exactly its owner's deposit; ECIES decrypt succeeds only with the matching sk (cross-user fails); `confirmedBy` attribution in the v2 envelope |
-| Two-phase confirm + idempotency | `two_phase_confirm_idempotency_tests.rs` | misconfigured inbox → `Error(C2CError "NotConfigured")`, card stays **Pending**, a retry after configuring succeeds; double-confirm/retry dedupes to exactly ONE inbox entry (idempotency_id = sha256(plaintext‖message_id)); a redundant confirm of a Confirmed card deposits nothing |
+| Per-user key isolation | `per_user_key_isolation_tests.rs` | A/B confirm to their OWN keys into one inbox; each fingerprint bucket holds exactly its owner's deposit; ECIES decrypt succeeds only with the matching sk (cross-user fails); exact `confirmedBy`/app/card/lease attribution in the v4 envelope |
+| Two-phase confirm + idempotency | `two_phase_confirm_idempotency_tests.rs` | misconfigured inbox keeps the card retryable; exact retry/outcome-unknown handling; full card identity is derived from canonical chat + thread + message coordinates and committed beside the final-payload hash; a confirmed card deposits at most once per recipient |
 | Client-side AI action pipeline | `frontend/openchat-shared/src/domain/aiAction.test.ts` *(existing)* | extraction parse, card build, rules post-pass, `chatKeyFor` byte-match with the Rust envelope |
 
 **Layer 3/4 support changes** (minimal, documented): (a) `tauri-plugin-oc/src/model_manager.rs` extracts the
@@ -198,10 +204,11 @@ the LUI global inbox setting is canister-wide.
 - **The propose→confirm→deposit loop** is proven once, authoritatively, in Layer 4 (Rust, real
   canisters). Layer 2 covers the consumer half rather than re-implementing OpenChat's group/confirm
   flow in TypeScript.
-- **msgpack-only registry endpoints** (`create_ai_app_link_code`, `set_my_ai_app_key`,
-  `my_ai_app_keys`, `publish_ai_app`) are exercised in Layer 4 (which speaks msgpack); Layer 2 covers
-  the candid-exposed surface (`register_ai_app`, `ai_apps`, `explore_ai_apps`, `delete_ai_app`,
-  `claim_ai_app_link_code`, `revoke_ai_app_user_key`) plus the negatives.
+- **Per-user claim/revoke and msgpack registry endpoints** (`create_ai_app_link_code`,
+  `c2c_claim_ai_app_link_code`, `revoke_ai_app_user_key`, `set_my_ai_app_key`,
+  `my_ai_app_keys`, `publish_ai_app`) are exercised in Layer 4. IOU unit tests cover its side of
+  browser → signed-in IOU backend → app-authenticated C2C. Layer 2 covers only the public registry
+  surface (`register_ai_app`, `ai_apps`, `explore_ai_apps`, `delete_ai_app`).
 - **Live GGUF inference** (Layer 3) is gated behind env vars; the surrounding plumbing is always tested.
 
 Every feature has at least one assertion that would fail if the feature regressed.

@@ -10,7 +10,7 @@
 //
 // Env: IOU_RELAY_URL (default http://127.0.0.1:8788)
 
-import { generateKeyPairSync, createPrivateKey } from "node:crypto";
+import { generateKeyPairSync, createPrivateKey, randomUUID } from "node:crypto";
 import { readFileSync, writeFileSync, existsSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
@@ -27,9 +27,20 @@ function ensureKeys(): void {
   writeFileSync(PRIV, privateKey.export({ type: "pkcs8", format: "pem" }).toString());
   writeFileSync(PUB, publicKey.export({ type: "spki", format: "pem" }).toString());
 }
-const token = (sub: string): string => {
+const token = (sub: string, purpose: "pairing" | "draft"): string => {
   const now = Date.now();
-  return signOpenChatToken({ sub, iat: now, exp: now + 5 * 60 * 1000 }, createPrivateKey(readFileSync(PRIV, "utf8")));
+  return signOpenChatToken(
+    {
+      iss: "openchat",
+      aud: "iou-relay",
+      purpose,
+      sub,
+      jti: randomUUID(),
+      iat: now,
+      exp: now + 5 * 60 * 1000,
+    },
+    createPrivateKey(readFileSync(PRIV, "utf8")),
+  );
 };
 const post = (p: string, body: unknown) =>
   fetch(RELAY + p, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
@@ -48,7 +59,10 @@ async function main() {
     const code = args[0];
     const user = args[1] ?? "oc-tester";
     if (!code) { console.error("usage: claim <CODE> [user]"); process.exit(2); }
-    const r = await post("/v1/pairings/claim", { code, oc_token: token(user) });
+    const r = await post("/v1/pairings/claim", {
+      code,
+      oc_token: token(user, "pairing"),
+    });
     console.error(`[standin] claim ${r.status}: ${await r.text()}`);
     process.exit(r.ok ? 0 : 1);
   }
@@ -61,7 +75,10 @@ async function main() {
       direction: args[3] === "debt" ? "debt" : "credit",
       note: args.slice(4).join(" ") || "from openchat stand-in",
     };
-    const r = await post("/v1/openchat/drafts", { oc_token: token(user), draft });
+    const r = await post("/v1/openchat/drafts", {
+      oc_token: token(user, "draft"),
+      draft,
+    });
     console.error(`[standin] send ${r.status}: ${await r.text()}`);
     process.exit(r.ok ? 0 : 1);
   }

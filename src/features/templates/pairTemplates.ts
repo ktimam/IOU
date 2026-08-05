@@ -68,6 +68,15 @@ export type PairSlotPayload = {
  * id can at worst resurface a long-dead card.
  */
 export const DISMISSED_CAP = 300;
+const PAIR_SLOT_MAX_BYTES = 64_000;
+const PAIR_TEMPLATE_CAP = 100;
+const TEMPLATE_ID_MAX_LENGTH = 128;
+const TEMPLATE_NAME_MAX_LENGTH = 200;
+const TEMPLATE_NOTE_MAX_LENGTH = 2_000;
+const TEMPLATE_KEYWORD_CAP = 50;
+const TEMPLATE_KEYWORD_MAX_LENGTH = 64;
+const TEMPLATE_SCHEDULE_CAP = 100;
+const TEMPLATE_OFFSET_MAX_DAYS = 36_500;
 
 /**
  * Encode a slot as bytes (JSON, v2 envelope). The caller encrypts under
@@ -80,18 +89,204 @@ export function encodePairSlot(
   return new TextEncoder().encode(JSON.stringify({ v: 2, templates, dismissed }));
 }
 
-function isValidEnvelope(x: unknown): x is SharedTemplate {
-  if (x == null || typeof x !== "object" || Array.isArray(x)) return false;
-  const t = x as Record<string, unknown>;
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return value != null && typeof value === "object" && !Array.isArray(value);
+}
+
+function isBoundedNonEmptyString(
+  value: unknown,
+  maxLength: number,
+): value is string {
   return (
-    typeof t.id === "string" &&
-    t.id.length > 0 &&
-    typeof t.rev === "number" &&
-    Number.isFinite(t.rev)
+    typeof value === "string" &&
+    value.trim().length > 0 &&
+    value.length <= maxLength
   );
 }
 
-const EMPTY_PAYLOAD: PairSlotPayload = { templates: [], dismissed: [] };
+function isCurrency(value: unknown): value is string {
+  return typeof value === "string" && /^[A-Za-z]{3}$/.test(value);
+}
+
+function isNonNegativeSafeInteger(value: unknown): value is number {
+  return (
+    typeof value === "number" &&
+    Number.isSafeInteger(value) &&
+    value >= 0
+  );
+}
+
+function decodeTemplate(value: unknown): SharedTemplate | null {
+  if (!isRecord(value)) return null;
+
+  const id = value.id;
+  const name = value.name;
+  const direction = value.direction;
+  const txnType = value.txn_type;
+  const rev = value.rev;
+  const updatedAt = value.updatedAt;
+
+  if (
+    !isBoundedNonEmptyString(id, TEMPLATE_ID_MAX_LENGTH) ||
+    !isBoundedNonEmptyString(name, TEMPLATE_NAME_MAX_LENGTH) ||
+    (direction !== "credit" && direction !== "debt") ||
+    (txnType !== "settlement" && txnType !== "iou") ||
+    typeof rev !== "number" ||
+    !Number.isSafeInteger(rev) ||
+    rev < 1 ||
+    rev >= Number.MAX_SAFE_INTEGER ||
+    !isNonNegativeSafeInteger(updatedAt) ||
+    !Number.isFinite(new Date(updatedAt).getTime()) ||
+    (value.deleted !== undefined && value.deleted !== true) ||
+    (value.currency !== undefined && !isCurrency(value.currency)) ||
+    (value.amount_minor !== undefined &&
+      !isNonNegativeSafeInteger(value.amount_minor)) ||
+    (value.fee_percent !== undefined &&
+      (typeof value.fee_percent !== "number" ||
+        !Number.isFinite(value.fee_percent) ||
+        value.fee_percent < 0 ||
+        value.fee_percent > 100)) ||
+    (value.fee_fixed_minor !== undefined &&
+      !isNonNegativeSafeInteger(value.fee_fixed_minor)) ||
+    (value.fee_fixed_currency !== undefined &&
+      !isCurrency(value.fee_fixed_currency)) ||
+    (value.note !== undefined &&
+      (typeof value.note !== "string" ||
+        value.note.length > TEMPLATE_NOTE_MAX_LENGTH))
+  ) {
+    return null;
+  }
+
+  const hasFee =
+    value.fee_percent !== undefined ||
+    value.fee_fixed_minor !== undefined ||
+    value.fee_fixed_currency !== undefined;
+  if (
+    (txnType === "settlement" &&
+      (hasFee || value.schedule !== undefined)) ||
+    (value.fee_fixed_currency !== undefined &&
+      (value.fee_fixed_minor === undefined ||
+        (value.fee_fixed_minor as number) <= 0))
+  ) {
+    return null;
+  }
+
+  let schedule: TxnTemplate["schedule"];
+  if (value.schedule !== undefined) {
+    if (
+      !Array.isArray(value.schedule) ||
+      value.schedule.length === 0 ||
+      value.schedule.length > TEMPLATE_SCHEDULE_CAP
+    ) {
+      return null;
+    }
+    schedule = [];
+    let percentTotal = 0;
+    for (const row of value.schedule) {
+      if (!isRecord(row)) return null;
+      const offsetDays = row.offset_days;
+      const percent = row.percent;
+      const anchor = row.anchor;
+      if (
+        !isNonNegativeSafeInteger(offsetDays) ||
+        offsetDays > TEMPLATE_OFFSET_MAX_DAYS ||
+        typeof percent !== "number" ||
+        !Number.isFinite(percent) ||
+        percent < 0 ||
+        percent > 100 ||
+        (anchor !== undefined &&
+          anchor !== "in_days" &&
+          anchor !== "start_of_next_month") ||
+        (anchor === "start_of_next_month" && offsetDays !== 0)
+      ) {
+        return null;
+      }
+      percentTotal += percent;
+      schedule.push({
+        offset_days: offsetDays,
+        percent,
+        ...(anchor === undefined ? {} : { anchor }),
+      });
+    }
+    if (percentTotal !== 100) return null;
+  }
+
+  let keywords: string[] | undefined;
+  if (value.keywords !== undefined) {
+    if (
+      !Array.isArray(value.keywords) ||
+      value.keywords.length > TEMPLATE_KEYWORD_CAP
+    ) {
+      return null;
+    }
+    keywords = [];
+    for (const keyword of value.keywords) {
+      if (
+        !isBoundedNonEmptyString(
+          keyword,
+          TEMPLATE_KEYWORD_MAX_LENGTH,
+        )
+      ) {
+        return null;
+      }
+      keywords.push(keyword);
+    }
+  }
+
+  const decoded: SharedTemplate = {
+    id,
+    name,
+    direction,
+    txn_type: txnType,
+    rev,
+    updatedAt,
+  };
+  if (value.deleted === true) decoded.deleted = true;
+  if (value.currency !== undefined) {
+    decoded.currency = value.currency as string;
+  }
+  if (value.amount_minor !== undefined) {
+    decoded.amount_minor = value.amount_minor as number;
+  }
+  if (value.fee_percent !== undefined) {
+    decoded.fee_percent = value.fee_percent as number;
+  }
+  if (value.fee_fixed_minor !== undefined) {
+    decoded.fee_fixed_minor = value.fee_fixed_minor as number;
+  }
+  if (value.fee_fixed_currency !== undefined) {
+    decoded.fee_fixed_currency = value.fee_fixed_currency as string;
+  }
+  if (schedule !== undefined) decoded.schedule = schedule;
+  if (value.note !== undefined) decoded.note = value.note as string;
+  if (keywords !== undefined) decoded.keywords = keywords;
+  return decoded;
+}
+
+function decodeTemplates(values: unknown[]): SharedTemplate[] {
+  const templates: SharedTemplate[] = [];
+  for (const value of values) {
+    const decoded = decodeTemplate(value);
+    if (decoded !== null) templates.push(decoded);
+    if (templates.length === PAIR_TEMPLATE_CAP) break;
+  }
+  return templates;
+}
+
+function decodeDismissed(value: unknown): string[] {
+  if (!Array.isArray(value)) return [];
+  const valid: string[] = [];
+  for (const id of value) {
+    if (isBoundedNonEmptyString(id, TEMPLATE_ID_MAX_LENGTH)) {
+      valid.push(id);
+    }
+  }
+  return mergeDismissed([], valid);
+}
+
+function emptyPayload(): PairSlotPayload {
+  return { templates: [], dismissed: [] };
+}
 
 /**
  * Decode a slot from bytes. Accepts BOTH formats: the legacy v1 bare array
@@ -104,30 +299,29 @@ const EMPTY_PAYLOAD: PairSlotPayload = { templates: [], dismissed: [] };
 export function decodePairSlot(
   bytes: Uint8Array | number[] | null | undefined,
 ): PairSlotPayload {
-  if (bytes == null) return { ...EMPTY_PAYLOAD };
+  if (bytes == null) return emptyPayload();
+  if (bytes.length === 0 || bytes.length > PAIR_SLOT_MAX_BYTES) {
+    return emptyPayload();
+  }
   const u8 = bytes instanceof Uint8Array ? bytes : Uint8Array.from(bytes);
-  if (u8.length === 0) return { ...EMPTY_PAYLOAD };
   try {
     const parsed: unknown = JSON.parse(new TextDecoder().decode(u8));
     // Legacy v1: a bare array of envelopes.
     if (Array.isArray(parsed)) {
-      return { templates: parsed.filter(isValidEnvelope), dismissed: [] };
+      return { templates: decodeTemplates(parsed), dismissed: [] };
     }
     // v2 envelope: {v, templates, dismissed}.
-    if (parsed != null && typeof parsed === "object") {
-      const o = parsed as Record<string, unknown>;
-      if (Array.isArray(o.templates)) {
+    if (isRecord(parsed)) {
+      if (parsed.v === 2 && Array.isArray(parsed.templates)) {
         return {
-          templates: o.templates.filter(isValidEnvelope),
-          dismissed: Array.isArray(o.dismissed)
-            ? o.dismissed.filter((d): d is string => typeof d === "string")
-            : [],
+          templates: decodeTemplates(parsed.templates),
+          dismissed: decodeDismissed(parsed.dismissed),
         };
       }
     }
-    return { ...EMPTY_PAYLOAD };
+    return emptyPayload();
   } catch {
-    return { ...EMPTY_PAYLOAD };
+    return emptyPayload();
   }
 }
 
@@ -262,4 +456,3 @@ export function mergeDismissed(a: string[], b: string[]): string[] {
   }
   return out.slice(-DISMISSED_CAP);
 }
-

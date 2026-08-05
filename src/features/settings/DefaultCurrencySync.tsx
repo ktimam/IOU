@@ -15,17 +15,19 @@ export function DefaultCurrencySync() {
   const { state } = useAuth();
   const { actor } = useActor();
   const { prefs, setDefaultCurrency } = usePreferences();
-  // Run the reconcile ONCE per session. Without this the effect would re-fire on its own
+  // Run the reconcile once per principal. Without this the effect would re-fire on its own
   // setDefaultCurrency (prefs changes) and fight a user who edits the setting right after load.
-  const done = useRef(false);
+  const donePrincipal = useRef<string | null>(null);
   // Read the cache without depending on it, so editing the setting never re-triggers the sync.
   const cachedRef = useRef(prefs.defaultCurrency);
   cachedRef.current = prefs.defaultCurrency;
 
   useEffect(() => {
-    if (done.current) return;
     if (state.kind !== "authenticated" || !actor) return;
-    done.current = true;
+    const principal = state.principal;
+    if (donePrincipal.current === principal) return;
+    donePrincipal.current = principal;
+    let cancelled = false;
     void (async () => {
       try {
         const rec = unwrap(await actor.get_my_user());
@@ -36,16 +38,20 @@ export function DefaultCurrencySync() {
         // Materialize the cache even when it already agrees. Leaving it absent would mean the
         // browser is relying on the DEFAULTS constant rather than on the user's own choice — so a
         // future change to that constant would silently move their default on an offline load.
+        if (cancelled) return;
         setDefaultCurrency(use);
         if (push) await actor.set_default_currency(push);
       } catch (e) {
         // Offline, an un-upgraded canister (no such method), or a brand-new user with no record —
         // all non-fatal: the cached value keeps working and the next load retries.
-        done.current = false;
+        if (donePrincipal.current === principal) donePrincipal.current = null;
         console.warn("[DefaultCurrencySync] could not sync the default currency:", e);
       }
     })();
-  }, [actor, state.kind, setDefaultCurrency]);
+    return () => {
+      cancelled = true;
+    };
+  }, [actor, state, setDefaultCurrency]);
 
   return null;
 }

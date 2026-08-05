@@ -12,20 +12,41 @@ import { Principal } from "@dfinity/principal";
 // In-memory canister store shared with the mocked backend actor.
 const s = vi.hoisted(() => ({
   remote: null as null | { wrapped_private_key: number[] | Uint8Array; public_key_pem: string },
+  epoch: 0n,
   setCalls: [] as string[], // pems passed to set_consumer_keypair
   deleteCalls: 0,
+  getCalls: 0,
+  getGate: null as Promise<void> | null,
 }));
 
 vi.mock("../../backend/declarations", () => ({
   createActor: () => ({
-    get_consumer_keypair: async () => (s.remote ? [s.remote] : []),
-    set_consumer_keypair: async (wrapped: number[], pem: string) => {
+    get_consumer_keypair: async () => {
+      s.getCalls++;
+      if (s.getGate) await s.getGate;
+      return { mutation_epoch: s.epoch, keypair: s.remote ? [s.remote] : [] };
+    },
+    set_consumer_keypair: async (expected: bigint, wrapped: number[], pem: string) => {
+      if (expected !== s.epoch) {
+        return {
+          Err: { StaleEpoch: { expected_epoch: expected, current_epoch: s.epoch } },
+        };
+      }
+      s.epoch++;
       s.remote = { wrapped_private_key: wrapped, public_key_pem: pem };
       s.setCalls.push(pem);
+      return { Ok: s.epoch };
     },
-    delete_consumer_keypair: async () => {
+    delete_consumer_keypair: async (expected: bigint) => {
+      if (expected !== s.epoch) {
+        return {
+          Err: { StaleEpoch: { expected_epoch: expected, current_epoch: s.epoch } },
+        };
+      }
+      s.epoch++;
       s.remote = null;
       s.deleteCalls++;
+      return { Ok: s.epoch };
     },
   }),
 }));
@@ -39,7 +60,10 @@ vi.mock("@dfinity/agent", async (importOriginal) => ({
   },
 }));
 
-vi.mock("../auth/config", () => ({ host: "http://127.0.0.1:8080" }));
+vi.mock("../auth/config", () => ({
+  host: "http://127.0.0.1:8080",
+  canisterId: "test-iou-backend",
+}));
 
 // Simple in-process localStorage so both the consumer cache and the devVetkd
 // dev keypair persist within a test (and can be selectively cleared).
@@ -58,19 +82,70 @@ import {
   consumerPublicKeyPem,
   configureConsumerKeypairBackend,
   clearConsumerKeypair,
+  captureConsumerKeypairSession,
   signRevokeChallenge,
+  __testing as consumerKeypairTesting,
 } from "./consumerKeypair";
 import { keyFingerprint, __testing } from "./actionInboxCrypto";
 
-const LS_KEY = "iou.openchat.consumerKeypair.v1";
 const identity = { getPrincipal: () => Principal.fromText("aaaaa-aa") } as unknown as Identity;
+const otherIdentity = {
+  getPrincipal: () => Principal.fromText("rrkah-fqaaa-aaaaa-aaaaq-cai"),
+} as unknown as Identity;
+const ANONYMOUS_KEY = consumerKeypairTesting.storageKeyForPrincipal(null);
+const IDENTITY_KEY = consumerKeypairTesting.storageKeyForPrincipal(
+  identity.getPrincipal().toText(),
+);
 
 beforeEach(() => {
   store.clear();
   s.remote = null;
+  s.epoch = 0n;
   s.setCalls = [];
   s.deleteCalls = 0;
+  s.getCalls = 0;
+  s.getGate = null;
   configureConsumerKeypairBackend(null);
+});
+
+describe("consumerKeypair account isolation", () => {
+  it("does not adopt another principal's device cache when the backend has no key", async () => {
+    configureConsumerKeypairBackend(identity);
+    const first = await loadOrCreateConsumerKeypair();
+
+    // Reproduce account switching in one browser profile. The second principal has no
+    // canister key yet, so a browser-global cache would silently upload the first user's key.
+    s.remote = null;
+    configureConsumerKeypairBackend(otherIdentity);
+    const second = await loadOrCreateConsumerKeypair();
+
+    expect(second.publicKeySpkiPem).not.toBe(first.publicKeySpkiPem);
+  });
+
+  it("does not expose the previous principal's key after an authenticated-to-anonymous transition", async () => {
+    configureConsumerKeypairBackend(identity);
+    const authenticated = await loadOrCreateConsumerKeypair();
+
+    configureConsumerKeypairBackend(null);
+    const anonymous = await loadOrCreateConsumerKeypair();
+
+    expect(anonymous.publicKeySpkiPem).not.toBe(authenticated.publicKeySpkiPem);
+  });
+
+  it("rejects an in-flight load when authentication changes", async () => {
+    let release!: () => void;
+    s.getGate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    configureConsumerKeypairBackend(identity);
+    const pending = loadOrCreateConsumerKeypair();
+    await vi.waitFor(() => expect(s.getCalls).toBe(1));
+
+    configureConsumerKeypairBackend(otherIdentity);
+    release();
+
+    await expect(pending).rejects.toThrow(/authentication changed/);
+  });
 });
 
 describe("consumerKeypair — device-local (no backend)", () => {
@@ -78,7 +153,7 @@ describe("consumerKeypair — device-local (no backend)", () => {
     const a = await loadOrCreateConsumerKeypair();
     const b = await loadOrCreateConsumerKeypair();
     expect(a.publicKeySpkiPem).toBe(b.publicKeySpkiPem);
-    expect(store.has(LS_KEY)).toBe(true);
+    expect(store.has(ANONYMOUS_KEY)).toBe(true);
     expect(s.setCalls).toHaveLength(0); // no backend configured → no upload
   });
 
@@ -104,18 +179,20 @@ describe("consumerKeypair — canister sync branches", () => {
     expect(s.setCalls).toHaveLength(1);
 
     // Emulate another device of the same user: drop the consumer cache but keep the dev wrap key.
-    store.delete(LS_KEY);
+    store.delete(IDENTITY_KEY);
     configureConsumerKeypairBackend(identity); // reset the in-flight memo → force a fresh sync
     const second = await loadOrCreateConsumerKeypair();
 
     expect(second.publicKeySpkiPem).toBe(first.publicKeySpkiPem); // recovered, identical key
     expect(s.setCalls).toHaveLength(1); // NOT re-uploaded
-    expect(store.has(LS_KEY)).toBe(true); // cache refreshed
+    expect(store.has(IDENTITY_KEY)).toBe(true); // cache refreshed
   });
 
   it("unwrappable-but-cached: a corrupt canister copy falls back to the device cache without overwriting it", async () => {
-    // Seed a valid device cache (device-local first).
+    // Seed a valid cache for this principal.
+    configureConsumerKeypairBackend(identity);
     const cached = await loadOrCreateConsumerKeypair();
+    s.setCalls = [];
     // Canister holds garbage (unwrap will fail under our wrap key).
     s.remote = { wrapped_private_key: new Array(40).fill(0), public_key_pem: "garbage-pem" };
     configureConsumerKeypairBackend(identity);
@@ -141,9 +218,9 @@ describe("consumerKeypair — clear + revoke signing", () => {
   it("clearConsumerKeypair deletes the canister copy and the device cache", async () => {
     configureConsumerKeypairBackend(identity);
     await loadOrCreateConsumerKeypair();
-    expect(store.has(LS_KEY)).toBe(true);
-    await clearConsumerKeypair();
-    expect(store.has(LS_KEY)).toBe(false);
+    expect(store.has(IDENTITY_KEY)).toBe(true);
+    await clearConsumerKeypair(captureConsumerKeypairSession(identity.getPrincipal().toText()));
+    expect(store.has(IDENTITY_KEY)).toBe(false);
     expect(s.deleteCalls).toBe(1);
   });
 
@@ -172,7 +249,7 @@ describe("consumerKeypair — clear + revoke signing", () => {
   });
 
   it("signRevokeChallenge throws when no keypair exists", async () => {
-    store.delete(LS_KEY);
+    store.delete(ANONYMOUS_KEY);
     await expect(signRevokeChallenge(new Uint8Array([1, 2, 3]))).rejects.toThrow(/no consumer keypair/);
   });
 });

@@ -1,4 +1,4 @@
-// Settings simplification (settings-redundancy): the 6-digit "Connect to OpenChat" flow is the
+// Settings simplification (settings-redundancy): the claim-token "Connect to OpenChat" flow is the
 // ONLY OpenChat surface on the default /settings view. The admin "Link to OpenChat" button, the
 // debug PEM textarea + "Copy public key" + fingerprint, the auto-derived inbox readout, and the
 // legacy relay cards ("Chat import (relay)" setup + "OpenChat link (relay)" pairing) all live
@@ -18,8 +18,8 @@ test("default /settings shows ONLY the Connect flow — no admin, debug, or rela
   await signInDev(page);
   await openSettings(page);
 
-  // The surviving end-user flow: 6-digit code + Connect, and the one-sided Disconnect.
-  await expect(page.locator('input[placeholder="6-digit code"]')).toBeVisible();
+  // The surviving end-user flow: claim token + Connect, and the one-sided Disconnect.
+  await expect(page.locator('input[placeholder="64-character claim token"]')).toBeVisible();
   await expect(page.getByRole("button", { name: /^Connect$/ })).toBeVisible();
   await expect(page.getByRole("button", { name: "Disconnect from OpenChat" })).toBeVisible();
 
@@ -53,11 +53,11 @@ test("Advanced discloses Link/PEM/Copy/fingerprint, the inbox readout, and the r
 });
 
 // REGRESSION (green today, must stay green): the OpenChat consent-sheet deep link still scrolls to
-// and focuses the 6-digit code input after Connect moves to the top of the card.
-test("/settings#openchat-connect still focuses the 6-digit code input after the restructure", async ({ page }) => {
+// and focuses the claim-token input after Connect moves to the top of the card.
+test("/settings#openchat-connect still focuses the claim-token input after the restructure", async ({ page }) => {
   await signInDev(page);
   await page.goto("/settings#openchat-connect", { waitUntil: "domcontentloaded" });
-  await expect(page.locator('input[placeholder="6-digit code"]')).toBeFocused({ timeout: 20_000 });
+  await expect(page.locator('input[placeholder="64-character claim token"]')).toBeFocused({ timeout: 20_000 });
 });
 
 // FAILING-FIRST 3: a pre-existing relay config (iou:relay:* keys, as relay.ts setRelayConfig

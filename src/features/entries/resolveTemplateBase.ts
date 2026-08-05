@@ -1,14 +1,8 @@
-// Which of THIS account's saved types does a chat-routed draft mean?
+// Which of THIS account's saved types does an imported draft mean?
 //
 // Extracted from an inline SheetPage closure so the containment below is testable at all. It is the
-// only thing standing between a foreign type name and this account's ledger.
-//
-// WHY THE FOREIGN NAME ARRIVES. OpenChat registers ONE manifest per app+user, not per chat:
-// ManifestTypesSync folds loadAllSharedTemplates (EVERY account this user is in) into a single
-// keyword_map roster. So a "Reservation" that only exists on the House account is deterministically
-// offered — and matched — in the child chat, and `raw.template` reaches this sheet naming a type it
-// has never heard of. That is by design today (see actionManifest.test.ts, "one per-USER manifest"):
-// there is no chat→account gate at propose time, so containment has to happen HERE, at import.
+// boundary that ensures external/legacy template references and local keyword
+// matching can use only the linked account's decrypted template list.
 //
 // WHAT CONTAINMENT MEANS. A name this account does not have resolves to NO base: no fee percent, no
 // fixed fee, no due schedule, no currency, no direction, no default note. The draft is imported with
@@ -22,13 +16,12 @@
 //
 // NOT DEDUPLICATED ACROSS ACCOUNTS. Two accounts may each own a type named "Rent" with different
 // fees; this resolves against the CURRENT account's list only, so this sheet always gets its own
-// account's "Rent". That is the correct answer for this sheet, and it is also why the roster leak
-// above cannot be reasoned about as "the model picked the right type" — see resolveTemplateBase.test.ts.
+// account's "Rent". No cross-account aggregate is consulted.
 
 import type { EntryPayload } from "./types";
 import type { TxnTemplate } from "../templates/TemplatesContext";
 import { templateToInitial } from "../templates/templateBase";
-import { extractTs } from "./draft";
+import { extractTs, messageEvidence } from "./draft";
 
 export type TemplateResolution = {
   /** Entry defaults to merge under the extracted draft. Absent ⇒ nothing matched, nothing applied. */
@@ -37,9 +30,44 @@ export type TemplateResolution = {
   unknownTemplate?: string;
 };
 
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+export function keywordMatches(text: string, keyword: string): boolean {
+  const normalized = keyword.trim();
+  if (!normalized) return false;
+  // Match complete words/phrases, so a type keyword such as "rent" does not match "parent".
+  return new RegExp(
+    `(^|[^\\p{L}\\p{N}_])${escapeRegExp(normalized)}($|[^\\p{L}\\p{N}_])`,
+    "iu",
+  ).test(text);
+}
+
 /**
- * Resolve a draft's `template` (the manifest keyword_map / model sets it to the type's NAME — see
- * actionManifest buildTemplateRules) against THIS account's shared types.
+ * Select exactly one account-local type from the draft's message evidence.
+ *
+ * This is shared by the signed-in import page and the credentialless OpenChat
+ * card after the card has decrypted the viewer-authorized account roster. A
+ * collision is deliberately treated as no match: money defaults must never be
+ * selected by array order when two types share a keyword.
+ */
+export function matchTemplateForDraft(
+  allTemplates: TxnTemplate[],
+  raw: unknown,
+): TxnTemplate | undefined {
+  if (raw == null || typeof raw !== "object") return undefined;
+  const evidence = messageEvidence(raw as { message?: unknown; note?: unknown });
+  if (!evidence.trim()) return undefined;
+  const matches = allTemplates.filter((template) =>
+    (template.keywords ?? []).some((keyword) => keywordMatches(evidence, keyword)),
+  );
+  return matches.length === 1 ? matches[0] : undefined;
+}
+
+/**
+ * Resolve a legacy explicit `template` reference or locally match message evidence against THIS
+ * account's private shared types.
  *
  * Matched case-insensitively by name, with an id fallback for any older id-based manifest. The
  * template's relative due schedule is anchored at the DRAFT's transaction date (the same date the
@@ -48,12 +76,19 @@ export type TemplateResolution = {
 export function resolveTemplateBase(allTemplates: TxnTemplate[], raw: unknown): TemplateResolution {
   if (raw == null || typeof raw !== "object") return {};
   const ref = (raw as { template?: unknown }).template;
-  if (typeof ref !== "string" || ref.trim() === "") return {};
-  const name = ref.trim();
-  const key = name.toLowerCase();
-  const t =
-    allTemplates.find((x) => x.name.trim().toLowerCase() === key) ??
-    allTemplates.find((x) => x.id === ref);
-  if (!t) return { unknownTemplate: name };
+  let t: TxnTemplate | undefined;
+  if (typeof ref === "string" && ref.trim() !== "") {
+    const name = ref.trim();
+    const key = name.toLowerCase();
+    t =
+      allTemplates.find((x) => x.name.trim().toLowerCase() === key) ??
+      allTemplates.find((x) => x.id === ref);
+    if (!t) return { unknownTemplate: name };
+  } else {
+    // The public OpenChat manifest intentionally contains no private template roster. Match only
+    // after the draft reaches IOU, against the templates of this linked account.
+    t = matchTemplateForDraft(allTemplates, raw);
+    if (!t) return {};
+  }
   return { base: templateToInitial(t, extractTs(raw as { note?: unknown; date?: unknown })) };
 }

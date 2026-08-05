@@ -1,7 +1,7 @@
 // Multi-user UI E2E: drives the real IOU app with THREE distinct users (isolated
 // browser contexts = distinct dev identities), THREE pairs/sheets, entries added
 // through the real form, cross-user E2E-decryption (a partner opens the shared
-// sheet and sees the same net), and chat→sheet links. Every step is a real click
+// sheet and sees the same net). Every step is a real click
 // against the live app + replica.
 
 import { test, expect } from "@playwright/test";
@@ -12,7 +12,6 @@ import {
   acceptInvite,
   openSheet,
   addEntry,
-  linkChatToSheet,
   balancesText,
 } from "./flows";
 
@@ -21,7 +20,7 @@ import {
 // long-lived contended replica the default 180s is too tight for the CUMULATIVE path.
 test.setTimeout(360_000);
 
-test("3 users · 3 sheets · cross-user shared view · chat links", async ({ browser }) => {
+test("3 users · 3 sheets · cross-user shared view", async ({ browser }) => {
   const aliceCtx = await browser.newContext();
   const bobCtx = await browser.newContext();
   const carolCtx = await browser.newContext();
@@ -101,10 +100,6 @@ test("3 users · 3 sheets · cross-user shared view · chat links", async ({ bro
   await alice.goto("/pair/new"); // a redirect-guarded page
   await expect(alice).toHaveURL(/\/pair\/new$/);
   await expect(alice.getByRole("heading", { name: "New account" })).toBeVisible();
-
-  // ── Multiple chats: Alice links two chats to two different sheets ─────────
-  await linkChatToSheet(alice, "group:aaaaa-aa", "Rent 2026");
-  await linkChatToSheet(alice, "group:2vxsx-fae", "Trip");
 
   await aliceCtx.close();
   await bobCtx.close();

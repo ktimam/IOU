@@ -1,17 +1,18 @@
 // Settings card for the ON-CHAIN action inbox path (the successor to the relay).
 //
 // DEFAULT view — the ONE end-user flow: "Connect to OpenChat". Each user pairs their OWN delivery
-// key once by entering the 6-digit code OpenChat displays (its consent sheet); we push this
-// account's public key via claim_ai_app_link_code. The keypair itself is canister-backed
+// key once by entering the high-entropy claim token OpenChat displays (its consent sheet); the
+// signed-in browser sends it to IOU, whose registered app canister performs the authenticated
+// c2c_claim_ai_app_link_code call. The keypair itself is canister-backed
 // (consumerKeypair.ts): wrapped via the same vetkd mechanism as sheet keys, so any of the user's
-// devices can decrypt. Disconnect (one-sided key delete + best-effort OpenChat revoke) also lives
-// on the default view.
+// devices can decrypt. Normal disconnect first obtains a clean C2C OpenChat revoke outcome and
+// only then deletes the IOU key; remote failure retains the key for a safe retry.
 //
 // ADVANCED (collapsed disclosure) — admin & debugging surfaces only:
 //   - "Link to OpenChat" registers the app manifest (per_user_keys=true) at the user_index's
 //     register_ai_app in one tap (registerAiApp.ts). Registration sends an EMPTY app-level key.
 //     End users never need it: first-ever bootstrap is CI's `pnpm register:openchat` (deploy:local),
-//     and the manifest re-syncs automatically on Connect, on type edits, and on app load.
+//     and the static manifest re-syncs automatically on Connect and app load.
 //   - The SPKI PEM + "Copy public key" + fingerprint remain for debugging/legacy
 //     (per_user_keys=false) setups only.
 //   - The inbox canister readout: NOT entered here — getActionInboxConfig() auto-derives it from
@@ -26,22 +27,26 @@
 
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import { getRelayConfig } from "../relay/relay";
-import { useAuth, buildAgent } from "../auth/AuthProvider";
+import { useAuth } from "../auth/AuthProvider";
 import { canisterId as iouBackendCanisterId } from "../auth/config";
+import { useActor } from "../flows/useActor";
 import {
+  captureConsumerKeypairSession,
   clearConsumerKeypair,
   consumerPublicKeyPem,
   loadOrCreateConsumerKeypair,
   signRevokeChallenge,
 } from "./consumerKeypair";
-import { claimAiAppLinkCode, registerAiApp, revokeAiAppUserKey } from "./registerAiApp";
+import {
+  isValidOpenChatClaimToken,
+  normalizeOpenChatClaimToken,
+  OPENCHAT_CLAIM_TOKEN_HEX_LENGTH,
+  registerAiApp,
+} from "./registerAiApp";
+import { coordinatedDisconnectOpenChat } from "./disconnectOpenChat";
 import { getActionInboxConfig, invalidateInboxCache } from "./actionInboxClient";
-import { loadAllSharedTemplates } from "../templates/pairTemplatesActor";
-import { useSheetKey } from "../flows/SheetKeyContext";
-import { createActor } from "../../backend/declarations";
-import { syncManifestWithTypes } from "./syncManifest";
+import { syncOpenChatManifest } from "./syncManifest";
 import { OC_ACTION_INBOX_CANISTER_ID, OC_CONNECTED_KEY, OC_IC_URL, OC_LINKED_KEY, OC_USER_INDEX_CANISTER_ID } from "./ocConfig";
-import { forgetOpenChatUserId, rememberOpenChatUserId } from "./ocViewer";
 
 const LS_INBOX = "iou.openchat.actionInbox.v1";
 
@@ -53,14 +58,16 @@ type LinkStatus =
 
 export function ActionInboxSettings({ children }: { children?: ReactNode }) {
   const { identity } = useAuth();
-  // For folding the ACCOUNT-SCOPED types into the manifest on Connect.
-  const { unwrapFor } = useSheetKey();
+  const { actor } = useActor();
+  const principal = identity?.getPrincipal().toText() ?? null;
   const [pubKeyPem, setPubKeyPem] = useState<string>("");
   const [fingerprint, setFingerprint] = useState<string>("");
   const [inbox, setInbox] = useState<{ canisterId: string; host: string } | null>(null);
   // Admin/debug + legacy relay surfaces are collapsed by default; auto-expand for users who
   // already configured a relay so their URL/token stay reachable after the simplification.
-  const [showAdvanced, setShowAdvanced] = useState<boolean>(() => getRelayConfig() !== null);
+  const [showAdvanced, setShowAdvanced] = useState<boolean>(
+    () => getRelayConfig(principal) !== null,
+  );
   const [link, setLink] = useState<LinkStatus>({ kind: "idle" });
   const [linkCode, setLinkCode] = useState("");
   const [connect, setConnect] = useState<LinkStatus>({ kind: "idle" });
@@ -90,13 +97,17 @@ export function ActionInboxSettings({ children }: { children?: ReactNode }) {
       /* ignore */
     }
     let cancelled = false;
-    void getActionInboxConfig().then((cfg) => {
+    if (!actor) {
+      setInbox(null);
+      return;
+    }
+    void getActionInboxConfig(actor).then((cfg) => {
       if (!cancelled) setInbox(cfg);
     });
     return () => {
       cancelled = true;
     };
-  }, []);
+  }, [actor]);
 
   // OpenChat's consent sheet links here as <origin>/settings#openchat-connect (the manifest's
   // "connect" surface): scroll the Connect section into view and put the caret in the code input
@@ -132,19 +143,8 @@ export function ActionInboxSettings({ children }: { children?: ReactNode }) {
         });
         return;
       }
-      // Register the user's ACCOUNT-SCOPED types too (slot-sourced, all
-      // accounts), so the manifest can route chat messages to them.
-      // Best-effort: if the fold fails, register the base manifest — the
-      // app-load sync / next type edit re-folds the keyword rules.
-      let manifestTemplates: Awaited<ReturnType<typeof loadAllSharedTemplates>> = [];
-      try {
-        if (identity) {
-          const actor = createActor(await buildAgent(identity)) as any;
-          manifestTemplates = await loadAllSharedTemplates(actor, unwrapFor);
-        }
-      } catch {
-        /* base manifest */
-      }
+      // The registered manifest is static public app metadata. Private
+      // account template names and keywords are never supplied here.
       const outcome = await registerAiApp({
         host: OC_IC_URL,
         userIndexCanisterId: OC_USER_INDEX_CANISTER_ID,
@@ -154,13 +154,12 @@ export function ActionInboxSettings({ children }: { children?: ReactNode }) {
         // Route deposits to IOU's own inbox — MUST be sent on every upsert or deposits go NotConfigured.
         inboxCanisterId: OC_ACTION_INBOX_CANISTER_ID,
         identity,
-        templates: manifestTemplates,
       });
       if (outcome.kind === "success") {
         // The manifest (and its routed inbox) just changed — drop the resolver cache so the next poll
         // resolves the fresh inbox instead of a stale one.
         invalidateInboxCache();
-        // Remember we're linked (scoped to this principal) so a later template edit auto-re-registers.
+        // Remember the principal so a later app load can refresh the static manifest.
         try {
           if (identity) localStorage.setItem(OC_LINKED_KEY, identity.getPrincipal().toText());
         } catch {
@@ -180,12 +179,13 @@ export function ActionInboxSettings({ children }: { children?: ReactNode }) {
     }
   };
 
-  // Per-user pairing: OpenChat shows the user a single-use 6-digit code (its consent sheet);
-  // entering it here pushes THIS user's public key to OpenChat via claim_ai_app_link_code. The
-  // keypair is ensured first (canister-backed, automatic) so the PEM survives device changes.
+  // Per-user pairing: OpenChat shows the user a single-use 256-bit claim token (its consent sheet).
+  // The signed-in browser gives it to IOU, whose registered canister performs the authenticated
+  // c2c claim. The keypair is ensured first so the PEM survives device changes.
   const connectWithCode = async () => {
     setConnect({ kind: "busy" });
     try {
+      const consumerSession = captureConsumerKeypairSession(principal);
       if (!OC_USER_INDEX_CANISTER_ID) {
         setConnect({
           kind: "err",
@@ -195,71 +195,48 @@ export function ActionInboxSettings({ children }: { children?: ReactNode }) {
         });
         return;
       }
-      const code = linkCode.trim();
-      if (!/^\d{6}$/.test(code)) {
-        setConnect({ kind: "err", message: "Enter the 6-digit code shown in OpenChat." });
+      const code = normalizeOpenChatClaimToken(linkCode);
+      if (!isValidOpenChatClaimToken(code)) {
+        setConnect({
+          kind: "err",
+          message: `Paste the ${OPENCHAT_CLAIM_TOKEN_HEX_LENGTH}-character claim token shown in OpenChat.`,
+        });
         return;
       }
-      const pem = await consumerPublicKeyPem(); // ensures the keypair exists (auto-created + wrapped)
-      const outcome = await claimAiAppLinkCode({
-        host: OC_IC_URL,
-        userIndexCanisterId: OC_USER_INDEX_CANISTER_ID,
-        code,
-        publicKeyPem: pem,
-        identity,
-      });
-      switch (outcome.kind) {
-        case "success":
+      const pem = await consumerPublicKeyPem(consumerSession); // ensures the keypair exists (auto-created + wrapped)
+      if (!actor) throw new Error("IOU backend is not ready");
+      const outcome = (await actor.connect_openchat(code, pem)) as Record<string, unknown>;
+      if ("Success" in outcome) {
           setLinkCode("");
-          // Connecting IS participating in OpenChat: mark it, then fold the user's saved types into
-          // the manifest so a connect-only user's chat messages route to their types — no separate
-          // "Link to OpenChat" needed. (Previously connect touched neither, so types stayed unmapped.)
+          // Connecting is participating in OpenChat: mark it, then refresh
+          // the static manifest without reading private account templates.
           try {
             if (identity) {
               const me = identity.getPrincipal().toText();
               localStorage.setItem(OC_CONNECTED_KEY, me);
-              // The claim response now names the OpenChat user whose code this was — the only moment
-              // the two identities are proven to be the same person. Kept for a future "did I confirm
-              // this?" check; nothing reads it today.
-              if (outcome.openChatUserId) rememberOpenChatUserId(me, outcome.openChatUserId);
             }
           } catch {
             /* best-effort */
           }
-          // Fold ALL MY ACCOUNTS' types (each account's chat routes through
-          // MY manifest) into the manifest — sourced from the pair slots
-          // ONLY; the legacy personal store feeds nothing. Best-effort: if
-          // the slot fold itself fails, SKIP the sync rather than clobber
-          // the registered keyword rules with an empty list (the app-load
-          // sync / next type edit will re-fold).
-          void (async () => {
-            try {
-              if (!identity) return;
-              const actor = createActor(await buildAgent(identity)) as any;
-              const manifestTemplates = await loadAllSharedTemplates(actor, unwrapFor);
-              void syncManifestWithTypes(identity, manifestTemplates);
-            } catch {
-              /* skip — re-synced on app load or the next type edit */
-            }
-          })();
+          void syncOpenChatManifest(identity);
           setConnect({
             kind: "ok",
             message: "Connected — OpenChat now delivers your confirmed actions encrypted to your own key.",
           });
-          break;
-        case "code_not_found":
-          setConnect({ kind: "err", message: "OpenChat doesn't recognise this code — check the digits and try again." });
-          break;
-        case "code_expired":
+      } else if ("CodeNotFound" in outcome) {
+          setConnect({ kind: "err", message: "OpenChat doesn't recognise this claim token — copy it again and retry." });
+      } else if ("CodeExpired" in outcome) {
           setConnect({ kind: "err", message: "This code has expired — get a fresh one in OpenChat and try again." });
-          break;
-        case "invalid_request":
-          setConnect({ kind: "err", message: `OpenChat rejected the request: ${outcome.message}` });
-          break;
-        default:
+      } else if ("InvalidRequest" in outcome) {
+          setConnect({ kind: "err", message: `OpenChat rejected the request: ${String(outcome.InvalidRequest)}` });
+      } else if ("NotConfigured" in outcome) {
+          setConnect({ kind: "err", message: "This IOU deployment has not pinned its OpenChat UserIndex." });
+      } else if ("WrongApp" in outcome) {
+          setConnect({ kind: "err", message: "The claim token belongs to a different OpenChat app registration." });
+      } else {
           setConnect({
             kind: "err",
-            message: `OpenChat error ${outcome.code}${outcome.message ? ` — ${outcome.message}` : ""}`,
+            message: `OpenChat could not complete the connection${"RemoteError" in outcome ? `: ${String(outcome.RemoteError)}` : ""}`,
           });
       }
     } catch (e) {
@@ -267,40 +244,49 @@ export function ActionInboxSettings({ children }: { children?: ReactNode }) {
     }
   };
 
-  // One-sided disconnect from the IOU side: delete this account's wrapped consumer keypair
-  // (canister + device cache), and — while we still know the PEM — best-effort revoke the same key
-  // on OpenChat (revoke_ai_app_user_key; the PEM is the bearer authorization). With the key gone
-  // there too, OpenChat's in-chat propose flow re-detects "not connected" and offers the user the
-  // pairing sheet right in the chat. Reconnecting = a fresh keypair + a new 6-digit pairing.
+  // Coordinated disconnect: while the private key still exists, the browser signs OpenChat's exact
+  // V3 proof over the caller-scoped, app-subject binding. The signed-in IOU backend then invokes
+  // revoke_ai_app_user_key C2C as the registered app canister. Only Success/KeyNotFound permits the
+  // local wrapped key to be deleted. A remote failure keeps the key and binding intact for retry.
   const disconnectFromOpenChat = async () => {
     setDisconnect({ kind: "busy" });
     try {
-      // Revoke FIRST (needs the PEM; after clearConsumerKeypair it is gone for good). Failure is
-      // non-fatal — the local delete still stops all importing; OpenChat-side cleanup can then be
-      // done via Disconnect in the chat's Apps settings.
-      let revoked = false;
-      if (pubKeyPem && OC_USER_INDEX_CANISTER_ID) {
-        try {
-          const outcome = await revokeAiAppUserKey({
-            host: OC_IC_URL,
-            userIndexCanisterId: OC_USER_INDEX_CANISTER_ID,
-            publicKeyPem: pubKeyPem,
-            // Signs with the still-present consumer private key (revoke runs before the delete).
-            sign: signRevokeChallenge,
-            identity,
-          });
-          revoked = outcome.kind === "success" || outcome.kind === "key_not_found";
-        } catch {
-          /* unreachable user_index — proceed with the local delete */
-        }
+      const consumerSession = captureConsumerKeypairSession(principal);
+      if (!actor) throw new Error("IOU backend is not ready");
+      const coordinated = await coordinatedDisconnectOpenChat(
+        actor,
+        pubKeyPem,
+        (challenge) => signRevokeChallenge(challenge, consumerSession),
+        () => clearConsumerKeypair(consumerSession),
+      );
+      const outcome = coordinated.outcome;
+      if (!("localDeleteResult" in coordinated)) {
+        const message = outcome.kind === "not_linked"
+          ? "No authoritative OpenChat link was found. Your delivery key was retained."
+          : outcome.kind === "not_configured"
+            ? "This IOU deployment has not pinned its OpenChat UserIndex. Your delivery key was retained."
+            : outcome.kind === "invalid_binding"
+              ? "The saved OpenChat link is not a complete V3 scoped binding. Reconnect it before disconnecting."
+              : outcome.kind === "binding_changed"
+                ? "The OpenChat link or delivery key changed while disconnecting. Nothing local was deleted; retry."
+                : outcome.kind === "invalid_request"
+                  ? `IOU rejected the disconnect proof: ${outcome.message}`
+                  : outcome.kind === "remote_error"
+                    ? `OpenChat could not revoke the delivery key: ${outcome.message}. The key was retained; retry.`
+                    : "The coordinated disconnect did not complete. Your delivery key was retained; retry.";
+        setDisconnect({ kind: "err", message });
+        return;
       }
-      await clearConsumerKeypair();
-      // No longer connected — clear the marker so manifest sync stops treating this principal as a
-      // participant (a later type edit won't re-register unless they're still explicitly linked).
+
+      // IOU removed the exact binding after a clean OC outcome, then the sequencing helper
+      // completed the wrapped-key deletion as the final local half.
+      const cleared = coordinated.localDeleteResult;
+      // The account which initiated the operation was safely cleared, but a
+      // newer session now owns this UI and its local participation markers.
+      if (!cleared.sessionStillCurrent) return;
+      // No longer connected — clear the participation marker used by app-load refresh.
       try {
         localStorage.removeItem(OC_CONNECTED_KEY);
-        // The id is only meaningful for the delivery key OpenChat currently holds.
-        if (identity) forgetOpenChatUserId(identity.getPrincipal().toText());
       } catch {
         /* best-effort */
       }
@@ -308,12 +294,8 @@ export function ActionInboxSettings({ children }: { children?: ReactNode }) {
       setFingerprint("");
       setDisconnect({
         kind: "ok",
-        message: revoked
-          ? "Disconnected — your delivery key was deleted here AND removed from OpenChat. Next time an " +
-            "action is proposed in a chat, OpenChat will offer to reconnect."
-          : "Disconnected — your delivery key was deleted, so OpenChat actions can no longer be decrypted " +
-            "or imported. OpenChat couldn't be reached to remove its copy — also press Disconnect in the " +
-            "chat's Apps settings there.",
+        message: "Disconnected — your delivery key was deleted here AND removed from OpenChat. Next time an " +
+          "action is proposed in a chat, OpenChat will offer to reconnect.",
       });
     } catch (e) {
       setDisconnect({ kind: "err", message: (e as Error).message });
@@ -335,17 +317,20 @@ export function ActionInboxSettings({ children }: { children?: ReactNode }) {
         </h3>
         <p className="muted small">
           OpenChat delivers <em>your</em> confirmed actions encrypted to a key only your IOU account holds.
-          When OpenChat shows you a 6-digit code, enter it here to connect them — once per account, ever.
+          When OpenChat shows you a secure claim token, paste it here to connect them — once per account, ever.
         </p>
         <div className="row" style={{ gap: 8, flexWrap: "wrap", alignItems: "center" }}>
           <input
             ref={codeInputRef}
-            placeholder="6-digit code"
+            placeholder="64-character claim token"
             value={linkCode}
             onChange={(e) => setLinkCode(e.target.value)}
-            inputMode="numeric"
-            maxLength={6}
-            style={{ flex: "0 1 140px", fontFamily: "monospace", letterSpacing: "0.2em" }}
+            inputMode="text"
+            autoCapitalize="none"
+            autoCorrect="off"
+            spellCheck={false}
+            maxLength={OPENCHAT_CLAIM_TOKEN_HEX_LENGTH}
+            style={{ flex: "1 1 360px", fontFamily: "monospace", letterSpacing: "0.04em" }}
           />
           <button
             type="button"
@@ -411,7 +396,7 @@ export function ActionInboxSettings({ children }: { children?: ReactNode }) {
             <p className="muted small">
               <strong>Link to OpenChat</strong> registers the app manifest in one tap (admin only — no
               key involved: delivery uses per-user keys, and the manifest re-syncs automatically on
-              Connect, on type edits, and on app load). The consumer public key below is
+              Connect and on app load). The consumer public key below is
               canister-backed and cached on this device; <em>Copy public key</em> stays for debugging
               and legacy setups:
             </p>

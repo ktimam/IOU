@@ -173,7 +173,7 @@ describe("Scenario 2 — father keeps two independent family sheets", () => {
 // ---------------------------------------------------------------------------
 // SCENARIO 3 — the ROUTING guarantee, end to end. Same father with two chats
 // and two sheets as Scenario 2, but here every draft arrives in ONE mixed inbox
-// tagged with its source chatKey (as the OpenChat action-inbox actually
+// tagged with its app-scoped chat handle (as the OpenChat action-inbox actually
 // delivers them). We route each draft with the REAL predicate SheetPage uses
 // (draftBelongsOnSheet), then compute each sheet's balance from ONLY the drafts
 // that routed to it. This proves "each message in a different chat heads to the
@@ -184,11 +184,11 @@ describe("Scenario 3 — one father, two chats, two sheets: drafts route correct
   const WIFE = "wife";
   const CHILD = "child";
 
-  // The father pinned each chat to its sheet (LinkChatPage → set_chat_sheet_link).
+  // The father pinned each app-scoped chat handle when importing a confirmed draft.
   const SHEET_WIFE = "aaaaaaaaaaaaaaaa";
   const SHEET_CHILD = "bbbbbbbbbbbbbbbb";
-  const CHAT_WIFE = "direct:wife-user-id";
-  const CHAT_CHILD = "direct:child-user-id";
+  const CHAT_WIFE = "A".repeat(43);
+  const CHAT_CHILD = "B".repeat(42) + "E";
   const links: ChatSheetLinks = { [CHAT_WIFE]: SHEET_WIFE, [CHAT_CHILD]: SHEET_CHILD };
 
   // One inbox draft: which chat it came from + who authored it + its payload.

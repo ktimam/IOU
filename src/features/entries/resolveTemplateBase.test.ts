@@ -1,10 +1,4 @@
-// resolveTemplateBase — the ONLY containment between a cross-account type name and this sheet.
-//
-// THE REPORT. "Reservation template is proposed in the child chat despite that there is no
-// Reservation type in the linked account." The mechanism is not a bug in one function: OpenChat holds
-// ONE manifest per app+user (no per-chat rule set), and ManifestTypesSync folds
-// loadAllSharedTemplates — EVERY account — into that single roster, so House's "Reservation" routes
-// in the child chat and arrives here as `raw.template = "Reservation"`.
+// Account-local template resolution after the public roster was removed.
 //
 // This file pins what happens next, because that half is the half that decides whether the user is
 // harmed. A name this account does not own must seed NOTHING: no 20% fee, no 1000 EGP fixed fee, no
@@ -12,12 +6,11 @@
 // observe — which is exactly how a foreign type could start quietly re-shaping entries without a
 // single suite going red. The fee/schedule damage is D8's damage arriving through a different door.
 //
-// NOT A FIX. The roster leak is deliberately left alone here (actionManifest.test.ts pins it as a
-// design trade-off). These tests pin the containment, so the day someone adds a chat→account gate,
-// the legitimate half below has to keep working.
+// These tests also pin legacy explicit-template containment while new drafts
+// are matched locally from message evidence.
 
 import { describe, it, expect } from "vitest";
-import { resolveTemplateBase } from "./resolveTemplateBase";
+import { matchTemplateForDraft, resolveTemplateBase } from "./resolveTemplateBase";
 import { templateToInitial } from "../templates/templateBase";
 import { extractTs } from "./draft";
 import type { TxnTemplate } from "../templates/TemplatesContext";
@@ -161,5 +154,52 @@ describe("resolveTemplateBase — the same-name collision the shared roster make
     expect(house.base?.currency).toBe("EGP");
     expect(house.base?.fee?.percent).toBe(20);
     expect(house.base?.schedule).toHaveLength(2);
+  });
+});
+
+describe("resolveTemplateBase private local keyword matching", () => {
+  it("matches message evidence against this account without a manifest template field", () => {
+    const raw = { amount: 1000, message: "Booked a reservation for 3 July" };
+    expect(resolveTemplateBase([HOUSE_RESERVATION], raw).base).toEqual(
+      templateToInitial(HOUSE_RESERVATION, extractTs(raw)),
+    );
+  });
+
+  it("cannot match a private type belonging only to another account", () => {
+    const raw = { amount: 1000, message: "Booked a reservation for 3 July" };
+    expect(resolveTemplateBase([CHILD_ALLOWANCE], raw)).toEqual({});
+  });
+
+  it("matches complete words rather than substrings", () => {
+    const rent = { ...HOUSE_RESERVATION, id: "rent", name: "Rent", keywords: ["rent"] };
+    expect(resolveTemplateBase([rent], { message: "parent paid" })).toEqual({});
+    expect(resolveTemplateBase([rent], { message: "rent paid" }).base).toBeDefined();
+  });
+
+  it("fails closed when two templates share a matching keyword", () => {
+    const a = { ...HOUSE_RESERVATION, id: "a", name: "A", keywords: ["booking"] };
+    const b = { ...HOUSE_RESERVATION, id: "b", name: "B", keywords: ["booking"] };
+    expect(resolveTemplateBase([a, b], { message: "booking paid" })).toEqual({});
+  });
+
+  it("exposes the same unique matcher to the private in-chat card", () => {
+    expect(
+      matchTemplateForDraft([CHILD_ALLOWANCE, HOUSE_RESERVATION], {
+        message: "Booked a reservation for 3 July",
+      })?.id,
+    ).toBe(HOUSE_RESERVATION.id);
+    expect(matchTemplateForDraft([CHILD_ALLOWANCE], { message: "reservation" })).toBeUndefined();
+  });
+
+  it("the shared matcher is word-boundary and ambiguity safe", () => {
+    const rent = { ...HOUSE_RESERVATION, id: "rent", name: "Rent", keywords: ["rent"] };
+    expect(matchTemplateForDraft([rent], { message: "parent paid" })).toBeUndefined();
+    expect(matchTemplateForDraft([rent], { message: "rent paid" })?.id).toBe("rent");
+    expect(
+      matchTemplateForDraft(
+        [rent, { ...rent, id: "rent-2", name: "Other rent" }],
+        { message: "rent paid" },
+      ),
+    ).toBeUndefined();
   });
 });

@@ -2,9 +2,10 @@
 //
 // Used by: NewPair (auto-create the first sheet), NewSheet (manual new
 // sheet), and CloseSheetButton (rotate to a fresh sheet on archive). Each
-// generates a fresh K_sheet, wraps it for the member(s), creates the sheet
-// (optionally with an E2E-encrypted name), and returns both so the caller
-// can cache K_sheet and publish account/member names.
+// In dev it generates and wraps a fresh K_sheet before creation. In production
+// it creates the sheet first, derives the authoritative id-bound vetKD key,
+// then stores any encrypted name. Both paths return the same public result so
+// callers can cache K_sheet and publish account/member names.
 
 import type { Identity } from "@dfinity/agent";
 import {
@@ -14,8 +15,13 @@ import {
   wrapSheetKeyTagged,
   encryptName,
   importPublicKeyB64Wrap,
-  isProdVetkd,
 } from "../crypto/devVetkd";
+import {
+  isProdVetkd,
+  prepareProdSheetKey,
+  deriveProdSheetKeyWithRetry,
+  type ProdSheetKeyContext,
+} from "../crypto/prodVetkd";
 import { unwrap } from "./useActor";
 
 const ANON = "2vxsx-fae";
@@ -50,11 +56,49 @@ export type CreateSheetOpts = {
   name?: string;
 };
 
+type CreateSheetRuntime = {
+  isProdVetkd: () => boolean;
+  prepareProdSheetKey: (actor: any) => Promise<ProdSheetKeyContext>;
+  deriveProdSheetKeyWithRetry: (
+    actor: any,
+    sheetId: string,
+    prepared: ProdSheetKeyContext,
+  ) => Promise<Uint8Array>;
+};
+
+const DEFAULT_CREATE_SHEET_RUNTIME: CreateSheetRuntime = {
+  isProdVetkd,
+  prepareProdSheetKey,
+  deriveProdSheetKeyWithRetry,
+};
+
+/**
+ * create_sheet succeeded, so callers must open the returned sheet instead of
+ * issuing another create. SheetKeyContext will retry derivation on that page.
+ */
+export class SheetCreatedSetupError extends Error {
+  constructor(
+    readonly sheet: any,
+    readonly K_sheet: Uint8Array | undefined,
+    readonly stage: "key-derivation" | "name",
+    cause: unknown,
+  ) {
+    super(
+      stage === "key-derivation"
+        ? "The sheet was created, but its encryption key could not be loaded. Opening the existing sheet to retry."
+        : "The sheet was created, but its encrypted name could not be saved. Opening the existing sheet.",
+      { cause },
+    );
+    this.name = "SheetCreatedSetupError";
+  }
+}
+
 /** Create a sheet for a pair. Returns the new sheet + its K_sheet. */
 export async function createSheetForPair(
   actor: any,
   identity: Identity,
   opts: CreateSheetOpts,
+  runtime: CreateSheetRuntime = DEFAULT_CREATE_SHEET_RUNTIME,
 ): Promise<{ sheet: any; K_sheet: Uint8Array }> {
   const pair = unwrap(await actor.get_pair(opts.pairId)) as any;
   if (!pair) throw new Error("Pair not found or not a member.");
@@ -66,9 +110,12 @@ export async function createSheetForPair(
   const memberBText = asText(memberB);
   const isSolo = memberBText === "" || memberBText === ANON;
 
-  const myPrincipal = identity.getPrincipal().toText();
-  const myKp = await deriveUserKeypair(myPrincipal);
-  const K_sheet = newSheetKey();
+  const prod = runtime.isProdVetkd();
+  // Validate this session's ephemeral transport key and the canister's master
+  // key before create_sheet. The returned sheet id is the only input unavailable
+  // here.
+  const prepared = prod ? await runtime.prepareProdSheetKey(actor) : undefined;
+  let K_sheet: Uint8Array | undefined;
 
   // Wrap K_sheet for both member slots so each member can unwrap THEIR slot.
   //
@@ -82,16 +129,22 @@ export async function createSheetForPair(
   // member_b (filled by accept_invite when a partner joins).
   //
   // Prod (vetkd): the wrapped blobs are unused (the IC re-derives K_sheet per
-  // member); keep a self-wrapped placeholder so create_sheet's non-empty
-  // wrapped_key_a guard passes.
+  // member); use validated public transport material as the non-empty
+  // wrapped_key_a placeholder.
   let wrapA: Uint8Array;
   let wrapB: Uint8Array;
-  if (isProdVetkd()) {
-    wrapA = await wrapSheetKey(K_sheet, myKp.publicKey, myKp.privateKey);
-    wrapB = isSolo
-      ? new Uint8Array(0)
-      : await wrapSheetKey(K_sheet, myKp.publicKey, myKp.privateKey);
+  if (prod) {
+    // These blobs are a legacy/dev storage field. Production authorization is
+    // sheet membership and K_sheet is derived from the sheet id. Reuse the
+    // validated public transport material as a non-secret placeholder rather
+    // than wrapping a disposable random key.
+    const placeholder = prepared!.transport.publicKey;
+    wrapA = placeholder;
+    wrapB = isSolo ? new Uint8Array(0) : placeholder;
   } else {
+    const myPrincipal = identity.getPrincipal().toText();
+    const myKp = await deriveUserKeypair(myPrincipal);
+    K_sheet = newSheetKey();
     await registerMyWrapPubkey(actor, myKp.publicKeyB64);
     const selfWrap = await wrapSheetKey(K_sheet, myKp.publicKey, myKp.privateKey);
     if (isSolo) {
@@ -119,8 +172,10 @@ export async function createSheetForPair(
 
   let encBytes: number[] | null = null;
   let ivBytes: number[] | null = null;
-  if (opts.name && opts.name.trim()) {
-    const r = await encryptName(K_sheet, opts.name.trim());
+  // The authoritative production key contains the new sheet id, so production
+  // names are encrypted only after create_sheet returns. Dev remains atomic.
+  if (!prod && opts.name && opts.name.trim()) {
+    const r = await encryptName(K_sheet!, opts.name.trim());
     encBytes = r.enc;
     ivBytes = r.iv;
   }
@@ -133,7 +188,25 @@ export async function createSheetForPair(
     name_enc: encBytes ? [encBytes] : [],
     name_iv: ivBytes ? [ivBytes] : [],
   });
-  return { sheet, K_sheet };
+
+  if (prod) {
+    try {
+      K_sheet = await runtime.deriveProdSheetKeyWithRetry(actor, sheet.id, prepared!);
+    } catch (error) {
+      // create_sheet is never retried after success. Callers open this exact
+      // sheet and the shared read path retries its key derivation there.
+      throw new SheetCreatedSetupError(sheet, undefined, "key-derivation", error);
+    }
+    if (opts.name && opts.name.trim()) {
+      try {
+        const name = await encryptName(K_sheet, opts.name.trim());
+        await actor.set_sheet_name(sheet.id, name.enc, name.iv);
+      } catch (error) {
+        throw new SheetCreatedSetupError(sheet, K_sheet, "name", error);
+      }
+    }
+  }
+  return { sheet, K_sheet: K_sheet! };
 }
 
 /**

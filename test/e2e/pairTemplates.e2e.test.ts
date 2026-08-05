@@ -446,7 +446,11 @@ describeE2E("IOU account-scoped transaction types (pair template slots)", () => 
     // Rotate: close the sheet, start a new one under a fresh K2 (what
     // CloseSheetButton does), then run the production rotation helper for
     // A's own slot.
-    await A.actor.close_sheet(sheetId, []);
+    await A.actor.close_sheet_encrypted(sheetId, {
+      entry_key: new Uint8Array(32),
+      ciphertext: new Uint8Array(16),
+      iv: new Uint8Array(12),
+    });
     const K2 = newSheetKey();
     await A.actor.create_sheet({
       pair_id: pairId,

@@ -65,7 +65,11 @@ describeE2E("Leave-time key reads — creator leaves, promoted member still read
     // A pair allows only ONE active sheet, so rotate: close sheet1 (now archived but still readable),
     // then A creates sheet2 as the new active sheet. A can't self-wrap for B (no B private key), so
     // B's slot is a TAGGED cross-wrap embedding A's pubkey.
-    await A.actor.close_sheet(sheet1, []);
+    await A.actor.close_sheet_encrypted(sheet1, {
+      entry_key: new Uint8Array(32),
+      ciphertext: new Uint8Array(16),
+      iv: new Uint8Array(12),
+    });
     K2 = newSheetKey();
     const wrapA2 = await wrapSheetKey(K2, A.kp.publicKey, A.kp.privateKey);
     const crossB2 = await wrapSheetKeyTagged(K2, B.kp.publicKey, A.kp.privateKey, A.kp.publicKeyB64);

@@ -1,35 +1,34 @@
 // /openchat/card — IOU's OWN app-rendered confirmable card.
 //
-// OpenChat embeds this page as a storage-partitioned iframe inside the chat
-// bubble (surface kind "card", display "sheet"). Because the frame is
-// partitioned by the OpenChat host origin it sees NO IOU session — so this page
-// deliberately renders OUTSIDE every auth/session provider (see App.tsx) and
-// never calls the IOU canister or reads the user's identity. It only RENDERS an
-// editable card (prefilled from the extraction handed over the postMessage
-// bridge) and COLLECTS the edited values, handing them back to the host, which
-// deposits them (Phase 2/3). See fork-notes/08-app-rendered-cards.md.
+// OpenChat embeds this page as an opaque, credentialless sandboxed iframe.
+// The page has no IOU browser session or user identity. After an explicit
+// host-side load gesture, it redeems a short-lived capability bound to this
+// viewer, card, app revision, and iframe recipient key. Only the linked
+// account's encrypted type roster is released and decrypted in iframe memory.
 //
-// Bridge (all pure-built in cardBridge.ts, all posted to window.parent):
-//   on mount        → { type: "oc:card:ready" }
-//   height changes  → { type: "oc:card:resize", height }
-//   "Add to IOU"    → { type: "oc:card:confirm", payload: <EntryDraft> }
-//   "Cancel"        → { type: "oc:card:cancel" }
-// It accepts only { type: "oc:card:init", version: 1, data, context } (parseInit
-// ignores everything else — devtools/HMR/foreign frames).
+// Every bridge message uses protocol v2 and a fresh per-document nonce. A
+// selected private type leaves the iframe only as an encrypted template_ref
+// bound to the sheet, chat, message, and entry row.
 
-import { useCallback, useEffect, useId, useMemo, useRef, useState, type CSSProperties } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
 import type { Direction } from "../entries/types";
+import { matchTemplateForDraft } from "../entries/resolveTemplateBase";
 import { orderedCurrencies } from "../settings/currencies";
+import type { TxnTemplate } from "../templates/TemplatesContext";
 import { IOU_ICON_DATA_URI } from "./actionManifest";
 import { fetchCardCurrency } from "./cardCurrency";
 import {
+  parseBootstrap,
+  cardParentTargetOrigin,
   parseInit,
   parseBusy,
+  parsePrivateContextRequest,
   initToFormState,
   initEntries,
   buildConfirmPayload,
   buildMultiConfirmPayload,
   buildReady,
+  buildPrivateContextReady,
   buildResize,
   buildConfirm,
   buildCancel,
@@ -37,6 +36,17 @@ import {
   type CardInitContext,
   type CardTheme,
 } from "./cardBridge";
+import {
+  cardContextMatchesInit,
+  createCardTransportSession,
+  destroyCardTransportSession,
+  destroyLoadedCardContext,
+  loadCardPrivateContext,
+  type AuthoritativeCardContext,
+  type CardTransportSession,
+  type LoadedCardPrivateContext,
+} from "./cardPrivateContext";
+import { encryptTemplateRef, type TemplateRefContext } from "./templateRef";
 
 // Plain-language direction labels (same vocabulary the OC-rendered card used, so
 // a human catches an inversion before confirming).
@@ -52,6 +62,33 @@ const KIND_LABELS: Record<"iou" | "settlement", string> = {
   iou: "IOU",
   settlement: "Settlement",
 };
+
+export function templateRefContextForCard(
+  authoritative: AuthoritativeCardContext,
+  entryIndex: number,
+): TemplateRefContext {
+  return {
+    sheetId: authoritative.sheetId,
+    contextVersion: authoritative.contextVersion,
+    appSubject: authoritative.appSubject,
+    chatHandle: authoritative.chatHandle,
+    messageHandle: authoritative.messageHandle,
+    appId: authoritative.appId,
+    appRevision: authoritative.appRevision,
+    actionId: authoritative.actionId,
+    entryIndex,
+  };
+}
+
+function withAutoType(
+  state: CardFormState,
+  raw: unknown,
+  templates: TxnTemplate[],
+): CardFormState {
+  if (state.templateId) return state;
+  const matched = matchTemplateForDraft(templates, raw);
+  return matched ? { ...state, templateId: matched.id } : state;
+}
 
 
 
@@ -92,7 +129,7 @@ const THEME_VARS: Record<CardTheme, Record<string, string>> = {
 
 export function OpenChatCardPage() {
   const rootRef = useRef<HTMLDivElement>(null);
-  const [ctx, setCtx] = useState<CardInitContext>({ theme: "dark", readonly: false });
+  const [ctx, setCtx] = useState<CardInitContext | null>(null);
   const [form, setForm] = useState<CardFormState>(() => initToFormState({}));
   // MULTI mode: a non-null list of per-entry form states (initEntries detected data.entries).
   // null → SINGLE mode, which renders exactly today's one-entry UI from `form`.
@@ -108,6 +145,17 @@ export function OpenChatCardPage() {
   const [appCurrency, setAppCurrency] = useState<string | undefined>(undefined);
   // Mirror for the message handler, which closes over state from its mount-time render.
   const appCurrencyRef = useRef<string | undefined>(undefined);
+  const frameNonceRef = useRef<string | null>(null);
+  const parentTargetOriginRef = useRef<string | null>(null);
+  const initializedNonceRef = useRef<string | null>(null);
+  const transportRef = useRef<CardTransportSession>();
+  const privateContextRef = useRef<LoadedCardPrivateContext>();
+  const privateCapabilityRef = useRef<string>();
+  const privateInitContextRef = useRef<CardInitContext>();
+  const [templates, setTemplates] = useState<TxnTemplate[]>([]);
+  const [typesState, setTypesState] = useState<
+    { kind: "waiting" | "loading" | "ready" } | { kind: "error"; message: string }
+  >({ kind: "waiting" });
 
   useEffect(() => {
     let cancelled = false;
@@ -122,50 +170,194 @@ export function OpenChatCardPage() {
   }, []);
 
   const post = useCallback((msg: unknown) => {
-    // Post to the embedder. targetOrigin "*" per the contract — the HOST
-    // origin-checks inbound messages; this frame carries no secret to leak.
-    // When opened standalone (window.parent === window) this is a harmless
-    // no-op self-post.
+    // Use the exact parent origin learned from its nonce-bound bootstrap.
+    // Opaque/custom-scheme parent origins serialize as "null" and require the
+    // wildcard fallback; exact WindowProxy + frame nonce remain mandatory.
+    const targetOrigin = parentTargetOriginRef.current;
+    if (!targetOrigin) return;
     try {
-      window.parent?.postMessage(msg, "*");
+      window.parent?.postMessage(msg, targetOrigin);
     } catch {
       /* cross-origin post can throw in exotic sandboxes — non-fatal */
     }
   }, []);
 
-  // Announce readiness once; accept init (and re-inits) + the busy signal from the host.
+  // Bootstrap establishes one opaque iframe document. A transport key is created only after the
+  // host's separate, user-approved private-context request. Capability results are discarded if
+  // navigation/bootstrap rotates the nonce while an await runs.
   useEffect(() => {
+    let disposed = false;
+
+    const resetPrivateState = () => {
+      destroyLoadedCardContext(privateContextRef.current);
+      privateContextRef.current = undefined;
+      privateCapabilityRef.current = undefined;
+      privateInitContextRef.current = undefined;
+      setTemplates([]);
+      setTypesState({ kind: "waiting" });
+    };
+
     function onMessage(event: MessageEvent) {
       // Only accept messages from our EMBEDDER (the OpenChat host). A co-resident sibling frame in the
       // same tab has its own window as event.source — never window.parent — so this rejects a forged
       // oc:card:init (overwriting the values the user is about to confirm) or oc:card:busy (freezing/
       // unlocking the buttons) injected sideways. Standalone (parent === self) still self-delivers.
       if (event.source !== window.parent) return;
+      const bootstrap = parseBootstrap(event.data);
+      if (bootstrap) {
+        const targetOrigin = cardParentTargetOrigin(event.origin);
+        if (
+          frameNonceRef.current !== bootstrap.frameNonce ||
+          parentTargetOriginRef.current !== targetOrigin
+        ) {
+          initializedNonceRef.current = null;
+          frameNonceRef.current = bootstrap.frameNonce;
+          parentTargetOriginRef.current = targetOrigin;
+          destroyCardTransportSession(transportRef.current);
+          transportRef.current = undefined;
+          resetPrivateState();
+          setCtx(null);
+          setPhase("idle");
+        }
+        post(buildReady(bootstrap.frameNonce));
+        return;
+      }
+      const frameNonce = frameNonceRef.current;
+      if (!frameNonce) return;
+      if (parsePrivateContextRequest(event.data, frameNonce)) {
+        try {
+          const session = transportRef.current ?? createCardTransportSession();
+          transportRef.current = session;
+          post(buildPrivateContextReady(frameNonce, session.publicKeyBase64Url));
+        } catch {
+          setTypesState({ kind: "error", message: "Could not create a private card session." });
+        }
+        return;
+      }
       // Progress signal: the host is (or finished) round-tripping our confirm/cancel. Drives the
       // in-frame button lock + spinner. busy=false clears the phase; busy=true keeps it (the click
       // already set which action), defaulting to "confirm" if somehow unset.
-      const busyMsg = parseBusy(event.data);
+      const busyMsg = parseBusy(event.data, frameNonce);
       if (busyMsg) {
         setPhase((p) => (busyMsg.busy ? (p === "idle" ? "confirm" : p) : "idle"));
         return;
       }
-      const parsed = parseInit(event.data);
+      const parsed = parseInit(event.data, frameNonce);
       if (!parsed) return; // ignore devtools / HMR / foreign messages
       setCtx(parsed.context);
-      // Seed with the app card currency when it is already known (init usually arrives first, so the
-      // effect below adopts it on arrival instead).
-      const seed = appCurrencyRef.current ?? "";
-      const entries = initEntries(parsed.data, seed);
-      if (entries) {
-        setMulti(entries); // MULTI: render N editable entry blocks
-      } else {
-        setMulti(null); // SINGLE: today's one-entry UI
-        setForm(initToFormState(parsed.data, seed));
+      if (initializedNonceRef.current !== frameNonce) {
+        initializedNonceRef.current = frameNonce;
+        // Seed public form data only once. Host re-init updates theme/readonly/private authority and
+        // must never overwrite edits the viewer has already made in the isolated frame.
+        const seed = appCurrencyRef.current ?? "";
+        const entries = initEntries(parsed.data, seed);
+        if (entries) {
+          setMulti(entries);
+        } else {
+          setMulti(null);
+          setForm(initToFormState(parsed.data, seed));
+        }
       }
+
+      const privateGrant = parsed.context.privateContext;
+      const session = transportRef.current;
+      if (!privateGrant) {
+        if (privateCapabilityRef.current || privateContextRef.current) resetPrivateState();
+        return;
+      }
+      const capability = privateGrant.capability;
+      privateInitContextRef.current = parsed.context;
+      if (!session) {
+        setTypesState({
+          kind: "error",
+          message: "Private card context was not requested for this frame.",
+        });
+        return;
+      }
+      if (privateCapabilityRef.current === capability) {
+        const loaded = privateContextRef.current;
+        if (loaded && !cardContextMatchesInit(loaded.authoritative, parsed.context)) {
+          resetPrivateState();
+          setTypesState({ kind: "error", message: "Private card context did not match this card." });
+        }
+        return;
+      }
+      destroyLoadedCardContext(privateContextRef.current);
+      privateContextRef.current = undefined;
+      privateCapabilityRef.current = capability;
+      setTemplates([]);
+      setTypesState({ kind: "loading" });
+      const capturedNonce = frameNonce;
+      void loadCardPrivateContext(capability, session)
+        .then((loaded) => {
+          if (
+            disposed ||
+            frameNonceRef.current !== capturedNonce ||
+            transportRef.current !== session ||
+            privateCapabilityRef.current !== capability ||
+            !cardContextMatchesInit(
+              loaded.authoritative,
+              privateInitContextRef.current ?? parsed.context,
+            )
+          ) {
+            destroyLoadedCardContext(loaded);
+            if (
+              !disposed &&
+              frameNonceRef.current === capturedNonce &&
+              privateCapabilityRef.current === capability
+            ) {
+              privateCapabilityRef.current = undefined;
+              privateInitContextRef.current = undefined;
+              setTypesState({ kind: "error", message: "Private card context did not match this card." });
+            }
+            return;
+          }
+          destroyLoadedCardContext(privateContextRef.current);
+          privateContextRef.current = loaded;
+          setTemplates(loaded.templates);
+          setTypesState({ kind: "ready" });
+
+          const rawEntries = Array.isArray(parsed.data.entries) ? parsed.data.entries : null;
+          if (rawEntries && rawEntries.length > 0) {
+            setMulti((current) =>
+              current
+                ? current.map((state, index) =>
+                    withAutoType(state, rawEntries[index] ?? {}, loaded.templates),
+                  )
+                : current,
+            );
+          } else {
+            setForm((current) => withAutoType(current, parsed.data, loaded.templates));
+          }
+        })
+        .catch((error) => {
+          if (
+            disposed ||
+            frameNonceRef.current !== capturedNonce ||
+            privateCapabilityRef.current !== capability
+          ) return;
+          privateCapabilityRef.current = undefined;
+          privateInitContextRef.current = undefined;
+          setTypesState({
+            kind: "error",
+            message: error instanceof Error ? error.message : "Account types are unavailable.",
+          });
+        });
     }
     window.addEventListener("message", onMessage);
-    post(buildReady());
-    return () => window.removeEventListener("message", onMessage);
+    return () => {
+      disposed = true;
+      window.removeEventListener("message", onMessage);
+      destroyLoadedCardContext(privateContextRef.current);
+      privateContextRef.current = undefined;
+      privateCapabilityRef.current = undefined;
+      privateInitContextRef.current = undefined;
+      destroyCardTransportSession(transportRef.current);
+      transportRef.current = undefined;
+      frameNonceRef.current = null;
+      parentTargetOriginRef.current = null;
+      initializedNonceRef.current = null;
+    };
   }, [post]);
 
   // The fetch usually lands AFTER init, so adopt it wherever the card is still deferring
@@ -189,7 +381,8 @@ export function OpenChatCardPage() {
       const h = Math.ceil(el.getBoundingClientRect().height);
       if (h !== last && h > 0) {
         last = h;
-        post(buildResize(h));
+        const frameNonce = frameNonceRef.current;
+        if (frameNonce) post(buildResize(frameNonce, h));
       }
     });
     ro.observe(el);
@@ -210,15 +403,55 @@ export function OpenChatCardPage() {
     setForm((f) => ({ ...f, [key]: value }));
 
 
-  const onConfirm = () => {
-    if (!amountValid || submitting) return;
+  const encryptedTypeRef = async (
+    state: CardFormState,
+    entryIndex: number,
+    captured: LoadedCardPrivateContext,
+  ): Promise<string | undefined> => {
+    const templateId = state.templateId;
+    if (!templateId) return undefined;
+    if (!captured.templates.some((template) => template.id === templateId)) {
+      throw new Error("The selected account type is no longer available.");
+    }
+    return encryptTemplateRef(
+      templateId,
+      captured.sheetKey,
+      templateRefContextForCard(captured.authoritative, entryIndex),
+    );
+  };
+
+  const onConfirm = async () => {
+    const frameNonce = frameNonceRef.current;
+    if (!amountValid || submitting || !frameNonce || !ctx) return;
     setPhase("confirm"); // instant feedback; the host's busy signal keeps/clears it
-    post(buildConfirm(buildConfirmPayload(form)));
+    const captured = privateContextRef.current;
+    try {
+      const typeRef = form.templateId
+        ? captured
+          ? await encryptedTypeRef(form, 0, captured)
+          : (() => { throw new Error("Account types are not ready."); })()
+        : undefined;
+      if (
+        frameNonceRef.current !== frameNonce ||
+        (captured && privateContextRef.current !== captured)
+      ) {
+        setPhase("idle");
+        return;
+      }
+      post(buildConfirm(frameNonce, buildConfirmPayload(form, typeRef)));
+    } catch (error) {
+      setPhase("idle");
+      setTypesState({
+        kind: "error",
+        message: error instanceof Error ? error.message : "Could not protect the selected account type.",
+      });
+    }
   };
   const onCancel = () => {
-    if (submitting) return;
+    const frameNonce = frameNonceRef.current;
+    if (submitting || !frameNonce) return;
     setPhase("cancel");
-    post(buildCancel());
+    post(buildCancel(frameNonce));
   };
 
   // MULTI-mode edit + confirm. Edits patch one entry in the list; the single "Add all" button gates
@@ -229,14 +462,38 @@ export function OpenChatCardPage() {
     [],
   );
   const multiAllValid = !!multi && multi.length > 0 && multi.every(isAmountValid);
-  const onConfirmAll = () => {
-    if (!multi || !multiAllValid || submitting) return;
+  const onConfirmAll = async () => {
+    const frameNonce = frameNonceRef.current;
+    if (!multi || !multiAllValid || submitting || !frameNonce || !ctx) return;
     setPhase("confirm");
-    post(buildConfirm(buildMultiConfirmPayload(multi)));
+    const captured = privateContextRef.current;
+    try {
+      if (multi.some((entry) => entry.templateId) && !captured) {
+        throw new Error("Account types are not ready.");
+      }
+      const refs = captured
+        ? await Promise.all(multi.map((entry, index) => encryptedTypeRef(entry, index, captured)))
+        : [];
+      if (
+        frameNonceRef.current !== frameNonce ||
+        (captured && privateContextRef.current !== captured)
+      ) {
+        setPhase("idle");
+        return;
+      }
+      post(buildConfirm(frameNonce, buildMultiConfirmPayload(multi, refs)));
+    } catch (error) {
+      setPhase("idle");
+      setTypesState({
+        kind: "error",
+        message: error instanceof Error ? error.message : "Could not protect the selected account types.",
+      });
+    }
   };
 
-  const { readonly } = ctx;
-  const themeVars = THEME_VARS[ctx.theme] as CSSProperties;
+  const readonly = ctx?.readonly ?? true;
+  const theme = ctx?.theme ?? "dark";
+  const themeVars = THEME_VARS[theme] as CSSProperties;
 
   // Header subtitle. SINGLE mode keeps today's exact copy; MULTI mode names the entry count.
   const subtitle = readonly
@@ -279,7 +536,7 @@ export function OpenChatCardPage() {
   }, [themeVars]);
 
   return (
-    <div ref={rootRef} style={rootStyle} data-theme={ctx.theme}>
+    <div ref={rootRef} style={rootStyle} data-theme={theme}>
       <div
         className="card"
         style={{
@@ -301,6 +558,20 @@ export function OpenChatCardPage() {
           </div>
         </div>
 
+        {typesState.kind === "loading" && (
+          <div style={{ fontSize: "0.75rem", color: "var(--text-dim)", marginTop: 8 }}>
+            Loading this account's saved types…
+          </div>
+        )}
+        {typesState.kind === "error" && (
+          <div
+            role="status"
+            style={{ fontSize: "0.75rem", color: "var(--text-dim)", marginTop: 8 }}
+          >
+            {typesState.message}
+          </div>
+        )}
+
         {multi ? (
           readonly ? (
             // MULTI + readonly: every entry rendered read-only, numbered, no buttons.
@@ -308,7 +579,7 @@ export function OpenChatCardPage() {
               {multi.map((entry, i) => (
                 <div key={i} style={entryBlockStyle}>
                   <EntryHeading index={i} total={multi.length} />
-                  <ReadonlyView form={entry} />
+                  <ReadonlyView form={entry} templates={templates} />
                 </div>
               ))}
             </div>
@@ -322,7 +593,7 @@ export function OpenChatCardPage() {
                   total={multi.length}
                   entry={entry}
                   onChange={(k, v) => setEntry(i, k, v)}
-                  knownTemplates={knownTemplateNames(multi)}
+                  templates={templates}
                 />
               ))}
               {/* WRAP is load-bearing, not cosmetic. The host sizes this frame with `max-width: 100%`, so in a
@@ -367,7 +638,7 @@ export function OpenChatCardPage() {
             </div>
           )
         ) : readonly ? (
-          <ReadonlyView form={form} />
+          <ReadonlyView form={form} templates={templates} />
         ) : (
           <div style={{ display: "flex", flexDirection: "column", gap: 8, marginTop: 10 }}>
             {/* Three to a wrapping row instead of two-then-one: at card width they sit on one line,
@@ -420,7 +691,7 @@ export function OpenChatCardPage() {
             </div>
 
             <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
-              <TypeFields form={form} onChange={set} knownTemplates={knownTemplateNames([form])} />
+              <TypeFields form={form} onChange={set} templates={templates} />
             </div>
 
             <Field label="Note">
@@ -575,38 +846,24 @@ function EntryHeading({ index, total }: { index: number; total: number }) {
   );
 }
 
-// The two DECLARED card rows the classic OpenChat table used to draw, now editable alongside the
-// rest — but by two DIFFERENT mechanisms, because only one of them can have a picker.
-//
-// `kind` is a closed two-value enum, so it gets a real <select>. "Auto" (the "" state) is a genuine
-// choice, not a placeholder: it means the extraction named no kind and parseDraft should re-infer one
-// from the fee/schedule at import, which is what a card that never carried a kind should keep doing.
-//
-// `template` names one of the ACCOUNT's saved types, and that roster is unreachable from here — it
-// lives as an AES-GCM blob encrypted under the sheet key (lib.rs check_templates_blob), and this frame
-// is storage-partitioned with no IOU session and no way to identify its viewer, so it holds no key and
-// could not decrypt it even if it could fetch it. Hence a text field with a datalist of the names the
-// card ALREADY carries (its own, plus its sibling entries' in a multi card) — enough to re-pick or
-// copy across a routed type without typing it, and free text otherwise. A name matching nothing
-// yields no defaults at import (resolveTemplateBase returns undefined) — the same safe fallback as
-// leaving it blank, never a bad import.
-function TypeFields({
+// Transaction kind is a public closed enum. Account type is private: the
+// viewer-authorized roster is decrypted only inside this iframe, displayed by
+// name, and represented by an account-local id only in memory. Confirmation
+// encrypts that id before it crosses the bridge.
+export function TypeFields({
   form,
   onChange,
-  knownTemplates,
+  templates,
 }: {
   form: CardFormState;
   onChange: <K extends keyof CardFormState>(key: K, value: CardFormState[K]) => void;
-  knownTemplates: string[];
+  templates: TxnTemplate[];
 }) {
-  // One id per instance: a multi card renders this once per row, and a shared id would point every
-  // row's suggestions at the first row's datalist.
-  const listId = useId();
   return (
     <>
-      <Field label="Type" style={{ flex: "1 1 108px" }}>
+      <Field label="Transaction" style={{ flex: "1 1 108px" }}>
         <select
-          aria-label="Type"
+          aria-label="Transaction"
           value={form.kind}
           onChange={(e) => onChange("kind", e.target.value as CardFormState["kind"])}
           style={inputStyle}
@@ -616,38 +873,26 @@ function TypeFields({
           <option value="settlement">{KIND_LABELS.settlement}</option>
         </select>
       </Field>
-      <Field label="Template" style={{ flex: "1 1 128px" }}>
-        <input
-          type="text"
-          aria-label="Template"
-          value={form.template ?? ""}
-          onChange={(e) => onChange("template", e.target.value)}
-          placeholder="none"
-          list={knownTemplates.length > 0 ? listId : undefined}
+      <Field label="Account type" style={{ flex: "1 1 128px" }}>
+        <select
+          aria-label="Account type"
+          value={form.templateId ?? ""}
+          onChange={(e) => onChange("templateId", e.target.value || undefined)}
           style={inputStyle}
-        />
-        {knownTemplates.length > 0 && (
-          <datalist id={listId}>
-            {knownTemplates.map((t) => (
-              <option key={t} value={t} />
-            ))}
-          </datalist>
-        )}
+        >
+          <option value="">None</option>
+          {templates.map((template) => (
+            <option key={template.id} value={template.id}>
+              {template.name}
+            </option>
+          ))}
+        </select>
       </Field>
     </>
   );
 }
 
 /** Every saved-type name this card carries, deduped — the only suggestions it can offer (see TypeFields). */
-function knownTemplateNames(states: CardFormState[]): string[] {
-  const seen = new Set<string>();
-  for (const s of states) {
-    const t = (s.template ?? "").trim();
-    if (t !== "") seen.add(t);
-  }
-  return [...seen].sort((a, b) => a.localeCompare(b));
-}
-
 // One editable entry in MULTI mode: amount / currency / direction on one wrapping line, note below.
 // Reuses the single card's Field + inputStyle + DIRECTION_LABELS so styling and theming match
 // exactly. Purely presentational — edits flow up through onChange; no session/canister/identity use.
@@ -656,7 +901,7 @@ function EntryRow({
   total,
   entry,
   onChange,
-  knownTemplates,
+  templates,
 }: {
   index: number;
   total: number;
@@ -664,7 +909,7 @@ function EntryRow({
   onChange: <K extends keyof CardFormState>(key: K, value: CardFormState[K]) => void;
   // Pooled across ALL rows, not just this one: a message that routed one entry to a type usually
   // wants its siblings on the same one, and copying it should not mean retyping it.
-  knownTemplates: string[];
+  templates: TxnTemplate[];
 }) {
   const currencyOptions = useMemo(
     () => orderedCurrencies(entry.currency, [entry.currency]),
@@ -717,7 +962,7 @@ function EntryRow({
         </Field>
       </div>
       <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
-        <TypeFields form={entry} onChange={onChange} knownTemplates={knownTemplates} />
+        <TypeFields form={entry} onChange={onChange} templates={templates} />
       </div>
       <Field label="Note">
         <input
@@ -753,15 +998,21 @@ function Spinner() {
 
 // Read-only rendering (a consumed card, or the non-acting member): the same
 // values, no inputs, no buttons.
-function ReadonlyView({ form }: { form: CardFormState }) {
+export function ReadonlyView({
+  form,
+  templates,
+}: {
+  form: CardFormState;
+  templates: TxnTemplate[];
+}) {
   const rows: { label: string; value: string }[] = [
     { label: "Amount", value: form.amount ? `${form.amount} ${form.currency || "(your IOU default)"}` : "—" },
   ];
   // Between Currency and Direction, which is where the classic OC-rendered table put them — and, like
   // that renderer, only when they carry a value.
-  if (form.kind !== "") rows.push({ label: "Type", value: KIND_LABELS[form.kind] });
-  const template = (form.template ?? "").trim();
-  if (template !== "") rows.push({ label: "Template", value: template });
+  if (form.kind !== "") rows.push({ label: "Transaction", value: KIND_LABELS[form.kind] });
+  const template = templates.find((candidate) => candidate.id === form.templateId);
+  if (template) rows.push({ label: "Account type", value: template.name });
   rows.push({ label: "Direction", value: DIRECTION_LABELS[form.direction] });
   rows.push({ label: "Note", value: form.note || "—" });
   if (form.date) rows.push({ label: "Date", value: form.date });

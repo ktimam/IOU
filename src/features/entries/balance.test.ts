@@ -74,6 +74,25 @@ describe("portionsOf", () => {
     expect(ps.map((p) => p.amount_minor)).toEqual([33, 33, 34]);
     expect(ps.reduce((s, p) => s + p.amount_minor, 0)).toBe(100);
   });
+
+  it("never emits a negative final portion when rounded installments exhaust a tiny amount", () => {
+    const ps = portionsOf(
+      entry({
+        txn_type: "iou",
+        amount_minor: 2,
+        schedule: [
+          { due_ts: JUN1, percent: 25 },
+          { due_ts: JUN1 + DAY, percent: 25 },
+          { due_ts: JUN1 + 2 * DAY, percent: 25 },
+          { due_ts: JUN1 + 3 * DAY, percent: 25 },
+        ],
+      }),
+    );
+
+    expect(ps.map((portion) => portion.amount_minor)).toEqual([1, 1, 0, 0]);
+    expect(ps.every((portion) => portion.amount_minor >= 0)).toBe(true);
+    expect(ps.reduce((sum, portion) => sum + portion.amount_minor, 0)).toBe(2);
+  });
 });
 
 describe("portionsOf with a fee (deducted from the final due)", () => {
@@ -141,6 +160,32 @@ describe("portionsOf with a fee (deducted from the final due)", () => {
 });
 
 describe("portionsOf with a cross-currency fixed fee", () => {
+  it("does not create a second currency line for casing-only currency differences", () => {
+    const ps = portionsOf(
+      entry({
+        txn_type: "iou",
+        currency: "USD",
+        amount_minor: 700,
+        fee: {
+          percent: 20,
+          fixed_minor: 100,
+          fixed_currency: "usd",
+          gross_amount_minor: 1_000,
+        },
+        ts: JUN1,
+      }),
+    );
+
+    expect(ps).toEqual([
+      {
+        currency: "USD",
+        due_ts: JUN1,
+        amount_minor: 700,
+        direction: "credit",
+      },
+    ]);
+  });
+
   it("keeps the foreign fixed fee as its own opposite-direction line (entry amount unreduced)", () => {
     // IOU 1000 USD, fee 1000 EGP: the EGP fee doesn't touch the USD amount.
     const ps = portionsOf(

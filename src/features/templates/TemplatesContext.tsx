@@ -58,9 +58,8 @@ export type TxnTemplate = {
   fee_fixed_currency?: string;
   schedule?: TemplatePortion[]; // IOU default due schedule (relative)
   note?: string;
-  // Trigger words that route on-device extraction to this template's id: IOU folds them into the
-  // registered OpenChat manifest (a keyword_map on a `template` field), so a chat message matching
-  // one is classified as this type. Absent === not routable from chat.
+  // Private trigger words used only after the viewer-authorized account roster
+  // is decrypted locally. They are never published in the OpenChat manifest.
   keywords?: string[];
 };
 

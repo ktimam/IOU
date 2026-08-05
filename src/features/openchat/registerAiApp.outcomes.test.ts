@@ -1,6 +1,8 @@
-// Outcome decoding for the OpenChat registry client calls (register / claim /
-// revoke / getRegisteredInboxCanisterId) against a mocked user_index actor, plus
-// the exact revoke-challenge preimage layout. Complements registerAiApp.test.ts
+// Outcome decoding for the public OpenChat registry client calls (register /
+// getRegisteredInboxCanisterId) against a mocked user_index actor, plus local
+// claim-token normalization. Per-user claim/revoke runs browser → IOU backend
+// → authenticated C2C and is covered by disconnectOpenChat.test.ts + Rust.
+// Complements registerAiApp.test.ts
 // (which pins the manifest wire value + IDL encode).
 
 import { describe, it, expect, beforeEach, vi } from "vitest";
@@ -23,14 +25,14 @@ vi.mock("@dfinity/agent", async (importOriginal) => {
 
 import {
   registerAiApp,
-  claimAiAppLinkCode,
-  revokeAiAppUserKey,
   getRegisteredInboxCanisterId,
+  isValidOpenChatClaimToken,
+  normalizeOpenChatClaimToken,
 } from "./registerAiApp";
 
 const HOST = "http://127.0.0.1:8080";
 const UINDEX = "uzt4z-lp777-77774-qaabq-cai";
-const PEM = "-----BEGIN PUBLIC KEY-----\nMFkwEwYHKoZIzj0CAQ==\n-----END PUBLIC KEY-----\n";
+const CLAIM_TOKEN = "ab".repeat(32);
 
 beforeEach(() => {
   h.actor = {};
@@ -79,94 +81,28 @@ describe("registerAiApp — outcome decode + inbox pass-through", () => {
   });
 });
 
-describe("claimAiAppLinkCode — outcome decode", () => {
-  const call = () =>
-    claimAiAppLinkCode({ host: HOST, userIndexCanisterId: UINDEX, code: "123456", publicKeyPem: PEM });
-
-  it("maps each response variant", async () => {
-    h.actor = { claim_ai_app_link_code: () => ({ Success: null }) };
-    expect(await call()).toEqual({ kind: "success" });
-    h.actor = { claim_ai_app_link_code: () => ({ CodeNotFound: null }) };
-    expect(await call()).toEqual({ kind: "code_not_found" });
-    h.actor = { claim_ai_app_link_code: () => ({ CodeExpired: null }) };
-    expect(await call()).toEqual({ kind: "code_expired" });
-    h.actor = { claim_ai_app_link_code: () => ({ InvalidRequest: "bad code" }) };
-    expect(await call()).toEqual({ kind: "invalid_request", message: "bad code" });
-    h.actor = { claim_ai_app_link_code: () => ({ Error: [503, ["down"]] }) };
-    expect(await call()).toEqual({ kind: "oc_error", code: 503, message: "down" });
+describe("OpenChat claim-token validation", () => {
+  it("normalizes copy/pasted uppercase tokens and accepts exactly 32 bytes of hex", () => {
+    expect(normalizeOpenChatClaimToken(`  ${CLAIM_TOKEN.toUpperCase()}\n`)).toBe(
+      CLAIM_TOKEN,
+    );
+    expect(isValidOpenChatClaimToken(CLAIM_TOKEN)).toBe(true);
   });
 
-  it("forwards the code + public key to the canister", async () => {
-    let seen: { code: string; public_key: string } | undefined;
-    h.actor = {
-      claim_ai_app_link_code: (a) => {
-        seen = a as typeof seen;
-        return { Success: null };
-      },
-    };
-    await call();
-    expect(seen).toEqual({ code: "123456", public_key: PEM });
-  });
-});
-
-describe("revokeAiAppUserKey — outcome decode + challenge preimage", () => {
-  const DOMAIN = new TextEncoder().encode("oc-revoke-ai-app-user-key-v1");
-
-  it("signs the canonical challenge (domain ‖ userIndex ‖ pem ‖ ts LE) and decodes Success", async () => {
-    let preimage: Uint8Array | undefined;
-    let sentArgs: { public_key: string; signature: number[]; timestamp: bigint } | undefined;
-    h.actor = {
-      revoke_ai_app_user_key: (a) => {
-        sentArgs = a as typeof sentArgs;
-        return { Success: null };
-      },
-    };
-    const out = await revokeAiAppUserKey({
-      host: HOST,
-      userIndexCanisterId: UINDEX,
-      publicKeyPem: PEM,
-      sign: async (p) => {
-        preimage = p;
-        return new Uint8Array([1, 2, 3, 4]);
-      },
-    });
-    expect(out).toEqual({ kind: "success" });
-
-    // Reconstruct the expected preimage and compare each segment.
-    const idBytes = Principal.fromText(UINDEX).toUint8Array();
-    const pemBytes = new TextEncoder().encode(PEM);
-    const ts = sentArgs!.timestamp;
-    const tsLe = new Uint8Array(8);
-    let v = ts;
-    for (let i = 0; i < 8; i++) {
-      tsLe[i] = Number(v & 0xffn);
-      v >>= 8n;
-    }
-    const expected = new Uint8Array([...DOMAIN, ...idBytes, ...pemBytes, ...tsLe]);
-    expect(Array.from(preimage!)).toEqual(Array.from(expected));
-    // The signed timestamp and the wire timestamp must be the same value.
-    const tail = preimage!.slice(preimage!.length - 8);
-    expect(new DataView(tail.slice().buffer).getBigUint64(0, true)).toBe(ts);
-    expect(sentArgs!.public_key).toBe(PEM);
-    expect(sentArgs!.signature).toEqual([1, 2, 3, 4]);
-  });
-
-  it("maps KeyNotFound and Error", async () => {
-    h.actor = { revoke_ai_app_user_key: () => ({ KeyNotFound: null }) };
-    expect(
-      await revokeAiAppUserKey({ host: HOST, userIndexCanisterId: UINDEX, publicKeyPem: PEM, sign: async () => new Uint8Array(64) }),
-    ).toEqual({ kind: "key_not_found" });
-    h.actor = { revoke_ai_app_user_key: () => ({ Error: [401, ["nope"]] }) };
-    expect(
-      await revokeAiAppUserKey({ host: HOST, userIndexCanisterId: UINDEX, publicKeyPem: PEM, sign: async () => new Uint8Array(64) }),
-    ).toEqual({ kind: "oc_error", code: 401, message: "nope" });
-  });
+  it.each(["123456", "g".repeat(64), "a".repeat(63), "a".repeat(65)])(
+    "rejects malformed token %s locally",
+    (code) => {
+      expect(isValidOpenChatClaimToken(code)).toBe(false);
+    },
+  );
 });
 
 describe("getRegisteredInboxCanisterId — read the registered inbox", () => {
   const INBOX = "lc6ij-px777-77777-aaadq-cai";
   const APPCAN = "ll5dv-z7777-77777-aaaca-cai";
   const app = (name: string, inbox?: string, appCanister?: string) => ({
+    id: 7,
+    updated: 3n,
     manifest: {
       name,
       inbox_canister_id: inbox ? [Principal.fromText(inbox)] : [],

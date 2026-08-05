@@ -1,132 +1,142 @@
-// Adversarial ECIES + provenance coverage: wrong key, flipped ciphertext byte,
-// flipped ephemeral point, forged/other-key signature, tampered created_at, and
-// fingerprint-definition consistency. Complements actionInboxCrypto.test.ts
-// (which pins the Rust interop vector); here we PRODUCE envelopes via ecTestKit
-// so we can corrupt each field independently.
-
-import { describe, it, expect } from "vitest";
+import { describe, expect, it } from "vitest";
 import {
   decryptInboxEnvelope,
-  verifyOpenChatSignature,
-  keyFingerprint,
   fingerprintPublicKey,
-  signingPreimageV2,
+  keyFingerprint,
+  verifyOpenChatActionSignature,
+  type ActionSignatureContextV4,
 } from "./actionInboxCrypto";
-import { generateConsumerKeys, generateOcSigner, eciesEncrypt, buildStoredAction } from "./ecTestKit";
+import {
+  buildStoredAction,
+  generateConsumerKeys,
+  generateOcSigner,
+  TEST_INBOX_CANISTER_ID,
+  TEST_USER_INDEX_CANISTER_ID,
+  type StoredActionLike,
+} from "./ecTestKit";
 
-const PLAINTEXT = '{"context":{"chat":"group:aaaaa-aa","messageId":"7"},"payload":{"amount":20}}';
-const CREATED_AT = 1_750_000_000_123n;
+const CREATED_AT = 1_800_000_000_123n;
 
-function envOf(a: { ephemeral_public_key: number[]; ciphertext: number[] }) {
+function envOf(action: StoredActionLike) {
   return {
-    ephemeralPublicKey: Uint8Array.from(a.ephemeral_public_key),
-    ciphertext: Uint8Array.from(a.ciphertext),
+    ephemeralPublicKey: Uint8Array.from(action.ephemeral_public_key),
+    ciphertext: Uint8Array.from(action.ciphertext),
   };
 }
 
-describe("ECIES decrypt — happy path and negatives", () => {
-  it("round-trips a real signed+encrypted envelope (verify true, decrypt matches)", async () => {
-    const recipient = await generateConsumerKeys();
-    const signer = await generateOcSigner();
-    const a = await buildStoredAction({ id: 1n, createdAt: CREATED_AT, recipient, signer, plaintext: PLAINTEXT });
+function signatureContext(action: StoredActionLike): ActionSignatureContextV4 {
+  return {
+    keyId: Uint8Array.from(action.signing_key_id),
+    userIndexCanisterId: TEST_USER_INDEX_CANISTER_ID,
+    inboxCanisterId: TEST_INBOX_CANISTER_ID,
+    appId: action.app_id,
+    appRevision: action.app_revision,
+    actionId: action.action_id,
+    cardContextHash: Uint8Array.from(action.card_context_hash),
+    consumerKeyFingerprint: Uint8Array.from(action.consumer_key_fingerprint),
+    idempotencyKey: Uint8Array.from(action.idempotency_key),
+    payloadHash: Uint8Array.from(action.payload_hash),
+    acknowledgementSecretHash: Uint8Array.from(action.acknowledgement_secret_hash),
+    envelope: envOf(action),
+    createdAt: action.created_at,
+  };
+}
 
-    const env = envOf(a);
+function flipped(bytes: Uint8Array, index = 0): Uint8Array {
+  const copy = Uint8Array.from(bytes);
+  copy[index] ^= 1;
+  return copy;
+}
+
+describe("ECIES authenticated decryption negatives", () => {
+  it("rejects the wrong recipient, changed ciphertext, and changed ephemeral point", async () => {
+    const recipient = await generateConsumerKeys();
+    const other = await generateConsumerKeys();
+    const signer = await generateOcSigner();
+    const action = await buildStoredAction({ id: 1n, createdAt: CREATED_AT, recipient, signer });
+    await expect(decryptInboxEnvelope(envOf(action), other.privateKey)).rejects.toBeTruthy();
+
+    const changedCiphertext = envOf(action);
     await expect(
-      verifyOpenChatSignature(env, a.created_at, Uint8Array.from(a.oc_signature), signer.publicKeyPem),
-    ).resolves.toBe(true);
-    const pt = await decryptInboxEnvelope(env, recipient.privateKey);
-    expect(new TextDecoder().decode(pt)).toBe(PLAINTEXT);
-  });
+      decryptInboxEnvelope(
+        { ...changedCiphertext, ciphertext: flipped(changedCiphertext.ciphertext) },
+        recipient.privateKey,
+      ),
+    ).rejects.toBeTruthy();
 
-  it("rejects decryption with the WRONG recipient key (not addressed to us)", async () => {
-    const recipient = await generateConsumerKeys();
-    const attacker = await generateConsumerKeys();
-    const signer = await generateOcSigner();
-    const a = await buildStoredAction({ id: 1n, createdAt: CREATED_AT, recipient, signer, plaintext: PLAINTEXT });
-    // Decrypting someone else's deposit with our key fails (AES-GCM auth) — this is the "addressed-to-us" filter.
-    await expect(decryptInboxEnvelope(envOf(a), attacker.privateKey)).rejects.toBeTruthy();
-  });
-
-  it("rejects a flipped ciphertext byte (AES-GCM tag fails)", async () => {
-    const recipient = await generateConsumerKeys();
-    const signer = await generateOcSigner();
-    const a = await buildStoredAction({ id: 1n, createdAt: CREATED_AT, recipient, signer, plaintext: PLAINTEXT });
-    a.ciphertext[0] ^= 0x01;
-    await expect(decryptInboxEnvelope(envOf(a), recipient.privateKey)).rejects.toBeTruthy();
-  });
-
-  it("rejects a corrupted ephemeral public point", async () => {
-    const recipient = await generateConsumerKeys();
-    const signer = await generateOcSigner();
-    const a = await buildStoredAction({ id: 1n, createdAt: CREATED_AT, recipient, signer, plaintext: PLAINTEXT });
-    // Flip a byte in the middle of the SEC1 point → invalid point (import throws) or wrong shared secret.
-    a.ephemeral_public_key[20] ^= 0xff;
-    await expect(decryptInboxEnvelope(envOf(a), recipient.privateKey)).rejects.toBeTruthy();
+    const changedPoint = envOf(action);
+    await expect(
+      decryptInboxEnvelope(
+        { ...changedPoint, ephemeralPublicKey: flipped(changedPoint.ephemeralPublicKey, 20) },
+        recipient.privateKey,
+      ),
+    ).rejects.toBeTruthy();
   });
 });
 
-describe("provenance signature — negatives", () => {
-  it("rejects a flipped signature byte", async () => {
+describe("v4 provenance signature negatives", () => {
+  it("rejects every independently tampered authenticated deposit field", async () => {
     const recipient = await generateConsumerKeys();
     const signer = await generateOcSigner();
-    const a = await buildStoredAction({ id: 1n, createdAt: CREATED_AT, recipient, signer, plaintext: PLAINTEXT });
-    const sig = Uint8Array.from(a.oc_signature);
-    sig[0] ^= 0x01;
-    await expect(verifyOpenChatSignature(envOf(a), a.created_at, sig, signer.publicKeyPem)).resolves.toBe(false);
+    const action = await buildStoredAction({ id: 1n, createdAt: CREATED_AT, recipient, signer });
+    const base = signatureContext(action);
+    const cases: Array<[string, ActionSignatureContextV4]> = [
+      ["key id", { ...base, keyId: flipped(base.keyId) }],
+      ["UserIndex route", { ...base, userIndexCanisterId: TEST_INBOX_CANISTER_ID }],
+      ["inbox route", { ...base, inboxCanisterId: TEST_USER_INDEX_CANISTER_ID }],
+      ["app id", { ...base, appId: base.appId + 1 }],
+      ["app revision", { ...base, appRevision: base.appRevision + 1n }],
+      ["action id", { ...base, actionId: `${base.actionId}.changed` }],
+      ["private card context", { ...base, cardContextHash: flipped(base.cardContextHash) }],
+      ["recipient", { ...base, consumerKeyFingerprint: flipped(base.consumerKeyFingerprint) }],
+      ["replay identity", { ...base, idempotencyKey: flipped(base.idempotencyKey) }],
+      ["payload", { ...base, payloadHash: flipped(base.payloadHash) }],
+      ["acknowledgement", { ...base, acknowledgementSecretHash: flipped(base.acknowledgementSecretHash) }],
+      [
+        "ephemeral point",
+        { ...base, envelope: { ...base.envelope, ephemeralPublicKey: flipped(base.envelope.ephemeralPublicKey, 20) } },
+      ],
+      ["ciphertext", { ...base, envelope: { ...base.envelope, ciphertext: flipped(base.envelope.ciphertext) } }],
+      ["created_at", { ...base, createdAt: base.createdAt + 1n }],
+    ];
+    for (const [name, changed] of cases) {
+      await expect(
+        verifyOpenChatActionSignature(changed, Uint8Array.from(action.oc_signature), signer.publicKeyPem),
+        name,
+      ).resolves.toBe(false);
+    }
   });
 
-  it("rejects a signature made by a DIFFERENT platform key", async () => {
+  it("rejects a changed signature, wrong platform key, and non-64-byte signature", async () => {
     const recipient = await generateConsumerKeys();
     const signer = await generateOcSigner();
     const impostor = await generateOcSigner();
-    const a = await buildStoredAction({ id: 1n, createdAt: CREATED_AT, recipient, signer, plaintext: PLAINTEXT });
-    // Same envelope, verified against the wrong openchat_public_key → false.
+    const action = await buildStoredAction({ id: 1n, createdAt: CREATED_AT, recipient, signer });
+    const context = signatureContext(action);
     await expect(
-      verifyOpenChatSignature(envOf(a), a.created_at, Uint8Array.from(a.oc_signature), impostor.publicKeyPem),
+      verifyOpenChatActionSignature(context, flipped(Uint8Array.from(action.oc_signature)), signer.publicKeyPem),
     ).resolves.toBe(false);
-  });
-
-  it("rejects a tampered created_at (the timestamp is bound by the v2 signature)", async () => {
-    const recipient = await generateConsumerKeys();
-    const signer = await generateOcSigner();
-    const a = await buildStoredAction({ id: 1n, createdAt: CREATED_AT, recipient, signer, plaintext: PLAINTEXT });
     await expect(
-      verifyOpenChatSignature(envOf(a), a.created_at + 1n, Uint8Array.from(a.oc_signature), signer.publicKeyPem),
+      verifyOpenChatActionSignature(context, Uint8Array.from(action.oc_signature), impostor.publicKeyPem),
     ).resolves.toBe(false);
+    await expect(verifyOpenChatActionSignature(context, new Uint8Array(63), signer.publicKeyPem)).resolves.toBe(false);
   });
 });
 
-describe("routing fingerprint — definition consistency", () => {
-  it("keyFingerprint(pem) == fingerprintPublicKey(key) == sha256(raw point), 32 bytes", async () => {
+describe("recipient routing fingerprint", () => {
+  it("matches PEM, CryptoKey, and raw point representations", async () => {
     const recipient = await generateConsumerKeys();
     const fromPem = await keyFingerprint(recipient.spkiPem);
-    const pub = await globalThis.crypto.subtle.importKey(
+    const publicKey = await globalThis.crypto.subtle.importKey(
       "raw",
-      recipient.publicKeyRaw.buffer.slice(0) as ArrayBuffer,
+      recipient.publicKeyRaw.slice().buffer as ArrayBuffer,
       { name: "ECDH", namedCurve: "P-256" },
       true,
       [],
     );
-    const fromKey = await fingerprintPublicKey(pub);
-    expect(fromPem.length).toBe(32);
+    const fromKey = await fingerprintPublicKey(publicKey);
     expect(Array.from(fromPem)).toEqual(Array.from(recipient.fingerprint));
     expect(Array.from(fromKey)).toEqual(Array.from(recipient.fingerprint));
-  });
-
-  it("distinct keys get distinct fingerprints", async () => {
-    const a = await generateConsumerKeys();
-    const b = await generateConsumerKeys();
-    expect(Array.from(a.fingerprint)).not.toEqual(Array.from(b.fingerprint));
-  });
-});
-
-describe("signingPreimageV2 — layout on a real envelope", () => {
-  it("is eph ‖ ct ‖ u64 LE created_at", async () => {
-    const recipient = await generateConsumerKeys();
-    const env = await eciesEncrypt(recipient.publicKeyRaw, new TextEncoder().encode("{}"));
-    const pre = signingPreimageV2(env, CREATED_AT);
-    expect(pre.length).toBe(env.ephemeralPublicKey.length + env.ciphertext.length + 8);
-    const tail = pre.slice(pre.length - 8);
-    expect(new DataView(tail.slice().buffer).getBigUint64(0, true)).toBe(CREATED_AT);
+    expect(Array.from((await generateConsumerKeys()).fingerprint)).not.toEqual(Array.from(recipient.fingerprint));
   });
 });

@@ -1,9 +1,9 @@
-// Pins the "keep the registered OpenChat manifest in lock-step with the user's types" logic:
+// Pins static public manifest refresh without any private template argument:
 // the sync DECISION (shouldSyncOpenChatManifest), the participation STATE reader
 // (readManifestSyncState), and the decision-and-fire seam (maybeSyncManifest) that the callers use.
 //
-// The connect-only case (6-digit Connect, never the separate "Link to OpenChat") is the recurring
-// "types not mapped after a fresh start" bug — it MUST sync.
+// The connect-only case (claim-token Connect, never the separate "Link to OpenChat")
+// must still refresh app metadata and inbox routing.
 
 import { describe, it, expect, vi } from "vitest";
 import type { Identity } from "@dfinity/agent";
@@ -66,22 +66,20 @@ describe("readManifestSyncState", () => {
 });
 
 describe("maybeSyncManifest (caller wiring)", () => {
-  const templates = [{ id: "z1", name: "Reservation", keywords: ["reservation"] }];
-
-  it("CONNECT-only user's type-save re-registers the manifest with their types (P0-8/P0-28)", async () => {
+  it("CONNECT-only user's refresh invokes a static registration with no private template argument", async () => {
     // Rest params so the mock's calls tuple is typed unknown[] (arg-less vi.fn types it []).
     const register = vi.fn(async (..._args: unknown[]) => ({ ok: true }));
-    const res = await maybeSyncManifest(fakeIdentity(ME), templates, register, {
+    const res = await maybeSyncManifest(fakeIdentity(ME), register, {
       myPrincipal: ME, linkedPrincipal: null, connected: true,
     });
     expect(res).toBe("synced");
     expect(register).toHaveBeenCalledOnce();
-    expect(register.mock.calls[0][1]).toEqual(templates); // the user's current types are passed
+    expect(register.mock.calls[0]).toHaveLength(1);
   });
 
   it("linked user syncs too", async () => {
     const register = vi.fn(async () => ({ ok: true }));
-    const res = await maybeSyncManifest(fakeIdentity(ME), templates, register, {
+    const res = await maybeSyncManifest(fakeIdentity(ME), register, {
       myPrincipal: ME, linkedPrincipal: ME, connected: false,
     });
     expect(res).toBe("synced");
@@ -90,7 +88,7 @@ describe("maybeSyncManifest (caller wiring)", () => {
 
   it("does NOT register a user who neither linked nor connected", async () => {
     const register = vi.fn(async () => ({ ok: true }));
-    const res = await maybeSyncManifest(fakeIdentity(ME), templates, register, {
+    const res = await maybeSyncManifest(fakeIdentity(ME), register, {
       myPrincipal: ME, linkedPrincipal: null, connected: false,
     });
     expect(res).toBe("skipped");
@@ -101,13 +99,13 @@ describe("maybeSyncManifest (caller wiring)", () => {
     const failing = vi.fn(async () => ({ ok: false }));
     const throwing = vi.fn(async () => { throw new Error("user_index unreachable"); });
     const st = { myPrincipal: ME, linkedPrincipal: ME, connected: false };
-    expect(await maybeSyncManifest(fakeIdentity(ME), templates, failing, st)).toBe("error");
-    expect(await maybeSyncManifest(fakeIdentity(ME), templates, throwing, st)).toBe("error");
+    expect(await maybeSyncManifest(fakeIdentity(ME), failing, st)).toBe("error");
+    expect(await maybeSyncManifest(fakeIdentity(ME), throwing, st)).toBe("error");
   });
 
   it("no identity → skipped (no register attempt)", async () => {
     const register = vi.fn(async () => ({ ok: true }));
-    expect(await maybeSyncManifest(undefined, templates, register)).toBe("skipped");
+    expect(await maybeSyncManifest(undefined, register)).toBe("skipped");
     expect(register).not.toHaveBeenCalled();
   });
 });

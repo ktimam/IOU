@@ -1,6 +1,6 @@
 // Persistent multi-user demo: opens one real Chromium WINDOW per user (Alice, Bob,
 // Carol), signs each in as a distinct dev identity, and gives each user their own
-// accounts / sheets / entries (+ chat links for Alice) through the real UI — then
+// accounts / sheets / entries through the real UI — then
 // LEAVES the windows open so you can click around as each user. Ctrl-C to close.
 //
 //   pnpm ui:demo        (dev server must be running: pnpm dev → http://127.0.0.1:3000)
@@ -14,7 +14,7 @@ import { chromium, type BrowserContext, type Page } from "@playwright/test";
 import { rmSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { signInDev, createAccount, addEntry, linkChatToSheet, importDraft } from "../test/ui/flows";
+import { signInDev, createAccount, addEntry, importDraft } from "../test/ui/flows";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const PROFILES = path.resolve(HERE, "..", ".pw-profiles");
@@ -80,11 +80,6 @@ async function setup(
   console.log("Carol: Weekend…");
   await createAccount(carol.page, "Weekend (Carol)", "Weekend");
   await addEntry(carol.page, { currency: "CHF", amount: 75, direction: "credit", type: "settlement", note: "Split the hotel" });
-
-  // Multiple chats: Alice links two chats to two of her sheets.
-  console.log("Alice: linking chats…");
-  await linkChatToSheet(alice.page, "group:aaaaa-aa", "Rent 2026");
-  await linkChatToSheet(alice.page, "group:2vxsx-fae", "Trip");
 
   // Leave each window on their accounts overview.
   await alice.page.goto("/pairs");

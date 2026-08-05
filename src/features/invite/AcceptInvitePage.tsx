@@ -4,8 +4,9 @@
 // Accept and are IMMEDIATELY a full member — no creator "grant" step. In the
 // dev/P-256 build the sheet key K_sheet rides in the URL fragment; the invitee
 // self-wraps it under their own key and hands the opaque blob to accept_invite.
-// In prod (vetkd) the fragment carries no key — accept_invite just flips
-// member_b and the IC re-derives K_sheet for any member.
+// In prod (vetkd) the fragment carries no key — accept_invite receives an
+// empty rewrap record to establish sheet.member_b, then the IC derives the
+// authoritative K_sheet for that member.
 
 import { useMemo, useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
@@ -14,12 +15,8 @@ import { SignInButtons } from "../auth/SignInButtons";
 import { useActor } from "../flows/useActor";
 import { useSheetKey } from "../flows/SheetKeyContext";
 import { useToasts } from "../ui/Toasts";
-import {
-  deriveUserKeypair,
-  wrapSheetKey,
-  isProdVetkd,
-} from "../crypto/devVetkd";
-import { parseInviteFragment, b64uDecode, type InviteParams } from "../flows/inviteLink";
+import { parseInviteFragment, type InviteParams } from "../flows/inviteLink";
+import { acceptInviteForSheet } from "./acceptInvite";
 
 const STASH = "iou.pendingInvite.v1";
 
@@ -59,22 +56,12 @@ export function AcceptInvitePage() {
     setBusy(true);
     setErr(null);
     try {
-      const myKp = await deriveUserKeypair(state.principal);
-      const pubkey = Array.from(new TextEncoder().encode(myKp.publicKeyB64));
-      let rewraps: { sheet_id: string; wrapped_key_for_partner: number[] }[] = [];
-      let kSheet: Uint8Array | null = null;
-      if (!isProdVetkd()) {
-        if (!invite.keyB64u) throw new Error("invite link is missing the sheet key");
-        kSheet = b64uDecode(invite.keyB64u);
-        // self-wrap under my own key (ECDH(myPriv, myPub)); unwrapFor reads it
-        // back the same way — no creator involvement.
-        const blob = await wrapSheetKey(kSheet, myKp.publicKey, myKp.privateKey);
-        rewraps = [
-          { sheet_id: invite.sheetId, wrapped_key_for_partner: Array.from(blob) },
-        ];
-      }
-      await (actor as any).accept_invite(invite.code, rewraps, pubkey);
-      if (kSheet) cache(invite.sheetId, kSheet); // warm the key so the sheet opens instantly
+      const { K_sheet } = await acceptInviteForSheet(
+        actor as any,
+        state.principal,
+        invite,
+      );
+      if (K_sheet) cache(invite.sheetId, K_sheet); // warm the key so the sheet opens instantly
       try {
         sessionStorage.removeItem(STASH);
       } catch {
@@ -109,7 +96,7 @@ export function AcceptInvitePage() {
           Sign in (or create an account) to join this shared ledger. You'll come
           right back here to accept.
         </p>
-        {/* Inline sign-in (like SettingsPage/LinkChatPage) so the /pair/accept#… URL — and the
+        {/* Inline sign-in (like SettingsPage) so the /pair/accept#… URL — and the
             invite it carries — survives; a redirect to /sign-in would land the invitee on /pairs
             afterwards instead of back here to accept. */}
         <SignInButtons />

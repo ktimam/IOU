@@ -6,10 +6,11 @@ import { useParams, Link } from "react-router-dom";
 import { useActor } from "../flows/useActor";
 import { useSheetKey } from "../flows/SheetKeyContext";
 import { useAuth } from "../auth/AuthProvider";
-import { decryptEntryPayload, decryptName } from "../crypto/devVetkd";
-import { decodeEntry, type EntryPayload } from "./types";
+import { decryptName } from "../crypto/devVetkd";
+import type { EntryPayload } from "./types";
 import { computeBalances, formatMinor } from "./balance";
 import { usePreferences } from "../settings/usePreferences";
+import { decryptEntryRecords } from "./decryptEntries";
 
 // Unwrap a Candid opt<vec nat8> to a Uint8Array (or null).
 function optBytes(o: any): Uint8Array | null {
@@ -55,19 +56,14 @@ export function ArchivedSheetsPage() {
               if (nm) cacheSheetName(sh.id, nm);
             }
             const res = await (actor as any).list_entries(sh.id, [], 200);
-            const dec: DecryptedEntry[] = [];
-            for (const e of res.entries) {
-              const pt = await decryptEntryPayload(
-                new Uint8Array(e.entry_key),
-                new Uint8Array(e.iv),
-                new Uint8Array(e.ciphertext),
-                K_sheet,
-              );
-              dec.push({
-                id: Number(e.id),
-                payload: decodeEntry(pt),
-                created_by: e.created_by.toText(),
-              });
+            const decoded = await decryptEntryRecords(res.entries, K_sheet);
+            const dec: DecryptedEntry[] = decoded.entries.map((entry) => ({
+              id: entry.id,
+              payload: entry.payload,
+              created_by: entry.created_by,
+            }));
+            if (decoded.failures.length > 0) {
+              console.warn("skipped unreadable archived entries", sh.id, decoded.failures);
             }
             dec.sort((a, b) => b.payload.ts - a.payload.ts);
             map[sh.id] = dec;

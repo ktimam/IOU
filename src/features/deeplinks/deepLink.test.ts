@@ -13,20 +13,17 @@ describe("deepLinkToPath", () => {
   it("preserves the fragment on settings/me so the OpenChat connect deep link scrolls to Connect", () => {
     // Regression (P0-20): iou://settings#openchat-connect must carry the hash through, or the
     // desktop "Open the code page in IOU" button lands on /settings but never focuses the Connect
-    // section. Previously the settings case dropped url.hash (only `invite` preserved it).
+    // section. Previously the settings case dropped url.hash.
     expect(deepLinkToPath("iou://settings#openchat-connect")).toBe("/settings#openchat-connect");
     expect(deepLinkToPath("iou://me#openchat-connect")).toBe("/me#openchat-connect");
     // fragment-less still resolves cleanly
     expect(deepLinkToPath("iou://settings")).toBe("/settings");
   });
 
-  it("maps invite links to the accept surface, preserving the fragment", () => {
-    expect(
-      deepLinkToPath("iou://invite#c=ABCD-1234&s=deadbeef&k=Zm9v"),
-    ).toBe("/pair/accept#c=ABCD-1234&s=deadbeef&k=Zm9v");
-    // a fragment-less invite still resolves to the accept page (which then
-    // reports the link is malformed)
-    expect(deepLinkToPath("iou://invite")).toBe("/pair/accept");
+  it("rejects invite capabilities on the non-exclusive custom scheme", () => {
+    expect(deepLinkToPath("iou://invite#c=ABCD-1234&s=deadbeef&k=Zm9v")).toBe(null);
+    expect(deepLinkToPath("iou://invite#c=ABCD-1234&s=deadbeef")).toBe(null);
+    expect(deepLinkToPath("iou://invite")).toBe(null);
   });
 
   it("encodes path segments", () => {
@@ -53,15 +50,14 @@ describe("handleAppUrl (native appUrlOpen wiring)", () => {
     handleAppUrl("iou://sheet/abc123", navigate);
     expect(navigate).toHaveBeenCalledTimes(1);
     expect(navigate).toHaveBeenCalledWith("/sheet/abc123");
-    handleAppUrl("iou://invite#c=ABCD-1234&s=deadbeef&k=Zm9v", navigate);
-    expect(navigate).toHaveBeenLastCalledWith("/pair/accept#c=ABCD-1234&s=deadbeef&k=Zm9v");
   });
 
   it("ignores null-mapped links entirely (no navigation)", () => {
     const navigate = vi.fn();
     for (const bad of [
       "iou://evil/../admin",
-      "iou://openchat/link-chat?chat=group:abc",
+     "iou://openchat/link-chat?chat=group:abc",
+      "iou://invite#c=ABCD-1234&s=deadbeef&k=Zm9v",
       "https://example.com/sheet/abc",
       "not a url",
       "",

@@ -1,6 +1,6 @@
 // The Internet Identity + (dev-only) local-identity sign-in buttons, shared by every INLINE
-// sign-in surface: the /sign-in page and the OpenChat surfaces (/openchat/link-chat and
-// /settings#openchat-connect). Rendering sign-in inline — rather than redirecting to /sign-in or
+// sign-in surface: the /sign-in page and the OpenChat connect surface
+// (/settings#openchat-connect). Rendering sign-in inline — rather than redirecting to /sign-in or
 // / — keeps the current URL, hash and query intact (e.g. /settings#openchat-connect), so an
 // unsigned visitor lands exactly where they were headed once authenticated instead of on the
 // landing page.

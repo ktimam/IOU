@@ -16,12 +16,29 @@ type UserRecord = record {
     default_currency : opt text;
 };
 
+type AiAppVerificationBinding = record {
+    user_index_canister_id : principal;
+    app_id : nat32;
+    app_revision : nat64;
+    owner : principal;
+    canonical_name : text;
+    app_canister_id : principal;
+    inbox_canister_id : opt principal;
+    manifest_hash : blob;
+};
+
 type Config = record {
     creator_principal : principal;
     deployed_at : nat64;
     // v1.12.0: deployment-wide currency the app-rendered card pre-selects. ANONYMOUSLY
     // readable via get_config — the storage-partitioned card iframe has no identity.
     card_currency : opt text;
+    // Exact OpenChat user-canister owner this deployment will vouch for.
+    ai_app_owner : opt principal;
+    // Exact OpenChat UserIndex trusted for link claims/card capabilities.
+    openchat_user_index_canister_id : opt principal;
+    // Exact reviewed OpenChat verifier-v2 registry/manifest commitment.
+    ai_app_verification_binding : opt AiAppVerificationBinding;
 };
 
 // Generic OpenChat manifest-verification contract (app side): OpenChat c2c-calls this at publish to
@@ -35,6 +52,80 @@ type VerifyAiAppResponse = record {
     vouched : bool;
     name : opt text;
     owner : opt principal;
+};
+
+type VerifyAiAppV2Args = record {
+    binding : AiAppVerificationBinding;
+};
+
+type VerifyAiAppV2Response = record {
+    vouched : bool;
+    binding : AiAppVerificationBinding;
+};
+
+type AttestedActionCardRow = record {
+    label : text;
+    value : text;
+};
+
+type AiAppCardContentV1 = record {
+    title : text;
+    rows : vec AttestedActionCardRow;
+    confirm_label : text;
+    cancel_label : text;
+    action_id : text;
+    disclosure : opt text;
+    expires_at : opt nat64;
+    confirm_payload : opt blob;
+};
+
+type AppScopedCardContextV1 = record {
+    context_version : nat16;
+    app_subject : blob;
+    chat_handle : blob;
+    message_handle : blob;
+    app_id : nat32;
+    app_revision : nat64;
+    action_id : text;
+};
+
+type AppScopedCardContentCommitmentV1 = record {
+    context : AppScopedCardContextV1;
+    content : AiAppCardContentV1;
+};
+
+type CardAttestationBindingV1 = record {
+    user_index_canister_id : principal;
+    app_canister_id : principal;
+    commitment : AppScopedCardContentCommitmentV1;
+    authority_content_hash : blob;
+};
+
+type AttestAiAppCardV1Args = record {
+    binding : CardAttestationBindingV1;
+};
+
+type AttestAiAppCardV1Response = record {
+    vouched : bool;
+    binding : CardAttestationBindingV1;
+};
+
+type CardConfirmationAttestationBindingV1 = record {
+    user_index_canister_id : principal;
+    app_canister_id : principal;
+    context : AppScopedCardContextV1;
+    content_hash : blob;
+    confirm_payload : blob;
+    app_user_key_version : opt nat64;
+};
+
+type AttestAiAppCardConfirmationV1Args = record {
+    binding : CardConfirmationAttestationBindingV1;
+};
+
+type AttestAiAppCardConfirmationV1Response = record {
+    vouched : bool;
+    binding : CardConfirmationAttestationBindingV1;
 };
 
 type Pair = record {
@@ -75,17 +166,6 @@ type SheetState = variant {
     Closed;
 };
 
-type Direction = variant {
-    Credit;
-    Debt;
-};
-
-type ClosingBalance = record {
-    currency : text;
-    amount_minor : nat64;
-    direction : Direction;
-};
-
 type Sheet = record {
     id : text;
     pair_id : text;
@@ -98,7 +178,10 @@ type Sheet = record {
     member_b : principal;
     created_at : nat64;
     closed_at : opt nat64;
-    closing_balances : opt vec ClosingBalance;
+    // AES-GCM balance snapshot encrypted client-side under K_sheet.
+    closing_balances_key : opt vec nat8;
+    closing_balances_enc : opt vec nat8;
+    closing_balances_iv : opt vec nat8;
     name_enc : opt vec nat8;   // E2E-encrypted sheet name
     name_iv : opt vec nat8;
 };
@@ -115,6 +198,12 @@ type CreateSheetReq = record {
     wrapped_key_b : vec nat8;
     name_enc : opt vec nat8;   // optional E2E-encrypted sheet name at creation
     name_iv : opt vec nat8;
+};
+
+type EncryptedClosingBalances = record {
+    entry_key : vec nat8;
+    ciphertext : vec nat8;
+    iv : vec nat8;
 };
 
 type EntryVersion = record {
@@ -203,19 +292,107 @@ type SheetRewrap = record {
 // v1.8.0: OpenChat per-user consumer keypair. The canister stores an
 // OPAQUE wrapped private-key blob (AES-GCM iv || ciphertext, wrapped
 // client-side under the vetkd-derived user key) plus the matching P-256
-// SPKI public key PEM. Caller-keyed; localStorage is only a cache.
+// SPKI public key PEM. Caller-keyed; production web keeps plaintext only in
+// session memory, native production may cache it in platform secure storage,
+// and localStorage is development-only plus a one-time migration source.
 type ConsumerKeypair = record {
     wrapped_private_key : vec nat8;
     public_key_pem : text;
 };
 
-// v1.9.0: OpenChat chat → sheet mapping. chat_key is the opaque
-// OpenChat context.chat string ("group:<principal>" or
-// "channel:<principal>:<channel id>"); sheet_id is the 16-hex-char
-// sheet id encoded as a nat64. Caller-keyed.
+// v1.14.0: canister-owned compare-and-swap state. mutation_epoch advances on
+// every accepted set/delete; keypair = null at a non-zero epoch is a stable
+// deletion tombstone which rejects delayed writes prepared at an older epoch.
+type ConsumerKeypairState = record {
+    mutation_epoch : nat64;
+    keypair : opt ConsumerKeypair;
+};
+
+type ConsumerKeyEpochConflict = record {
+    expected_epoch : nat64;
+    current_epoch : nat64;
+};
+
+type ConsumerKeyMutationError = variant {
+    StaleEpoch : ConsumerKeyEpochConflict;
+    EpochExhausted;
+};
+
+type ConsumerKeyMutationResult = variant {
+    Ok : nat64;
+    Err : ConsumerKeyMutationError;
+};
+
+// OpenChat chat → sheet mapping. The stable field name remains chat_key for
+// compatibility, but new rows use the app-scoped 32-byte chat handle encoded
+// as unpadded base64url; raw chat principals/ids are never accepted as card
+// context. sheet_id is the 16-hex-char sheet id encoded as a nat64. Caller-keyed.
 type ChatSheetLink = record {
     chat_key : text;
     sheet_id : nat64;
+};
+
+type OpenChatBinding = record {
+    iou_principal : principal;
+    user_index_canister_id : principal;
+    app_id : nat32;
+    app_revision : nat64;
+    app_canister_id : principal;
+    key_version : nat64;
+    // Caller-private, app-scoped identifiers issued by OpenChat's HMAC authority.
+    app_subject : blob;
+    subject_version : nat16;
+    consumer_queue_selector : blob;
+    consumer_queue_selector_version : nat16;
+    linked_at : nat64;
+};
+
+type ConnectOpenChatResult = variant {
+    Success : OpenChatBinding;
+    NotConfigured;
+    CodeNotFound;
+    CodeExpired;
+    InvalidRequest : text;
+    WrongApp;
+    RemoteError : text;
+};
+
+type DisconnectOpenChatResult = variant {
+    Success;
+    KeyNotFound;
+    NotConfigured;
+    NotLinked;
+    InvalidBinding;
+    InvalidRequest : text;
+    BindingChanged;
+    RemoteError : text;
+};
+
+type OpenChatCardContext = record {
+    sheet_id : text;
+    context_version : nat16;
+    app_subject : blob;
+    chat_handle : blob;
+    message_handle : blob;
+    app_id : nat32;
+    app_revision : nat64;
+    action_id : text;
+    vetkd_public_key : vec nat8;
+    encrypted_vet_key : vec nat8;
+    templates_a_enc : opt vec nat8;
+    templates_a_iv : opt vec nat8;
+    templates_b_enc : opt vec nat8;
+    templates_b_iv : opt vec nat8;
+};
+
+type OpenChatCardContextResult = variant {
+    Success : OpenChatCardContext;
+    NotConfigured;
+    InvalidCapability;
+    NotLinked;
+    ChatNotLinked;
+    NotAuthorized;
+    KeyUnavailable;
 };
 
 service : {
@@ -227,8 +404,14 @@ service : {
     set_default_currency : (text) -> (UserRecord);
     get_config : () -> (Config) query;
     set_creator_principal : (principal) -> ();
+    set_ai_app_owner : (principal) -> ();
+    set_openchat_user_index_canister_id : (principal) -> ();
+    set_ai_app_verification_binding : (opt AiAppVerificationBinding) -> ();
     set_card_currency : (text) -> ();
     c2c_verify_ai_app : (VerifyAiAppArgs) -> (VerifyAiAppResponse) query;
+    c2c_verify_ai_app_v2 : (VerifyAiAppV2Args) -> (VerifyAiAppV2Response) query;
+    c2c_attest_ai_app_card_v1 : (AttestAiAppCardV1Args) -> (AttestAiAppCardV1Response);
+    c2c_attest_ai_app_card_confirmation_v1 : (AttestAiAppCardConfirmationV1Args) -> (AttestAiAppCardConfirmationV1Response);
 
     // Phase 2
     create_pair : () -> (CreatePairResult);
@@ -245,7 +428,7 @@ service : {
     create_sheet : (CreateSheetReq) -> (Sheet);
     get_sheet : (text) -> (opt Sheet) query;
     get_sheet_wrapped_key : (text) -> (opt vec nat8) query;
-    close_sheet : (text, vec ClosingBalance) -> ();
+    close_sheet_encrypted : (text, EncryptedClosingBalances) -> ();
     start_new_sheet : (CreateSheetReq) -> (Sheet);
     // v1.5.0: E2E-encrypted names
     set_pair_name : (text, vec nat8, vec nat8) -> ();
@@ -284,13 +467,20 @@ service : {
     grant_partner_access : (text, principal, vec SheetRewrap) -> (nat32);
 
     // v1.8.0: OpenChat per-user consumer keypair
-    set_consumer_keypair : (vec nat8, text) -> ();
-    get_consumer_keypair : () -> (opt ConsumerKeypair) query;
-    delete_consumer_keypair : () -> ();
+    set_consumer_keypair : (nat64, vec nat8, text) -> (ConsumerKeyMutationResult);
+    get_consumer_keypair : () -> (ConsumerKeypairState) query;
+    delete_consumer_keypair : (nat64) -> (ConsumerKeyMutationResult);
     vetkd_wrap_consumer_key : (vec nat8) -> (vec nat8);
 
     // v1.9.0: OpenChat chat → sheet mapping
     set_chat_sheet_link : (text, nat64) -> ();
     remove_chat_sheet_link : (text) -> ();
     chat_sheet_links : () -> (vec ChatSheetLink) query;
+
+    // v1.15.0: authoritative OpenChat identity link and capability-gated,
+    // ciphertext-only app-card context.
+    connect_openchat : (text, text) -> (ConnectOpenChatResult);
+    get_openchat_binding : () -> (opt OpenChatBinding) query;
+    disconnect_openchat : (text, vec nat8, nat64) -> (DisconnectOpenChatResult);
+    openchat_card_context : (vec nat8, text, vec nat8) -> (OpenChatCardContextResult);
 }

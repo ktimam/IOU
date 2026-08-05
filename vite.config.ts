@@ -69,7 +69,9 @@ export default defineConfig({
   ],
   build: {
     outDir: "dist",
-    sourcemap: true,
+    // Production maps previously shipped full sourcesContent, including removed code.
+    // Keep debugging maps private and generate them only in a separately controlled job.
+    sourcemap: false,
   },
   server: {
     // 127.0.0.1:3000 is IOU's canonical dev origin. It must match the origin baked into the

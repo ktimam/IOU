@@ -121,7 +121,7 @@ export function SettingsPage() {
   if (state.kind === "loading") return <p className="muted">Loading…</p>;
 
   if (state.kind !== "authenticated") {
-    // Render sign-in INLINE (like LinkChatPage) rather than redirecting to "/": a redirect drops
+    // Render sign-in INLINE rather than redirecting to "/": a redirect drops
     // the URL and its #openchat-connect hash, so an unsigned visitor — e.g. the OpenChat "Open the
     // code page in IOU" button opening a fresh (or desktop-external) browser tab that isn't signed
     // into IOU — would be bounced to the landing page instead of the Connect section. Signing in
@@ -229,7 +229,7 @@ export function SettingsPage() {
         </p>
       </div>
 
-      {/* The OpenChat card: the 6-digit Connect flow is the only default-visible integration
+      {/* The OpenChat card: the claim-token Connect flow is the only default-visible integration
           surface. Admin/debug surfaces AND the legacy off-chain relay cards (passed as children)
           sit behind its "Advanced" disclosure — auto-expanded when a relay is already configured. */}
       <ActionInboxSettings>

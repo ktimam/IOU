@@ -25,9 +25,8 @@ export const OC_ACTION_INBOX_CANISTER_ID = (
 // edit re-registers ONLY for the user who actually linked, never hijacking the global "iou" entry.
 export const OC_LINKED_KEY = "iou.openchat.linked.v1";
 
-// Written (value = the connected principal text) on a successful 6-digit "Connect" (claim_ai_app_link_code
-// registered the user's per-user delivery key). This is the OTHER way a user participates in OpenChat:
-// people commonly Connect but never tap the separate "Link to OpenChat", so gating manifest sync on
-// OC_LINKED_KEY alone left their saved types unmapped ("not mapped after a fresh start"). Manifest sync
-// now also fires when this matches the current identity — a connect-only user's types reach the manifest.
+// Written (value = the connected principal text) after IOU's signed-in backend successfully performs
+// c2c_claim_ai_app_link_code as the registered app canister. This is the OTHER way a user participates:
+// people commonly Connect but never tap the separate "Link to OpenChat", so static manifest refresh
+// must also recognize this principal. Private account templates are never part of that refresh.
 export const OC_CONNECTED_KEY = "iou.openchat.connected.v1";

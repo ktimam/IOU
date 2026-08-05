@@ -25,7 +25,13 @@ async function inboxDrafts(p: Page): Promise<Record<string, unknown>[]> {
   await p.waitForTimeout(2000);
   return (await p.evaluate(`(async () => {
     const inbox = await import('/src/features/openchat/actionInboxClient.ts');
-    const cfg = await inbox.getActionInboxConfig();
+    const auth = await import('/src/features/auth/AuthProvider.tsx');
+    const declarations = await import('/src/backend/declarations.ts');
+    const identity = auth.loadDevIdentityForDiagnostics();
+    if (!identity) throw new Error('signed-in local development identity is required');
+    const actor = declarations.createActor(await auth.buildAgent(identity));
+    const cfg = await inbox.getActionInboxConfig(actor);
+    if (!cfg) throw new Error('OpenChat binding is not configured');
     const drafts = await inbox.pollActionInbox({ config: cfg, maxResults: 80 });
     return drafts.map(d => d.draft);
   })()`)) as Record<string, unknown>[];

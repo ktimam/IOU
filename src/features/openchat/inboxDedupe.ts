@@ -2,19 +2,22 @@
 // logic is unit-testable in isolation.
 //
 // A single chat message can, in a rare double-confirm race, produce two on-chain deposits with the
-// SAME context.messageId (different confirmedBy). We defend on two layers: collapse the VISIBLE
-// cards to the first per messageId, and (in the component) guard the accept path with a persisted
-// set of already-imported messageIds. Drafts without a messageId (wrapper-less / pre-v2 deposits)
+// SAME app-scoped context.messageHandle. We defend on two layers: collapse the VISIBLE
+// cards to the first per handle, and guard the accept path with a persisted set of already-imported
+// handles. Drafts without a handle (wrapper-less local compatibility deposits)
 // are NEVER collapsed — collapsing an undefined key would hide distinct real drafts.
 
 /**
- * Keep the first item for each `context.messageId`, preserving input order. Items whose
- * `context.messageId` is undefined all pass through (never collapsed).
+ * Keep the first item for each `context.messageHandle`, preserving input order.
  */
-export function collapseByMessageId<T extends { context?: { messageId?: string } }>(items: T[]): T[] {
+import { scopedStorageKey } from "../storage/scopedStorage";
+
+export function collapseByMessageHandle<T extends { context?: { messageHandle?: string } }>(
+  items: T[],
+): T[] {
   const seen = new Set<string>();
   return items.filter((p) => {
-    const m = p.context?.messageId;
+    const m = p.context?.messageHandle;
     if (m === undefined) return true;
     if (seen.has(m)) return false;
     seen.add(m);
@@ -24,8 +27,8 @@ export function collapseByMessageId<T extends { context?: { messageId?: string }
 
 /**
  * Cross-member "already imported" predicate: has ANY member of the sheet already imported this
- * pending card as an entry? The fan-out deposits one envelope per member, each carrying the SAME
- * `context.messageId`; importing writes that id into the shared encrypted entry as
+ * pending card as an entry? Fan-out deposits carry the SAME app-scoped message handle; importing
+ * writes that handle into the shared encrypted entry as
  * `payload.import_message_id`, so every member's decrypted entries carry the signal.
  *
  * Matching rules:
@@ -35,18 +38,18 @@ export function collapseByMessageId<T extends { context?: { messageId?: string }
  *    identical content (two same-price bookings) — a content match would falsely suppress a real
  *    card. Legacy entries imported before `import_message_id` existed therefore do NOT hide their
  *    card for the partner (acceptable: dismiss once).
- *  - Card WITHOUT a messageId (wrapper-less / pre-v2 deposit) → fall back to `draft_id` equality
+ *  - Card WITHOUT a messageId (wrapper-less / pre-v4 local deposit) → fall back to `draft_id` equality
  *    against non-deleted entries (same rule as the paste path's isDuplicateDraft).
  *  - DELETED entries never match: deleting the imported entry resurrects the card for members who
  *    have not locally dismissed it.
  */
 export function isImportedIntoSheet(
   entries: { deleted: boolean; payload: { draft_id?: string; import_message_id?: string } }[],
-  messageId: string | undefined,
+  messageHandle: string | undefined,
   draftId: string | undefined,
 ): boolean {
-  if (messageId !== undefined) {
-    return entries.some((e) => !e.deleted && e.payload.import_message_id === messageId);
+  if (messageHandle !== undefined) {
+    return entries.some((e) => !e.deleted && e.payload.import_message_id === messageHandle);
   }
   if (draftId !== undefined) {
     return entries.some((e) => !e.deleted && e.payload.draft_id === draftId);
@@ -77,17 +80,59 @@ export function serializeImportedMessageIds(ids: Iterable<string>, cap: number):
 }
 
 // ── Deployment-scoped dedup keys ──────────────────────────────────────────────────────────────
-// Both inbox dedup sets (dismissed inbox ids; imported messageIds) persist across reloads, but they
-// are SPECIFIC TO ONE OpenChat deployment: inbox action ids (`oc-<id>`) restart from 1 on every
-// clean redeploy, and messageIds come from a specific OpenChat instance. A set carried over from an
-// EARLIER deployment would wrongly suppress a fresh deployment's low-/reused-id deposits — the
-// "confirmed in OpenChat but never imported after an environment restart" bug. So both are SCOPED by
-// the OpenChat user_index canister id (which changes on every clean redeploy).
+// Signed delivery identities and imported messageIds persist across reloads, but remain specific to
+// one OpenChat deployment. Both stores are scoped by UserIndex so recreated local deployments do not
+// inherit unrelated handled state. Numeric ActionInbox storage ids are never used as durable identity.
 
 /** The scope tag: the user_index canister id (trimmed) or "default" when unknown. */
 export function deriveDeployTag(userIndexId: string | undefined | null): string {
   const id = typeof userIndexId === "string" ? userIndexId.trim() : "";
   return id || "default";
+}
+
+export function inboxDedupeStorageKey(
+  namespace: string,
+  principal: string,
+  openChatDeployment: string,
+  iouDeployment?: string,
+): string {
+  return scopedStorageKey(
+    namespace + "." + encodeURIComponent(openChatDeployment),
+    principal,
+    iouDeployment,
+  );
+}
+
+export const OBSOLETE_INBOX_STORAGE_SCAN_CAP = 10_000;
+
+/**
+ * Return legacy inbox-dedupe keys which are safe to remove. Every v2 key is
+ * obsolete now that v3 includes principal, IOU deployment, and OpenChat
+ * deployment. Discovery is bounded so hostile local storage cannot cause an
+ * unbounded startup scan.
+ */
+export function planObsoleteInboxStorageCleanup(
+  existingKeys: Iterable<string>,
+): string[] {
+  const remove = new Set<string>([
+    "iou.openchat.handledInboxDrafts.v1",
+    "iou.openchat.importedMessageIds.v1",
+  ]);
+  const iterator = existingKeys[Symbol.iterator]();
+  for (let scanned = 0; scanned < OBSOLETE_INBOX_STORAGE_SCAN_CAP; scanned++) {
+    const next = iterator.next();
+    if (next.done) break;
+    const key = next.value;
+    if (
+      key.startsWith("iou.openchat.handledInboxDrafts.v2.") ||
+      key.startsWith("iou.openchat.importedMessageIds.v2.") ||
+      key.startsWith("iou.openchat.viewerUserId.v1.")
+    ) {
+      remove.add(key);
+    }
+  }
+  iterator.return?.();
+  return [...remove];
 }
 
 /**

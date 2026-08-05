@@ -24,10 +24,30 @@ use ic_cdk_management_canister::raw_rand;
 use ic_stable_structures::memory_manager::{MemoryId, MemoryManager, VirtualMemory};
 use ic_stable_structures::{DefaultMemoryImpl, StableBTreeMap, StableCell, Storable};
 use ic_stable_structures::storable::Bound;
+use serde::de::{self, MapAccess, SeqAccess, Visitor};
 use std::borrow::Cow;
 use std::cell::RefCell;
+use std::collections::{BTreeMap, BTreeSet};
+use std::fmt;
 
 type Memory = VirtualMemory<DefaultMemoryImpl>;
+
+// Resource limits are deliberately generous for normal household/property-manager use while
+// putting a hard ceiling on attacker-controlled stable-memory growth. They are enforced at the
+// canister boundary; UI limits are not a security boundary.
+const MAX_PAIRS_PER_PRINCIPAL: usize = 512;
+const MAX_SHEETS_PER_PAIR: usize = 512;
+const MAX_ENTRIES_PER_SHEET: u64 = 10_000;
+const MAX_ENTRY_CIPHERTEXT_BYTES: usize = 64_000;
+const MAX_ENTRY_HISTORY_VERSIONS: usize = 100;
+const MAX_SHEET_ENCRYPTED_BYTES: u64 = 32 * 1024 * 1024;
+const MAX_WRAPPED_KEY_BYTES: usize = 8_192;
+const MAX_REWRAPS_PER_REQUEST: usize = MAX_SHEETS_PER_PAIR;
+const MAX_CHAT_LINKS_PER_PRINCIPAL: usize = 1_024;
+// Legacy PAIRS/SHEETS maps predate secondary indexes. Keep every externally reachable fallback
+// scan instruction-bounded and fail closed once the deployment outgrows this ceiling. A resumable
+// controller-driven stable-index migration is required before raising/removing this guard.
+const MAX_LEGACY_GLOBAL_SCAN_RECORDS: usize = 10_000;
 
 // ───────────────────────── types ─────────────────────────
 
@@ -63,6 +83,24 @@ impl Storable for UserRecord {
     const BOUND: Bound = Bound::Unbounded;
 }
 
+/// Exact OpenChat registry commitment this deployment has reviewed and is willing to vouch for.
+///
+/// The manifest itself remains in OpenChat; storing its domain-separated hash plus every routing
+/// coordinate prevents this canister from blindly reflecting a publication challenge. This field
+/// is optional in `Config`, so canisters upgraded from the V1 verifier decode with verification
+/// disabled until an administrator installs the reviewed V2 binding.
+#[derive(Clone, CandidType, Deserialize, Debug, PartialEq, Eq)]
+pub struct AiAppVerificationBinding {
+    pub user_index_canister_id: Principal,
+    pub app_id: u32,
+    pub app_revision: u64,
+    pub owner: Principal,
+    pub canonical_name: String,
+    pub app_canister_id: Principal,
+    pub inbox_canister_id: Option<Principal>,
+    pub manifest_hash: Vec<u8>,
+}
+
 #[derive(Clone, CandidType, Deserialize)]
 pub struct Config {
     pub creator_principal: Principal,
@@ -76,6 +114,19 @@ pub struct Config {
     // anonymous, so the card can read it with no identity. None = unset, and the card falls back to
     // deferring the currency to whoever imports it. Additive `opt` ⇒ old records decode with None.
     pub card_currency: Option<String>,
+    // The OpenChat registry owner is a user-canister principal and is not necessarily the same
+    // principal that installed/administers IOU. Publication is vouched only when the owner supplied
+    // by OpenChat exactly matches this separately configured value. Optional keeps old stable Config
+    // records Candid-compatible; None means "do not vouch for any registration".
+    pub ai_app_owner: Option<Principal>,
+    // Exact OpenChat UserIndex trusted for link-code claims and one-time
+    // app-card capability redemption. The card endpoint is anonymous by
+    // design, so accepting a caller-supplied verifier would turn a malicious
+    // canister into an authorization oracle. None fails closed.
+    pub openchat_user_index_canister_id: Option<Principal>,
+    // OpenChat publication verifier V2 binding. It is cleared automatically whenever the owner or
+    // UserIndex trust pin changes. None makes c2c_verify_ai_app_v2 fail closed.
+    pub ai_app_verification_binding: Option<AiAppVerificationBinding>,
 }
 
 impl Storable for Config {
@@ -168,7 +219,13 @@ pub struct Sheet {
     pub member_b: Principal,
     pub created_at: u64,
     pub closed_at: Option<u64>,
-    pub closing_balances: Option<Vec<ClosingBalance>>,
+    // v1.13.0: closing balances are an opaque AES-GCM blob encrypted by the client under K_sheet.
+    // The random 32-byte key salt uses the same per-record derivation as encrypted entries. The
+    // previous plaintext closing_balances field is intentionally omitted: Candid safely ignores
+    // it while decoding old stable records, so historical plaintext is no longer returned.
+    pub closing_balances_key: Option<Vec<u8>>,
+    pub closing_balances_enc: Option<Vec<u8>>,
+    pub closing_balances_iv: Option<Vec<u8>>,
     // v1.5.0: E2E-encrypted sheet name (AES-GCM under this sheet's K_sheet).
     pub name_enc: Option<Vec<u8>>,
     pub name_iv: Option<Vec<u8>>,
@@ -191,16 +248,10 @@ pub enum SheetState {
 }
 
 #[derive(Clone, CandidType, Deserialize)]
-pub struct ClosingBalance {
-    pub currency: String,
-    pub amount_minor: u64,
-    pub direction: Direction,
-}
-
-#[derive(Clone, CandidType, Deserialize)]
-pub enum Direction {
-    Credit, // the creator of the row is owed this amount
-    Debt,   // the creator owes this amount
+pub struct EncryptedClosingBalances {
+    pub entry_key: Vec<u8>,
+    pub ciphertext: Vec<u8>,
+    pub iv: Vec<u8>,
 }
 
 // One Entry row in the entries map. Keyed by (sheet_id, entry_id).
@@ -357,11 +408,11 @@ impl Storable for RecoveryKey {
 //     private-key blob + public key PEM, wrapped client-side under the
 //     vetkd-derived user key (the canister never sees the plaintext).
 //   MemoryId 19: CHAT_SHEET_LINKS (StableBTreeMap<String, ChatSheetLink>)
-//     v1.9.0 OpenChat chat → sheet mapping. Key is
+//     OpenChat app-scoped chat-handle → sheet mapping. Key is
 //     `format!("{}\0{}", caller.to_text(), chat_key)` — see
-//     chat_link_key(). Caller-keyed; chat_key is the opaque OpenChat
-//     context.chat string; sheet_id is the 16-hex-char sheet id
-//     encoded as a u64.
+//     chat_link_key(). Caller-keyed; the stable chat_key field now contains a
+//     canonical unpadded base64url encoding of OpenChat's 32-byte app-scoped
+//     chat handle. sheet_id is the 16-hex-char sheet id encoded as a u64.
 //   MemoryId 20:    (was ACCOUNT_INBOX_KEYS for ~1 day during v1.11.0
 //                development, never released; orphaned. The shared-inbox
 //                review feature was REDESIGNED to OpenChat-side fan-out
@@ -379,10 +430,21 @@ impl Storable for RecoveryKey {
 //                denominated in, not what the confirming user's default is),
 //                which regressed the import back to the founder's currency.
 //                The default currency is resolved PER USER at import instead.)
+//   MemoryIds 22-23: unused.
+//   MemoryId 24: SHEET_ENTRY_BYTES (StableBTreeMap<String, u64>)
+//     v1.13.0 lazy per-sheet accounting for encrypted entry/history payload quotas.
+//   MemoryId 25: CONSUMER_KEY_EPOCHS (StableBTreeMap<Principal, u64>)
+//     v1.14.0 monotonic compare-and-swap epoch for consumer-key mutations.
+//     Entries remain after delete as stable tombstones, so a set prepared by
+//     another browser/process before the delete can never land afterwards.
+//   MemoryId 26: OPENCHAT_BINDINGS_BY_IOU
+//     One canister-verified OpenChat binding per IOU principal.
+//   MemoryId 27: OPENCHAT_BINDINGS_BY_OC
+//     Reverse index from deployment/app/OpenChat-user to IOU principal.
 //
 //   DO NOT re-use these orphaned MemoryIds for a new structure
 //   with a different key/value type — see issue #7. If you need
-//   a new region, use the next free number (currently 22+).
+//   a new region, use the next free number (currently 28+).
 
 // v1.5.0 (schema v3 -> v4): added optional encrypted name fields to Pair,
 // Sheet, PairSummary, CreateSheetReq.
@@ -407,7 +469,25 @@ impl Storable for RecoveryKey {
 // (which carry the field in their bytes) read back unchanged and skip it. No
 // data migration, no MemoryId changes. See
 // `sheet_decodes_pre_v1_12_records_that_still_carry_enabled_currencies`.
-const SCHEMA_VERSION: u32 = 9;
+// v1.13.0 (schema v9 -> v10): added optional Config.ai_app_owner and MemoryId 24
+// encrypted-payload usage counters. Existing counters are populated lazily from
+// the per-sheet entry range, avoiding an unbounded upgrade-hook scan.
+// v1.13.0 (schema v10 -> v11): replaced plaintext Sheet.closing_balances with
+// optional closing_balances_key/enc/iv ciphertext fields. Old records decode by
+// ignoring the removed field; historical plaintext cannot be retroactively protected.
+// v1.14.0 (schema v11 -> v12): added MemoryId 25 CONSUMER_KEY_EPOCHS. Existing
+// keypairs lazily begin at epoch 0; the first accepted set/delete writes epoch 1.
+// Deletes retain the epoch with no keypair, forming an upgrade-stable tombstone.
+// v1.15.0 (schema v12 -> v13): added authoritative OpenChat identity bindings
+// in MemoryIds 26-27 and an optional pinned UserIndex in Config.
+// v1.16.0 (schema v13 -> v14): added optional Config.ai_app_verification_binding and optional
+// app_revision/app_canister_id/key_version fields to stable OpenChatBinding records. The options
+// preserve decoding of existing cells/maps; legacy links deliberately fail private-card access and
+// must be recreated through the app-authenticated C2C claim.
+// v1.17.0 (schema v14 -> v15): added the optional app_subject/subject_version pair. Newly claimed
+// links use only OpenChat's app-scoped subject; the retained openchat_user_id field exists solely so
+// v14 stable bytes decode and is anonymous for new rows. Legacy raw-subject rows fail closed.
+const SCHEMA_VERSION: u32 = 15;
 
 thread_local! {
     static MEMORY_MANAGER: RefCell<MemoryManager<DefaultMemoryImpl>> =
@@ -429,7 +509,14 @@ thread_local! {
     static CONFIG: RefCell<StableCell<Config, Memory>> = RefCell::new(
         StableCell::init(
             MEMORY_MANAGER.with(|m| m.borrow().get(MemoryId::new(2))),
-            Config { creator_principal: Principal::anonymous(), deployed_at: 0, card_currency: None },
+            Config {
+                creator_principal: Principal::anonymous(),
+                deployed_at: 0,
+                card_currency: None,
+                ai_app_owner: None,
+                openchat_user_index_canister_id: None,
+                ai_app_verification_binding: None,
+            },
         )
             .expect("CONFIG cell init")
     );
@@ -492,18 +579,37 @@ thread_local! {
             MEMORY_MANAGER.with(|m| m.borrow().get(MemoryId::new(18)))
         ));
 
-    // v1.9.0 (OpenChat delivery provenance): per-user chat → sheet
-    // mapping. When OpenChat deposits a confirmed action it now carries
-    // the source chat in the envelope's v2 context wrapper; the PWA lets
+    // v1.14.0: canister-owned, per-principal mutation sequence for the
+    // consumer-key record. This is intentionally a separate additive map so
+    // MemoryId 18 keeps its exact released key/value layout. A missing epoch
+    // decodes as legacy epoch 0. Unlike CONSUMER_KEYPAIRS, delete NEVER removes
+    // this row: the retained value is the tombstone which rejects stale writes
+    // from delayed requests, other devices, or a restarted browser process.
+    static CONSUMER_KEY_EPOCHS: RefCell<StableBTreeMap<Principal, u64, Memory>> =
+        RefCell::new(StableBTreeMap::init(
+            MEMORY_MANAGER.with(|m| m.borrow().get(MemoryId::new(25)))
+        ));
+
+    // OpenChat delivery provenance: per-user app-scoped chat-handle → sheet
+    // mapping. OpenChat's v4 envelope carries a secret-derived handle; the PWA lets
     // the user pin "always import this chat's drafts into this sheet".
     // The mapping is caller-keyed (composite String key, see
-    // chat_link_key()); the chat_key is OPAQUE text to the canister
-    // (OpenChat's canonical "group:<principal>" /
-    // "channel:<principal>:<id>" form). Mirrors the CONSUMER_KEYPAIRS
-    // conventions: fresh MemoryId (19), additive, no migration.
+    // chat_link_key()). The stable chat_key field name is retained for Candid/stable compatibility,
+    // but raw OpenChat chat coordinates are rejected and legacy rows are hidden. Mirrors the
+    // CONSUMER_KEYPAIRS conventions: fresh MemoryId (19), additive, no migration.
     static CHAT_SHEET_LINKS: RefCell<StableBTreeMap<String, ChatSheetLink, Memory>> =
         RefCell::new(StableBTreeMap::init(
             MEMORY_MANAGER.with(|m| m.borrow().get(MemoryId::new(19)))
+        ));
+
+    static OPENCHAT_BINDINGS_BY_IOU: RefCell<StableBTreeMap<Principal, OpenChatBinding, Memory>> =
+        RefCell::new(StableBTreeMap::init(
+            MEMORY_MANAGER.with(|m| m.borrow().get(MemoryId::new(26)))
+        ));
+
+    static OPENCHAT_BINDINGS_BY_OC: RefCell<StableBTreeMap<String, Principal, Memory>> =
+        RefCell::new(StableBTreeMap::init(
+            MEMORY_MANAGER.with(|m| m.borrow().get(MemoryId::new(27)))
         ));
 
     // V6: cache the result of vetkd_public_key after first derivation.
@@ -545,6 +651,14 @@ thread_local! {
         RefCell::new(StableBTreeMap::init(
             MEMORY_MANAGER.with(|m| m.borrow().get(MemoryId::new(16)))
         ));
+
+    // v1.13.0: cached encrypted payload bytes per sheet. Existing sheets initialize lazily from
+    // the bounded entry-key range on their first add/edit, so no unbounded post-upgrade migration is
+    // required. MemoryId 24 is fresh; do not reuse an orphaned region for a different type.
+    static SHEET_ENTRY_BYTES: RefCell<StableBTreeMap<String, u64, Memory>> =
+        RefCell::new(StableBTreeMap::init(
+            MEMORY_MANAGER.with(|m| m.borrow().get(MemoryId::new(24)))
+        ));
 }
 
 /// Composite key for the entries map. The NUL separator is
@@ -557,8 +671,13 @@ fn entry_key(sheet_id: &str, entry_id: u64) -> String {
     format!("{}\0{:020}", sheet_id, entry_id)
 }
 
+fn entry_key_bounds(sheet_id: &str, max_id: u64) -> (String, String) {
+    (entry_key(sheet_id, 0), entry_key(sheet_id, max_id))
+}
+
 /// Extract the sheet_id from an entry key. Returns the slice
 /// up to the first NUL byte.
+#[cfg(test)]
 fn entry_key_sheet_id(key: &str) -> &str {
     match key.find('\0') {
         Some(i) => &key[..i],
@@ -596,22 +715,57 @@ fn sheet_entries_remove(sheet_id: &str, entry_id: u64) -> Option<Entry> {
     ENTRIES.with(|m| m.borrow_mut().remove(&entry_key(sheet_id, entry_id)))
 }
 
-/// Returns every entry for the given sheet, in id-ascending
-/// order. v1.3.2 uses a full-table scan (stable structures
-/// don't expose a range API); this is fine for the IOU scale
-/// (each pair has at most one active sheet, so the total
-/// entry count is bounded by the number of pairs).
+/// Returns every entry for the given sheet, in id-ascending order. Composite keys are contiguous,
+/// so use StableBTreeMap::range rather than scanning every user's entries.
 fn sheet_entries_iter(sheet_id: &str) -> Vec<Entry> {
-    let mut out: Vec<Entry> = Vec::new();
-    ENTRIES.with(|m| {
-        for (k, v) in m.borrow().iter() {
-            if entry_key_sheet_id(&k) == sheet_id {
-                out.push(v);
-            }
-        }
+    let (start, end) = entry_key_bounds(sheet_id, u64::MAX);
+    ENTRIES.with(|m| m.borrow().range(start..=end).map(|(_, value)| value).collect())
+}
+
+fn entry_blob_bytes(entry_key: &[u8], ciphertext: &[u8], iv: &[u8]) -> u64 {
+    entry_key
+        .len()
+        .saturating_add(ciphertext.len())
+        .saturating_add(iv.len()) as u64
+}
+
+fn stored_entry_bytes(entry: &Entry) -> u64 {
+    let current = entry_blob_bytes(&entry.entry_key, &entry.ciphertext, &entry.iv);
+    entry.history.as_deref().unwrap_or_default().iter().fold(current, |total, version| {
+        total.saturating_add(entry_blob_bytes(
+            &version.entry_key,
+            &version.ciphertext,
+            &version.iv,
+        ))
+    })
+}
+
+/// Return the sheet's current encrypted-payload usage. The cache is initialized lazily so an
+/// upgrade from a pre-quota release does not need to scan every entry in post_upgrade.
+fn sheet_entry_bytes(sheet_id: &str) -> u64 {
+    if let Some(cached) = SHEET_ENTRY_BYTES.with(|m| m.borrow().get(&sheet_id.to_string())) {
+        return cached;
+    }
+    let total = sheet_entries_iter(sheet_id)
+        .iter()
+        .fold(0u64, |sum, entry| sum.saturating_add(stored_entry_bytes(entry)));
+    SHEET_ENTRY_BYTES.with(|m| {
+        m.borrow_mut().insert(sheet_id.to_string(), total);
     });
-    out.sort_by_key(|e| e.id);
-    out
+    total
+}
+
+fn add_sheet_entry_bytes(sheet_id: &str, additional: u64) {
+    let current = sheet_entry_bytes(sheet_id);
+    let next = current
+        .checked_add(additional)
+        .unwrap_or_else(|| ic_cdk::trap("sheet encrypted-byte counter overflow"));
+    if next > MAX_SHEET_ENCRYPTED_BYTES {
+        ic_cdk::trap("sheet encrypted payload quota exceeded");
+    }
+    SHEET_ENTRY_BYTES.with(|m| {
+        m.borrow_mut().insert(sheet_id.to_string(), next);
+    });
 }
 
 /// StableBTreeMap has no `get_mut` — use this remove/mutate/insert
@@ -654,9 +808,23 @@ where
 
 #[ic_cdk::init]
 fn init() {
-    // First deploy. The stable maps are lazily allocated on first
-    // access via thread_local!; nothing to do here. The version cell
-    // is already at SCHEMA_VERSION.
+    // Bind administration to the installer/controller during the install message. Previously the
+    // cell stayed anonymous and the first arbitrary authenticated caller could claim the canister.
+    let installer = ic_cdk::api::msg_caller();
+    if installer == Principal::anonymous() || !ic_cdk::api::is_controller(&installer) {
+        ic_cdk::trap("installer must be an authenticated canister controller");
+    }
+    CONFIG.with(|c| {
+        let current = c.borrow().get().clone();
+        let _ = c.borrow_mut().set(Config {
+            creator_principal: installer,
+            deployed_at: ic_cdk::api::time(),
+            card_currency: current.card_currency,
+            ai_app_owner: current.ai_app_owner,
+            openchat_user_index_canister_id: current.openchat_user_index_canister_id,
+            ai_app_verification_binding: current.ai_app_verification_binding,
+        });
+    });
 }
 
 #[ic_cdk::pre_upgrade]
@@ -723,6 +891,133 @@ fn require_authed() {
     if ic_cdk::api::msg_caller() == Principal::anonymous() {
         ic_cdk::trap("anonymous call rejected");
     }
+}
+
+fn can_manage_config(creator: Principal, caller: Principal, caller_is_controller: bool) -> bool {
+    caller != Principal::anonymous() && (caller_is_controller || creator == caller)
+}
+
+fn validate_entry_blob(
+    entry_key: &[u8],
+    ciphertext: &[u8],
+    iv: &[u8],
+) -> Result<(), &'static str> {
+    if entry_key.len() != 32 {
+        return Err("entry_key must be 32 bytes");
+    }
+    // AES-GCM ciphertext always includes a 16-byte authentication tag.
+    if ciphertext.len() < 16 {
+        return Err("ciphertext is too short for an AES-GCM authentication tag");
+    }
+    if ciphertext.len() > MAX_ENTRY_CIPHERTEXT_BYTES {
+        return Err("ciphertext exceeds the 64000-byte limit");
+    }
+    if !(12..=16).contains(&iv.len()) {
+        return Err("iv length must be 12..=16 bytes");
+    }
+    Ok(())
+}
+
+fn validate_wrapped_key(blob: &[u8], allow_empty: bool) -> Result<(), &'static str> {
+    if blob.is_empty() && !allow_empty {
+        return Err("wrapped key must not be empty");
+    }
+    if blob.len() > MAX_WRAPPED_KEY_BYTES {
+        return Err("wrapped key exceeds the 8192-byte limit");
+    }
+    Ok(())
+}
+
+fn validate_optional_name(
+    enc: &Option<Vec<u8>>,
+    iv: &Option<Vec<u8>>,
+) -> Result<(), &'static str> {
+    match (enc.as_deref(), iv.as_deref()) {
+        (None, None) => Ok(()),
+        (Some(enc), Some(iv)) => {
+            if enc.is_empty() || enc.len() > 1_024 {
+                return Err("name ciphertext length out of range");
+            }
+            if !(12..=16).contains(&iv.len()) {
+                return Err("name iv length out of range");
+            }
+            Ok(())
+        }
+        _ => Err("name ciphertext and iv must either both be present or both be absent"),
+    }
+}
+
+fn principal_pair_count(principal: Principal) -> usize {
+    PAIRS.with(|pairs| {
+        let mut scanned = 0usize;
+        let mut count = 0usize;
+        for (_, pair) in pairs.borrow().iter() {
+            require_legacy_scan_capacity(&mut scanned, "account");
+            if is_member_of(&pair, principal) {
+                count += 1;
+                if count > MAX_PAIRS_PER_PRINCIPAL {
+                    break;
+                }
+            }
+        }
+        count
+    })
+}
+
+fn pair_sheet_count(pair_id: &str) -> usize {
+    SHEETS.with(|sheets| {
+        let mut scanned = 0usize;
+        let mut count = 0usize;
+        for (_, sheet) in sheets.borrow().iter() {
+            require_legacy_scan_capacity(&mut scanned, "sheet");
+            if sheet.pair_id == pair_id {
+                count += 1;
+                if count > MAX_SHEETS_PER_PAIR {
+                    break;
+                }
+            }
+        }
+        count
+    })
+}
+
+fn pair_sheet_ids(pair_id: &str) -> Vec<String> {
+    SHEETS.with(|sheets| {
+        let mut scanned = 0usize;
+        let mut ids = Vec::new();
+        for (id, sheet) in sheets.borrow().iter() {
+            require_legacy_scan_capacity(&mut scanned, "sheet");
+            if sheet.pair_id == pair_id {
+                if ids.len() >= MAX_SHEETS_PER_PAIR {
+                    ic_cdk::trap("sheet quota exceeded in legacy state; migration required");
+                }
+                ids.push(id);
+            }
+        }
+        ids
+    })
+}
+
+fn checked_legacy_scan_increment(scanned: &mut usize) -> Result<(), &'static str> {
+    *scanned = scanned.saturating_add(1);
+    if *scanned > MAX_LEGACY_GLOBAL_SCAN_RECORDS {
+        Err("legacy global scan limit reached; migrate stable secondary indexes")
+    } else {
+        Ok(())
+    }
+}
+
+fn require_legacy_scan_capacity(scanned: &mut usize, collection: &str) {
+    if checked_legacy_scan_increment(scanned).is_err() {
+        ic_cdk::trap(format!(
+            "{collection} index migration required: legacy global scan limit reached"
+        ));
+    }
+}
+
+fn principal_can_read_sheet(sheet: &Sheet, principal: Principal) -> bool {
+    principal != Principal::anonymous()
+        && (sheet.member_a == principal || sheet.member_b == principal)
 }
 
 fn is_member_of(pair: &Pair, p: Principal) -> bool {
@@ -834,6 +1129,9 @@ fn inspect_message() {
         "set_default_currency",
         "get_config",
         "set_creator_principal",
+        "set_ai_app_owner",
+        "set_openchat_user_index_canister_id",
+        "set_ai_app_verification_binding",
         "set_card_currency",
         // Phase 2: pair lifecycle
         "create_pair",
@@ -852,7 +1150,7 @@ fn inspect_message() {
         "get_sheet",
         "list_archived_sheets",
         "get_sheet_wrapped_key",
-        "close_sheet",
+        "close_sheet_encrypted",
         "start_new_sheet",
         // v1.5.0: encrypted names
         "set_pair_name",
@@ -889,6 +1187,12 @@ fn inspect_message() {
         "set_chat_sheet_link",
         "remove_chat_sheet_link",
         "chat_sheet_links",
+        // v1.15.0: authenticated OC identity binding + anonymous,
+        // capability-gated encrypted card context.
+        "connect_openchat",
+        "get_openchat_binding",
+        "disconnect_openchat",
+        "openchat_card_context",
     ];
     if !allowed.contains(&method_name.as_str()) {
         ic_cdk::trap(format!(
@@ -908,6 +1212,9 @@ fn inspect_message() {
         "set_user_templates",
         "set_default_currency",
         "set_creator_principal",
+        "set_ai_app_owner",
+        "set_openchat_user_index_canister_id",
+        "set_ai_app_verification_binding",
         "set_card_currency",
         "create_pair",
         "join_pair",
@@ -918,7 +1225,7 @@ fn inspect_message() {
         "unarchive_pair",
         "delete_pair",
         "create_sheet",
-        "close_sheet",
+        "close_sheet_encrypted",
         "start_new_sheet",
         "add_entry",
         "edit_entry",
@@ -938,6 +1245,8 @@ fn inspect_message() {
         "vetkd_wrap_consumer_key",
         "set_chat_sheet_link",
         "remove_chat_sheet_link",
+        "connect_openchat",
+        "disconnect_openchat",
     ];
     if require_auth_methods.contains(&method_name.as_str())
         && caller == candid::Principal::anonymous()
@@ -998,12 +1307,7 @@ fn upsert_my_user(f: impl FnOnce(&mut UserRecord)) -> UserRecord {
 #[ic_cdk::update]
 fn set_display_name(wrapped_display_name: Vec<u8>, display_name_iv: Vec<u8>) -> UserRecord {
     require_authed();
-    if wrapped_display_name.is_empty() {
-        ic_cdk::trap("wrappedDisplayName is empty");
-    }
-    if display_name_iv.is_empty() {
-        ic_cdk::trap("displayNameIv is empty");
-    }
+    check_name_blob(&wrapped_display_name, &display_name_iv);
     upsert_my_user(|rec| {
         rec.wrapped_display_name = wrapped_display_name;
         rec.display_name_iv = display_name_iv;
@@ -1031,11 +1335,8 @@ fn set_default_currency(iso: String) -> UserRecord {
 #[ic_cdk::update]
 fn set_user_templates(templates_enc: Vec<u8>, templates_iv: Vec<u8>) -> UserRecord {
     require_authed();
-    if templates_enc.len() > 64_000 {
-        ic_cdk::trap("templates blob too large");
-    }
-    if templates_iv.len() < 12 || templates_iv.len() > 16 {
-        ic_cdk::trap("templates iv length out of range");
+    if let Err(msg) = check_templates_blob(&templates_enc, &templates_iv) {
+        ic_cdk::trap(msg);
     }
     upsert_my_user(|rec| {
         rec.templates_enc = Some(templates_enc);
@@ -1048,17 +1349,12 @@ fn get_config() -> Config {
     CONFIG.with(|c| c.borrow().get().clone())
 }
 
-// Generic OpenChat manifest-verification contract (the app side). OpenChat's user_index c2c-calls
-// this at publish time to confirm the registrant controls the canister the manifest points at:
-// because only THIS canister answers here, a squatter who registers the name "iou" pointing at a
-// bogus/absent canister can never get it published. We vouch for our own name only (option A —
-// name attestation; `owner` is accepted but not required, since OpenChat's owner is a user-canister
-// principal we don't know out of band). Pure identity attestation: no private-key material, so the
-// E2E crypto invariant is untouched. Kept a QUERY so the c2c is cheap and side-effect-free.
+// Legacy V1 OpenChat verifier. Kept only for wire compatibility with older local deployments;
+// current OpenChat publication never consults it because name+owner alone do not bind a manifest,
+// registry, revision, route, or app canister.
 #[derive(CandidType, Deserialize)]
 struct VerifyAiAppArgs {
     name: String,
-    #[allow(dead_code)]
     owner: Principal,
 }
 
@@ -1069,43 +1365,831 @@ struct VerifyAiAppResponse {
     owner: Option<Principal>,
 }
 
+fn verify_ai_app(args: VerifyAiAppArgs, configured_owner: Option<Principal>) -> VerifyAiAppResponse {
+    let vouched = configured_owner
+        .as_ref()
+        .map(|owner| {
+            *owner != Principal::anonymous() && args.name == "iou" && args.owner == *owner
+        })
+        .unwrap_or(false);
+    VerifyAiAppResponse {
+        vouched,
+        name: Some("iou".to_string()),
+        owner: configured_owner,
+    }
+}
+
 #[ic_cdk::query]
 fn c2c_verify_ai_app(args: VerifyAiAppArgs) -> VerifyAiAppResponse {
-    let creator = CONFIG.with(|c| c.borrow().get().creator_principal);
-    VerifyAiAppResponse {
-        vouched: args.name == "iou",
-        name: Some("iou".to_string()),
-        owner: Some(creator),
+    let configured_owner = CONFIG.with(|c| c.borrow().get().ai_app_owner);
+    verify_ai_app(args, configured_owner)
+}
+
+#[derive(CandidType, Deserialize)]
+struct VerifyAiAppV2Args {
+    binding: AiAppVerificationBinding,
+}
+
+#[derive(CandidType, Deserialize)]
+struct VerifyAiAppV2Response {
+    vouched: bool,
+    binding: AiAppVerificationBinding,
+}
+
+fn verification_binding_is_valid(
+    binding: &AiAppVerificationBinding,
+    configured_owner: Option<Principal>,
+    configured_user_index: Option<Principal>,
+    app_canister_id: Principal,
+) -> bool {
+    binding.user_index_canister_id != Principal::anonymous()
+        && binding.owner != Principal::anonymous()
+        && binding.app_canister_id != Principal::anonymous()
+        && binding.app_id > 0
+        && binding.app_revision > 0
+        && binding.canonical_name == "iou"
+        && binding.manifest_hash.len() == 32
+        && binding
+            .inbox_canister_id
+            .map(|id| id != Principal::anonymous())
+            .unwrap_or(true)
+        && configured_owner == Some(binding.owner)
+        && configured_user_index == Some(binding.user_index_canister_id)
+        && binding.app_canister_id == app_canister_id
+}
+
+fn verify_ai_app_v2(
+    challenge: AiAppVerificationBinding,
+    configured: Option<AiAppVerificationBinding>,
+    configured_owner: Option<Principal>,
+    configured_user_index: Option<Principal>,
+    app_canister_id: Principal,
+    caller: Principal,
+) -> VerifyAiAppV2Response {
+    // A false response still needs a non-optional binding on the wire. Return the independently
+    // stored value when available; otherwise echo the challenge with `vouched = false`. OpenChat
+    // accepts only true plus byte-for-byte equality, so the disabled case cannot grant authority.
+    let response_binding = configured.clone().unwrap_or_else(|| challenge.clone());
+    let vouched = configured.as_ref() == Some(&challenge)
+        && verification_binding_is_valid(
+            &challenge,
+            configured_owner,
+            configured_user_index,
+            app_canister_id,
+        )
+        && caller == challenge.user_index_canister_id;
+    VerifyAiAppV2Response {
+        vouched,
+        binding: response_binding,
+    }
+}
+
+/// Vouch only for the exact V2 registry commitment independently installed by this canister's
+/// administrator. This deliberately does not hash or trust the caller's manifest challenge.
+#[ic_cdk::query]
+fn c2c_verify_ai_app_v2(args: VerifyAiAppV2Args) -> VerifyAiAppV2Response {
+    let config = CONFIG.with(|c| c.borrow().get().clone());
+    verify_ai_app_v2(
+        args.binding,
+        config.ai_app_verification_binding,
+        config.ai_app_owner,
+        config.openchat_user_index_canister_id,
+        ic_cdk::api::canister_self(),
+        ic_cdk::api::msg_caller(),
+    )
+}
+
+// Generic OpenChat card-attestation contracts. These mirror OpenChat's
+// language-neutral V1 wire types locally so IOU independently decides whether
+// an exact public card and an exact edited confirmation payload are acceptable.
+// OpenChat remains app-agnostic: the IOU-specific schema checks live here.
+#[derive(Clone, CandidType, Deserialize, Debug, PartialEq, Eq)]
+struct AttestedActionCardRow {
+    label: String,
+    value: String,
+}
+
+#[derive(Clone, CandidType, Deserialize, Debug, PartialEq, Eq)]
+struct AiAppCardContentV1 {
+    title: String,
+    rows: Vec<AttestedActionCardRow>,
+    confirm_label: String,
+    cancel_label: String,
+    action_id: String,
+    disclosure: Option<String>,
+    expires_at: Option<u64>,
+    confirm_payload: Option<Vec<u8>>,
+}
+
+#[derive(Clone, CandidType, Deserialize, Debug, PartialEq, Eq)]
+struct AppScopedCardContextV1 {
+    context_version: u16,
+    app_subject: Vec<u8>,
+    chat_handle: Vec<u8>,
+    message_handle: Vec<u8>,
+    app_id: u32,
+    app_revision: u64,
+    action_id: String,
+}
+
+#[derive(Clone, CandidType, Deserialize, Debug, PartialEq, Eq)]
+struct AppScopedCardContentCommitmentV1 {
+    context: AppScopedCardContextV1,
+    content: AiAppCardContentV1,
+}
+
+#[derive(Clone, CandidType, Deserialize, Debug, PartialEq, Eq)]
+struct CardAttestationBindingV1 {
+    user_index_canister_id: Principal,
+    app_canister_id: Principal,
+    commitment: AppScopedCardContentCommitmentV1,
+    authority_content_hash: [u8; 32],
+}
+
+#[derive(CandidType, Deserialize)]
+struct AttestAiAppCardV1Args {
+    binding: CardAttestationBindingV1,
+}
+
+#[derive(CandidType, Deserialize)]
+struct AttestAiAppCardV1Response {
+    vouched: bool,
+    binding: CardAttestationBindingV1,
+}
+
+#[derive(Clone, CandidType, Deserialize, Debug, PartialEq, Eq)]
+struct CardConfirmationAttestationBindingV1 {
+    user_index_canister_id: Principal,
+    app_canister_id: Principal,
+    context: AppScopedCardContextV1,
+    content_hash: [u8; 32],
+    confirm_payload: Vec<u8>,
+    app_user_key_version: Option<u64>,
+}
+
+#[derive(CandidType, Deserialize)]
+struct AttestAiAppCardConfirmationV1Args {
+    binding: CardConfirmationAttestationBindingV1,
+}
+
+#[derive(CandidType, Deserialize)]
+struct AttestAiAppCardConfirmationV1Response {
+    vouched: bool,
+    binding: CardConfirmationAttestationBindingV1,
+}
+
+const IOU_CARD_ACTION_ID: &str = "iou.entry.import";
+const IOU_CARD_TITLE: &str = "Add to IOU";
+const IOU_CARD_CONFIRM_LABEL: &str = "Add to IOU";
+const IOU_CARD_CANCEL_LABEL: &str = "Cancel";
+const IOU_CARD_DISCLOSURE: &str =
+    "On confirm, an encrypted draft is delivered to your IOU app.";
+const MAX_CARD_CONFIRM_PAYLOAD_BYTES: usize = 16_384;
+const MAX_CARD_DRAFTS: usize = 32;
+const TEMPLATE_REF_PREFIX: &str = "ioutr1.";
+const TEMPLATE_REF_MAX_LENGTH: usize = 1_416;
+
+#[derive(Clone, Debug)]
+struct AttestedEntryDraft {
+    amount: serde_json::Number,
+    kind: Option<String>,
+    currency: Option<String>,
+    direction: Option<String>,
+    date: Option<String>,
+    note: Option<String>,
+    message: Option<String>,
+    template_ref: Option<String>,
+}
+
+// A custom visitor rejects duplicate and unknown keys. Parsing to a generic
+// JSON map first would silently collapse duplicates, which can create
+// cross-language interpretation differences at this security boundary.
+impl<'de> Deserialize<'de> for AttestedEntryDraft {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        struct EntryVisitor;
+        impl<'de> Visitor<'de> for EntryVisitor {
+            type Value = AttestedEntryDraft;
+
+            fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+                formatter.write_str("an IOU entry-draft object")
+            }
+
+            fn visit_map<A>(self, mut map: A) -> Result<Self::Value, A::Error>
+            where
+                A: MapAccess<'de>,
+            {
+                let mut seen = BTreeSet::new();
+                let mut amount = None;
+                let mut kind = None;
+                let mut currency = None;
+                let mut direction = None;
+                let mut date = None;
+                let mut note = None;
+                let mut message = None;
+                let mut template_ref = None;
+                while let Some(key) = map.next_key::<String>()? {
+                    if !seen.insert(key.clone()) {
+                        return Err(de::Error::custom("duplicate entry-draft field"));
+                    }
+                    match key.as_str() {
+                        "amount" => amount = Some(map.next_value()?),
+                        "kind" => kind = Some(map.next_value()?),
+                        "currency" => currency = Some(map.next_value()?),
+                        "direction" => direction = Some(map.next_value()?),
+                        "date" => date = Some(map.next_value()?),
+                        "note" => note = Some(map.next_value()?),
+                        "message" => message = Some(map.next_value()?),
+                        "template_ref" => template_ref = Some(map.next_value()?),
+                        _ => {
+                            let _: de::IgnoredAny = map.next_value()?;
+                            return Err(de::Error::custom("unknown entry-draft field"));
+                        }
+                    }
+                }
+                Ok(AttestedEntryDraft {
+                    amount: amount.ok_or_else(|| de::Error::missing_field("amount"))?,
+                    kind,
+                    currency,
+                    direction,
+                    date,
+                    note,
+                    message,
+                    template_ref,
+                })
+            }
+        }
+        deserializer.deserialize_map(EntryVisitor)
+    }
+}
+
+#[derive(Debug)]
+struct AttestedEntryDrafts(Vec<AttestedEntryDraft>);
+
+impl<'de> Deserialize<'de> for AttestedEntryDrafts {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        struct PayloadVisitor;
+        impl<'de> Visitor<'de> for PayloadVisitor {
+            type Value = AttestedEntryDrafts;
+
+            fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+                formatter.write_str("one IOU entry draft or a non-empty array of drafts")
+            }
+
+            fn visit_map<A>(self, map: A) -> Result<Self::Value, A::Error>
+            where
+                A: MapAccess<'de>,
+            {
+                let draft = AttestedEntryDraft::deserialize(
+                    de::value::MapAccessDeserializer::new(map),
+                )?;
+                Ok(AttestedEntryDrafts(vec![draft]))
+            }
+
+            fn visit_seq<A>(self, mut seq: A) -> Result<Self::Value, A::Error>
+            where
+                A: SeqAccess<'de>,
+            {
+                let mut drafts = Vec::new();
+                while let Some(draft) = seq.next_element::<AttestedEntryDraft>()? {
+                    if drafts.len() == MAX_CARD_DRAFTS {
+                        return Err(de::Error::custom("too many entry drafts"));
+                    }
+                    drafts.push(draft);
+                }
+                if drafts.is_empty() {
+                    return Err(de::Error::custom("entry-draft array must not be empty"));
+                }
+                Ok(AttestedEntryDrafts(drafts))
+            }
+        }
+        deserializer.deserialize_any(PayloadVisitor)
+    }
+}
+
+fn is_ascii_date(value: &str) -> bool {
+    let bytes = value.as_bytes();
+    bytes.len() == 10
+        && bytes[4] == b'-'
+        && bytes[7] == b'-'
+        && bytes
+            .iter()
+            .enumerate()
+            .all(|(i, byte)| i == 4 || i == 7 || byte.is_ascii_digit())
+        && value[0..4].parse::<u16>().is_ok_and(|year| year > 0)
+        && value[5..7]
+            .parse::<u8>()
+            .is_ok_and(|month| (1..=12).contains(&month))
+        && value[8..10]
+            .parse::<u8>()
+            .is_ok_and(|day| (1..=31).contains(&day))
+}
+
+fn is_structural_encrypted_template_ref(value: &str) -> bool {
+    if value.len() <= TEMPLATE_REF_PREFIX.len()
+        || value.len() > TEMPLATE_REF_MAX_LENGTH
+        || !value.starts_with(TEMPLATE_REF_PREFIX)
+    {
+        return false;
+    }
+    let encoded = &value[TEMPLATE_REF_PREFIX.len()..];
+    let sextet = |byte: u8| match byte {
+        b'A'..=b'Z' => Some(byte - b'A'),
+        b'a'..=b'z' => Some(byte - b'a' + 26),
+        b'0'..=b'9' => Some(byte - b'0' + 52),
+        b'-' => Some(62),
+        b'_' => Some(63),
+        _ => None,
+    };
+    let remainder = encoded.len() % 4;
+    if remainder == 1 || !encoded.bytes().all(|byte| sextet(byte).is_some()) {
+        return false;
+    }
+    let last = encoded
+        .as_bytes()
+        .last()
+        .and_then(|byte| sextet(*byte))
+        .unwrap_or_default();
+    if (remainder == 2 && last & 0x0f != 0) || (remainder == 3 && last & 0x03 != 0) {
+        return false;
+    }
+    // 12-byte IV + at least one plaintext byte + 16-byte GCM tag. The
+    // browser codec uses canonical unpadded base64url and caps plaintext.
+    let decoded_len = encoded.len().saturating_mul(3) / 4;
+    (29..=1_052).contains(&decoded_len)
+}
+
+fn validate_attested_entry_draft(draft: &AttestedEntryDraft, allow_template_ref: bool) -> bool {
+    let Some(amount) = draft.amount.as_f64() else {
+        return false;
+    };
+    let minor_units = (amount * 100.0).round();
+    amount.is_finite()
+        && amount > 0.0
+        && minor_units.is_finite()
+        && (1.0..=9_007_199_254_740_991.0).contains(&minor_units)
+        && draft
+            .kind
+            .as_deref()
+            .is_none_or(|value| matches!(value, "iou" | "settlement"))
+        && draft.currency.as_deref().is_none_or(|value| {
+            value.len() == 3 && value.bytes().all(|byte| byte.is_ascii_uppercase())
+        })
+        && draft
+            .direction
+            .as_deref()
+            .is_none_or(|value| matches!(value, "credit" | "debt"))
+        && draft.date.as_deref().is_none_or(is_ascii_date)
+        && draft
+            .note
+            .as_deref()
+            .is_none_or(|value| value.chars().count() <= 4_096 && !value.contains('\0'))
+        && draft
+            .message
+            .as_deref()
+            .is_none_or(|value| value.chars().count() <= 200 && !value.contains('\0'))
+        && match draft.template_ref.as_deref() {
+            None => true,
+            Some(value) => allow_template_ref && is_structural_encrypted_template_ref(value),
+        }
+}
+
+fn parse_attested_entry_drafts(
+    payload: &[u8],
+    allow_template_ref: bool,
+) -> Option<Vec<AttestedEntryDraft>> {
+    if payload.is_empty() || payload.len() > MAX_CARD_CONFIRM_PAYLOAD_BYTES {
+        return None;
+    }
+    let mut deserializer = serde_json::Deserializer::from_slice(payload);
+    let parsed = AttestedEntryDrafts::deserialize(&mut deserializer).ok()?;
+    deserializer.end().ok()?;
+    parsed
+        .0
+        .iter()
+        .all(|draft| validate_attested_entry_draft(draft, allow_template_ref))
+        .then_some(parsed.0)
+}
+
+fn draft_public_values(draft: &AttestedEntryDraft) -> Vec<(&'static str, String)> {
+    [
+        Some(("Amount", draft.amount.to_string())),
+        draft.currency.clone().map(|value| ("Currency", value)),
+        // This is the public transaction kind (iou/settlement), not a private
+        // account Type. Account Type is accepted only as encrypted template_ref.
+        draft.kind.clone().map(|value| ("Type", value)),
+        draft.direction.clone().map(|value| ("Direction", value)),
+        draft.date.clone().map(|value| ("Date", value)),
+        draft.note.clone().map(|value| ("Note", value)),
+        draft.message.clone().map(|value| ("Message", value)),
+    ]
+    .into_iter()
+    .flatten()
+    .filter(|(_, value)| !value.is_empty())
+    .collect()
+}
+
+fn exact_iou_card_content_is_valid(content: &AiAppCardContentV1) -> bool {
+    if content.confirm_label != IOU_CARD_CONFIRM_LABEL
+        || content.cancel_label != IOU_CARD_CANCEL_LABEL
+        || content.action_id != IOU_CARD_ACTION_ID
+        || content.disclosure.as_deref() != Some(IOU_CARD_DISCLOSURE)
+        || content.expires_at.is_some()
+    {
+        return false;
+    }
+    let Some(payload) = content.confirm_payload.as_deref() else {
+        return false;
+    };
+    let Some(drafts) = parse_attested_entry_drafts(payload, false) else {
+        return false;
+    };
+    let expected_rows = if drafts.len() == 1 {
+        draft_public_values(&drafts[0])
+            .into_iter()
+            .map(|(label, value)| AttestedActionCardRow {
+                label: label.to_string(),
+                value,
+            })
+            .collect::<Vec<_>>()
+    } else {
+        drafts
+            .iter()
+            .enumerate()
+            .map(|(index, draft)| AttestedActionCardRow {
+                label: format!("Entry {}", index + 1),
+                value: draft_public_values(draft)
+                    .into_iter()
+                    .map(|(_, value)| value)
+                    .collect::<Vec<_>>()
+                    .join(" "),
+            })
+            .collect::<Vec<_>>()
+    };
+    let expected_title = if drafts.len() == 1 {
+        IOU_CARD_TITLE.to_string()
+    } else {
+        format!("{IOU_CARD_TITLE} ({} entries)", drafts.len())
+    };
+    content.title == expected_title && content.rows == expected_rows
+}
+
+fn current_card_link_matches(
+    link: Option<&OpenChatBinding>,
+    user_index_canister_id: Principal,
+    app_canister_id: Principal,
+    app_subject: &[u8],
+    app_id: u32,
+    app_revision: u64,
+    key_version: Option<u64>,
+) -> bool {
+    let Some(link) = link else {
+        return false;
+    };
+    link.user_index_canister_id == user_index_canister_id
+        && link.app_canister_id == Some(app_canister_id)
+        && valid_app_subject(link) == Some(app_subject)
+        && link.app_id == app_id
+        && link.app_revision == Some(app_revision)
+        && link.key_version.is_some_and(|version| version > 0)
+        && key_version.is_none_or(|version| Some(version) == link.key_version)
+}
+
+fn valid_app_scoped_card_context(context: &AppScopedCardContextV1) -> bool {
+    context.context_version == 1
+        && context.app_subject.len() == 32
+        && context.chat_handle.len() == 32
+        && context.message_handle.len() == 32
+        && !context.action_id.is_empty()
+        && context.action_id.len() <= 128
+}
+
+fn lowercase_hex(bytes: &[u8]) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut out = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        out.push(HEX[(byte >> 4) as usize] as char);
+        out.push(HEX[(byte & 0x0f) as usize] as char);
+    }
+    out
+}
+
+fn base64url_no_pad(bytes: &[u8]) -> String {
+    const ALPHABET: &[u8; 64] =
+        b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+    let mut out = String::with_capacity((bytes.len() * 4).div_ceil(3));
+    for chunk in bytes.chunks(3) {
+        let b0 = chunk[0];
+        let b1 = chunk.get(1).copied().unwrap_or(0);
+        let b2 = chunk.get(2).copied().unwrap_or(0);
+        out.push(ALPHABET[(b0 >> 2) as usize] as char);
+        out.push(ALPHABET[(((b0 & 0x03) << 4) | (b1 >> 4)) as usize] as char);
+        if chunk.len() > 1 {
+            out.push(ALPHABET[(((b1 & 0x0f) << 2) | (b2 >> 6)) as usize] as char);
+        }
+        if chunk.len() > 2 {
+            out.push(ALPHABET[(b2 & 0x3f) as usize] as char);
+        }
+    }
+    out
+}
+
+fn scoped_chat_handle_key(handle: &[u8]) -> Option<String> {
+    (handle.len() == 32).then(|| base64url_no_pad(handle))
+}
+
+fn attests_exact_iou_card(
+    binding: &CardAttestationBindingV1,
+    configured: Option<&AiAppVerificationBinding>,
+    link: Option<&OpenChatBinding>,
+    app_canister_id: Principal,
+    caller: Principal,
+) -> bool {
+    let Some(configured) = configured else {
+        return false;
+    };
+    caller == configured.user_index_canister_id
+        && binding.user_index_canister_id == configured.user_index_canister_id
+        && binding.app_canister_id == app_canister_id
+        && configured.app_canister_id == app_canister_id
+        && configured.inbox_canister_id.is_some()
+        && valid_app_scoped_card_context(&binding.commitment.context)
+        && binding.commitment.context.app_id == configured.app_id
+        && binding.commitment.context.app_revision == configured.app_revision
+        && binding.commitment.context.action_id == IOU_CARD_ACTION_ID
+        && binding.authority_content_hash.iter().any(|byte| *byte != 0)
+        && current_card_link_matches(
+            link,
+            binding.user_index_canister_id,
+            app_canister_id,
+            &binding.commitment.context.app_subject,
+            binding.commitment.context.app_id,
+            binding.commitment.context.app_revision,
+            None,
+        )
+        && exact_iou_card_content_is_valid(&binding.commitment.content)
+}
+
+/// Vouch for the exact public card only after independently hashing and
+/// validating every row and consumer payload. Private Type names and ids
+/// cannot enter this initial/public payload.
+#[ic_cdk::update]
+fn c2c_attest_ai_app_card_v1(
+    args: AttestAiAppCardV1Args,
+) -> AttestAiAppCardV1Response {
+    let app_canister_id = ic_cdk::api::canister_self();
+    let caller = ic_cdk::api::msg_caller();
+    let configured =
+        CONFIG.with(|config| config.borrow().get().ai_app_verification_binding.clone());
+    let link = openchat_binding_for_subject(
+        args.binding.user_index_canister_id,
+        args.binding.commitment.context.app_id,
+        &args.binding.commitment.context.app_subject,
+    );
+    let vouched = attests_exact_iou_card(
+        &args.binding,
+        configured.as_ref(),
+        link.as_ref(),
+        app_canister_id,
+        caller,
+    );
+    AttestAiAppCardV1Response {
+        vouched,
+        binding: args.binding,
+    }
+}
+
+fn private_reference_sheet_access_is_valid(
+    link: Option<&OpenChatBinding>,
+    chat_handle: &[u8],
+) -> bool {
+    let Some(link) = link else {
+        return false;
+    };
+    let Some(chat_key) = scoped_chat_handle_key(chat_handle) else {
+        return false;
+    };
+    let Some(sheet_id) = linked_sheet_for(link.iou_principal, &chat_key) else {
+        return false;
+    };
+    principal_owns_sheet(link.iou_principal, &sheet_id) && sheet_is_active(&sheet_id)
+}
+
+fn attests_exact_iou_card_confirmation(
+    binding: &CardConfirmationAttestationBindingV1,
+    configured: Option<&AiAppVerificationBinding>,
+    link: Option<&OpenChatBinding>,
+    app_canister_id: Principal,
+    caller: Principal,
+    private_sheet_access_valid: bool,
+) -> bool {
+    let Some(configured) = configured else {
+        return false;
+    };
+    let Some(drafts) = parse_attested_entry_drafts(&binding.confirm_payload, true) else {
+        return false;
+    };
+    let has_private_reference = drafts.iter().any(|draft| draft.template_ref.is_some());
+    caller == configured.user_index_canister_id
+        && binding.user_index_canister_id == configured.user_index_canister_id
+        && binding.app_canister_id == app_canister_id
+        && configured.app_canister_id == app_canister_id
+        && configured.inbox_canister_id.is_some()
+        && valid_app_scoped_card_context(&binding.context)
+        && binding.context.app_id == configured.app_id
+        && binding.context.app_revision == configured.app_revision
+        && binding.context.action_id == IOU_CARD_ACTION_ID
+        && binding.content_hash.iter().any(|byte| *byte != 0)
+        && current_card_link_matches(
+            link,
+            binding.user_index_canister_id,
+            app_canister_id,
+            &binding.context.app_subject,
+            binding.context.app_id,
+            binding.context.app_revision,
+            binding.app_user_key_version,
+        )
+        && binding.app_user_key_version.is_some()
+        && (!has_private_reference || private_sheet_access_valid)
+}
+
+/// Vouch for the exact final bytes edited inside the app-rendered card. The
+/// only private account-Type field accepted is a structurally valid opaque
+/// template_ref; plaintext template/type fields are rejected as unknown.
+#[ic_cdk::update]
+fn c2c_attest_ai_app_card_confirmation_v1(
+    args: AttestAiAppCardConfirmationV1Args,
+) -> AttestAiAppCardConfirmationV1Response {
+    let app_canister_id = ic_cdk::api::canister_self();
+    let caller = ic_cdk::api::msg_caller();
+    let configured =
+        CONFIG.with(|config| config.borrow().get().ai_app_verification_binding.clone());
+    let link = openchat_binding_for_subject(
+        args.binding.user_index_canister_id,
+        args.binding.context.app_id,
+        &args.binding.context.app_subject,
+    );
+    let private_sheet_access_valid =
+        private_reference_sheet_access_is_valid(link.as_ref(), &args.binding.context.chat_handle);
+    let vouched = attests_exact_iou_card_confirmation(
+        &args.binding,
+        configured.as_ref(),
+        link.as_ref(),
+        app_canister_id,
+        caller,
+        private_sheet_access_valid,
+    );
+    AttestAiAppCardConfirmationV1Response {
+        vouched,
+        binding: args.binding,
     }
 }
 
 #[ic_cdk::update]
 fn set_creator_principal(p: Principal) {
     require_authed();
+    if p == Principal::anonymous() {
+        ic_cdk::trap("creator principal must not be anonymous");
+    }
     let caller = ic_cdk::api::msg_caller();
     CONFIG.with(|c| {
         let mut cfg = c.borrow_mut();
         let current = cfg.get().clone();
-        let is_unset = current.creator_principal == Principal::anonymous();
-        if !is_unset && current.creator_principal != caller {
-            ic_cdk::trap("only the creator can change the creator principal");
+        if !can_manage_config(
+            current.creator_principal,
+            caller,
+            ic_cdk::api::is_controller(&caller),
+        ) {
+            ic_cdk::trap("only the creator or a canister controller can change configuration");
         }
         let _ = cfg.set(Config {
             creator_principal: p,
             deployed_at: ic_cdk::api::time(),
-            // Preserve — this setter rebuilds the whole record.
             card_currency: current.card_currency.clone(),
+            ai_app_owner: current.ai_app_owner,
+            openchat_user_index_canister_id: current.openchat_user_index_canister_id,
+            ai_app_verification_binding: current.ai_app_verification_binding.clone(),
+        });
+    });
+}
+
+/// Configure the exact OpenChat user-canister principal allowed to register this IOU deployment.
+/// Passing anonymous clears the binding and makes verification fail closed.
+#[ic_cdk::update]
+fn set_ai_app_owner(owner: Principal) {
+    require_authed();
+    let caller = ic_cdk::api::msg_caller();
+    CONFIG.with(|c| {
+        let mut cfg = c.borrow_mut();
+        let current = cfg.get().clone();
+        if !can_manage_config(
+            current.creator_principal,
+            caller,
+            ic_cdk::api::is_controller(&caller),
+        ) {
+            ic_cdk::trap("only the creator or a canister controller can change configuration");
+        }
+        let next_owner = (owner != Principal::anonymous()).then_some(owner);
+        let verification_binding = current
+            .ai_app_verification_binding
+            .clone()
+            .filter(|binding| Some(binding.owner) == next_owner);
+        let _ = cfg.set(Config {
+            creator_principal: current.creator_principal,
+            deployed_at: current.deployed_at,
+            card_currency: current.card_currency,
+            ai_app_owner: next_owner,
+            openchat_user_index_canister_id: current.openchat_user_index_canister_id,
+            ai_app_verification_binding: verification_binding,
+        });
+    });
+}
+
+/// Pin the only OpenChat UserIndex whose link claims and card capabilities
+/// this deployment will accept. Passing anonymous clears the pin and makes
+/// both flows fail closed.
+#[ic_cdk::update]
+fn set_openchat_user_index_canister_id(canister_id: Principal) {
+    require_authed();
+    let caller = ic_cdk::api::msg_caller();
+    CONFIG.with(|c| {
+        let mut cfg = c.borrow_mut();
+        let current = cfg.get().clone();
+        if !can_manage_config(
+            current.creator_principal,
+            caller,
+            ic_cdk::api::is_controller(&caller),
+        ) {
+            ic_cdk::trap("only the creator or a canister controller can change configuration");
+        }
+        let next_user_index = (canister_id != Principal::anonymous()).then_some(canister_id);
+        let verification_binding = current
+            .ai_app_verification_binding
+            .clone()
+            .filter(|binding| Some(binding.user_index_canister_id) == next_user_index);
+        let _ = cfg.set(Config {
+            creator_principal: current.creator_principal,
+            deployed_at: current.deployed_at,
+            card_currency: current.card_currency,
+            ai_app_owner: current.ai_app_owner,
+            openchat_user_index_canister_id: next_user_index,
+            ai_app_verification_binding: verification_binding,
+        });
+    });
+}
+
+/// Install or clear the exact OpenChat verifier-v2 commitment reviewed for this IOU deployment.
+///
+/// Registration is an upsert and every security-relevant manifest edit receives a new revision,
+/// so this value must be refreshed before publication. The setter refuses a binding that does not
+/// match the already-pinned owner/UserIndex or this canister; callers cannot use it to widen trust.
+#[ic_cdk::update]
+fn set_ai_app_verification_binding(binding: Option<AiAppVerificationBinding>) {
+    require_authed();
+    let caller = ic_cdk::api::msg_caller();
+    CONFIG.with(|c| {
+        let mut cfg = c.borrow_mut();
+        let current = cfg.get().clone();
+        if !can_manage_config(
+            current.creator_principal,
+            caller,
+            ic_cdk::api::is_controller(&caller),
+        ) {
+            ic_cdk::trap("only the creator or a canister controller can change configuration");
+        }
+        if let Some(candidate) = binding.as_ref() {
+            if !verification_binding_is_valid(
+                candidate,
+                current.ai_app_owner,
+                current.openchat_user_index_canister_id,
+                ic_cdk::api::canister_self(),
+            ) {
+                ic_cdk::trap(
+                    "verification binding must match the pinned owner, UserIndex, this app canister, canonical name iou, and a 32-byte manifest hash",
+                );
+            }
+        }
+        let _ = cfg.set(Config {
+            creator_principal: current.creator_principal,
+            deployed_at: current.deployed_at,
+            card_currency: current.card_currency,
+            ai_app_owner: current.ai_app_owner,
+            openchat_user_index_canister_id: current.openchat_user_index_canister_id,
+            ai_app_verification_binding: binding,
         });
     });
 }
 
 /// set_card_currency: the deployment-wide currency IOU's confirmable card pre-selects.
 ///
-/// Gated like `set_creator_principal`: the creator sets it, and while no creator has been claimed any
-/// signed-in user may (fresh deployments start with `creator_principal` = anonymous). It is ONE value
-/// for every user of this canister — see the `card_currency` field comment for why it cannot be
-/// per-user — and it is only a PRE-SELECTION: whoever confirms a card can change it in the dropdown
-/// before importing.
+/// Gated like set_creator_principal: only the configured administrator or a canister controller may
+/// set it. It is ONE value for every user of this canister and only a PRE-SELECTION: whoever
+/// confirms a card can change it in the dropdown before importing.
 #[ic_cdk::update]
 fn set_card_currency(iso: String) {
     require_authed();
@@ -1119,14 +2203,20 @@ fn set_card_currency(iso: String) {
     CONFIG.with(|c| {
         let mut cfg = c.borrow_mut();
         let current = cfg.get().clone();
-        let is_unset = current.creator_principal == Principal::anonymous();
-        if !is_unset && current.creator_principal != caller {
-            ic_cdk::trap("only the creator can set the card currency");
+        if !can_manage_config(
+            current.creator_principal,
+            caller,
+            ic_cdk::api::is_controller(&caller),
+        ) {
+            ic_cdk::trap("only the creator or a canister controller can change configuration");
         }
         let _ = cfg.set(Config {
             creator_principal: current.creator_principal,
             deployed_at: current.deployed_at,
             card_currency: if code.is_empty() { None } else { Some(code) },
+            ai_app_owner: current.ai_app_owner,
+            openchat_user_index_canister_id: current.openchat_user_index_canister_id,
+            ai_app_verification_binding: current.ai_app_verification_binding,
         });
     });
 }
@@ -1146,6 +2236,9 @@ pub struct CreatePairResult {
 async fn create_pair() -> CreatePairResult {
     let caller = ic_cdk::api::msg_caller();
     require_authed();
+    if principal_pair_count(caller) >= MAX_PAIRS_PER_PRINCIPAL {
+        ic_cdk::trap("account quota reached for this principal");
+    }
     // v1.3.2: fix for issue #2 (create_pair async TOCTOU). On the
     // IC, an `await` (here, the `raw_rand` calls) suspends the
     // method and lets other ingress messages run. The previous
@@ -1175,10 +2268,14 @@ async fn create_pair() -> CreatePairResult {
         templates_b_iv: None,
     };
     PAIRS.with(|p| {
+        let mut map = p.borrow_mut();
+        if INVITES.with(|invites| invites.borrow().contains_key(&invite)) {
+            ic_cdk::trap("invite code collision; please retry");
+        }
         // V5 fix: pre-insert existence check. now_id uses 64 bits
         // of raw_rand entropy so collisions are vanishingly unlikely,
         // but check anyway to fail loudly if it ever happens.
-        if p.borrow().contains_key(&id) {
+        if map.contains_key(&id) {
             ic_cdk::trap("pair id collision; please retry");
         }
         // A principal may be in any number of pairs concurrently — one shared
@@ -1187,11 +2284,27 @@ async fn create_pair() -> CreatePairResult {
         // get_my_pairs already returns the full list and the UI picks among
         // them, join_pair never enforced the limit anyway, and there is no
         // principal->pair index to maintain — sheets are keyed per pair and
-        // keys per principal, so unbounded pairs need no other change. The
+        // keys per principal, so quota enforcement currently uses a bounded scan. The
         // `archived_at` field is retained for a future leave/close-pair action.
-        p.borrow_mut().insert(id.clone(), pair);
+        let mut scanned = 0usize;
+        let mut count = 0usize;
+        for (_, existing) in map.iter() {
+            require_legacy_scan_capacity(&mut scanned, "account");
+            if is_member_of(&existing, caller) {
+                count += 1;
+                if count >= MAX_PAIRS_PER_PRINCIPAL {
+                    break;
+                }
+            }
+        }
+        if count >= MAX_PAIRS_PER_PRINCIPAL {
+            ic_cdk::trap("account quota reached for this principal");
+        }
+        map.insert(id.clone(), pair);
+        INVITES.with(|invites| {
+            invites.borrow_mut().insert(invite.clone(), id.clone());
+        });
     });
-    INVITES.with(|i| i.borrow_mut().insert(invite.clone(), id.clone()));
     CreatePairResult { pair_id: id, invite_code: invite }
 }
 
@@ -1200,6 +2313,9 @@ async fn create_pair() -> CreatePairResult {
 fn join_pair(invite_code: String) -> String {
     let caller = ic_cdk::api::msg_caller();
     require_authed();
+    if principal_pair_count(caller) >= MAX_PAIRS_PER_PRINCIPAL {
+        ic_cdk::trap("account quota reached for this principal");
+    }
     let pair_id = INVITES.with(|i| i.borrow().get(&invite_code).clone());
     let pair_id = match pair_id {
         Some(p) => p,
@@ -1234,53 +2350,64 @@ fn join_pair(invite_code: String) -> String {
 fn get_my_pairs() -> Vec<PairSummary> {
     require_authed();
     let caller = ic_cdk::api::msg_caller();
-    let mut out: Vec<PairSummary> = Vec::new();
-    PAIRS.with(|p| {
-        SHEETS.with(|s| {
-            for (_id, pair) in p.borrow().iter() {
-                if !is_member_of(&pair, caller) {
-                    continue;
+    // Bound legacy responses and scan SHEETS once rather than once for every account.
+    let pairs: Vec<Pair> = PAIRS.with(|p| {
+        let mut scanned = 0usize;
+        let mut out = Vec::new();
+        for (_, pair) in p.borrow().iter() {
+            require_legacy_scan_capacity(&mut scanned, "account");
+            if is_member_of(&pair, caller) {
+                if out.len() >= MAX_PAIRS_PER_PRINCIPAL {
+                    ic_cdk::trap("account quota exceeded in legacy state; migration required");
                 }
-                let caller_is_a = pair.members[0] == caller;
-                let other = if caller_is_a {
-                    pair.members[1]
-                } else {
-                    pair.members[0]
-                };
-                // The OTHER member's encrypted name, relative to the caller.
-                let (other_name_enc, other_name_iv) = if caller_is_a {
-                    (pair.member_b_name_enc.clone(), pair.member_b_name_iv.clone())
-                } else {
-                    (pair.member_a_name_enc.clone(), pair.member_a_name_iv.clone())
-                };
-                // Find the active sheet (if any) for this pair.
-                let mut active_sheet: Option<String> = None;
-                let mut archived = 0u32;
-                for (_sid, sheet) in s.borrow().iter() {
-                    if sheet.pair_id != pair.id {
-                        continue;
-                    }
-                    match sheet.state {
-                        SheetState::Active => active_sheet = Some(sheet.id.clone()),
-                        SheetState::Closed => archived += 1,
-                    }
-                }
-                out.push(PairSummary {
-                    id: pair.id.clone(),
-                    other_principal: other,
-                    active_sheet_id: active_sheet,
-                    archived_sheet_count: archived,
-                    created_at: pair.created_at,
-                    archived_at: pair.archived_at,
-                    name_enc: pair.name_enc.clone(),
-                    name_iv: pair.name_iv.clone(),
-                    other_name_enc,
-                    other_name_iv,
-                });
+                out.push(pair);
             }
-        });
+        }
+        out
     });
-    out
+    let mut sheet_stats: BTreeMap<String, (Option<String>, u32)> = pairs
+        .iter()
+        .map(|pair| (pair.id.clone(), (None, 0)))
+        .collect();
+    SHEETS.with(|s| {
+        let mut scanned = 0usize;
+        for (_, sheet) in s.borrow().iter() {
+            require_legacy_scan_capacity(&mut scanned, "sheet");
+            let Some((active, archived)) = sheet_stats.get_mut(&sheet.pair_id) else {
+                continue;
+            };
+            match sheet.state {
+                SheetState::Active => *active = Some(sheet.id),
+                SheetState::Closed => *archived = archived.saturating_add(1),
+            }
+        }
+    });
+    pairs
+        .into_iter()
+        .map(|pair| {
+            let caller_is_a = pair.members[0] == caller;
+            let other_principal = if caller_is_a { pair.members[1] } else { pair.members[0] };
+            let (other_name_enc, other_name_iv) = if caller_is_a {
+                (pair.member_b_name_enc.clone(), pair.member_b_name_iv.clone())
+            } else {
+                (pair.member_a_name_enc.clone(), pair.member_a_name_iv.clone())
+            };
+            let (active_sheet_id, archived_sheet_count) =
+                sheet_stats.remove(&pair.id).unwrap_or((None, 0));
+            PairSummary {
+                id: pair.id,
+                other_principal,
+                active_sheet_id,
+                archived_sheet_count,
+                created_at: pair.created_at,
+                archived_at: pair.archived_at,
+                name_enc: pair.name_enc,
+                name_iv: pair.name_iv,
+                other_name_enc,
+                other_name_iv,
+            }
+        })
+        .collect()
 }
 
 /// get_pair: full pair record for a given id. Caller must be a member.
@@ -1320,9 +2447,23 @@ pub struct CreateSheetReq {
 async fn create_sheet(req: CreateSheetReq) -> Sheet {
     let caller = ic_cdk::api::msg_caller();
     require_authed();
+    if let Err(msg) = validate_wrapped_key(&req.wrapped_key_a, false) {
+        ic_cdk::trap(msg);
+    }
+    if let Err(msg) = validate_wrapped_key(&req.wrapped_key_b, true) {
+        ic_cdk::trap(msg);
+    }
+    if let Err(msg) = validate_optional_name(&req.name_enc, &req.name_iv) {
+        ic_cdk::trap(msg);
+    }
     // v1 constraints we enforce:
     if req.closing_window_days < 30 || req.closing_window_days > 730 {
         ic_cdk::trap("closing_window_days must be 30..=730");
+    }
+    // Early rejection avoids paying for raw_rand when a legacy account is already over quota.
+    // The count is checked again atomically immediately before insertion below.
+    if pair_sheet_count(&req.pair_id) >= MAX_SHEETS_PER_PAIR {
+        ic_cdk::trap("sheet quota reached for this account");
     }
     // v1.3.2: fix for issue #3 (create_sheet async TOCTOU). Same
     // pattern as create_pair (#2): do all the awaits first, then
@@ -1359,17 +2500,27 @@ async fn create_sheet(req: CreateSheetReq) -> Sheet {
         // empty placeholder; grant_partner_access fills it once a partner
         // joins. member_b stays anonymous until then.
         let is_solo = member_b == Principal::anonymous();
+        if !is_solo && req.wrapped_key_b.is_empty() {
+            ic_cdk::trap("wrapped_key_b must not be empty for a two-member sheet");
+        }
         let wrapped_key_b = if is_solo { Vec::new() } else { req.wrapped_key_b.clone() };
         // v1: only one active sheet per pair. The check + insert
         // are in the same synchronous block (no await between), so
         // two concurrent create_sheet calls for the same pair
         // cannot both pass the check.
+        let mut sheet_count = 0usize;
+        let mut scanned = 0usize;
         for (_id, existing) in s.borrow().iter() {
+            require_legacy_scan_capacity(&mut scanned, "sheet");
             if existing.pair_id == req.pair_id {
+                sheet_count += 1;
                 if let SheetState::Active = existing.state {
                     ic_cdk::trap("pair already has an active sheet");
                 }
             }
+        }
+        if sheet_count >= MAX_SHEETS_PER_PAIR {
+            ic_cdk::trap("sheet quota reached for this account");
         }
         let sheet = Sheet {
             id: id.clone(),
@@ -1383,7 +2534,9 @@ async fn create_sheet(req: CreateSheetReq) -> Sheet {
             member_b,
             created_at: now,
             closed_at: None,
-            closing_balances: None,
+            closing_balances_key: None,
+            closing_balances_enc: None,
+            closing_balances_iv: None,
             name_enc: req.name_enc,
             name_iv: req.name_iv,
         };
@@ -1393,18 +2546,16 @@ async fn create_sheet(req: CreateSheetReq) -> Sheet {
     sheet
 }
 
-/// get_sheet: full sheet record. Caller must be a member of the parent pair.
+/// get_sheet: full sheet record. Caller must be an explicitly recorded sheet member.
 #[ic_cdk::query]
 fn get_sheet(sheet_id: String) -> Option<Sheet> {
     require_authed();
     let caller = ic_cdk::api::msg_caller();
-    let pair_id = SHEETS.with(|s| s.borrow().get(&sheet_id).map(|sh| sh.pair_id.clone()));
-    let pair_id = pair_id?;
-    let allowed = PAIRS.with(|p| {
-        p.borrow().get(&pair_id).map(|pair| is_member_of(&pair, caller)).unwrap_or(false)
-    });
-    if !allowed { return None; }
-    SHEETS.with(|s| s.borrow().get(&sheet_id).clone())
+    SHEETS.with(|s| {
+        s.borrow()
+            .get(&sheet_id)
+            .filter(|sheet| principal_can_read_sheet(sheet, caller))
+    })
 }
 
 /// list_archived_sheets: returns all closed sheets for a pair the
@@ -1421,16 +2572,21 @@ fn list_archived_sheets(pair_id: String) -> Vec<Sheet> {
     });
     if !allowed { ic_cdk::trap("not a member of this pair"); }
     let mut out: Vec<Sheet> = SHEETS.with(|s| {
-        s.borrow()
-            .iter()
-            .filter_map(|(_id, sh)| {
-                if sh.pair_id == pair_id && matches!(sh.state, SheetState::Closed) {
-                    Some(sh)
-                } else {
-                    None
+        let mut scanned = 0usize;
+        let mut out = Vec::new();
+        for (_, sh) in s.borrow().iter() {
+            require_legacy_scan_capacity(&mut scanned, "sheet");
+            if sh.pair_id == pair_id
+                && matches!(sh.state, SheetState::Closed)
+                && principal_can_read_sheet(&sh, caller)
+            {
+                if out.len() >= MAX_SHEETS_PER_PAIR {
+                    ic_cdk::trap("sheet quota exceeded in legacy state; migration required");
                 }
-            })
-            .collect()
+                out.push(sh);
+            }
+        }
+        out
     });
     out.sort_by_key(|b| std::cmp::Reverse(b.closed_at.unwrap_or(0)));
     out
@@ -1612,14 +2768,22 @@ fn set_pair_templates(pair_id: String, templates_enc: Vec<u8>, templates_iv: Vec
     });
 }
 
-/// close_sheet: marks a sheet closed, captures the closing balances.
-/// Members are still able to read it.
+/// Close a sheet while preserving the E2E boundary. The client serializes the balance snapshot and
+/// encrypts it under K_sheet before calling; the canister validates only the AES-GCM envelope and
+/// never receives currency, amount, or direction in plaintext.
 #[ic_cdk::update]
-fn close_sheet(sheet_id: String, closing_balances: Vec<ClosingBalance>) {
+fn close_sheet_encrypted(sheet_id: String, closing_balances: EncryptedClosingBalances) {
     let caller = ic_cdk::api::msg_caller();
     require_authed();
+    if let Err(msg) = validate_entry_blob(
+        &closing_balances.entry_key,
+        &closing_balances.ciphertext,
+        &closing_balances.iv,
+    ) {
+        ic_cdk::trap(msg);
+    }
     let ok = update_sheet_field(&sheet_id, |sheet| {
-        if sheet.member_a != caller && sheet.member_b != caller {
+        if !principal_can_read_sheet(sheet, caller) {
             ic_cdk::trap("not a member of this sheet");
         }
         if let SheetState::Closed = sheet.state {
@@ -1627,7 +2791,9 @@ fn close_sheet(sheet_id: String, closing_balances: Vec<ClosingBalance>) {
         }
         sheet.state = SheetState::Closed;
         sheet.closed_at = Some(now_nanos());
-        sheet.closing_balances = Some(closing_balances);
+        sheet.closing_balances_key = Some(closing_balances.entry_key.clone());
+        sheet.closing_balances_enc = Some(closing_balances.ciphertext.clone());
+        sheet.closing_balances_iv = Some(closing_balances.iv.clone());
     });
     if !ok {
         ic_cdk::trap("sheet not found");
@@ -1673,7 +2839,12 @@ fn next_entry_id(sheet_id: &str) -> u64 {
     ENTRY_COUNTERS.with(|c| {
         let mut map = c.borrow_mut();
         let cur = map.get(&sheet_id.to_string()).unwrap_or(0);
-        let next = cur + 1;
+        if cur >= MAX_ENTRIES_PER_SHEET {
+            ic_cdk::trap("entry quota reached for this sheet");
+        }
+        let next = cur
+            .checked_add(1)
+            .unwrap_or_else(|| ic_cdk::trap("entry id counter overflow"));
         map.insert(sheet_id.to_string(), next);
         next
     })
@@ -1688,17 +2859,20 @@ fn next_entry_id(sheet_id: &str) -> u64 {
 /// so a late joiner cannot derive K_sheet (or read/write entries) for
 /// sheets the creator made while solo until an explicit
 /// grant_partner_access sets member_b.
-fn caller_owns_sheet(sheet_id: &str) -> bool {
-    let caller = ic_cdk::api::msg_caller();
-    if caller == Principal::anonymous() {
+fn principal_owns_sheet(principal: Principal, sheet_id: &str) -> bool {
+    if principal == Principal::anonymous() {
         return false;
     }
     SHEETS.with(|s| {
         s.borrow()
             .get(&sheet_id.to_string())
-            .map(|sh| sh.member_a == caller || sh.member_b == caller)
+            .map(|sh| principal_can_read_sheet(&sh, principal))
             .unwrap_or(false)
     })
+}
+
+fn caller_owns_sheet(sheet_id: &str) -> bool {
+    principal_owns_sheet(ic_cdk::api::msg_caller(), sheet_id)
 }
 
 fn sheet_is_active(sheet_id: &str) -> bool {
@@ -1730,14 +2904,8 @@ fn record_entry_timestamp(sheet_id: &str, now: u64) {
 fn add_entry(req: AddEntryReq) -> Entry {
     let caller = ic_cdk::api::msg_caller();
     require_authed();
-    if req.entry_key.len() != 32 {
-        ic_cdk::trap("entry_key must be 32 bytes");
-    }
-    if req.ciphertext.is_empty() {
-        ic_cdk::trap("ciphertext is empty");
-    }
-    if req.iv.is_empty() {
-        ic_cdk::trap("iv is empty");
+    if let Err(msg) = validate_entry_blob(&req.entry_key, &req.ciphertext, &req.iv) {
+        ic_cdk::trap(msg);
     }
     if !caller_owns_sheet(&req.sheet_id) {
         ic_cdk::trap("caller does not have access to this sheet");
@@ -1751,6 +2919,8 @@ fn add_entry(req: AddEntryReq) -> Entry {
         None => ic_cdk::trap("sheet not found"),
     };
     let now = ic_cdk::api::time();
+    let additional = entry_blob_bytes(&req.entry_key, &req.ciphertext, &req.iv);
+    add_sheet_entry_bytes(&req.sheet_id, additional);
     let id = next_entry_id(&req.sheet_id);
     let entry = Entry {
         id,
@@ -1790,14 +2960,8 @@ pub struct EditEntryReq {
 fn edit_entry(req: EditEntryReq) -> Entry {
     let caller = ic_cdk::api::msg_caller();
     require_authed();
-    if req.entry_key.len() != 32 {
-        ic_cdk::trap("entry_key must be 32 bytes");
-    }
-    if req.ciphertext.is_empty() {
-        ic_cdk::trap("ciphertext is empty");
-    }
-    if req.iv.is_empty() {
-        ic_cdk::trap("iv is empty");
+    if let Err(msg) = validate_entry_blob(&req.entry_key, &req.ciphertext, &req.iv) {
+        ic_cdk::trap(msg);
     }
     if !caller_owns_sheet(&req.sheet_id) {
         ic_cdk::trap("caller does not have access to this sheet");
@@ -1805,19 +2969,26 @@ fn edit_entry(req: EditEntryReq) -> Entry {
     if !sheet_is_active(&req.sheet_id) {
         ic_cdk::trap("sheet is not active");
     }
-    let now = ic_cdk::api::time();
-    let Some(mut entry) = sheet_entries_remove(&req.sheet_id, req.entry_id) else {
+    let Some(existing) = sheet_entries_get(&req.sheet_id, req.entry_id) else {
         ic_cdk::trap("entry not found");
     };
-    if entry.created_by != caller {
-        // put it back before trapping
-        sheet_entries_insert(&req.sheet_id, req.entry_id, entry);
+    if existing.created_by != caller {
         ic_cdk::trap("only the original creator can edit this entry");
     }
-    if entry.deleted_at.is_some() {
-        sheet_entries_insert(&req.sheet_id, req.entry_id, entry);
+    if existing.deleted_at.is_some() {
         ic_cdk::trap("cannot edit a deleted entry");
     }
+    if existing.history.as_ref().map_or(0, Vec::len) >= MAX_ENTRY_HISTORY_VERSIONS {
+        ic_cdk::trap("entry edit-history quota reached");
+    }
+    // The previous current version remains stored as history, so an edit adds one complete new blob.
+    add_sheet_entry_bytes(
+        &req.sheet_id,
+        entry_blob_bytes(&req.entry_key, &req.ciphertext, &req.iv),
+    );
+    let now = ic_cdk::api::time();
+    let mut entry = sheet_entries_remove(&req.sheet_id, req.entry_id)
+        .unwrap_or_else(|| ic_cdk::trap("entry disappeared during edit"));
     // v1.7.0: snapshot the current (pre-edit) ciphertext into history before
     // overwriting, so the full edit history is preserved.
     let mut hist = entry.history.take().unwrap_or_default();
@@ -1918,23 +3089,25 @@ fn list_entries(
         ic_cdk::trap("caller does not have access to this sheet");
     }
     let limit = limit.min(200) as usize;
-    // v1.3.2: full-table scan filtered by sheet_id (the
-    // single-map layout doesn't have a range API; this is
-    // O(total entries) but bounded by the number of pairs in
-    // practice — each pair has at most one active sheet).
-    let mut all: Vec<Entry> = sheet_entries_iter(&sheet_id);
-    // Sort newest first.
-    all.sort_by_key(|b| std::cmp::Reverse(b.id));
-    let start = match cursor {
-        Some(c) => all.iter().position(|e| e.id < c).unwrap_or(all.len()),
-        None => 0,
-    };
-    let page: Vec<Entry> = all.into_iter().skip(start).take(limit).collect();
-    let next_cursor = if page.len() == limit {
-        page.last().map(|e| e.id)
-    } else {
-        None
-    };
+    if limit == 0 {
+        return ListEntriesResult { entries: Vec::new(), next_cursor: None };
+    }
+    let max_id = cursor.map(|value| value.saturating_sub(1)).unwrap_or(u64::MAX);
+    let (start, end) = entry_key_bounds(&sheet_id, max_id);
+    // Fetch one extra row so next_cursor is returned only when another page really exists.
+    let mut page: Vec<Entry> = ENTRIES.with(|m| {
+        m.borrow()
+            .range(start..=end)
+            .rev()
+            .take(limit + 1)
+            .map(|(_, value)| value)
+            .collect()
+    });
+    let has_more = page.len() > limit;
+    if has_more {
+        page.truncate(limit);
+    }
+    let next_cursor = has_more.then(|| page.last().expect("non-empty bounded page").id);
     ListEntriesResult {
         entries: page,
         next_cursor,
@@ -1943,7 +3116,7 @@ fn list_entries(
 
 // ────────────────────── v1.1.1: real vetkd endpoints ──────────────────────
 //
-// The PWA holds a BLS12-381 G2 transport key pair (the same scheme
+// The PWA creates an ephemeral BLS12-381 G1 transport key pair (the same scheme
 // the IC's vetkd system uses for IBE encryption). To derive K_sheet
 // for a given (caller_principal, sheet_id), the canister calls
 // ic_cdk_management_canister::vetkd_derive_key(...) with:
@@ -1954,8 +3127,10 @@ fn list_entries(
 //   transport:   the PWA's transport public key
 //
 // The returned `encrypted_key` is an IBE ciphertext that only the
-// holder of the matching transport secret key can decrypt. The PWA
-// then HKDFs the resulting symmetric key to get K_sheet (32 bytes).
+// holder of the matching transport secret key can decrypt. The transport
+// secret is discarded with the client session; a fresh transport key can
+// retrieve the same deterministic vetKey. The PWA then HKDFs the resulting
+// symmetric key to get K_sheet (32 bytes).
 //
 // Requires dfx 0.27+ on local (which exports the cost_call system
 // API that ic-cdk 0.20 needs). On the IC mainnet, vetkd_test_key
@@ -2013,7 +3188,7 @@ async fn vetkd_public_key() -> Vec<u8> {
 /// (caller, sheet_id) pair. The PWA is the only entity that can
 /// decrypt this (it holds the matching transport secret key). On
 /// unwrap, the PWA HKDFs the resulting symmetric key to get
-/// K_sheet. Only members of the parent pair can call this.
+/// K_sheet. Only principals recorded on the sheet can call this, including after the sheet closes.
 ///
 /// IBE input is b"iou-sheet:" + sheet_id; the context is
 /// b"iou-vetkd-symmetric-v1". The IBE ciphertext is bound to
@@ -2040,9 +3215,6 @@ async fn vetkd_wrap_sheet_key(
     if !caller_owns_sheet(&sheet_id) {
         ic_cdk::trap("not a member of this sheet (or partner access not yet granted)");
     }
-    if !sheet_is_active(&sheet_id) {
-        ic_cdk::trap("sheet is not active");
-    }
     let mut input = Vec::with_capacity(10 + sheet_id.len());
     input.extend_from_slice(b"iou-sheet:");
     input.extend_from_slice(sheet_id.as_bytes());
@@ -2056,6 +3228,12 @@ async fn vetkd_wrap_sheet_key(
         ic_cdk_management_canister::vetkd_derive_key(&request)
             .await
             .expect("call to vetkd_derive_key failed");
+    // Inter-canister awaits permit other updates to run. A leave/replacement
+    // can revoke this principal while the management canister derives the
+    // result, so repeat the consent check immediately before releasing it.
+    if !caller_owns_sheet(&sheet_id) {
+        ic_cdk::trap("sheet membership changed while deriving the key");
+    }
     res.encrypted_key
 }
 
@@ -2102,8 +3280,10 @@ async fn vetkd_wrap_consumer_key(transport_public_key: Vec<u8>) -> Vec<u8> {
 //
 // The action-inbox consumer keypair (P-256; the public half is what the
 // user registers with OpenChat as their per-user delivery key) becomes
-// canister-backed so any of the user's devices can recover it — device
-// localStorage is only a cache. The canister stores an OPAQUE blob: the
+// canister-backed so any of the user's devices can recover it. Production web
+// holds plaintext only in session memory; native uses platform secure storage;
+// localStorage is development-only and a one-time production migration source.
+// The canister stores an OPAQUE blob: the
 // PWA wraps the private key client-side (AES-GCM under the vetkd-derived
 // user key — dev sim uses the self-ECDH user key, prod uses
 // vetkd_wrap_consumer_key above), so the canister never sees plaintext
@@ -2116,6 +3296,33 @@ pub struct ConsumerKeypair {
     pub public_key_pem: String,
 }
 
+/// Authoritative caller-scoped consumer-key state. `mutation_epoch` is owned
+/// by this canister and advances exactly once for every accepted set/delete.
+/// `keypair = None` with a non-zero epoch is a durable deletion tombstone.
+#[derive(Clone, CandidType, Deserialize)]
+pub struct ConsumerKeypairState {
+    pub mutation_epoch: u64,
+    pub keypair: Option<ConsumerKeypair>,
+}
+
+#[derive(Clone, CandidType, Deserialize, Debug, PartialEq, Eq)]
+pub struct ConsumerKeyEpochConflict {
+    pub expected_epoch: u64,
+    pub current_epoch: u64,
+}
+
+#[derive(Clone, CandidType, Deserialize, Debug, PartialEq, Eq)]
+pub enum ConsumerKeyMutationError {
+    StaleEpoch(ConsumerKeyEpochConflict),
+    EpochExhausted,
+}
+
+#[derive(Clone, CandidType, Deserialize)]
+pub enum ConsumerKeyMutationResult {
+    Ok(u64),
+    Err(ConsumerKeyMutationError),
+}
+
 impl Storable for ConsumerKeypair {
     fn to_bytes(&self) -> Cow<'_, [u8]> {
         Cow::Owned(Encode!(self).unwrap())
@@ -2126,14 +3333,37 @@ impl Storable for ConsumerKeypair {
     const BOUND: Bound = Bound::Unbounded;
 }
 
-/// set_consumer_keypair: caller-keyed upsert of the wrapped consumer
-/// keypair. `wrapped_private_key` is the opaque client-side AES-GCM blob
-/// (iv || ciphertext, wrapped under the vetkd-derived user key);
-/// `public_key_pem` is the matching P-256 SPKI PEM OpenChat encrypts
-/// confirmed actions to. Validation mirrors OpenChat's key checks so a
-/// bad PEM fails here, before it ever reaches a registration.
+fn next_consumer_key_epoch(
+    current_epoch: u64,
+    expected_epoch: u64,
+) -> Result<u64, ConsumerKeyMutationError> {
+    if expected_epoch != current_epoch {
+        return Err(ConsumerKeyMutationError::StaleEpoch(
+            ConsumerKeyEpochConflict {
+                expected_epoch,
+                current_epoch,
+            },
+        ));
+    }
+    current_epoch
+        .checked_add(1)
+        .ok_or(ConsumerKeyMutationError::EpochExhausted)
+}
+
+fn consumer_key_epoch(caller: &Principal) -> u64 {
+    CONSUMER_KEY_EPOCHS.with(|epochs| epochs.borrow().get(caller).unwrap_or(0))
+}
+
+/// set_consumer_keypair: caller-keyed compare-and-swap upsert. The caller MUST
+/// supply the epoch returned by get_consumer_keypair. A delayed request
+/// prepared before a newer set/delete is rejected without changing stable
+/// state. The key blob remains opaque and client-side encrypted.
 #[ic_cdk::update]
-fn set_consumer_keypair(wrapped_private_key: Vec<u8>, public_key_pem: String) {
+fn set_consumer_keypair(
+    expected_epoch: u64,
+    wrapped_private_key: Vec<u8>,
+    public_key_pem: String,
+) -> ConsumerKeyMutationResult {
     require_authed();
     if wrapped_private_key.is_empty() {
         ic_cdk::trap("wrapped_private_key is empty");
@@ -2148,62 +3378,904 @@ fn set_consumer_keypair(wrapped_private_key: Vec<u8>, public_key_pem: String) {
         ic_cdk::trap("public_key_pem must be a SPKI PEM (missing 'BEGIN PUBLIC KEY')");
     }
     let caller = ic_cdk::api::msg_caller();
-    CONSUMER_KEYPAIRS.with(|m| {
-        m.borrow_mut().insert(
+    let current_epoch = consumer_key_epoch(&caller);
+    let next_epoch = match next_consumer_key_epoch(current_epoch, expected_epoch) {
+        Ok(epoch) => epoch,
+        Err(error) => return ConsumerKeyMutationResult::Err(error),
+    };
+
+    // There is deliberately no await between compare and mutation. The IC
+    // executes this as one atomic update message.
+    CONSUMER_KEYPAIRS.with(|keypairs| {
+        keypairs.borrow_mut().insert(
             caller,
             ConsumerKeypair {
                 wrapped_private_key,
                 public_key_pem,
             },
-        )
+        );
     });
+    CONSUMER_KEY_EPOCHS.with(|epochs| {
+        epochs.borrow_mut().insert(caller, next_epoch);
+    });
+    ConsumerKeyMutationResult::Ok(next_epoch)
 }
 
-/// get_consumer_keypair: the caller's stored consumer keypair (or None).
-/// Caller-keyed — a principal can only ever read their own record; the
-/// anonymous principal never has one.
+/// Return the caller's authoritative key + mutation epoch. Legacy keypairs
+/// lazily start at epoch 0; no unbounded upgrade migration is needed.
 #[ic_cdk::query]
-fn get_consumer_keypair() -> Option<ConsumerKeypair> {
+fn get_consumer_keypair() -> ConsumerKeypairState {
     let caller = ic_cdk::api::msg_caller();
     if caller == Principal::anonymous() {
-        return None;
+        return ConsumerKeypairState {
+            mutation_epoch: 0,
+            keypair: None,
+        };
     }
-    CONSUMER_KEYPAIRS.with(|m| m.borrow().get(&caller))
+    ConsumerKeypairState {
+        mutation_epoch: consumer_key_epoch(&caller),
+        keypair: CONSUMER_KEYPAIRS.with(|keypairs| keypairs.borrow().get(&caller)),
+    }
 }
 
-/// delete_consumer_keypair: caller-keyed removal of the stored consumer
-/// keypair. Backs the app's "Disconnect from OpenChat" action — once removed
-/// the device holds no wrapped private key, so it can no longer decrypt any
-/// action-inbox envelope and stops importing. This is the app-side half of a
-/// one-sided unlink that needs no code from OpenChat; removing the OpenChat-side
-/// delivery key (so OpenChat stops sending) is the separate `remove_my_ai_app_key`
-/// action in the OpenChat UI. Idempotent — a no-op when the caller has none.
-/// Only the opaque wrapped blob + PEM are affected; the plaintext private key
-/// never lived in the canister, so the E2E invariant is untouched.
+/// Compare-and-swap delete. The incremented epoch is retained after removing
+/// the keypair as a stable tombstone, preventing a set prepared before this
+/// delete from landing later from another browser/device/process.
 #[ic_cdk::update]
-fn delete_consumer_keypair() {
+fn delete_consumer_keypair(expected_epoch: u64) -> ConsumerKeyMutationResult {
     require_authed();
     let caller = ic_cdk::api::msg_caller();
-    CONSUMER_KEYPAIRS.with(|m| m.borrow_mut().remove(&caller));
+    let current_epoch = consumer_key_epoch(&caller);
+    let next_epoch = match next_consumer_key_epoch(current_epoch, expected_epoch) {
+        Ok(epoch) => epoch,
+        Err(error) => return ConsumerKeyMutationResult::Err(error),
+    };
+    CONSUMER_KEYPAIRS.with(|keypairs| {
+        keypairs.borrow_mut().remove(&caller);
+    });
+    CONSUMER_KEY_EPOCHS.with(|epochs| {
+        epochs.borrow_mut().insert(caller, next_epoch);
+    });
+    // Emergency local erase remains available even if OpenChat is unreachable.
+    // Removing the IOU binding immediately closes private-card access, but this
+    // raw endpoint cannot revoke the now-useless public key held by OpenChat.
+    // The normal UI calls disconnect_openchat first and reaches this delete only
+    // after OpenChat returned Success/KeyNotFound.
+    if binding_removal_is_allowed(OpenChatBindingRemovalCause::EmergencyLocalErase) {
+        remove_openchat_binding_for_iou(caller);
+    }
+    ConsumerKeyMutationResult::Ok(next_epoch)
 }
 
-// ───────────── v1.9.0: OpenChat chat → sheet mapping ─────────────
+// ───────────── OpenChat app-scoped chat handle → sheet mapping ─────────────
 //
-// OpenChat's confirmed-action envelopes now carry a v2 context wrapper
-// with the source chat ("group:<principal>" or
-// "channel:<principal>:<channel id>"). The PWA lets the user remember
-// "always import this chat's drafts into this sheet"; the mapping lives
-// here so it follows the user across devices (localStorage is only a
-// cache). The chat_key is OPAQUE to the canister — plain text, never
-// parsed. sheet_id is the 16-hex-char sheet id encoded as a u64 (the
-// ids come from now_id(): 8 raw_rand bytes hex-encoded, so the mapping
-// is loss-free). Caller-keyed like CONSUMER_KEYPAIRS: a principal only
-// ever sees / edits its own links.
+// OpenChat's v4 confirmed-action envelope carries a secret-derived 32-byte app-scoped chat handle.
+// The PWA lets the user remember "always import this chat's drafts into this sheet"; the mapping
+// follows the user across devices (localStorage is only a cache). The released field name chat_key
+// remains for stable/Candid compatibility, but writes and reads require canonical unpadded base64url
+// handles and never accept raw OpenChat chat coordinates. sheet_id is the 16-hex-char sheet id
+// encoded as a u64. Caller-keyed like CONSUMER_KEYPAIRS: a principal only sees/edits its own links.
 
 #[derive(Clone, CandidType, Deserialize)]
 pub struct ChatSheetLink {
     pub chat_key: String,
     pub sheet_id: u64,
+}
+
+/// Authoritative cross-origin identity binding established only when the IOU
+/// canister itself redeems an OpenChat link code. Browser localStorage and a
+/// delivery public-key fingerprint are intentionally not authority here.
+#[derive(Clone, CandidType, Deserialize, Debug, PartialEq, Eq)]
+pub struct OpenChatBinding {
+    pub iou_principal: Principal,
+    pub user_index_canister_id: Principal,
+    pub app_id: u32,
+    // Optional only for stable decoding of pre-V2 links. Authorization requires all three V2
+    // values, so legacy links fail closed and must be recreated by the user.
+    pub app_revision: Option<u64>,
+    pub app_canister_id: Option<Principal>,
+    pub key_version: Option<u64>,
+    pub app_subject: Option<Vec<u8>>,
+    pub subject_version: Option<u16>,
+    pub consumer_queue_selector: Option<Vec<u8>>,
+    pub consumer_queue_selector_version: Option<u16>,
+    // Stable-layout compatibility only. New links always store anonymous and no public endpoint
+    // returns this field.
+    pub openchat_user_id: Principal,
+    pub linked_at: u64,
+}
+
+impl Storable for OpenChatBinding {
+    fn to_bytes(&self) -> Cow<'_, [u8]> {
+        Cow::Owned(Encode!(self).unwrap())
+    }
+    fn from_bytes(bytes: Cow<[u8]>) -> Self {
+        Decode!(bytes.as_ref(), Self).unwrap()
+    }
+    const BOUND: Bound = Bound::Unbounded;
+}
+
+#[derive(Clone, CandidType, Deserialize, Debug, PartialEq, Eq)]
+pub struct OpenChatBindingView {
+    pub iou_principal: Principal,
+    pub user_index_canister_id: Principal,
+    pub app_id: u32,
+    pub app_revision: u64,
+    pub app_canister_id: Principal,
+    pub key_version: u64,
+    pub app_subject: Vec<u8>,
+    pub subject_version: u16,
+    /// Opaque, caller-private ActionInbox queue selector issued by OpenChat's HMAC authority.
+    pub consumer_queue_selector: Vec<u8>,
+    pub consumer_queue_selector_version: u16,
+    pub linked_at: u64,
+}
+
+fn public_openchat_binding(binding: &OpenChatBinding) -> Option<OpenChatBindingView> {
+    Some(OpenChatBindingView {
+        iou_principal: binding.iou_principal,
+        user_index_canister_id: binding.user_index_canister_id,
+        app_id: binding.app_id,
+        app_revision: binding.app_revision?,
+        app_canister_id: binding.app_canister_id?,
+        key_version: binding.key_version?,
+        app_subject: valid_app_subject(binding)?.to_vec(),
+        subject_version: binding.subject_version?,
+        consumer_queue_selector: valid_consumer_queue_selector(binding)?.to_vec(),
+        consumer_queue_selector_version: binding.consumer_queue_selector_version?,
+        linked_at: binding.linked_at,
+    })
+}
+
+fn openchat_subject_key(
+    user_index_canister_id: Principal,
+    app_id: u32,
+    app_subject: &[u8],
+) -> String {
+    format!(
+        "{}\0{app_id:010}\0{}",
+        user_index_canister_id.to_text(),
+        lowercase_hex(app_subject)
+    )
+}
+
+fn legacy_openchat_subject_key(
+    user_index_canister_id: Principal,
+    app_id: u32,
+    openchat_user_id: Principal,
+) -> String {
+    format!(
+        "{}\0{app_id:010}\0{}",
+        user_index_canister_id.to_text(),
+        openchat_user_id.to_text()
+    )
+}
+
+fn valid_app_subject(binding: &OpenChatBinding) -> Option<&[u8]> {
+    (binding.subject_version == Some(1))
+        .then_some(binding.app_subject.as_deref())
+        .flatten()
+        .filter(|subject| subject.len() == 32)
+}
+
+fn valid_consumer_queue_selector(binding: &OpenChatBinding) -> Option<&[u8]> {
+    (binding.consumer_queue_selector_version == Some(1))
+        .then_some(binding.consumer_queue_selector.as_deref())
+        .flatten()
+        .filter(|selector| selector.len() == 32)
+}
+
+fn remove_openchat_binding_for_iou(iou_principal: Principal) {
+    if let Some(binding) =
+        OPENCHAT_BINDINGS_BY_IOU.with(|m| m.borrow_mut().remove(&iou_principal))
+    {
+        OPENCHAT_BINDINGS_BY_OC.with(|m| {
+            let mut map = m.borrow_mut();
+            if let Some(subject) = valid_app_subject(&binding) {
+                let reverse = openchat_subject_key(binding.user_index_canister_id, binding.app_id, subject);
+                if map.get(&reverse) == Some(iou_principal) {
+                    map.remove(&reverse);
+                }
+            }
+            if binding.openchat_user_id != Principal::anonymous() {
+                let legacy = legacy_openchat_subject_key(
+                    binding.user_index_canister_id,
+                    binding.app_id,
+                    binding.openchat_user_id,
+                );
+                if map.get(&legacy) == Some(iou_principal) {
+                    map.remove(&legacy);
+                }
+            }
+        });
+    }
+}
+
+fn replace_openchat_binding(binding: OpenChatBinding) {
+    remove_openchat_binding_for_iou(binding.iou_principal);
+    let Some(subject) = valid_app_subject(&binding) else {
+        return;
+    };
+    let reverse = openchat_subject_key(binding.user_index_canister_id, binding.app_id, subject);
+    if let Some(previous_iou) = OPENCHAT_BINDINGS_BY_OC.with(|m| m.borrow().get(&reverse)) {
+        if previous_iou != binding.iou_principal {
+            OPENCHAT_BINDINGS_BY_IOU.with(|m| {
+                let mut map = m.borrow_mut();
+                if map
+                    .get(&previous_iou)
+                    .as_ref()
+                    .is_some_and(|old| {
+                        old.user_index_canister_id == binding.user_index_canister_id
+                            && old.app_id == binding.app_id
+                            && valid_app_subject(old) == valid_app_subject(&binding)
+                    })
+                {
+                    map.remove(&previous_iou);
+                }
+            });
+        }
+    }
+    OPENCHAT_BINDINGS_BY_OC.with(|m| {
+        m.borrow_mut().insert(reverse, binding.iou_principal);
+    });
+    OPENCHAT_BINDINGS_BY_IOU.with(|m| {
+        m.borrow_mut().insert(binding.iou_principal, binding);
+    });
+}
+
+/// Return only the signed-in caller's authoritative OpenChat link. The browser
+/// needs these exact app-scoped coordinates to sign the revocation proof; it must never
+/// infer them from localStorage or from public-key lookup results.
+#[ic_cdk::query]
+fn get_openchat_binding() -> Option<OpenChatBindingView> {
+    require_authed();
+    let caller = ic_cdk::api::msg_caller();
+    OPENCHAT_BINDINGS_BY_IOU
+        .with(|bindings| bindings.borrow().get(&caller))
+        .as_ref()
+        .and_then(public_openchat_binding)
+}
+
+fn disconnect_binding_is_valid(
+    binding: &OpenChatBinding,
+    caller: Principal,
+    pinned_user_index: Option<Principal>,
+    app_canister_id: Principal,
+) -> bool {
+    caller != Principal::anonymous()
+        && binding.iou_principal == caller
+        && binding.user_index_canister_id != Principal::anonymous()
+        && pinned_user_index == Some(binding.user_index_canister_id)
+        && binding.app_revision.is_some_and(|revision| revision > 0)
+        && binding.app_canister_id == Some(app_canister_id)
+        && binding.key_version.is_some_and(|version| version > 0)
+        && valid_app_subject(binding).is_some()
+}
+
+fn openchat_binding_for_subject(
+    user_index_canister_id: Principal,
+    app_id: u32,
+    app_subject: &[u8],
+) -> Option<OpenChatBinding> {
+    if app_subject.len() != 32 {
+        return None;
+    }
+    let reverse = openchat_subject_key(user_index_canister_id, app_id, app_subject);
+    let iou_principal = OPENCHAT_BINDINGS_BY_OC.with(|m| m.borrow().get(&reverse))?;
+    OPENCHAT_BINDINGS_BY_IOU.with(|m| m.borrow().get(&iou_principal)).filter(|binding| {
+        binding.user_index_canister_id == user_index_canister_id
+            && binding.app_id == app_id
+            && valid_app_subject(binding) == Some(app_subject)
+    })
+}
+
+#[derive(CandidType, Deserialize)]
+struct ClaimAiAppLinkCodeArgs {
+    code: String,
+    public_key: String,
+}
+
+#[derive(CandidType, Deserialize)]
+struct ClaimAiAppLinkCodeSuccess {
+    app_subject: Vec<u8>,
+    subject_version: u16,
+    app_id: u32,
+    app_revision: u64,
+    app_canister_id: Principal,
+    consumer_queue_selector: Vec<u8>,
+    consumer_queue_selector_version: u16,
+    key_version: u64,
+}
+
+#[derive(CandidType, Deserialize)]
+enum ClaimAiAppLinkCodeResponse {
+    Success(ClaimAiAppLinkCodeSuccess),
+    CodeNotFound,
+    CodeExpired,
+    NotAuthorized,
+    InvalidRequest(String),
+    Error((u16, Option<String>)),
+}
+
+#[derive(Clone, CandidType, Deserialize, Debug, PartialEq, Eq)]
+pub enum ConnectOpenChatResult {
+    Success(OpenChatBindingView),
+    NotConfigured,
+    CodeNotFound,
+    CodeExpired,
+    InvalidRequest(String),
+    WrongApp,
+    RemoteError(String),
+}
+
+/// Claim the OpenChat link code through this canister, rather than trusting a
+/// browser to report which OpenChat user it linked. The pinned UserIndex
+/// authoritatively returns the code's user/app, and the returned app canister
+/// must be this canister before the IOU-principal mapping is persisted.
+#[ic_cdk::update]
+async fn connect_openchat(
+    code: String,
+    public_key: String,
+) -> ConnectOpenChatResult {
+    require_authed();
+    let iou_principal = ic_cdk::api::msg_caller();
+    if code.len() != 64
+        || !code
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    {
+        return ConnectOpenChatResult::CodeNotFound;
+    }
+    if public_key.is_empty() || public_key.len() > 2_000 {
+        return ConnectOpenChatResult::InvalidRequest(
+            "public key length out of range".to_string(),
+        );
+    }
+    let Some(user_index_canister_id) = CONFIG.with(|c| {
+        c.borrow()
+            .get()
+            .openchat_user_index_canister_id
+    }) else {
+        return ConnectOpenChatResult::NotConfigured;
+    };
+
+    let args = ClaimAiAppLinkCodeArgs { code, public_key };
+    let response = match ic_cdk::call::Call::bounded_wait(
+        user_index_canister_id,
+        "c2c_claim_ai_app_link_code",
+    )
+    .with_arg(&args)
+    .await
+    {
+        Ok(response) => response,
+        Err(error) => return ConnectOpenChatResult::RemoteError(error.to_string()),
+    };
+    let outcome: ClaimAiAppLinkCodeResponse = match response.candid() {
+        Ok(value) => value,
+        Err(error) => return ConnectOpenChatResult::RemoteError(error.to_string()),
+    };
+    let success = match outcome {
+        ClaimAiAppLinkCodeResponse::Success(value) => value,
+        ClaimAiAppLinkCodeResponse::CodeNotFound => {
+            return ConnectOpenChatResult::CodeNotFound
+        }
+        ClaimAiAppLinkCodeResponse::CodeExpired => {
+            return ConnectOpenChatResult::CodeExpired
+        }
+        ClaimAiAppLinkCodeResponse::NotAuthorized => {
+            return ConnectOpenChatResult::WrongApp
+        }
+        ClaimAiAppLinkCodeResponse::InvalidRequest(message) => {
+            return ConnectOpenChatResult::InvalidRequest(message)
+        }
+        ClaimAiAppLinkCodeResponse::Error((code, message)) => {
+            return ConnectOpenChatResult::RemoteError(format!(
+                "OpenChat error {code}{}",
+                message.map(|m| format!(": {m}")).unwrap_or_default()
+            ))
+        }
+    };
+
+    // Recheck the mutable trust pin after the await and bind only codes for
+    // the exact app registration that names this canister.
+    if CONFIG.with(|c| c.borrow().get().openchat_user_index_canister_id)
+        != Some(user_index_canister_id)
+    {
+        return ConnectOpenChatResult::NotConfigured;
+    }
+    if success.app_canister_id != ic_cdk::api::canister_self() {
+        return ConnectOpenChatResult::WrongApp;
+    }
+    let binding = OpenChatBinding {
+        iou_principal,
+        user_index_canister_id,
+        app_id: success.app_id,
+        app_revision: Some(success.app_revision),
+        app_canister_id: Some(success.app_canister_id),
+        key_version: Some(success.key_version),
+        app_subject: Some(success.app_subject),
+        subject_version: Some(success.subject_version),
+        consumer_queue_selector: Some(success.consumer_queue_selector),
+        consumer_queue_selector_version: Some(success.consumer_queue_selector_version),
+        openchat_user_id: Principal::anonymous(),
+        linked_at: ic_cdk::api::time(),
+    };
+    let Some(public_binding) = public_openchat_binding(&binding) else {
+        return ConnectOpenChatResult::InvalidRequest(
+            "invalid app-scoped subject or queue selector returned by OpenChat".to_string(),
+        );
+    };
+    replace_openchat_binding(binding.clone());
+    ConnectOpenChatResult::Success(public_binding)
+}
+
+#[derive(CandidType, Deserialize)]
+struct RevokeAiAppUserKeyArgs {
+    app_subject: Vec<u8>,
+    app_id: u32,
+    key_version: u64,
+    public_key: String,
+    signature: Vec<u8>,
+    timestamp: u64,
+}
+
+#[derive(CandidType, Deserialize, Debug, PartialEq, Eq)]
+enum RevokeAiAppUserKeyResponse {
+    Success,
+    KeyNotFound,
+    Error((u16, Option<String>)),
+}
+
+#[derive(Clone, CandidType, Deserialize, Debug, PartialEq, Eq)]
+pub enum DisconnectOpenChatResult {
+    Success,
+    KeyNotFound,
+    NotConfigured,
+    NotLinked,
+    InvalidBinding,
+    InvalidRequest(String),
+    BindingChanged,
+    RemoteError(String),
+}
+
+enum OpenChatBindingRemovalCause<'a> {
+    CoordinatedRevoke(&'a RevokeAiAppUserKeyResponse),
+    /// Explicit/raw local erasure is the availability escape hatch. It closes
+    /// IOU-side access immediately but can leave an unusable public key in OC.
+    EmergencyLocalErase,
+}
+
+fn binding_removal_is_allowed(cause: OpenChatBindingRemovalCause<'_>) -> bool {
+    match cause {
+        OpenChatBindingRemovalCause::CoordinatedRevoke(response) => matches!(
+            response,
+            RevokeAiAppUserKeyResponse::Success
+                | RevokeAiAppUserKeyResponse::KeyNotFound
+        ),
+        OpenChatBindingRemovalCause::EmergencyLocalErase => true,
+    }
+}
+
+fn disconnect_state_still_matches(
+    caller: Principal,
+    binding: &OpenChatBinding,
+    expected_consumer_key_epoch: u64,
+    public_key: &str,
+) -> bool {
+    let pinned_user_index =
+        CONFIG.with(|config| config.borrow().get().openchat_user_index_canister_id);
+    disconnect_binding_is_valid(
+        binding,
+        caller,
+        pinned_user_index,
+        ic_cdk::api::canister_self(),
+    ) && OPENCHAT_BINDINGS_BY_IOU.with(|bindings| {
+        bindings.borrow().get(&caller).as_ref() == Some(binding)
+    }) && consumer_key_epoch(&caller) == expected_consumer_key_epoch
+        && CONSUMER_KEYPAIRS.with(|keypairs| {
+            keypairs
+                .borrow()
+                .get(&caller)
+                .is_some_and(|keypair| keypair.public_key_pem == public_key)
+        })
+}
+
+/// Coordinated IOU-side disconnect. The browser supplies a proof signed by
+/// the still-present delivery private key, but only this registered app
+/// canister calls OpenChat's V2 revocation endpoint. The authoritative
+/// caller-scoped binding supplies the OpenChat user/app/key-version tuple.
+///
+/// The binding is removed only after OpenChat reports Success or KeyNotFound,
+/// and every mutable trust coordinate is rechecked after the await. The UI may
+/// delete the wrapped private key only after receiving either clean outcome.
+#[ic_cdk::update]
+async fn disconnect_openchat(
+    public_key: String,
+    signature: Vec<u8>,
+    timestamp: u64,
+) -> DisconnectOpenChatResult {
+    require_authed();
+    let caller = ic_cdk::api::msg_caller();
+    if public_key.is_empty()
+        || public_key.len() > 2_000
+        || !public_key.contains("BEGIN PUBLIC KEY")
+        || signature.len() != 64
+    {
+        return DisconnectOpenChatResult::InvalidRequest(
+            "invalid public key or signature shape".to_string(),
+        );
+    }
+
+    let Some(binding) = OPENCHAT_BINDINGS_BY_IOU
+        .with(|bindings| bindings.borrow().get(&caller))
+    else {
+        return DisconnectOpenChatResult::NotLinked;
+    };
+    let pinned_user_index =
+        CONFIG.with(|config| config.borrow().get().openchat_user_index_canister_id);
+    if pinned_user_index.is_none() {
+        return DisconnectOpenChatResult::NotConfigured;
+    }
+    if !disconnect_binding_is_valid(
+        &binding,
+        caller,
+        pinned_user_index,
+        ic_cdk::api::canister_self(),
+    ) {
+        return DisconnectOpenChatResult::InvalidBinding;
+    }
+    let Some(key_version) = binding.key_version else {
+        return DisconnectOpenChatResult::InvalidBinding;
+    };
+    let consumer_key_epoch = consumer_key_epoch(&caller);
+    let key_matches = CONSUMER_KEYPAIRS.with(|keypairs| {
+        keypairs
+            .borrow()
+            .get(&caller)
+            .is_some_and(|keypair| keypair.public_key_pem == public_key)
+    });
+    if !key_matches {
+        return DisconnectOpenChatResult::InvalidRequest(
+            "public key does not match the current IOU delivery key".to_string(),
+        );
+    }
+
+    let args = RevokeAiAppUserKeyArgs {
+        app_subject: binding.app_subject.clone().unwrap_or_default(),
+        app_id: binding.app_id,
+        key_version,
+        public_key: public_key.clone(),
+        signature,
+        timestamp,
+    };
+    let response = match ic_cdk::call::Call::bounded_wait(
+        binding.user_index_canister_id,
+        "revoke_ai_app_user_key",
+    )
+    .with_arg(&args)
+    .await
+    {
+        Ok(response) => response,
+        Err(error) => return DisconnectOpenChatResult::RemoteError(error.to_string()),
+    };
+    let outcome: RevokeAiAppUserKeyResponse = match response.candid() {
+        Ok(value) => value,
+        Err(error) => return DisconnectOpenChatResult::RemoteError(error.to_string()),
+    };
+    if !binding_removal_is_allowed(OpenChatBindingRemovalCause::CoordinatedRevoke(
+        &outcome,
+    )) {
+        let RevokeAiAppUserKeyResponse::Error((code, message)) = outcome else {
+            unreachable!();
+        };
+        return DisconnectOpenChatResult::RemoteError(format!(
+            "OpenChat error {code}{}",
+            message.map(|value| format!(": {value}")).unwrap_or_default()
+        ));
+    }
+
+    // An inter-canister call commits OpenChat's state before this continuation.
+    // Never let that response remove a newer IOU link or key that appeared while
+    // awaiting it; the caller must retry against the current binding instead.
+    if CONFIG.with(|config| config.borrow().get().openchat_user_index_canister_id)
+        != Some(binding.user_index_canister_id)
+    {
+        return DisconnectOpenChatResult::NotConfigured;
+    }
+    if !disconnect_state_still_matches(
+        caller,
+        &binding,
+        consumer_key_epoch,
+        &public_key,
+    ) {
+        return DisconnectOpenChatResult::BindingChanged;
+    }
+
+    remove_openchat_binding_for_iou(caller);
+    match outcome {
+        RevokeAiAppUserKeyResponse::Success => DisconnectOpenChatResult::Success,
+        RevokeAiAppUserKeyResponse::KeyNotFound => {
+            DisconnectOpenChatResult::KeyNotFound
+        }
+        RevokeAiAppUserKeyResponse::Error(_) => unreachable!(),
+    }
+}
+
+#[derive(CandidType, Deserialize)]
+struct RedeemAiAppCardCapabilityArgs {
+    token: Vec<u8>,
+    recipient_key_scheme: String,
+    recipient_public_key: Vec<u8>,
+}
+
+#[derive(CandidType, Deserialize)]
+struct RedeemedAiAppCardContext {
+    context_version: u16,
+    app_subject: Vec<u8>,
+    chat_handle: Vec<u8>,
+    message_handle: Vec<u8>,
+    app_id: u32,
+    app_revision: u64,
+    action_id: String,
+}
+
+#[derive(CandidType, Deserialize)]
+struct RedeemAiAppCardCapabilitySuccess {
+    context: RedeemedAiAppCardContext,
+    app_canister_id: Principal,
+    recipient_key_scheme: String,
+    recipient_public_key: Vec<u8>,
+    scope: RedeemedAiAppCardCapabilityScope,
+    expires_at: u64,
+}
+
+#[derive(CandidType, Deserialize, PartialEq, Eq)]
+enum RedeemedAiAppCardCapabilityScope {
+    #[serde(rename = "private_context")]
+    PrivateContext,
+}
+
+#[derive(CandidType, Deserialize)]
+#[allow(clippy::large_enum_variant)] // Keep the Candid response shape direct and language-neutral.
+enum RedeemAiAppCardCapabilityResponse {
+    Success(RedeemAiAppCardCapabilitySuccess),
+    NotFound,
+    Expired,
+    NotAuthorized,
+    AppUnavailable,
+    InvalidRequest(String),
+}
+
+#[derive(Clone, CandidType, Deserialize, Debug, PartialEq, Eq)]
+pub struct OpenChatCardContext {
+    pub sheet_id: String,
+    pub context_version: u16,
+    pub app_subject: Vec<u8>,
+    pub chat_handle: Vec<u8>,
+    pub message_handle: Vec<u8>,
+    pub app_id: u32,
+    pub app_revision: u64,
+    pub action_id: String,
+    pub vetkd_public_key: Vec<u8>,
+    pub encrypted_vet_key: Vec<u8>,
+    pub templates_a_enc: Option<Vec<u8>>,
+    pub templates_a_iv: Option<Vec<u8>>,
+    pub templates_b_enc: Option<Vec<u8>>,
+    pub templates_b_iv: Option<Vec<u8>>,
+}
+
+#[derive(Clone, CandidType, Deserialize, Debug, PartialEq, Eq)]
+#[allow(clippy::large_enum_variant)] // Keep the public Candid result shape stable.
+pub enum OpenChatCardContextResult {
+    Success(OpenChatCardContext),
+    NotConfigured,
+    InvalidCapability,
+    NotLinked,
+    ChatNotLinked,
+    NotAuthorized,
+    KeyUnavailable,
+}
+
+fn linked_sheet_for(principal: Principal, chat_key: &str) -> Option<String> {
+    if !is_canonical_app_scoped_chat_handle(chat_key) {
+        return None;
+    }
+    CHAT_SHEET_LINKS
+        .with(|m| m.borrow().get(&chat_link_key(&principal, chat_key)))
+        .map(|link| format!("{:016x}", link.sheet_id))
+}
+
+fn card_access_still_valid(
+    user_index_canister_id: Principal,
+    context: &RedeemedAiAppCardContext,
+    binding: &OpenChatBinding,
+    sheet_id: &str,
+) -> bool {
+    CONFIG.with(|c| c.borrow().get().openchat_user_index_canister_id)
+        == Some(user_index_canister_id)
+        && openchat_binding_for_subject(
+            user_index_canister_id,
+            context.app_id,
+            &context.app_subject,
+        ) == Some(binding.clone())
+        && binding.app_revision == Some(context.app_revision)
+        && binding.app_canister_id == Some(ic_cdk::api::canister_self())
+        && binding.key_version.is_some()
+        && scoped_chat_handle_key(&context.chat_handle)
+            .and_then(|key| linked_sheet_for(binding.iou_principal, &key))
+            .as_deref() == Some(sheet_id)
+        && principal_owns_sheet(binding.iou_principal, sheet_id)
+        && sheet_is_active(sheet_id)
+}
+
+/// Redeem an OpenChat-minted, app/revision/chat/message/viewer-bound one-time
+/// capability and release only ciphertext plus a vetKD key encrypted to this
+/// iframe's fresh transport key. Type names/keywords are decrypted only in
+/// the credentialless card's memory; neither canister receives plaintext.
+#[ic_cdk::update]
+async fn openchat_card_context(
+    token: Vec<u8>,
+    recipient_key_scheme: String,
+    transport_public_key: Vec<u8>,
+) -> OpenChatCardContextResult {
+    const IOU_CARD_KEY_SCHEME: &str = "iou.vetkd.bls12-381.v1";
+    if token.len() != 32
+        || recipient_key_scheme != IOU_CARD_KEY_SCHEME
+        || transport_public_key.len() != 48
+    {
+        return OpenChatCardContextResult::InvalidCapability;
+    }
+    let Some(user_index_canister_id) = CONFIG.with(|c| {
+        c.borrow()
+            .get()
+            .openchat_user_index_canister_id
+    }) else {
+        return OpenChatCardContextResult::NotConfigured;
+    };
+
+    let args = RedeemAiAppCardCapabilityArgs {
+        token,
+        recipient_key_scheme: recipient_key_scheme.clone(),
+        recipient_public_key: transport_public_key.clone(),
+    };
+    let response = match ic_cdk::call::Call::bounded_wait(
+        user_index_canister_id,
+        "c2c_redeem_ai_app_card_capability",
+    )
+    .with_arg(&args)
+    .await
+    {
+        Ok(response) => response,
+        Err(_) => return OpenChatCardContextResult::InvalidCapability,
+    };
+    let redeemed: RedeemAiAppCardCapabilityResponse = match response.candid() {
+        Ok(value) => value,
+        Err(_) => return OpenChatCardContextResult::InvalidCapability,
+    };
+    let grant = match redeemed {
+        RedeemAiAppCardCapabilityResponse::Success(value) => value,
+        RedeemAiAppCardCapabilityResponse::NotFound
+        | RedeemAiAppCardCapabilityResponse::Expired
+        | RedeemAiAppCardCapabilityResponse::NotAuthorized
+        | RedeemAiAppCardCapabilityResponse::AppUnavailable
+        | RedeemAiAppCardCapabilityResponse::InvalidRequest(_) => {
+            return OpenChatCardContextResult::InvalidCapability
+        }
+    };
+
+    let now_ms = ic_cdk::api::time() / 1_000_000;
+    if grant.app_canister_id != ic_cdk::api::canister_self()
+        || grant.recipient_key_scheme != recipient_key_scheme
+        || grant.recipient_public_key != transport_public_key
+        || grant.scope != RedeemedAiAppCardCapabilityScope::PrivateContext
+        || grant.expires_at <= now_ms
+    {
+        return OpenChatCardContextResult::InvalidCapability;
+    }
+    if !valid_app_scoped_card_context(&AppScopedCardContextV1 {
+        context_version: grant.context.context_version,
+        app_subject: grant.context.app_subject.clone(),
+        chat_handle: grant.context.chat_handle.clone(),
+        message_handle: grant.context.message_handle.clone(),
+        app_id: grant.context.app_id,
+        app_revision: grant.context.app_revision,
+        action_id: grant.context.action_id.clone(),
+    }) {
+        return OpenChatCardContextResult::InvalidCapability;
+    }
+    let Some(binding) = openchat_binding_for_subject(
+        user_index_canister_id,
+        grant.context.app_id,
+        &grant.context.app_subject,
+    ) else {
+        return OpenChatCardContextResult::NotLinked;
+    };
+    let Some(chat_handle_key) = scoped_chat_handle_key(&grant.context.chat_handle) else {
+        return OpenChatCardContextResult::InvalidCapability;
+    };
+    let Some(sheet_id) = linked_sheet_for(binding.iou_principal, &chat_handle_key) else {
+        return OpenChatCardContextResult::ChatNotLinked;
+    };
+    if !card_access_still_valid(
+        user_index_canister_id,
+        &grant.context,
+        &binding,
+        &sheet_id,
+    ) {
+        return OpenChatCardContextResult::NotAuthorized;
+    }
+
+    let Some(sheet) = SHEETS.with(|s| s.borrow().get(&sheet_id)) else {
+        return OpenChatCardContextResult::NotAuthorized;
+    };
+    let Some(pair) = PAIRS.with(|p| p.borrow().get(&sheet.pair_id)) else {
+        return OpenChatCardContextResult::NotAuthorized;
+    };
+
+    let vetkd_public_key = if let Some(cached) =
+        VETKD_PUBKEY_CACHE.with(|c| c.borrow().get().clone())
+    {
+        cached
+    } else {
+        let request = VetKDPublicKeyArgs {
+            canister_id: None,
+            context: b"iou-vetkd-symmetric-v1".to_vec(),
+            key_id: vetkd_key_id(),
+        };
+        let Ok(result) = ic_cdk_management_canister::vetkd_public_key(&request).await else {
+            return OpenChatCardContextResult::KeyUnavailable;
+        };
+        let _ = VETKD_PUBKEY_CACHE.with(|c| c.borrow_mut().set(Some(result.public_key.clone())));
+        result.public_key
+    };
+    if vetkd_public_key.len() != 96
+        || !card_access_still_valid(
+            user_index_canister_id,
+            &grant.context,
+            &binding,
+            &sheet_id,
+        )
+    {
+        return OpenChatCardContextResult::NotAuthorized;
+    }
+
+    let mut input = Vec::with_capacity(10 + sheet_id.len());
+    input.extend_from_slice(b"iou-sheet:");
+    input.extend_from_slice(sheet_id.as_bytes());
+    let request = VetKDDeriveKeyArgs {
+        input,
+        context: b"iou-vetkd-symmetric-v1".to_vec(),
+        key_id: vetkd_key_id(),
+        transport_public_key,
+    };
+    let Ok(derived) = ic_cdk_management_canister::vetkd_derive_key(&request).await else {
+        return OpenChatCardContextResult::KeyUnavailable;
+    };
+    if !card_access_still_valid(
+        user_index_canister_id,
+        &grant.context,
+        &binding,
+        &sheet_id,
+    ) {
+        return OpenChatCardContextResult::NotAuthorized;
+    }
+
+    OpenChatCardContextResult::Success(OpenChatCardContext {
+        sheet_id,
+        context_version: grant.context.context_version,
+        app_subject: grant.context.app_subject,
+        chat_handle: grant.context.chat_handle,
+        message_handle: grant.context.message_handle,
+        app_id: grant.context.app_id,
+        app_revision: grant.context.app_revision,
+        action_id: grant.context.action_id,
+        vetkd_public_key,
+        encrypted_vet_key: derived.encrypted_key,
+        templates_a_enc: pair.templates_a_enc,
+        templates_a_iv: pair.templates_a_iv,
+        templates_b_enc: pair.templates_b_enc,
+        templates_b_iv: pair.templates_b_iv,
+    })
 }
 
 impl Storable for ChatSheetLink {
@@ -2216,18 +4288,47 @@ impl Storable for ChatSheetLink {
     const BOUND: Bound = Bound::Unbounded;
 }
 
-/// Composite key for CHAT_SHEET_LINKS: `caller text \0 chat_key`. The
-/// NUL separator is safe because principal text never contains a NUL
-/// byte and validate_chat_key rejects NUL in chat_key. Same pattern as
+/// Composite key for CHAT_SHEET_LINKS: `caller text \0 chat_key`. The NUL separator is safe because
+/// principal text never contains NUL and every new chat_key is canonical base64url. Same pattern as
 /// entry_key().
 fn chat_link_key(caller: &Principal, chat_key: &str) -> String {
     format!("{}\0{}", caller.to_text(), chat_key)
 }
 
-/// Validation shared by set/remove: the chat_key is opaque but bounded
-/// (1..=200 chars) and must not contain NUL (it is embedded in the
-/// composite stable-map key).
-fn validate_chat_key(chat_key: &str) {
+fn chat_link_bounds(caller: &Principal) -> (String, String) {
+    // Principal text is ASCII. Every composite key starts with principal + NUL and therefore sorts
+    // before principal + SOH, regardless of the opaque chat-key suffix.
+    (
+        format!("{}\0", caller.to_text()),
+        format!("{}\u{1}", caller.to_text()),
+    )
+}
+
+/// A canonical, unpadded base64url encoding of exactly 32 bytes is 43 characters long. The final
+/// sextet can have only its high four bits set; restricting it to the 16 canonical alphabet values
+/// rejects alternate spellings with non-zero pad bits without adding a decoder dependency.
+fn is_canonical_app_scoped_chat_handle(chat_key: &str) -> bool {
+    let bytes = chat_key.as_bytes();
+    bytes.len() == 43
+        && bytes.iter().all(|byte| {
+            byte.is_ascii_alphanumeric() || *byte == b'-' || *byte == b'_'
+        })
+        && matches!(
+            bytes[42],
+            b'A' | b'E' | b'I' | b'M' | b'Q' | b'U' | b'Y' | b'c' | b'g' | b'k' | b'o'
+                | b's' | b'w' | b'0' | b'4' | b'8'
+        )
+}
+
+fn validate_app_scoped_chat_handle(chat_key: &str) {
+    if !is_canonical_app_scoped_chat_handle(chat_key) {
+        ic_cdk::trap("chat_key must be a canonical 32-byte app-scoped handle");
+    }
+}
+
+/// Removal keeps the released bounded-text validator so callers can explicitly delete a legacy raw
+/// row during migration. New writes and all reads remain canonical-handle-only.
+fn validate_legacy_chat_key_for_removal(chat_key: &str) {
     let n = chat_key.chars().count();
     if n == 0 || n > 200 {
         ic_cdk::trap("chat_key length out of range (1..=200 chars)");
@@ -2237,19 +4338,44 @@ fn validate_chat_key(chat_key: &str) {
     }
 }
 
-/// set_chat_sheet_link: caller-keyed upsert of a chat → sheet mapping.
-/// `chat_key` is the OpenChat context.chat string (opaque here);
-/// `sheet_id` is the sheet id as a u64 (hex-decoded client-side).
+/// set_chat_sheet_link: caller-keyed upsert of an app-scoped chat handle → sheet mapping. The stable
+/// argument remains named chat_key for compatibility; raw OpenChat coordinates are rejected.
 #[ic_cdk::update]
 fn set_chat_sheet_link(chat_key: String, sheet_id: u64) {
     require_authed();
-    validate_chat_key(&chat_key);
+    validate_app_scoped_chat_handle(&chat_key);
     let caller = ic_cdk::api::msg_caller();
+    let sheet_id_text = format!("{sheet_id:016x}");
+    if !principal_owns_sheet(caller, &sheet_id_text) {
+        ic_cdk::trap("caller does not have access to the linked sheet");
+    }
+    if !sheet_is_active(&sheet_id_text) {
+        ic_cdk::trap("only an active sheet can be linked to an OpenChat chat");
+    }
     CHAT_SHEET_LINKS.with(|m| {
-        m.borrow_mut().insert(
-            chat_link_key(&caller, &chat_key),
-            ChatSheetLink { chat_key, sheet_id },
-        )
+        let mut map = m.borrow_mut();
+        let key = chat_link_key(&caller, &chat_key);
+        // A successful new-format write is also a bounded lazy migration point: discard the caller's
+        // now-unusable raw-coordinate rows so they neither consume quota nor remain in stable memory.
+        let (start, end) = chat_link_bounds(&caller);
+        let legacy_keys: Vec<String> = map
+            .range(start.clone()..end.clone())
+            .filter(|(_, value)| !is_canonical_app_scoped_chat_handle(&value.chat_key))
+            .map(|(legacy_key, _)| legacy_key)
+            .collect();
+        for legacy_key in legacy_keys {
+            map.remove(&legacy_key);
+        }
+        if !map.contains_key(&key) {
+            let count = map
+                .range(start..end)
+                .take(MAX_CHAT_LINKS_PER_PRINCIPAL)
+                .count();
+            if count >= MAX_CHAT_LINKS_PER_PRINCIPAL {
+                ic_cdk::trap("chat-to-sheet link quota reached");
+            }
+        }
+        map.insert(key, ChatSheetLink { chat_key, sheet_id })
     });
 }
 
@@ -2258,33 +4384,30 @@ fn set_chat_sheet_link(chat_key: String, sheet_id: u64) {
 #[ic_cdk::update]
 fn remove_chat_sheet_link(chat_key: String) {
     require_authed();
-    validate_chat_key(&chat_key);
+    validate_legacy_chat_key_for_removal(&chat_key);
     let caller = ic_cdk::api::msg_caller();
     CHAT_SHEET_LINKS.with(|m| {
         m.borrow_mut().remove(&chat_link_key(&caller, &chat_key));
     });
 }
 
-/// chat_sheet_links: all of the CALLER's chat → sheet mappings. The
-/// anonymous principal never has any. Full-table scan filtered by the
-/// caller prefix — same trade-off as sheet_entries_iter (bounded by
-/// the number of chats a user has ever linked).
+/// chat_sheet_links: all of the caller's canonical app-scoped chat-handle → sheet mappings. Legacy
+/// raw-coordinate rows are intentionally hidden and are lazily deleted by the next set call.
 #[ic_cdk::query]
 fn chat_sheet_links() -> Vec<ChatSheetLink> {
     let caller = ic_cdk::api::msg_caller();
     if caller == Principal::anonymous() {
         return Vec::new();
     }
-    let prefix = format!("{}\0", caller.to_text());
-    let mut out: Vec<ChatSheetLink> = Vec::new();
+    let (start, end) = chat_link_bounds(&caller);
     CHAT_SHEET_LINKS.with(|m| {
-        for (k, v) in m.borrow().iter() {
-            if k.starts_with(&prefix) {
-                out.push(v);
-            }
-        }
-    });
-    out
+        m.borrow()
+            .range(start..end)
+            .filter(|(_, value)| is_canonical_app_scoped_chat_handle(&value.chat_key))
+            .take(MAX_CHAT_LINKS_PER_PRINCIPAL)
+            .map(|(_, value)| value)
+            .collect()
+    })
 }
 
 // ────────────────────── v1.1.2: replace-member (offline sig + QR) ──────────────────────
@@ -2423,6 +4546,9 @@ fn grant_partner_access(
 ) -> u32 {
     require_authed();
     let caller = ic_cdk::api::msg_caller();
+    if rewraps.len() > MAX_REWRAPS_PER_REQUEST {
+        ic_cdk::trap("too many sheet rewraps in one request");
+    }
     if expected_partner == Principal::anonymous() {
         ic_cdk::trap("expected_partner must not be anonymous");
     }
@@ -2446,9 +4572,16 @@ fn grant_partner_access(
     }
     // Validate the entire batch BEFORE mutating (single message → atomic).
     let mut validated: Vec<(String, Vec<u8>)> = Vec::with_capacity(rewraps.len());
+    let mut seen_sheet_ids = BTreeSet::new();
     SHEETS.with(|s| {
         let map = s.borrow();
         for rw in &rewraps {
+            if !seen_sheet_ids.insert(rw.sheet_id.as_str()) {
+                ic_cdk::trap("duplicate sheet_id in rewrap batch");
+            }
+            if let Err(msg) = validate_wrapped_key(&rw.wrapped_key_for_partner, true) {
+                ic_cdk::trap(msg);
+            }
             let sheet = match map.get(&rw.sheet_id) {
                 Some(sh) => sh,
                 None => ic_cdk::trap("sheet not found"),
@@ -2516,6 +4649,9 @@ async fn issue_invite(pair_id: String) -> String {
     }
     // Mint the code (async raw_rand) BEFORE touching any map — never await across a borrow.
     let code = gen_invite_code().await;
+    if INVITES.with(|invites| invites.borrow().contains_key(&code)) {
+        ic_cdk::trap("invite code collision; please retry");
+    }
     PAIRS.with(|p| {
         let mut map = p.borrow_mut();
         let mut pair = match map.remove(&pair_id) {
@@ -2570,6 +4706,9 @@ async fn issue_invite(pair_id: String) -> String {
 fn accept_invite(invite_code: String, rewraps: Vec<SheetRewrap>, pubkey: Vec<u8>) -> Pair {
     require_authed();
     let caller = ic_cdk::api::msg_caller();
+    if rewraps.len() > MAX_REWRAPS_PER_REQUEST {
+        ic_cdk::trap("too many sheet rewraps in one request");
+    }
     if pubkey.is_empty() || pubkey.len() > 256 {
         ic_cdk::trap("pubkey length out of range");
     }
@@ -2588,6 +4727,9 @@ fn accept_invite(invite_code: String, rewraps: Vec<SheetRewrap>, pubkey: Vec<u8>
     // partner and only needs their key (re)sealed.
     let is_reseal = pair.members[1] == caller;
     if !is_reseal {
+        if principal_pair_count(caller) >= MAX_PAIRS_PER_PRINCIPAL {
+            ic_cdk::trap("account quota reached for this principal");
+        }
         if pair.members[1] != Principal::anonymous() {
             ic_cdk::trap("this account already has a partner");
         }
@@ -2597,9 +4739,16 @@ fn accept_invite(invite_code: String, rewraps: Vec<SheetRewrap>, pubkey: Vec<u8>
     }
     // Validate the whole batch before mutating (atomic).
     let mut validated: Vec<(String, Vec<u8>)> = Vec::with_capacity(rewraps.len());
+    let mut seen_sheet_ids = BTreeSet::new();
     SHEETS.with(|s| {
         let map = s.borrow();
         for rw in &rewraps {
+            if !seen_sheet_ids.insert(rw.sheet_id.as_str()) {
+                ic_cdk::trap("duplicate sheet_id in rewrap batch");
+            }
+            if let Err(msg) = validate_wrapped_key(&rw.wrapped_key_for_partner, true) {
+                ic_cdk::trap(msg);
+            }
             let sheet = match map.get(&rw.sheet_id) {
                 Some(sh) => sh,
                 None => ic_cdk::trap("sheet not found"),
@@ -2692,12 +4841,7 @@ fn leave_pair(pair_id: String) -> Pair {
         (pair, staying)
     });
     // Rewrite every sheet: clear the leaver, promote the staying member if needed.
-    let sheet_ids: Vec<String> = SHEETS.with(|s| {
-        s.borrow()
-            .iter()
-            .filter_map(|(id, sh)| if sh.pair_id == pair_id { Some(id) } else { None })
-            .collect()
-    });
+    let sheet_ids = pair_sheet_ids(&pair_id);
     for sid in sheet_ids {
         update_sheet_field(&sid, |sh| {
             if sh.member_a == caller {
@@ -2772,17 +4916,13 @@ fn delete_pair(pair_id: String) {
         ic_cdk::trap("cannot delete an account that still has another member; leave first");
     }
     // Collect this pair's sheet ids, then purge their entries + counters + the sheets.
-    let sheet_ids: Vec<String> = SHEETS.with(|s| {
-        s.borrow()
-            .iter()
-            .filter_map(|(id, sh)| if sh.pair_id == pair_id { Some(id) } else { None })
-            .collect()
-    });
+    let sheet_ids = pair_sheet_ids(&pair_id);
     for sid in &sheet_ids {
         for e in sheet_entries_iter(sid) {
             sheet_entries_remove(sid, e.id);
         }
         ENTRY_COUNTERS.with(|m| m.borrow_mut().remove(sid));
+        SHEET_ENTRY_BYTES.with(|m| m.borrow_mut().remove(sid));
         SHEETS.with(|s| s.borrow_mut().remove(sid));
     }
     INVITES.with(|i| i.borrow_mut().remove(&pair.invite_code));
@@ -2878,6 +5018,9 @@ fn submit_replace_member(signed: SignedReplaceRequest) -> Pair {
     if pair.members.contains(&req.new_principal) {
         ic_cdk::trap("new principal is already a member");
     }
+    if principal_pair_count(req.new_principal) >= MAX_PAIRS_PER_PRINCIPAL {
+        ic_cdk::trap("new principal has reached the account quota");
+    }
 
     // 2. Verify the ed25519 signature against the pubkey the
     //    leaving member registered (NOT the one in `signed`).
@@ -2910,14 +5053,7 @@ fn submit_replace_member(signed: SignedReplaceRequest) -> Pair {
     // 5. Update all sheets: replace the leaving member's slot with
     // the new member. The leaving member loses read access; the
     // new member inherits the slot.
-    let sheet_ids: Vec<String> = SHEETS.with(|s| {
-        s.borrow()
-            .iter()
-            .filter_map(|(id, sh)| {
-                if sh.pair_id == req.pair_id { Some(id) } else { None }
-            })
-            .collect()
-    });
+    let sheet_ids = pair_sheet_ids(&req.pair_id);
     for sid in sheet_ids {
         update_sheet_field(&sid, |sh| {
             if sh.member_a == req.leaving_principal {
@@ -2927,7 +5063,7 @@ fn submit_replace_member(signed: SignedReplaceRequest) -> Pair {
             }
             // If the sheet is still Active, close it — the new
             // member inherits it as Closed with the same
-            // closing_balances (or none if not yet closed).
+            // encrypted closing-balance envelope (or none if not yet closed).
             if matches!(sh.state, SheetState::Active) {
                 sh.state = SheetState::Closed;
                 sh.closed_at = Some(now_nanos());
@@ -3000,6 +5136,7 @@ fn verify_replace_signature(signed: &SignedReplaceRequest, leaving_principal: &P
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ic_stable_structures::VectorMemory;
 
     #[test]
     fn entry_key_format_is_unique_per_sheet_and_id() {
@@ -3034,20 +5171,63 @@ mod tests {
 
     #[test]
     fn chat_link_key_is_caller_scoped_and_unambiguous() {
-        // v1.9.0: CHAT_SHEET_LINKS uses `caller\0chat_key` composite
-        // keys. Same caller + chat → same key; anything else differs.
+        // CHAT_SHEET_LINKS keeps its released `caller\0chat_key` composite-key layout. The value
+        // validator separately guarantees that new suffixes are app-scoped handles.
         let a = Principal::from_text("aaaaa-aa").unwrap();
         let b = Principal::anonymous();
-        assert_eq!(chat_link_key(&a, "group:x"), chat_link_key(&a, "group:x"));
-        assert_ne!(chat_link_key(&a, "group:x"), chat_link_key(&a, "group:y"));
-        assert_ne!(chat_link_key(&a, "group:x"), chat_link_key(&b, "group:x"));
+        let first = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
+        let second = "BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBE";
+        assert_eq!(chat_link_key(&a, first), chat_link_key(&a, first));
+        assert_ne!(chat_link_key(&a, first), chat_link_key(&a, second));
+        assert_ne!(chat_link_key(&a, first), chat_link_key(&b, first));
         // The caller-prefix scan in chat_sheet_links() relies on the
         // NUL separator: a key belongs to caller `p` iff it starts
         // with `p.to_text() + "\0"`. Principal text never contains
         // NUL, so no other principal's keys can match the prefix.
-        let key = chat_link_key(&a, "channel:xyz:42");
+        let key = chat_link_key(&a, first);
         assert!(key.starts_with(&format!("{}\0", a.to_text())));
-        assert_eq!(&key[a.to_text().len() + 1..], "channel:xyz:42");
+        assert_eq!(&key[a.to_text().len() + 1..], first);
+    }
+
+    #[test]
+    fn chat_sheet_links_accept_only_canonical_app_scoped_handles() {
+        let canonical = "CAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAg";
+        assert!(is_canonical_app_scoped_chat_handle(canonical));
+        for malformed in [
+            "",
+            "group:raw-openchat-id",
+            "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+            "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+            "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
+            // A 43-character base64url spelling with non-zero pad bits cannot canonically encode
+            // exactly 32 bytes, even though every character is in the alphabet.
+            "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAB",
+            "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA!",
+        ] {
+            assert!(!is_canonical_app_scoped_chat_handle(malformed), "{malformed:?}");
+        }
+    }
+
+    #[test]
+    fn app_scoped_card_context_requires_exact_v1_handles() {
+        let mut context = test_scoped_card_context();
+        assert!(valid_app_scoped_card_context(&context));
+        assert_eq!(scoped_chat_handle_key(&context.chat_handle).unwrap().len(), 43);
+        assert_eq!(
+            scoped_chat_handle_key(&context.chat_handle).unwrap(),
+            "CAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAg"
+        );
+        context.context_version = 2;
+        assert!(!valid_app_scoped_card_context(&context));
+        context = test_scoped_card_context();
+        context.app_subject.pop();
+        assert!(!valid_app_scoped_card_context(&context));
+        context = test_scoped_card_context();
+        context.chat_handle.push(0);
+        assert!(!valid_app_scoped_card_context(&context));
+        context = test_scoped_card_context();
+        context.message_handle.clear();
+        assert!(!valid_app_scoped_card_context(&context));
     }
 
     #[test]
@@ -3122,6 +5302,788 @@ mod tests {
         Principal::from_slice(&[byte])
     }
 
+    fn test_sheet(state: SheetState) -> Sheet {
+        Sheet {
+            id: "0123456789abcdef".into(),
+            pair_id: "fedcba9876543210".into(),
+            state,
+            closing_window_days: 365,
+            last_entry_at: None,
+            wrapped_key_a: vec![1],
+            wrapped_key_b: vec![2],
+            member_a: p(1),
+            member_b: p(2),
+            created_at: 1,
+            closed_at: None,
+            closing_balances_key: None,
+            closing_balances_enc: None,
+            closing_balances_iv: None,
+            name_enc: None,
+            name_iv: None,
+        }
+    }
+
+    #[test]
+    fn config_bootstrap_never_trusts_the_first_random_signed_in_user() {
+        let anonymous = Principal::anonymous();
+        let installer = p(1);
+        let stranger = p(2);
+        assert!(!can_manage_config(anonymous, stranger, false));
+        assert!(can_manage_config(anonymous, installer, true));
+        assert!(can_manage_config(installer, installer, false));
+        assert!(can_manage_config(installer, stranger, true));
+        assert!(!can_manage_config(installer, stranger, false));
+        assert!(!can_manage_config(installer, anonymous, true));
+    }
+
+    #[test]
+    fn ai_app_attestation_requires_exact_configured_owner_and_name() {
+        let owner = p(7);
+        let correct = verify_ai_app(
+            VerifyAiAppArgs { name: "iou".into(), owner },
+            Some(owner),
+        );
+        assert!(correct.vouched);
+        assert_eq!(correct.owner, Some(owner));
+
+        assert!(!verify_ai_app(
+            VerifyAiAppArgs { name: "IOU".into(), owner },
+            Some(owner),
+        )
+        .vouched);
+        assert!(!verify_ai_app(
+            VerifyAiAppArgs { name: "iou".into(), owner: p(8) },
+            Some(owner),
+        )
+        .vouched);
+        assert!(!verify_ai_app(
+            VerifyAiAppArgs { name: "iou".into(), owner },
+            None,
+        )
+        .vouched);
+        assert!(!verify_ai_app(
+            VerifyAiAppArgs { name: "iou".into(), owner: Principal::anonymous() },
+            Some(Principal::anonymous()),
+        )
+        .vouched);
+    }
+
+    fn test_ai_app_v2_binding() -> AiAppVerificationBinding {
+        AiAppVerificationBinding {
+            user_index_canister_id: p(1),
+            app_id: 7,
+            app_revision: 99,
+            owner: p(2),
+            canonical_name: "iou".into(),
+            app_canister_id: p(3),
+            // Principal::from_slice(&[4]) is the anonymous principal, so use a distinct
+            // non-anonymous fixture for the inbox authority.
+            inbox_canister_id: Some(p(5)),
+            manifest_hash: vec![5; 32],
+        }
+    }
+
+    fn test_card_content() -> AiAppCardContentV1 {
+        AiAppCardContentV1 {
+            title: IOU_CARD_TITLE.into(),
+            rows: vec![
+                AttestedActionCardRow { label: "Amount".into(), value: "25".into() },
+                AttestedActionCardRow { label: "Currency".into(), value: "USD".into() },
+                AttestedActionCardRow { label: "Type".into(), value: "iou".into() },
+                AttestedActionCardRow { label: "Direction".into(), value: "debt".into() },
+                AttestedActionCardRow { label: "Date".into(), value: "2026-08-05".into() },
+                AttestedActionCardRow { label: "Note".into(), value: "rent".into() },
+                AttestedActionCardRow {
+                    label: "Message".into(),
+                    value: "I owe 25 USD rent".into(),
+                },
+            ],
+            confirm_label: IOU_CARD_CONFIRM_LABEL.into(),
+            cancel_label: IOU_CARD_CANCEL_LABEL.into(),
+            action_id: IOU_CARD_ACTION_ID.into(),
+            disclosure: Some(IOU_CARD_DISCLOSURE.into()),
+            expires_at: None,
+            confirm_payload: Some(
+                br#"{"kind":"iou","amount":25,"currency":"USD","direction":"debt","date":"2026-08-05","note":"rent","message":"I owe 25 USD rent"}"#.to_vec(),
+            ),
+        }
+    }
+
+    fn test_scoped_card_context() -> AppScopedCardContextV1 {
+        AppScopedCardContextV1 {
+            context_version: 1,
+            app_subject: vec![7; 32],
+            chat_handle: vec![8; 32],
+            message_handle: vec![9; 32],
+            app_id: 7,
+            app_revision: 99,
+            action_id: IOU_CARD_ACTION_ID.into(),
+        }
+    }
+
+    fn test_card_attestation_binding() -> CardAttestationBindingV1 {
+        let commitment = AppScopedCardContentCommitmentV1 {
+            context: test_scoped_card_context(),
+            content: test_card_content(),
+        };
+        CardAttestationBindingV1 {
+            user_index_canister_id: p(1),
+            app_canister_id: p(3),
+            commitment,
+            authority_content_hash: [10; 32],
+        }
+    }
+
+    fn test_card_link() -> OpenChatBinding {
+        OpenChatBinding {
+            iou_principal: p(20),
+            user_index_canister_id: p(1),
+            app_id: 7,
+            app_revision: Some(99),
+            app_canister_id: Some(p(3)),
+            key_version: Some(4),
+            app_subject: Some(vec![7; 32]),
+            subject_version: Some(1),
+            consumer_queue_selector: Some(vec![8; 32]),
+            consumer_queue_selector_version: Some(1),
+            openchat_user_id: Principal::anonymous(),
+            linked_at: 1,
+        }
+    }
+
+    fn test_confirmation_binding(payload: Vec<u8>) -> CardConfirmationAttestationBindingV1 {
+        CardConfirmationAttestationBindingV1 {
+            user_index_canister_id: p(1),
+            app_canister_id: p(3),
+            context: test_scoped_card_context(),
+            content_hash: [9; 32],
+            confirm_payload: payload,
+            app_user_key_version: Some(4),
+        }
+    }
+
+    #[test]
+    fn initial_card_attestation_requires_exact_rows_payload_binding_and_link() {
+        let configured = test_ai_app_v2_binding();
+        let link = test_card_link();
+        let binding = test_card_attestation_binding();
+        assert!(attests_exact_iou_card(
+            &binding,
+            Some(&configured),
+            Some(&link),
+            p(3),
+            p(1),
+        ));
+
+        let mut changed = binding.clone();
+        changed.commitment.content.rows[2].value = "Private rent type".into();
+        assert!(!attests_exact_iou_card(&changed, Some(&configured), Some(&link), p(3), p(1)));
+
+        let mut changed = binding.clone();
+        changed.commitment.content.rows.swap(0, 1);
+        assert!(!attests_exact_iou_card(&changed, Some(&configured), Some(&link), p(3), p(1)));
+
+        let mut changed = binding.clone();
+        changed.commitment.context.context_version = 2;
+        assert!(!attests_exact_iou_card(&changed, Some(&configured), Some(&link), p(3), p(1)));
+
+        assert!(!attests_exact_iou_card(&binding, Some(&configured), Some(&link), p(3), p(9)));
+        assert!(!attests_exact_iou_card(&binding, Some(&configured), None, p(3), p(1)));
+        let mut wrong_link = link.clone();
+        wrong_link.app_subject = Some(vec![11; 32]);
+        assert!(!attests_exact_iou_card(&binding, Some(&configured), Some(&wrong_link), p(3), p(1)));
+    }
+
+    #[test]
+    fn initial_card_payload_rejects_private_type_unknown_duplicate_and_malformed_fields() {
+        for payload in [
+            br#"{"amount":25,"template":"Rent"}"#.as_slice(),
+            br#"{"amount":25,"template_ref":"ioutr1.AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"}"#.as_slice(),
+            br#"{"amount":25,"account_type":"Rent"}"#.as_slice(),
+            br#"{"amount":25,"amount":26}"#.as_slice(),
+            br#"{"amount":0}"#.as_slice(),
+            br#"{"amount":25,"currency":"usd"}"#.as_slice(),
+            br#"{"amount":25,"kind":"Rent"}"#.as_slice(),
+        ] {
+            assert!(parse_attested_entry_drafts(payload, false).is_none());
+        }
+    }
+
+    #[test]
+    fn final_confirmation_accepts_only_opaque_type_ref_and_current_exact_account() {
+        let configured = test_ai_app_v2_binding();
+        let link = test_card_link();
+        let encrypted_ref = format!("ioutr1.{}", "A".repeat(39));
+        let payload = format!(
+            "{{\"amount\":25,\"direction\":\"debt\",\"template_ref\":\"{encrypted_ref}\"}}"
+        )
+        .into_bytes();
+        let binding = test_confirmation_binding(payload);
+        assert!(attests_exact_iou_card_confirmation(
+            &binding,
+            Some(&configured),
+            Some(&link),
+            p(3),
+            p(1),
+            true,
+        ));
+        assert!(!attests_exact_iou_card_confirmation(
+            &binding,
+            Some(&configured),
+            Some(&link),
+            p(3),
+            p(1),
+            false,
+        ));
+
+        let no_private_ref = test_confirmation_binding(br#"{"amount":25,"direction":"debt"}"#.to_vec());
+        assert!(attests_exact_iou_card_confirmation(
+            &no_private_ref,
+            Some(&configured),
+            Some(&link),
+            p(3),
+            p(1),
+            false,
+        ));
+
+        let mut stale_key = binding.clone();
+        stale_key.app_user_key_version = Some(3);
+        assert!(!attests_exact_iou_card_confirmation(
+            &stale_key,
+            Some(&configured),
+            Some(&link),
+            p(3),
+            p(1),
+            true,
+        ));
+
+        let mut wrong_chat = binding.clone();
+        wrong_chat.context.chat_handle = vec![11; 32];
+        assert!(!attests_exact_iou_card_confirmation(
+            &wrong_chat,
+            Some(&configured),
+            Some(&link),
+            p(3),
+            p(1),
+            false,
+        ));
+
+        let mut malformed = binding.clone();
+        malformed.context.message_handle.pop();
+        assert!(!attests_exact_iou_card_confirmation(
+            &malformed,
+            Some(&configured),
+            Some(&link),
+            p(3),
+            p(1),
+            true,
+        ));
+    }
+
+    #[test]
+    fn final_confirmation_rejects_plaintext_or_malformed_type_and_ambiguous_json() {
+        let configured = test_ai_app_v2_binding();
+        let link = test_card_link();
+        for payload in [
+            br#"{"amount":25,"template":"Rent"}"#.as_slice(),
+            br#"{"amount":25,"type":"Rent"}"#.as_slice(),
+            br#"{"amount":25,"account_type":"Rent"}"#.as_slice(),
+            br#"{"amount":25,"template_ref":"Rent"}"#.as_slice(),
+            br#"{"amount":25,"template_ref":"ioutr1.AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAB"}"#.as_slice(),
+            br#"{"amount":25,"amount":26}"#.as_slice(),
+            br#"{"amount":0.001}"#.as_slice(),
+            br#"[]"#.as_slice(),
+        ] {
+            let binding = test_confirmation_binding(payload.to_vec());
+            assert!(!attests_exact_iou_card_confirmation(
+                &binding,
+                Some(&configured),
+                Some(&link),
+                p(3),
+                p(1),
+                true,
+            ));
+        }
+    }
+
+    #[test]
+    fn ai_app_v2_attestation_requires_exact_stored_binding_and_registry_caller() {
+        let binding = test_ai_app_v2_binding();
+        let accepted = verify_ai_app_v2(
+            binding.clone(),
+            Some(binding.clone()),
+            Some(binding.owner),
+            Some(binding.user_index_canister_id),
+            binding.app_canister_id,
+            binding.user_index_canister_id,
+        );
+        assert!(accepted.vouched);
+        assert_eq!(accepted.binding, binding);
+
+        let mut changed = binding.clone();
+        changed.app_revision += 1;
+        let stale = verify_ai_app_v2(
+            changed,
+            Some(binding.clone()),
+            Some(binding.owner),
+            Some(binding.user_index_canister_id),
+            binding.app_canister_id,
+            binding.user_index_canister_id,
+        );
+        assert!(!stale.vouched);
+        assert_eq!(stale.binding, binding, "mismatches return the stored commitment");
+
+        assert!(!verify_ai_app_v2(
+            binding.clone(),
+            Some(binding.clone()),
+            Some(binding.owner),
+            Some(binding.user_index_canister_id),
+            binding.app_canister_id,
+            p(9),
+        )
+        .vouched);
+        assert!(!verify_ai_app_v2(
+            binding.clone(),
+            None,
+            Some(binding.owner),
+            Some(binding.user_index_canister_id),
+            binding.app_canister_id,
+            binding.user_index_canister_id,
+        )
+        .vouched);
+    }
+
+    #[test]
+    fn ai_app_v2_binding_rejects_every_trust_coordinate_and_malformed_hash() {
+        let binding = test_ai_app_v2_binding();
+        assert!(verification_binding_is_valid(
+            &binding,
+            Some(binding.owner),
+            Some(binding.user_index_canister_id),
+            binding.app_canister_id,
+        ));
+
+        let mut cases = Vec::new();
+        let mut value = binding.clone();
+        value.app_id = 0;
+        cases.push(value);
+        let mut value = binding.clone();
+        value.app_revision = 0;
+        cases.push(value);
+        let mut value = binding.clone();
+        value.canonical_name = "IOU".into();
+        cases.push(value);
+        let mut value = binding.clone();
+        value.manifest_hash.pop();
+        cases.push(value);
+        let mut value = binding.clone();
+        value.inbox_canister_id = Some(Principal::anonymous());
+        cases.push(value);
+        let mut value = binding.clone();
+        value.app_canister_id = p(8);
+        cases.push(value);
+
+        for candidate in cases {
+            assert!(!verification_binding_is_valid(
+                &candidate,
+                Some(binding.owner),
+                Some(binding.user_index_canister_id),
+                binding.app_canister_id,
+            ));
+        }
+        assert!(!verification_binding_is_valid(
+            &binding,
+            Some(p(8)),
+            Some(binding.user_index_canister_id),
+            binding.app_canister_id,
+        ));
+        assert!(!verification_binding_is_valid(
+            &binding,
+            Some(binding.owner),
+            Some(p(8)),
+            binding.app_canister_id,
+        ));
+    }
+
+    fn test_openchat_user_binding() -> OpenChatBinding {
+        OpenChatBinding {
+            iou_principal: p(20),
+            user_index_canister_id: p(21),
+            // OpenChat's app-id allocator starts at zero; zero is valid and
+            // must stay covered by the disconnect contract.
+            app_id: 0,
+            app_revision: Some(44),
+            app_canister_id: Some(p(22)),
+            key_version: Some(3),
+            app_subject: Some(vec![23; 32]),
+            subject_version: Some(1),
+            consumer_queue_selector: Some(vec![24; 32]),
+            consumer_queue_selector_version: Some(1),
+            openchat_user_id: Principal::anonymous(),
+            linked_at: 55,
+        }
+    }
+
+    #[test]
+    fn openchat_disconnect_requires_every_authoritative_scoped_binding_coordinate() {
+        let binding = test_openchat_user_binding();
+        assert!(disconnect_binding_is_valid(
+            &binding,
+            binding.iou_principal,
+            Some(binding.user_index_canister_id),
+            binding.app_canister_id.unwrap(),
+        ));
+
+        let mut cases = Vec::new();
+        let mut value = binding.clone();
+        value.user_index_canister_id = Principal::anonymous();
+        cases.push(value);
+        let mut value = binding.clone();
+        value.app_revision = None;
+        cases.push(value);
+        let mut value = binding.clone();
+        value.app_revision = Some(0);
+        cases.push(value);
+        let mut value = binding.clone();
+        value.app_canister_id = None;
+        cases.push(value);
+        let mut value = binding.clone();
+        value.key_version = None;
+        cases.push(value);
+        let mut value = binding.clone();
+        value.key_version = Some(0);
+        cases.push(value);
+        let mut value = binding.clone();
+        value.app_subject = None;
+        cases.push(value);
+        let mut value = binding.clone();
+        value.app_subject = Some(vec![1; 31]);
+        cases.push(value);
+        let mut value = binding.clone();
+        value.subject_version = None;
+        cases.push(value);
+        let mut value = binding.clone();
+        value.subject_version = Some(2);
+        cases.push(value);
+
+        for candidate in cases {
+            assert!(!disconnect_binding_is_valid(
+                &candidate,
+                binding.iou_principal,
+                Some(binding.user_index_canister_id),
+                binding.app_canister_id.unwrap(),
+            ));
+        }
+        assert!(!disconnect_binding_is_valid(
+            &binding,
+            p(24),
+            Some(binding.user_index_canister_id),
+            binding.app_canister_id.unwrap(),
+        ));
+        assert!(!disconnect_binding_is_valid(
+            &binding,
+            binding.iou_principal,
+            Some(p(24)),
+            binding.app_canister_id.unwrap(),
+        ));
+        assert!(!disconnect_binding_is_valid(
+            &binding,
+            binding.iou_principal,
+            Some(binding.user_index_canister_id),
+            p(24),
+        ));
+    }
+
+    #[test]
+    fn normal_disconnect_removes_binding_only_for_clean_remote_outcomes_but_emergency_erase_is_explicit() {
+        assert!(binding_removal_is_allowed(
+            OpenChatBindingRemovalCause::CoordinatedRevoke(
+                &RevokeAiAppUserKeyResponse::Success,
+            ),
+        ));
+        assert!(binding_removal_is_allowed(
+            OpenChatBindingRemovalCause::CoordinatedRevoke(
+                &RevokeAiAppUserKeyResponse::KeyNotFound,
+            ),
+        ));
+        assert!(!binding_removal_is_allowed(
+            OpenChatBindingRemovalCause::CoordinatedRevoke(
+                &RevokeAiAppUserKeyResponse::Error((503, Some("unavailable".into()))),
+            ),
+        ));
+        assert!(binding_removal_is_allowed(
+            OpenChatBindingRemovalCause::EmergencyLocalErase,
+        ));
+    }
+
+    #[test]
+    fn archived_sheet_keys_remain_available_only_to_recorded_members() {
+        let active = test_sheet(SheetState::Active);
+        assert!(principal_can_read_sheet(&active, p(1)));
+        assert!(principal_can_read_sheet(&active, p(2)));
+        assert!(!principal_can_read_sheet(&active, p(3)));
+        assert!(!principal_can_read_sheet(&active, Principal::anonymous()));
+
+        let mut closed = test_sheet(SheetState::Closed);
+        assert!(principal_can_read_sheet(&closed, p(1)));
+        assert!(principal_can_read_sheet(&closed, p(2)));
+        assert!(!principal_can_read_sheet(&closed, p(3)));
+
+        // Revocation/member replacement updates the recorded slots, so a former member stays out.
+        closed.member_b = p(9);
+        assert!(!principal_can_read_sheet(&closed, p(2)));
+        assert!(principal_can_read_sheet(&closed, p(9)));
+    }
+
+    #[test]
+    fn encrypted_closing_balance_envelope_survives_stable_round_trip() {
+        let mut sheet = test_sheet(SheetState::Closed);
+        sheet.closed_at = Some(2);
+        sheet.closing_balances_key = Some(vec![7; 32]);
+        sheet.closing_balances_enc = Some(vec![8; 64]);
+        sheet.closing_balances_iv = Some(vec![9; 12]);
+
+        let round = Sheet::from_bytes(sheet.to_bytes());
+        assert_eq!(round.closing_balances_key, Some(vec![7; 32]));
+        assert_eq!(round.closing_balances_enc, Some(vec![8; 64]));
+        assert_eq!(round.closing_balances_iv, Some(vec![9; 12]));
+    }
+
+    #[test]
+    fn entry_blob_validation_covers_tag_size_upper_bound_and_nonce_shape() {
+        let key = vec![0u8; 32];
+        assert!(validate_entry_blob(&key, &[0u8; 16], &[0u8; 12]).is_ok());
+        assert!(validate_entry_blob(&key, &vec![0u8; MAX_ENTRY_CIPHERTEXT_BYTES], &[0u8; 16]).is_ok());
+        assert!(validate_entry_blob(&key[..31], &[0u8; 16], &[0u8; 12]).is_err());
+        assert!(validate_entry_blob(&key, &[0u8; 15], &[0u8; 12]).is_err());
+        assert!(validate_entry_blob(
+            &key,
+            &vec![0u8; MAX_ENTRY_CIPHERTEXT_BYTES + 1],
+            &[0u8; 12],
+        )
+        .is_err());
+        assert!(validate_entry_blob(&key, &[0u8; 16], &[0u8; 11]).is_err());
+        assert!(validate_entry_blob(&key, &[0u8; 16], &[0u8; 17]).is_err());
+    }
+
+    #[test]
+    fn wrapped_keys_and_optional_names_are_bounded_and_well_formed() {
+        assert!(validate_wrapped_key(&[1], false).is_ok());
+        assert!(validate_wrapped_key(&[], true).is_ok());
+        assert!(validate_wrapped_key(&[], false).is_err());
+        assert!(validate_wrapped_key(&vec![0; MAX_WRAPPED_KEY_BYTES + 1], true).is_err());
+
+        assert!(validate_optional_name(&None, &None).is_ok());
+        assert!(validate_optional_name(&Some(vec![1]), &Some(vec![0; 12])).is_ok());
+        assert!(validate_optional_name(&Some(vec![1]), &None).is_err());
+        assert!(validate_optional_name(&None, &Some(vec![0; 12])).is_err());
+        assert!(validate_optional_name(&Some(vec![0; 1_025]), &Some(vec![0; 12])).is_err());
+    }
+
+    #[test]
+    fn composite_entry_range_excludes_other_sheets_and_honors_cursor_ceiling() {
+        let mut rows = std::collections::BTreeMap::new();
+        for id in 1..=4 {
+            rows.insert(entry_key("sheet-a", id), id);
+            rows.insert(entry_key("sheet-aa", id), 100 + id);
+            rows.insert(entry_key("sheet-b", id), 200 + id);
+        }
+        let (start, end) = entry_key_bounds("sheet-a", 3);
+        let ids: Vec<u64> = rows.range(start..=end).rev().map(|(_, id)| *id).collect();
+        assert_eq!(ids, vec![3, 2, 1]);
+    }
+
+    #[test]
+    fn chat_link_range_excludes_other_principals_and_keeps_control_suffixes() {
+        let a = p(1);
+        let b = p(2);
+        let mut rows = std::collections::BTreeMap::new();
+        rows.insert(chat_link_key(&a, "group:one"), 1);
+        rows.insert(chat_link_key(&a, "\u{1}control"), 2);
+        rows.insert(chat_link_key(&b, "group:one"), 3);
+        let (start, end) = chat_link_bounds(&a);
+        let values: Vec<u8> = rows.range(start..end).map(|(_, value)| *value).collect();
+        assert_eq!(values, vec![2, 1]);
+    }
+
+    #[test]
+    fn stored_entry_byte_accounting_includes_every_history_version() {
+        let entry = Entry {
+            id: 1,
+            pair_id: "pair".into(),
+            sheet_id: "sheet".into(),
+            created_by: p(1),
+            created_at_server: 1,
+            updated_at_server: Some(2),
+            entry_key: vec![0; 32],
+            ciphertext: vec![0; 16],
+            iv: vec![0; 12],
+            history: Some(vec![
+                EntryVersion {
+                    entry_key: vec![0; 32],
+                    ciphertext: vec![0; 20],
+                    iv: vec![0; 12],
+                    replaced_at: 1,
+                },
+                EntryVersion {
+                    entry_key: vec![0; 32],
+                    ciphertext: vec![0; 24],
+                    iv: vec![0; 16],
+                    replaced_at: 2,
+                },
+            ]),
+            deleted_at: None,
+        };
+        assert_eq!(stored_entry_bytes(&entry), 60 + 64 + 72);
+    }
+
+    #[test]
+    fn legacy_global_scan_guard_allows_the_limit_and_rejects_the_next_record() {
+        let mut scanned = 0usize;
+        for _ in 0..MAX_LEGACY_GLOBAL_SCAN_RECORDS {
+            assert!(checked_legacy_scan_increment(&mut scanned).is_ok());
+        }
+        assert_eq!(scanned, MAX_LEGACY_GLOBAL_SCAN_RECORDS);
+        assert!(checked_legacy_scan_increment(&mut scanned).is_err());
+    }
+
+    #[test]
+    fn schema_version_covers_owner_binding_and_sheet_usage_counter() {
+        const {
+            assert!(
+                SCHEMA_VERSION >= 11,
+                "schema must record owner binding, usage counters, and encrypted closing balances"
+            )
+        };
+    }
+
+    #[test]
+    fn consumer_key_epoch_rejects_stale_two_device_write() {
+        let observed_by_both = 0;
+        let committed_by_device_a = next_consumer_key_epoch(observed_by_both, observed_by_both)
+            .expect("device A wins the compare-and-swap");
+        assert_eq!(committed_by_device_a, 1);
+        assert_eq!(
+            next_consumer_key_epoch(committed_by_device_a, observed_by_both),
+            Err(ConsumerKeyMutationError::StaleEpoch(
+                ConsumerKeyEpochConflict {
+                    expected_epoch: 0,
+                    current_epoch: 1,
+                }
+            ))
+        );
+    }
+
+    #[test]
+    fn consumer_key_epoch_tombstone_prevents_delete_reordering_and_aba() {
+        let set_epoch = next_consumer_key_epoch(0, 0).expect("initial set");
+        let tombstone_epoch = next_consumer_key_epoch(set_epoch, set_epoch).expect("delete");
+        assert_eq!(tombstone_epoch, 2);
+        assert!(matches!(
+            next_consumer_key_epoch(tombstone_epoch, set_epoch),
+            Err(ConsumerKeyMutationError::StaleEpoch(_))
+        ));
+
+        let reconnect_epoch = next_consumer_key_epoch(tombstone_epoch, tombstone_epoch)
+            .expect("explicit reconnect with the tombstone epoch");
+        assert_eq!(reconnect_epoch, 3);
+        assert!(matches!(
+            next_consumer_key_epoch(reconnect_epoch, set_epoch),
+            Err(ConsumerKeyMutationError::StaleEpoch(
+                ConsumerKeyEpochConflict {
+                    expected_epoch: 1,
+                    current_epoch: 3,
+                }
+            ))
+        ));
+    }
+
+    #[test]
+    fn consumer_key_epoch_tombstone_survives_stable_map_reopen() {
+        let key_memory = VectorMemory::default();
+        let epoch_memory = VectorMemory::default();
+        let principal = p(42);
+        {
+            let mut keypairs = StableBTreeMap::<Principal, ConsumerKeypair, _>::init(
+                key_memory.clone(),
+            );
+            keypairs.insert(
+                principal,
+                ConsumerKeypair {
+                    wrapped_private_key: vec![1, 2, 3],
+                    public_key_pem: "-----BEGIN PUBLIC KEY-----".into(),
+                },
+            );
+            keypairs.remove(&principal);
+            let mut epochs = StableBTreeMap::<Principal, u64, _>::init(epoch_memory.clone());
+            epochs.insert(principal, 9);
+        }
+        let keypairs = StableBTreeMap::<Principal, ConsumerKeypair, _>::init(key_memory);
+        let epochs = StableBTreeMap::<Principal, u64, _>::init(epoch_memory);
+        assert!(keypairs.get(&principal).is_none());
+        assert_eq!(epochs.get(&principal), Some(9));
+    }
+
+    #[test]
+    fn consumer_key_epoch_never_wraps() {
+        assert_eq!(
+            next_consumer_key_epoch(u64::MAX, u64::MAX),
+            Err(ConsumerKeyMutationError::EpochExhausted)
+        );
+    }
+
+    #[test]
+    fn schema_version_and_fresh_memory_cover_consumer_key_tombstones() {
+        const {
+            assert!(
+                SCHEMA_VERSION >= 12,
+                "schema must record MemoryId 25 consumer-key mutation tombstones"
+            )
+        };
+    }
+
+    #[test]
+    fn consumer_key_candid_matches_frontend_epoch_variants() {
+        // Bytes emitted by @dfinity/candid for the declarations.ts IDL. This
+        // guards Rust enum labels/record hashes as well as the handwritten DID.
+        let ok_wire = [
+            68, 73, 68, 76, 3, 108, 2, 131, 195, 145, 228, 1, 120, 130, 218, 202, 218, 4,
+            120, 107, 2, 160, 204, 247, 171, 7, 127, 144, 239, 134, 222, 8, 0, 107, 2,
+            188, 138, 1, 120, 197, 254, 210, 1, 1, 1, 2, 0, 7, 0, 0, 0, 0, 0, 0, 0,
+        ];
+        assert!(matches!(
+            Decode!(&ok_wire, ConsumerKeyMutationResult).expect("decode frontend Ok"),
+            ConsumerKeyMutationResult::Ok(7)
+        ));
+
+        let stale_wire = [
+            68, 73, 68, 76, 3, 108, 2, 131, 195, 145, 228, 1, 120, 130, 218, 202, 218, 4,
+            120, 107, 2, 160, 204, 247, 171, 7, 127, 144, 239, 134, 222, 8, 0, 107, 2,
+            188, 138, 1, 120, 197, 254, 210, 1, 1, 1, 2, 1, 1, 2, 0, 0, 0, 0, 0, 0,
+            0, 1, 0, 0, 0, 0, 0, 0, 0,
+        ];
+        assert!(matches!(
+            Decode!(&stale_wire, ConsumerKeyMutationResult)
+                .expect("decode frontend StaleEpoch"),
+            ConsumerKeyMutationResult::Err(ConsumerKeyMutationError::StaleEpoch(
+                ConsumerKeyEpochConflict {
+                    expected_epoch: 1,
+                    current_epoch: 2,
+                }
+            ))
+        ));
+
+        let tombstone_wire = [
+            68, 73, 68, 76, 4, 109, 123, 108, 2, 233, 159, 216, 232, 5, 0, 162, 148, 172,
+            253, 14, 113, 110, 1, 108, 2, 243, 200, 133, 155, 2, 120, 185, 194, 200, 202,
+            11, 2, 1, 3, 2, 0, 0, 0, 0, 0, 0, 0, 0,
+        ];
+        let state = Decode!(&tombstone_wire, ConsumerKeypairState)
+            .expect("decode frontend tombstone state");
+        assert_eq!(state.mutation_epoch, 2);
+        assert!(state.keypair.is_none());
+    }
+
     #[test]
     fn templates_blob_guards_mirror_set_user_templates_not_check_name_blob() {
         let iv12 = vec![0u8; 12];
@@ -3133,10 +6095,10 @@ mod tests {
         // a >1KB blob is FINE here (this is what rules out the name channel)
         assert!(check_templates_blob(&vec![0u8; 2048], &iv12).is_ok());
         // iv must be 12..=16
-        assert!(check_templates_blob(&[1], &vec![0u8; 11]).is_err());
-        assert!(check_templates_blob(&[1], &vec![0u8; 12]).is_ok());
-        assert!(check_templates_blob(&[1], &vec![0u8; 16]).is_ok());
-        assert!(check_templates_blob(&[1], &vec![0u8; 17]).is_err());
+        assert!(check_templates_blob(&[1], &[0u8; 11]).is_err());
+        assert!(check_templates_blob(&[1], &[0u8; 12]).is_ok());
+        assert!(check_templates_blob(&[1], &[0u8; 16]).is_ok());
+        assert!(check_templates_blob(&[1], &[0u8; 17]).is_err());
     }
 
     #[test]
@@ -3215,6 +6177,9 @@ mod tests {
         assert_eq!(new.creator_principal, p(1));
         assert_eq!(new.deployed_at, 99);
         assert_eq!(new.card_currency, None);
+        assert_eq!(new.ai_app_owner, None);
+        assert_eq!(new.openchat_user_index_canister_id, None);
+        assert_eq!(new.ai_app_verification_binding, None);
     }
 
     #[test]
@@ -3223,11 +6188,54 @@ mod tests {
             creator_principal: p(2),
             deployed_at: 7,
             card_currency: Some("EGP".into()),
+            ai_app_owner: Some(p(3)),
+            openchat_user_index_canister_id: Some(p(4)),
+            ai_app_verification_binding: None,
         };
         let back = Config::from_bytes(cfg.to_bytes());
         assert_eq!(back.card_currency, Some("EGP".to_string()));
+        assert_eq!(back.ai_app_owner, Some(p(3)));
+        assert_eq!(back.openchat_user_index_canister_id, Some(p(4)));
+        assert_eq!(back.ai_app_verification_binding, None);
         assert_eq!(back.creator_principal, p(2));
         assert_eq!(back.deployed_at, 7);
+    }
+
+    #[test]
+    fn openchat_binding_decodes_pre_v2_links_but_leaves_them_unversioned() {
+        #[derive(CandidType, Deserialize)]
+        struct OldOpenChatBinding {
+            iou_principal: Principal,
+            user_index_canister_id: Principal,
+            app_id: u32,
+            openchat_user_id: Principal,
+            linked_at: u64,
+        }
+        let old = OldOpenChatBinding {
+            iou_principal: p(1),
+            user_index_canister_id: p(2),
+            app_id: 7,
+            openchat_user_id: p(3),
+            linked_at: 9,
+        };
+        let decoded = OpenChatBinding::from_bytes(Cow::Owned(Encode!(&old).unwrap()));
+        assert_eq!(decoded.app_id, 7);
+        assert_eq!(decoded.app_revision, None);
+        assert_eq!(decoded.app_canister_id, None);
+        assert_eq!(decoded.key_version, None);
+        assert_eq!(decoded.app_subject, None);
+        assert_eq!(decoded.subject_version, None);
+        assert!(public_openchat_binding(&decoded).is_none());
+    }
+
+    #[test]
+    fn schema_version_records_scoped_openchat_links() {
+        const {
+            assert!(
+                SCHEMA_VERSION >= 15,
+                "app-scoped OpenChat links require schema v15"
+            )
+        };
     }
 
     #[test]
@@ -3298,6 +6306,17 @@ mod tests {
         // skip it rather than fail — otherwise `Sheet::from_bytes`' `.unwrap()` would trap the canister
         // on the first read of any pre-existing sheet.
         #[derive(CandidType, Deserialize)]
+        enum LegacyDirection {
+            Credit,
+            Debt,
+        }
+        #[derive(CandidType, Deserialize)]
+        struct LegacyClosingBalance {
+            currency: String,
+            amount_minor: u64,
+            direction: LegacyDirection,
+        }
+        #[derive(CandidType, Deserialize)]
         struct OldSheet {
             id: String,
             pair_id: String,
@@ -3311,14 +6330,14 @@ mod tests {
             member_b: Principal,
             created_at: u64,
             closed_at: Option<u64>,
-            closing_balances: Option<Vec<ClosingBalance>>,
+            closing_balances: Option<Vec<LegacyClosingBalance>>,
             name_enc: Option<Vec<u8>>,
             name_iv: Option<Vec<u8>>,
         }
         let old = OldSheet {
             id: "c819f76d77f260b3".into(),
             pair_id: "pair-1".into(),
-            state: SheetState::Active,
+            state: SheetState::Closed,
             enabled_currencies: vec!["USD".into(), "EGP".into()],
             closing_window_days: 365,
             last_entry_at: Some(11),
@@ -3327,8 +6346,12 @@ mod tests {
             member_a: p(1),
             member_b: p(2),
             created_at: 42,
-            closed_at: None,
-            closing_balances: None,
+            closed_at: Some(43),
+            closing_balances: Some(vec![LegacyClosingBalance {
+                currency: "USD".into(),
+                amount_minor: 12_345,
+                direction: LegacyDirection::Credit,
+            }]),
             name_enc: Some(vec![9, 9]),
             name_iv: Some(vec![0u8; 12]),
         };
@@ -3344,8 +6367,16 @@ mod tests {
         assert_eq!(new.member_a, p(1));
         assert_eq!(new.member_b, p(2));
         assert_eq!(new.name_enc, Some(vec![9, 9]));
+        assert_eq!(new.closing_balances_key, None);
+        assert_eq!(new.closing_balances_enc, None);
+        assert_eq!(new.closing_balances_iv, None);
         // And a fresh sheet still round-trips (no currency field to carry).
-        let round = Sheet::from_bytes(new.to_bytes());
+        let rewritten = new.to_bytes();
+        assert!(
+            !rewritten.as_ref().windows(3).any(|window| window == b"USD"),
+            "rewriting a legacy sheet must drop the old plaintext balance"
+        );
+        let round = Sheet::from_bytes(rewritten);
         assert_eq!(round.id, new.id);
         assert_eq!(round.closing_window_days, 365);
     }

@@ -20,8 +20,8 @@
 //       G1 compressed, 48 bytes.
 //   - Master public key (returned by vetkd_public_key()):
 //       G2, 96 bytes.
-//   - Transport secret key (stored in IndexedDB):
-//       32-byte scalar (G1).
+//   - Transport secret key (ephemeral; session memory only):
+//       32-byte scalar (G1). It is never an account-recovery key.
 //
 // These were verified empirically: `TransportSecretKey.random()
 // .publicKeyBytes().length === 48` for the transport pubkey, and the
@@ -56,6 +56,7 @@ import {
 } from "@dfinity/vetkeys";
 import { hkdf } from "@noble/hashes/hkdf";
 import { sha256 } from "@noble/hashes/sha256";
+import { isMobileNative, secureDel } from "./mobileSecureStorage";
 
 export function isProdVetkd(): boolean {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -71,7 +72,28 @@ export interface VetkdTransportKey {
   publicKeyB64: string;
 }
 
+/** Material validated before an irreversible sheet mutation. */
+export interface ProdSheetKeyContext {
+  transport: VetkdTransportKey;
+  masterPubKey: Uint8Array;
+}
+
+type ProdSheetKeyActor = {
+  vetkd_public_key: () => Promise<ArrayLike<number>>;
+  vetkd_wrap_sheet_key: (
+    sheetId: string,
+    transportPublicKey: number[],
+  ) => Promise<ArrayLike<number>>;
+};
+
+export type ProdSheetKeyRetryOptions = {
+  attempts?: number;
+  delayMs?: number;
+};
+
 const STORAGE_KEY = "iou:vetkd:transport:v1";
+const SECURE_STORAGE_KEY = "transport:v1";
+let transportKeyLoad: Promise<VetkdTransportKey> | null = null;
 
 /** Generate a new transport key pair. */
 export function newTransportKey(): VetkdTransportKey {
@@ -99,28 +121,146 @@ function tskFromBytes(b: Uint8Array): TransportSecretKey {
   return TransportSecretKey.deserialize(b);
 }
 
-/** Load or generate a transport key pair (persisted in IndexedDB). */
-export async function loadOrCreateTransportKey(): Promise<VetkdTransportKey> {
-  if (typeof indexedDB === "undefined") {
-    throw new Error(
-      "IndexedDB not available — prod vetkd requires a browser",
-    );
+async function purgePersistedTransportKey(): Promise<void> {
+  if (isMobileNative()) {
+    // Remove the obsolete durable record created by pre-review builds. Fail
+    // closed if the native keystore cannot purge that retired secret.
+    await secureDel(SECURE_STORAGE_KEY);
   }
-  const stored = await idbGet<VetkdTransportKey>(STORAGE_KEY);
-  if (stored) return stored;
-  const fresh = newTransportKey();
-  await idbPut(STORAGE_KEY, fresh);
-  return fresh;
+  if (typeof indexedDB !== "undefined") {
+    await idbDel(STORAGE_KEY);
+  }
+}
+
+async function loadOrCreateTransportKeyUncached(): Promise<VetkdTransportKey> {
+  // ICP transport keys protect delivery of a deterministic vetKey. They are
+  // ephemeral session material, not an account recovery secret. Purge records
+  // written by older builds before creating this session's fresh key.
+  await purgePersistedTransportKey();
+  return newTransportKey();
+}
+
+/** Return one ephemeral transport key shared by callers in this JS session. */
+export async function loadOrCreateTransportKey(): Promise<VetkdTransportKey> {
+  if (!transportKeyLoad) {
+    transportKeyLoad = loadOrCreateTransportKeyUncached().catch((error) => {
+      transportKeyLoad = null;
+      throw error;
+    });
+  }
+  return transportKeyLoad;
 }
 
 /**
- * Forget the transport key. The next loadOrCreateTransportKey()
- * will generate a new one. **This will not decrypt any old sheets**
- * — it's a "nuclear" option.
+ * End the current transport-key session. A fresh transport key can still
+ * retrieve the same deterministic sheet or consumer vetKey after access
+ * control succeeds at the canister.
  */
 export async function forgetTransportKey(): Promise<void> {
-  if (typeof indexedDB === "undefined") return;
-  await idbDel(STORAGE_KEY);
+  const pending = transportKeyLoad;
+  transportKeyLoad = null;
+  if (pending) {
+    const previous = await pending.catch(() => null);
+    previous?.secretKey.fill(0);
+  }
+  await purgePersistedTransportKey();
+}
+
+/**
+ * Load and validate all device-local and canister-global material needed to
+ * derive a production sheet key. Call this before creating or accepting an
+ * irreversible resource so corrupt/unavailable key material fails first.
+ */
+export async function prepareProdSheetKey(
+  actor: Pick<ProdSheetKeyActor, "vetkd_public_key">,
+): Promise<ProdSheetKeyContext> {
+  const transport = await loadOrCreateTransportKey();
+  if (transport.secretKey.length !== 32 || transport.publicKey.length !== 48) {
+    throw new Error("invalid vetKD transport key");
+  }
+  // Validate this session's transport secret before create_sheet.
+  tskFromBytes(transport.secretKey);
+
+  const masterPubKey = new Uint8Array(await actor.vetkd_public_key());
+  if (masterPubKey.length !== 96) {
+    throw new Error("invalid vetKD master public key");
+  }
+  // Validate the management-canister response while the operation is still
+  // safe to abort rather than discovering corruption after create_sheet.
+  DerivedPublicKey.deserialize(masterPubKey);
+  return { transport, masterPubKey };
+}
+
+/** Derive the authoritative production K_sheet for an existing sheet. */
+export async function deriveProdSheetKey(
+  actor: Pick<ProdSheetKeyActor, "vetkd_wrap_sheet_key">,
+  sheetId: string,
+  prepared: ProdSheetKeyContext,
+): Promise<Uint8Array> {
+  const encryptedVetKey = new Uint8Array(
+    await actor.vetkd_wrap_sheet_key(
+      sheetId,
+      Array.from(prepared.transport.publicKey),
+    ),
+  );
+  // unwrapSheetKeyProd retains the historical canister-id parameter for
+  // source compatibility, but it is intentionally unused as of v1.2.2.
+  return unwrapSheetKeyProd(
+    sheetId,
+    prepared.transport,
+    prepared.masterPubKey,
+    encryptedVetKey,
+    new Uint8Array(),
+  );
+}
+
+function retryableProdSheetKeyError(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error ?? "");
+  // Authorization and validation failures cannot become valid by waiting. In
+  // particular, a non-member must not turn one denied key request into a burst.
+  return !/not a member|does not have access|not signed in|anonymous|sheet is not active|transport_public_key|invalid vetkey|invalid vetkd/i.test(
+    message,
+  );
+}
+
+/**
+ * Retry only the post-create network derivation. create_sheet itself is never
+ * retried, so a transient key response cannot create duplicate sheets.
+ */
+export async function retryProdSheetKeyDerivation(
+  derive: () => Promise<Uint8Array>,
+  options: ProdSheetKeyRetryOptions = {},
+): Promise<Uint8Array> {
+  const attempts = Math.max(1, options.attempts ?? 4);
+  const delayMs = Math.max(0, options.delayMs ?? 100);
+  let lastError: unknown;
+  for (let attempt = 0; attempt < attempts; attempt++) {
+    try {
+      return await derive();
+    } catch (error) {
+      lastError = error;
+      if (attempt + 1 >= attempts || !retryableProdSheetKeyError(error)) throw error;
+      if (delayMs > 0) {
+        await new Promise<void>((resolve) => {
+          setTimeout(resolve, delayMs * 2 ** attempt);
+        });
+      }
+    }
+  }
+  throw lastError;
+}
+
+/** Shared production read/create/invite derivation path. */
+export async function deriveProdSheetKeyWithRetry(
+  actor: Pick<ProdSheetKeyActor, "vetkd_wrap_sheet_key">,
+  sheetId: string,
+  prepared: ProdSheetKeyContext,
+  options?: ProdSheetKeyRetryOptions,
+): Promise<Uint8Array> {
+  return retryProdSheetKeyDerivation(
+    () => deriveProdSheetKey(actor, sheetId, prepared),
+    options,
+  );
 }
 
 /** Unwrap a sheet key using the IC's IBE-decrypted vetKey. */
@@ -202,35 +342,7 @@ export async function deriveSheetKey(
   return unwrapSheetKeyProd(sheetId, transport, masterPubKey, encVetKey, canisterId);
 }
 
-// ─── IndexedDB shim (minimal; no external deps) ───
-
-function idbGet<T>(key: string): Promise<T | null> {
-  return new Promise((resolve, reject) => {
-    const req = indexedDB.open("iou-vetkd", 1);
-    req.onupgradeneeded = () => req.result.createObjectStore("keys");
-    req.onerror = () => reject(req.error);
-    req.onsuccess = () => {
-      const tx = req.result.transaction("keys", "readonly");
-      const get = tx.objectStore("keys").get(key);
-      get.onsuccess = () => resolve((get.result as T) ?? null);
-      get.onerror = () => reject(get.error);
-    };
-  });
-}
-
-function idbPut(key: string, value: unknown): Promise<void> {
-  return new Promise((resolve, reject) => {
-    const req = indexedDB.open("iou-vetkd", 1);
-    req.onupgradeneeded = () => req.result.createObjectStore("keys");
-    req.onerror = () => reject(req.error);
-    req.onsuccess = () => {
-      const tx = req.result.transaction("keys", "readwrite");
-      tx.objectStore("keys").put(value, key);
-      tx.oncomplete = () => resolve();
-      tx.onerror = () => reject(tx.error);
-    };
-  });
-}
+// IndexedDB is retained only to purge the obsolete persisted transport record.
 
 function idbDel(key: string): Promise<void> {
   return new Promise((resolve, reject) => {

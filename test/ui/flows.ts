@@ -194,25 +194,6 @@ export async function closeAndStartNewSheet(page: Page): Promise<string> {
   return page.url().split("/sheet/")[1];
 }
 
-/** Link an OpenChat chat key to a sheet (by the sheet's display name) via /openchat/link-chat. */
-export async function linkChatToSheet(page: Page, chatKey: string, sheetName: string): Promise<void> {
-  await page.goto(`/openchat/link-chat?chat=${encodeURIComponent(chatKey)}`, { waitUntil: "domcontentloaded" });
-  // LinkChatPage renders inline (no redirect). If it shows the anon prompt, sign in in place.
-  const dev = page.getByRole("button", { name: /Sign in \(dev/ });
-  if (await dev.isVisible().catch(() => false)) await dev.click();
-  await page.getByRole("heading", { name: "Link this chat to a sheet" }).waitFor({ timeout: T });
-  const row = page.locator("label").filter({ hasText: sheetName }).first();
-  await row.locator('input[name="link-chat-sheet"]').check();
-  await page.getByRole("button", { name: "Save" }).click();
-  // Wait for the SAVE ACKNOWLEDGEMENT, not just any "…imported into…" text. The page's static intro
-  // paragraph ("Entries you confirm in this OpenChat chat will be imported into the sheet you pick
-  // here", LinkChatPage.tsx:244) also matches /will be imported into/i and is earlier in the DOM, so
-  // `.first()` on that pattern resolved before the click had even landed — this helper returned with
-  // the set_chat_sheet_link update still in flight, and the caller's next page.goto cancelled it.
-  // The "Drafts from this chat…" line renders only from setSavedTo, i.e. after the call resolved.
-  await page.getByText(/Drafts from this chat will be imported into/i).waitFor({ timeout: T });
-}
-
 /** Read the visible text of the Balances section (for assertions / logging). */
 export async function balancesText(page: Page): Promise<string> {
   const section = page.locator("section.balances");
@@ -246,17 +227,10 @@ export async function consumerFingerprint(page: Page): Promise<string> {
   return (await fp.innerText()).trim();
 }
 
-/** Enter a code in the "Connect to OpenChat" box and submit. */
+/** Enter a claim token in the "Connect to OpenChat" box and submit. */
 export async function connectWithCode(page: Page, code: string): Promise<void> {
-  await page.locator('input[placeholder="6-digit code"]').fill(code);
+  await page.locator('input[placeholder="64-character claim token"]').fill(code);
   await page.getByRole("button", { name: /^Connect$/ }).click();
-}
-
-/** Unlink a chat→sheet mapping via the link-chat page. */
-export async function unlinkChat(page: Page, chatKey: string): Promise<void> {
-  await page.goto(`/openchat/link-chat?chat=${encodeURIComponent(chatKey)}`, { waitUntil: "domcontentloaded" });
-  await page.getByRole("button", { name: "Unlink this chat" }).click();
-  await page.getByText(/no longer linked/i).first().waitFor({ timeout: T });
 }
 
 /** Import a chat-bridge draft (paste JSON → Review in form → confirm) into the open sheet. */

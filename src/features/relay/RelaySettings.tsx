@@ -3,14 +3,18 @@
 // their chat connector. The relay only ever holds the draft (never K_sheet).
 
 import { useState } from "react";
-import { getRelayUrl, getRelayToken, setRelayConfig, generateToken } from "./relay";
+import { getRelayUrl, getRelayToken, setRelayConfig, generateToken, normalizeRelayUrl } from "./relay";
+import { useAuth } from "../auth/AuthProvider";
 
 const DEFAULT_URL = "http://localhost:8788";
 
 export function RelaySettings() {
-  const [url, setUrl] = useState(getRelayUrl() || DEFAULT_URL);
-  const [token, setToken] = useState(getRelayToken());
+  const { state } = useAuth();
+  const principal = state.kind === "authenticated" ? state.principal : null;
+  const [url, setUrl] = useState(getRelayUrl(principal) || DEFAULT_URL);
+  const [token, setToken] = useState(getRelayToken(principal));
   const [saved, setSaved] = useState(false);
+  const [error, setError] = useState<string | null>(null);
   const copy = (t: string) => {
     try {
       void navigator.clipboard?.writeText(t);
@@ -36,6 +40,7 @@ export function RelaySettings() {
           onChange={(e) => {
             setUrl(e.target.value);
             setSaved(false);
+            setError(null);
           }}
           placeholder={DEFAULT_URL}
         />
@@ -49,6 +54,7 @@ export function RelaySettings() {
             onChange={(e) => {
               setToken(e.target.value);
               setSaved(false);
+              setError(null);
             }}
             placeholder="generate one →"
             style={{ flex: 1, fontFamily: "monospace" }}
@@ -77,13 +83,23 @@ export function RelaySettings() {
       <div className="cta">
         <button
           onClick={() => {
-            setRelayConfig(url, token);
-            setSaved(true);
+            try {
+              const normalized = normalizeRelayUrl(url);
+              setRelayConfig(principal, normalized, token);
+              setUrl(normalized);
+              setError(null);
+              setSaved(true);
+            } catch (cause) {
+              setSaved(false);
+              setError((cause as Error).message);
+            }
           }}
         >
           Save
         </button>
       </div>
+
+      {error && <p className="err">{error}</p>}
 
       {saved && token && url && (
         <>

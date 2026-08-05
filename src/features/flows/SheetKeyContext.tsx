@@ -9,24 +9,23 @@
 //
 // 2. Prod path (VITE_IOU_PROD_VETKD=1):
 //    K_sheet is derived on demand via the IC's vetkd IBE. The PWA
-//    holds a BLS12-381 G2 transport key pair (in IndexedDB). To
+//    creates an ephemeral BLS12-381 G1 transport key pair per JS session. To
 //    unwrap, it calls vetkd_wrap_sheet_key (which returns the IBE
 //    ciphertext) and decrypts via @dfinity/vetkeys. No partner
 //    public key needed; the IC vets the unwrap.
 //
 // Either way, K_sheet is held in memory only — never on disk.
 
-import { createContext, useContext, useState, useCallback } from "react";
-import { Principal } from "@dfinity/principal";
+import { createContext, useContext, useState, useCallback, useEffect, useRef } from "react";
 import { createActor } from "../../backend/declarations";
 import { recoverSheetKey, deriveUserKeypair } from "../crypto/devVetkd";
 import {
   isProdVetkd,
-  loadOrCreateTransportKey,
-  deriveSheetKey as deriveSheetKeyProd,
+  prepareProdSheetKey,
+  deriveProdSheetKeyWithRetry,
 } from "../crypto/prodVetkd";
 import { useAuth, buildAgent } from "../auth/AuthProvider";
-import { canisterId as canisterIdString } from "../auth/config";
+import { SessionGeneration } from "../auth/sessionIsolation";
 import { unwrap } from "./useActor";
 
 type SheetKeyMap = Record<string, Uint8Array>;
@@ -51,6 +50,18 @@ const SheetKeyContext = createContext<SheetKeyContextValue | null>(null);
 
 export function SheetKeyProvider({ children }: { children: React.ReactNode }) {
   const [keys, setKeys] = useState<SheetKeyMap>({});
+  const keysRef = useRef(keys);
+  keysRef.current = keys;
+  const session = useRef(new SessionGeneration());
+  useEffect(
+    () => {
+      session.current.activate();
+      return () => {
+        session.current.invalidate(Object.values(keysRef.current));
+      };
+    },
+    [],
+  );
   // v1.10.0: with self-wrapped keys, no partner-pubkey exchange is needed. The
   // registerPartnerKey hook is retained (no-op cache) for source compatibility
   // until its last caller is removed.
@@ -67,10 +78,17 @@ export function SheetKeyProvider({ children }: { children: React.ReactNode }) {
   );
 
   const cache = useCallback((sheetId: string, key: Uint8Array) => {
+    try {
+      session.current.assertCurrent(session.current.capture(), key);
+    } catch (cause) {
+      key.fill(0);
+      throw cause;
+    }
     setKeys((prev) => ({ ...prev, [sheetId]: key }));
   }, []);
 
   async function unwrapFor(sheetId: string): Promise<Uint8Array> {
+    const ticket = session.current.capture();
     if (keys[sheetId]) return keys[sheetId];
     if (!identity) throw new Error("not signed in");
     // Build the actor via buildAgent so it targets the configured replica
@@ -79,29 +97,16 @@ export function SheetKeyProvider({ children }: { children: React.ReactNode }) {
     // an un-awaited fetchRootKey, which surfaced as "certificate
     // verification / Invalid signature" errors on a fresh sheet-page load.
     const agent = await buildAgent(identity);
+    session.current.assertCurrent(ticket);
     const actor = createActor(agent) as any;
 
     if (isProdVetkd()) {
       // Prod path: vetkd IBE. Each device holds its own transport
       // key; the IC's vetkd decrypts the same K_sheet for any
       // device whose transport public key was registered.
-      const transport = await loadOrCreateTransportKey();
-      const masterPubKey = await actor.vetkd_public_key();
-      const encVetKey = await actor.vetkd_wrap_sheet_key(
-        sheetId,
-        Array.from(transport.publicKey),
-      );
-      // `decryptAndVerify` requires a DerivedPublicKey bound to a
-      // specific canister; the canister id (as principal bytes) is
-      // the "audience" of the IBE ciphertext.
-      const canisterIdBytes = Principal.fromText(canisterIdString).toUint8Array();
-      const K_sheet = await deriveSheetKeyProd(
-        sheetId,
-        transport,
-        new Uint8Array(masterPubKey),
-        new Uint8Array(encVetKey),
-        canisterIdBytes,
-      );
+      const prepared = await prepareProdSheetKey(actor);
+      const K_sheet = await deriveProdSheetKeyWithRetry(actor, sheetId, prepared);
+      session.current.assertCurrent(ticket, K_sheet);
       setKeys((prev) => ({ ...prev, [sheetId]: K_sheet }));
       return K_sheet;
     }
@@ -118,6 +123,7 @@ export function SheetKeyProvider({ children }: { children: React.ReactNode }) {
     // recoverSheetKey (devVetkd) owns the branch logic: self-unwrap first, tagged cross-wrap
     // fallback, and the empty/undecryptable errors. Unit-tested in recoverSheetKey.test.ts.
     const K_sheet = await recoverSheetKey(new Uint8Array(wrapped ?? []), myKp);
+    session.current.assertCurrent(ticket, K_sheet);
     setKeys((prev) => ({ ...prev, [sheetId]: K_sheet }));
     return K_sheet;
   }
@@ -125,6 +131,7 @@ export function SheetKeyProvider({ children }: { children: React.ReactNode }) {
   function forget(sheetId: string) {
     setKeys((prev) => {
       const next = { ...prev };
+      next[sheetId]?.fill(0);
       delete next[sheetId];
       return next;
     });

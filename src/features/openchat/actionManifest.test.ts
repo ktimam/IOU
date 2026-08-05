@@ -9,57 +9,39 @@ import {
 import { parseDraft } from "../entries/draft";
 import registration from "../../../docs/openchat-registration.json";
 
-describe("template routing", () => {
+describe("private account templates", () => {
   const templates = [
-    { id: "z9-abc123", name: "Reservation", keywords: ["reservation", "booking"] },
+    { id: "z9-abc123", name: "Reservation", keywords: ["private-reservation-trigger"] },
     { id: "y8-def456", name: "No Triggers", keywords: [] },
   ];
 
-  it("routes by template NAME (not id) so it reads on the action card", () => {
+  it("never serializes template names or keywords into public rules", () => {
     const rules = buildIouRules(templates);
     const km = rules.find((r) => r.kind === "keyword_map" && r.field === "template");
-    expect(km, "a keyword_map on the `template` field").toBeDefined();
-    if (km && km.kind === "keyword_map") {
-      // The trigger-word-bearing template routes; its VALUE is the human name, and the keyword-less
-      // one is omitted (nothing to route).
-      expect(km.map).toEqual([{ value: "Reservation", keywords: ["reservation", "booking"] }]);
-    }
+    expect(km).toBeUndefined();
+    expect(JSON.stringify(rules)).not.toContain("Reservation");
+    expect(JSON.stringify(rules)).not.toContain("private-reservation-trigger");
   });
 
-  it("folds every account's types into one per-USER manifest by design; containment is resolveTemplateBase", () => {
-    // The user's report: "Reservation is proposed in the child chat despite that there is no
-    // Reservation type in the linked account." This is that, pinned rather than fixed.
-    //
-    // OpenChat registers ONE manifest per app+user and has no per-chat rule set, so
-    // ManifestTypesSync folds loadAllSharedTemplates — EVERY account the user is in — into a single
-    // roster (ManifestTypesSync.tsx, via loadAllSharedTemplates). House's "Reservation" therefore
-    // routes deterministically in the child chat, and always will until a chat→account gate exists
-    // at propose time. What stops that from doing damage is IMPORT-side containment: a name this
-    // account does not own seeds no fee, no schedule, no currency (resolveTemplateBase.test.ts).
-    //
-    // Pinned here so that adding scoping is a deliberate edit to this test, not a silent drift.
+  it("does not combine every account's types into one public per-user roster", () => {
+    // Reproduces the former cross-account roster: neither account's private
+    // values may appear in a public, user-global OpenChat manifest.
     const twoAccounts = [
       { id: "house-1", name: "Reservation", keywords: ["reservation", "booking"] }, // House account
       { id: "child-1", name: "Allowance", keywords: ["allowance"] }, // the child account
     ];
     const rules = buildIouRules(twoAccounts);
     const km = rules.find((r) => r.kind === "keyword_map" && r.field === "template");
-    expect(km && km.kind === "keyword_map" && km.map.map((m) => m.value)).toEqual([
-      "Reservation",
-      "Allowance",
-    ]);
-    // The image/vision path skips the keyword_map post-pass and picks from the roster instruction,
-    // so the leak is the same size there. (Which name the MODEL picks is not deterministic and is
-    // deliberately not asserted — only the offered roster and the keyword post-pass are.)
+    expect(km).toBeUndefined();
+    // The vision path must not receive a private roster instruction either.
     const roster = rules.find((r) => r.kind === "instruction" && /saved types/.test(r.text));
-    expect(roster && roster.kind === "instruction" && roster.text).toContain("Reservation");
-    expect(roster && roster.kind === "instruction" && roster.text).toContain("Allowance");
+    expect(roster).toBeUndefined();
+    expect(JSON.stringify(rules)).not.toContain("Reservation");
+    expect(JSON.stringify(rules)).not.toContain("Allowance");
   });
 
-  it("advertises the `template` field in the schema only when something is routable", () => {
-    expect((buildIouOutputSchema(templates).properties as Record<string, unknown>).template).toEqual({
-      type: "string",
-    });
+  it("never advertises a template field sourced from private account data", () => {
+    expect((buildIouOutputSchema(templates).properties as Record<string, unknown>).template).toBeUndefined();
     // No routable templates -> no `template` property (nothing would ever set it).
     expect(
       (buildIouOutputSchema([{ id: "x", name: "X", keywords: [] }]).properties as Record<string, unknown>)
@@ -161,21 +143,18 @@ describe("iouActionManifest", () => {
     expect(IOU_EXTRACTION_PROMPT).toMatch(/single/i);
   });
 
-  it("declares a chat_link surface pointing at the /openchat/link-chat page", () => {
-    const s = iouActionManifest.surfaces.find((x) => x.kind === "chat_link");
-    expect(s).toBeDefined();
-    // External so the linking page runs first-party (its own IOU session/sheets); an embedded
-    // iframe would be storage-partitioned by the OpenChat host origin.
-    expect(s!.display).toBe("external");
-    // Absolute origin (resolvable at registration time) + the app route + the {chatKey}
-    // placeholder OpenChat substitutes with the canonical chat key.
-    expect(s!.url).toMatch(/^https?:\/\/[^/]+\/openchat\/link-chat\?chat=\{chatKey\}$/);
+  it("publishes no chat coordinate surface or unsupported URL placeholder", () => {
+    expect(iouActionManifest.surfaces.some((x) => x.kind === "chat_link")).toBe(false);
+    for (const surface of iouActionManifest.surfaces) {
+      expect(surface.url).not.toMatch(/\{(?:chatKey|messageId|userId)\}/);
+      expect(surface.url.replaceAll("{appId}", "1")).not.toMatch(/[{}]/);
+    }
   });
 
   it("declares a connect surface pointing at the pairing-code entry anchor", () => {
     const s = iouActionManifest.surfaces.find((x) => x.kind === "connect");
     expect(s).toBeDefined();
-    // Same first-party reasoning as chat_link: the code entry needs the user's signed-in session.
+    // The code entry needs the user's signed-in session.
     expect(s!.display).toBe("external");
     // The #openchat-connect hash scrolls to / focuses the code input in ActionInboxSettings.
     expect(s!.url).toMatch(/^https?:\/\/[^/]+\/settings#openchat-connect$/);
@@ -199,12 +178,10 @@ describe("iouActionManifest", () => {
     expect(s!.url).toMatch(/^https?:\/\/[^/]+\/openchat\/card$/);
   });
 
-  it("surface URL parses once the placeholder is substituted", () => {
-    const s = iouActionManifest.surfaces.find((x) => x.kind === "chat_link")!;
-    const substituted = s.url.replace("{chatKey}", "group:aaaaa-aa");
-    const url = new URL(substituted);
-    expect(url.pathname).toBe("/openchat/link-chat");
-    expect(url.searchParams.get("chat")).toBe("group:aaaaa-aa");
+  it("every declared surface URL parses after public app-id substitution", () => {
+    for (const surface of iouActionManifest.surfaces) {
+      expect(() => new URL(surface.url.replaceAll("{appId}", "7"))).not.toThrow();
+    }
   });
 });
 
@@ -238,29 +215,21 @@ describe("registered wire — every from_message field survives to the card", ()
   });
 
   it("declares a card row for every field the confirm payload carries", async () => {
-    // This is the guard that keeps cardBridge.test.ts's "no declared row may be dropped" armed.
-    // That test loops over the REGISTERED rows and checks buildConfirmPayload keeps each one — but
-    // the rows come from docs/openchat-registration.json, which is HAND-EDITED and untouched by
-    // gen-openchat-registration.ts. Deleting the {label:"Template", valueKey:"template"} row there
-    // disarms it silently: the loop just iterates one row fewer and still passes. Then Template
-    // stops rendering on the card and stops riding the confirm payload, and the entry lands with
-    // none of its type's defaults — with the whole suite green.
+    // The rows are hand-edited in docs/openchat-registration.json. Pin the complete
+    // public list and explicitly exclude the former private `template` channel.
     const { buildManifestWire } = await import("./registerAiApp");
     const rows = (buildManifestWire("") as unknown as {
       actions: { card: { rows: { field: string }[] } }[];
     }).actions[0].card.rows;
-    expect(rows.map((r) => r.field)).toEqual(
-      expect.arrayContaining([
-        "amount",
-        "currency",
-        "kind",
-        "template",
-        "direction",
-        "date",
-        "note",
-        "message",
-      ]),
-    );
+    expect(rows.map((r) => r.field)).toEqual([
+      "amount",
+      "currency",
+      "kind",
+      "direction",
+      "date",
+      "note",
+      "message",
+    ]);
   });
 
   it("stamps the raw message on `message`, never on `note`", () => {

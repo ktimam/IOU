@@ -211,7 +211,11 @@ describeE2E("IOU invite reissue + re-seal (stale-invite fix)", () => {
       ).id as string;
     const Ko = newSheetKey();
     const other = await mkSheet(Ko);
-    await A.actor.close_sheet(other, []);
+    await A.actor.close_sheet_encrypted(other, {
+      entry_key: new Uint8Array(32),
+      ciphertext: new Uint8Array(16),
+      iv: new Uint8Array(12),
+    });
     const Kt = newSheetKey();
     const target = await mkSheet(Kt);
 

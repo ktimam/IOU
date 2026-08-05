@@ -5,14 +5,21 @@ import { useEffect, useState } from "react";
 import { useAuth, buildAgent } from "../auth/AuthProvider";
 import { createActor } from "../../backend/declarations";
 
+export function actorForPrincipal<T>(
+  session: { principal: string; actor: T } | null,
+  principal: string | null,
+): T | null {
+  return principal && session?.principal === principal ? session.actor : null;
+}
+
 /** Get an authenticated actor for the current user. */
 export function useActor() {
   const { state } = useAuth();
-  const [actor, setActor] = useState<any>(null);
+  const [session, setSession] = useState<{ principal: string; actor: any } | null>(null);
   const [err, setErr] = useState<string | null>(null);
   useEffect(() => {
     if (state.kind !== "authenticated") {
-      setActor(null);
+      setSession(null);
       return;
     }
     let cancelled = false;
@@ -20,7 +27,7 @@ export function useActor() {
       try {
         const agent = await buildAgent(state.identity);
         const a = createActor(agent);
-        if (!cancelled) setActor(a);
+        if (!cancelled) setSession({ principal: state.principal, actor: a });
       } catch (e) {
         if (!cancelled) setErr((e as Error).message);
       }
@@ -29,6 +36,12 @@ export function useActor() {
       cancelled = true;
     };
   }, [state]);
+  // React effects run after render. Never expose principal A's actor during the render in which
+  // authentication has already changed to principal B.
+  const actor = actorForPrincipal(
+    session,
+    state.kind === "authenticated" ? state.principal : null,
+  );
   return { actor, err };
 }
 

@@ -6,7 +6,7 @@
 // Steps (each asserted; exit 1 on any failure):
 //   1. Resolve the manager↔father direct chat + both OC user ids from the chat URLs.
 //   2. Ensure BOTH members have a registered per-user IOU key (ai_app_user_keys); any member
-//      missing one is paired live via the real UI: OC AI-apps → Connect → read the 6-digit code →
+//      missing one is paired live via the real UI: OC AI-apps → Connect → read the claim token →
 //      IOU /settings → claim. (The connect flow itself is part of the journey.)
 //   3. Snapshot both members' action_inbox fingerprint buckets.
 //   4. manager sends a fresh chat message and proposes via the DETERMINISTIC manual-JSON path
@@ -123,7 +123,7 @@ async function attach(port: number, urlPart: string): Promise<Page> {
   return page;
 }
 
-// Pair one member with IOU via the REAL Connect UI: OC AI-apps directory → Connect → 6-digit code →
+// Pair one member with IOU via the REAL Connect UI: OC AI-apps directory → Connect → claim token →
 // IOU /settings → claim. (The stageA3 flow, hardened.)
 async function pairViaUi(oc: Page, iou: Page, who: string): Promise<void> {
   console.log(`[${who}] pairing via the Connect UI…`);
@@ -136,14 +136,14 @@ async function pairViaUi(oc: Page, iou: Page, who: string): Promise<void> {
   });
   await oc.waitForTimeout(1500);
   await oc.getByRole("button", { name: /^(Connect|Reconnect)$/ }).first().click({ timeout: 15000 });
-  await oc.locator(".code .digit").first().waitFor({ timeout: 20000 });
-  const code = (await oc.locator(".code .digit").allInnerTexts()).join("").replace(/\s+/g, "");
-  if (!/^\d{6}$/.test(code)) throw new Error(`[${who}] bad link code: ${code}`);
+  await oc.locator("code.code").first().waitFor({ timeout: 20000 });
+  const code = (await oc.locator("code.code").first().innerText()).trim();
+  if (!/^[0-9a-f]{64}$/.test(code)) throw new Error(`[${who}] bad claim token: ${code}`);
   console.log(`[${who}] link code: ${code}`);
 
   await iou.goto(`${IOU_BASE}/settings`, { waitUntil: "domcontentloaded" });
   await iou.getByRole("heading", { name: /OpenChat action inbox/i }).waitFor({ timeout: 20000 });
-  await iou.locator('input[placeholder="6-digit code"]').fill(code);
+  await iou.locator('input[placeholder="64-character claim token"]').fill(code);
   await iou.getByRole("button", { name: /^Connect$/ }).click();
   await iou.getByText(/Connected —/i).first().waitFor({ timeout: 30000 });
   console.log(`[${who}] paired`);

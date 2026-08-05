@@ -15,16 +15,55 @@
 import { createPrivateKey, createPublicKey, sign as edSign, verify as edVerify } from "node:crypto";
 import type { KeyObject } from "node:crypto";
 
+export type OpenChatTokenPurpose = "pairing" | "draft";
+
 export type OpenChatClaims = {
+  iss: "openchat";
+  aud: "iou-relay";
+  purpose: OpenChatTokenPurpose;
   sub: string; // OpenChat user id
+  jti: string; // unique token id, consumed once by the relay
   iat: number; // issued-at (ms epoch)
   exp: number; // expiry (ms epoch)
 };
 
+const MAX_TOKEN_CHARS = 4096;
+const MAX_PAYLOAD_BYTES = 2048;
+const MAX_TOKEN_LIFETIME_MS = 5 * 60 * 1000;
+const MAX_CLOCK_SKEW_MS = 30 * 1000;
+const TOKEN_ID = /^[A-Za-z0-9_-]{22,128}$/;
+
 const b64url = (b: Buffer): string =>
   b.toString("base64").replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
-const fromB64url = (s: string): Buffer =>
-  Buffer.from(s.replace(/-/g, "+").replace(/_/g, "/"), "base64");
+const fromB64url = (s: string): Buffer | null => {
+  if (!/^[A-Za-z0-9_-]+$/.test(s) || s.length % 4 === 1) return null;
+  const decoded = Buffer.from(
+    s.replace(/-/g, "+").replace(/_/g, "/"),
+    "base64",
+  );
+  return b64url(decoded) === s ? decoded : null;
+};
+
+/** Bounded in-memory single-use token cache. Tokens expire within five minutes. */
+export class OpenChatReplayGuard {
+  private readonly used = new Map<string, number>();
+
+  constructor(private readonly maxEntries = 10_000) {
+    if (!Number.isSafeInteger(maxEntries) || maxEntries < 1) {
+      throw new Error("maxEntries must be a positive integer");
+    }
+  }
+
+  consume(claims: OpenChatClaims, now: number): boolean {
+    for (const [jti, expiry] of this.used) {
+      if (expiry <= now) this.used.delete(jti);
+    }
+    if (claims.exp <= now || this.used.has(claims.jti)) return false;
+    if (this.used.size >= this.maxEntries) return false;
+    this.used.set(claims.jti, claims.exp);
+    return true;
+  }
+}
 
 /** Sign claims into a compact token (test / local-bot use; OpenChat does this in prod). */
 export function signOpenChatToken(claims: OpenChatClaims, privateKeyPem: string | KeyObject): string {
@@ -42,17 +81,56 @@ export function verifyOpenChatToken(
   token: string,
   publicKeyPem: string | KeyObject,
   now: number,
+  expectedPurpose: OpenChatTokenPurpose,
 ): OpenChatClaims | null {
   try {
+    if (
+      typeof token !== "string" ||
+      token.length === 0 ||
+      token.length > MAX_TOKEN_CHARS ||
+      !Number.isSafeInteger(now)
+    ) {
+      return null;
+    }
     const key = typeof publicKeyPem === "string" ? createPublicKey(publicKeyPem) : publicKeyPem;
-    const dot = token.indexOf(".");
-    if (dot <= 0) return null;
-    const payloadPart = token.slice(0, dot);
-    const sigPart = token.slice(dot + 1);
-    if (!edVerify(null, Buffer.from(payloadPart, "utf8"), key, fromB64url(sigPart))) return null;
-    const claims = JSON.parse(fromB64url(payloadPart).toString("utf8")) as OpenChatClaims;
-    if (typeof claims.sub !== "string" || !claims.sub) return null;
-    if (typeof claims.exp !== "number" || now >= claims.exp) return null;
+    const parts = token.split(".");
+    if (parts.length !== 2 || !parts[0] || !parts[1]) return null;
+    const [payloadPart, sigPart] = parts;
+    const payload = fromB64url(payloadPart);
+    const signature = fromB64url(sigPart);
+    if (
+      !payload ||
+      payload.length > MAX_PAYLOAD_BYTES ||
+      !signature ||
+      signature.length !== 64
+    ) {
+      return null;
+    }
+    if (!edVerify(null, Buffer.from(payloadPart, "utf8"), key, signature)) return null;
+    const claims = JSON.parse(payload.toString("utf8")) as OpenChatClaims;
+    if (!claims || typeof claims !== "object" || Array.isArray(claims)) return null;
+    if (claims.iss !== "openchat" || claims.aud !== "iou-relay") return null;
+    if (claims.purpose !== expectedPurpose) return null;
+    if (
+      typeof claims.sub !== "string" ||
+      claims.sub.length < 1 ||
+      claims.sub.length > 256 ||
+      /[\u0000-\u001f\u007f]/.test(claims.sub)
+    ) {
+      return null;
+    }
+    if (typeof claims.jti !== "string" || !TOKEN_ID.test(claims.jti)) return null;
+    if (!Number.isSafeInteger(claims.iat) || !Number.isSafeInteger(claims.exp)) {
+      return null;
+    }
+    if (
+      claims.iat > now + MAX_CLOCK_SKEW_MS ||
+      claims.exp <= now ||
+      claims.exp <= claims.iat ||
+      claims.exp - claims.iat > MAX_TOKEN_LIFETIME_MS
+    ) {
+      return null;
+    }
     return claims;
   } catch {
     return null;

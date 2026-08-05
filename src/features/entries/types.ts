@@ -80,7 +80,7 @@ export type EntryPayload = {
   // member imports, every member's pending list hides the card by matching this
   // field on the sheet's decrypted entries (see openchat/inboxDedupe.ts
   // isImportedIntoSheet). Absent for manual/pasted entries and wrapper-less
-  // (pre-v2) deposits.
+  // (pre-v4) local legacy deposits.
   import_message_id?: string;
 };
 
@@ -88,6 +88,143 @@ export function encodeEntry(p: EntryPayload): Uint8Array {
   return new TextEncoder().encode(JSON.stringify(p));
 }
 
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return value != null && typeof value === "object" && !Array.isArray(value);
+}
+
+function isFiniteDate(value: unknown): value is number {
+  return (
+    typeof value === "number" &&
+    Number.isSafeInteger(value) &&
+    Number.isFinite(new Date(value).getTime())
+  );
+}
+
+function isMinorAmount(value: unknown, allowZero = true): value is number {
+  return (
+    typeof value === "number" &&
+    Number.isSafeInteger(value) &&
+    (allowZero ? value >= 0 : value > 0)
+  );
+}
+
+function isCurrency(value: unknown): value is string {
+  return typeof value === "string" && /^[A-Za-z]{3}$/.test(value);
+}
+
 export function decodeEntry(b: Uint8Array): EntryPayload {
-  return JSON.parse(new TextDecoder().decode(b)) as EntryPayload;
+  const value: unknown = JSON.parse(new TextDecoder().decode(b));
+  if (!isRecord(value)) {
+    throw new Error("invalid entry payload");
+  }
+  const p = value;
+  if (
+    !isFiniteDate(p.ts) ||
+    (p.kind !== "expense" && p.kind !== "payment") ||
+    !isCurrency(p.currency) ||
+    !isMinorAmount(p.amount_minor, false) ||
+    (p.direction !== "credit" && p.direction !== "debt") ||
+    typeof p.note !== "string"
+  ) {
+    throw new Error("invalid entry payload");
+  }
+  if (
+    p.txn_type !== undefined &&
+    p.txn_type !== "settlement" &&
+    p.txn_type !== "iou"
+  ) {
+    throw new Error("invalid entry transaction type");
+  }
+  if (p.schedule !== undefined) {
+    if (
+      p.txn_type === "settlement" ||
+      !Array.isArray(p.schedule) ||
+      p.schedule.length === 0 ||
+      p.schedule.length > 100
+    ) {
+      throw new Error("invalid entry schedule");
+    }
+    let percentTotal = 0;
+    for (const row of p.schedule) {
+      if (
+        !isRecord(row) ||
+        !isFiniteDate(row.due_ts) ||
+        typeof row.percent !== "number" ||
+        !Number.isFinite(row.percent) ||
+        row.percent < 0 ||
+        row.percent > 100
+      ) {
+        throw new Error("invalid entry schedule");
+      }
+      percentTotal += row.percent;
+    }
+    if (percentTotal !== 100) {
+      throw new Error("invalid entry schedule");
+    }
+  }
+  if (p.fee !== undefined) {
+    if (
+      !isRecord(p.fee) ||
+      typeof p.fee.percent !== "number" ||
+      !Number.isFinite(p.fee.percent) ||
+      p.fee.percent < 0 ||
+      p.fee.percent > 100 ||
+      !isMinorAmount(p.fee.gross_amount_minor, false) ||
+      (p.fee.fixed_minor !== undefined &&
+        !isMinorAmount(p.fee.fixed_minor)) ||
+      (p.fee.fixed_currency !== undefined &&
+        !isCurrency(p.fee.fixed_currency))
+    ) {
+      throw new Error("invalid entry fee");
+    }
+    const fixedMinor =
+      p.fee.fixed_minor === undefined ? 0 : p.fee.fixed_minor;
+    if (
+      p.txn_type === "settlement" ||
+      (p.fee.fixed_currency !== undefined && fixedMinor <= 0)
+    ) {
+      throw new Error("invalid entry fee");
+    }
+    const foreignFixed =
+      p.fee.fixed_currency !== undefined &&
+      p.fee.fixed_currency.toUpperCase() !==
+        (p.currency as string).toUpperCase();
+    const expectedNet = Math.max(
+      0,
+      p.fee.gross_amount_minor -
+        Math.round(
+          (p.fee.gross_amount_minor * p.fee.percent) / 100,
+        ) -
+        (foreignFixed ? 0 : fixedMinor),
+    );
+    if (
+      !Number.isSafeInteger(expectedNet) ||
+      p.amount_minor !== expectedNet
+    ) {
+      throw new Error("invalid entry fee");
+    }
+  }
+  if (p.convert != null) {
+    if (
+      !isRecord(p.convert) ||
+      !isCurrency(p.convert.from_currency) ||
+      !isMinorAmount(p.convert.from_amount_minor, false) ||
+      !isCurrency(p.convert.to_currency) ||
+      !isMinorAmount(p.convert.to_amount_minor, false) ||
+      typeof p.convert.rate !== "number" ||
+      !Number.isFinite(p.convert.rate) ||
+      p.convert.rate <= 0 ||
+      typeof p.convert.rate_source !== "string" ||
+      !isFiniteDate(p.convert.rate_fetched_at)
+    ) {
+      throw new Error("invalid entry conversion");
+    }
+  }
+  if (p.draft_id != null && typeof p.draft_id !== "string") {
+    throw new Error("invalid entry draft id");
+  }
+  if (p.import_message_id != null && typeof p.import_message_id !== "string") {
+    throw new Error("invalid entry message id");
+  }
+  return value as EntryPayload;
 }

@@ -17,13 +17,16 @@ import {
   revokePairing,
   type OpenChatPairing,
 } from "../relay/relay";
+import { useAuth } from "../auth/AuthProvider";
 
 export function RelayPairingCard() {
+  const { state } = useAuth();
+  const principal = state.kind === "authenticated" ? state.principal : null;
   const [pairings, setPairings] = useState<OpenChatPairing[]>([]);
   const [code, setCode] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
-  const cfg = getRelayConfig();
+  const cfg = getRelayConfig(principal);
 
   const reload = async () => {
     if (!cfg) return;

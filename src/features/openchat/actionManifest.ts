@@ -34,13 +34,11 @@ export type AiActionRule =
   | { kind: "context"; provide: "today"[] };
 
 // --- App surfaces (mirrors OpenChat's AiAppSurface TS domain shape) -----------------------------
-// A surface is a page of THIS app that OpenChat can open. kind = "chat_link" is the one OpenChat
-// knows today: it opens the page after the first confirmed action in a chat so the user can link
-// that chat inside the app; kinds OpenChat does not know are ignored. The URL may carry
-// placeholders OpenChat substitutes before opening: {chatKey} (the canonical chat key, same
-// format as the delivery provenance: "group:<principal>" / "channel:<principal>:<id>") and
-// {appId}. display: "sheet" = embedded in-app (iframe in a bottom sheet); "external" = opened in
-// the system browser / new tab.
+// A surface is a page of THIS app that OpenChat can open. Kinds OpenChat does not know are ignored.
+// Surface URLs may contain only the public {appId} placeholder. App-scoped chat/message/user
+// coordinates travel over authenticated canister calls or the private card bridge, never a URL.
+// display: "sheet" = embedded in-app (iframe in a bottom sheet); "external" = opened in the system
+// browser / new tab.
 
 export type IouSurfaceDisplay = "sheet" | "external";
 
@@ -111,7 +109,7 @@ export type IouActionManifest = {
   // per-device and supplied at registration, not in this static manifest (see ActionInboxSettings).
   delivery: { mode: "action_inbox" } | { mode: "relay" };
   // Multi-user delivery keys: when true, OpenChat delivers each user's confirmed actions
-  // encrypted to THAT user's own registered key (paired once per user via a 6-digit link code —
+  // encrypted to THAT user's own registered key (paired once per user via a high-entropy claim token —
   // see ActionInboxSettings "Connect to OpenChat") instead of the single app-level key.
   perUserKeys: boolean;
   // When true, OpenChat auto-proposes this action on IMAGE messages (its on-device vision model
@@ -258,16 +256,8 @@ export const iouActionManifest: IouActionManifest = {
   // could not see this user's IOU session or sheets. The origin is fixed at registration time
   // (see resolvePublicOrigin).
   surfaces: [
-    // "chat_link": opened after the first confirmed action in a chat (and from the chat's Apps
-    // settings) so the user can pick which sheet that chat's drafts land in. {chatKey} is
-    // substituted by OpenChat.
-    {
-      kind: "chat_link",
-      url: `${resolvePublicOrigin()}/openchat/link-chat?chat={chatKey}`,
-      display: "external",
-    },
     // "connect": the pairing-code entry page — OpenChat's consent sheet offers it as a one-tap
-    // "open the right page" shortcut next to the 6-digit code. The #openchat-connect hash scrolls
+    // "open the right page" shortcut next to the claim token. The #openchat-connect hash scrolls
     // to (and focuses) the code input in ActionInboxSettings.
     {
       kind: "connect",
@@ -287,10 +277,10 @@ export const iouActionManifest: IouActionManifest = {
     // "card": IOU's OWN app-rendered confirmable card (see fork-notes/08-app-rendered-cards.md).
     // OpenChat looks the app up by the card's actionId, finds this surface, and embeds
     // /openchat/card in the chat bubble instead of drawing its own rows. display: "sheet" =
-    // embedded iframe. UNLIKE the session-backed surfaces above, embedding storage-partitioning is
-    // FINE here: the card page needs no IOU session — it only renders the editable card (prefilled
-    // over the postMessage bridge) and collects the edited values back. Absent ⇒ OpenChat falls
-    // back to today's OC-rendered card (backward compatible).
+    // embedded iframe. The page has no IOU browser session. A private roster is
+    // released only through a viewer/card/recipient-key-bound capability, and
+    // the selected type returns as an encrypted reference. If absent, OpenChat
+    // uses its generic built-in card renderer.
     {
       kind: "card",
       url: `${resolvePublicOrigin()}/openchat/card`,
@@ -299,50 +289,24 @@ export const iouActionManifest: IouActionManifest = {
   ],
 };
 
-// ── Template-driven extraction (Design A) ──────────────────────────────────────────────────────
-// A user's saved "types" (TxnTemplate) drive OpenChat extraction: IOU folds each template's trigger
-// words into the REGISTERED manifest as a keyword_map on a `template` field, so a chat message that
-// matches routes to that template's id. OpenChat stays generic — it runs whatever rules/schema the
-// manifest carries. Only a minimal structural view is needed here (no React import; this module is
-// also loaded by the Node CLI in scripts/).
+// ── Private template compatibility boundary ────────────────────────────────────────────────────
+// Account types are private E2E data. OpenChat's manifest is public and user-global, so values
+// accepted by these compatibility helpers are never serialized into the manifest.
+// Matching happens locally after import against only the linked account.
 export type ManifestTemplate = { id: string; name: string; keywords?: string[] };
 
-// The backend register_ai_app validator caps a manifest (≤50 keyword mappings, ≤50 keywords each,
-// ≤1000-char instruction). Enforce them here so a fire-and-forget re-register never silently fails.
-function buildTemplateRules(templates: ManifestTemplate[]): AiActionRule[] {
-  const routable = templates.filter((t) => (t.keywords ?? []).length > 0).slice(0, 50);
-  if (routable.length === 0) return [];
-  // Route to the template NAME (not its opaque id) so it reads on the action card ("Template =
-  // Reservation") and stays human-meaningful end-to-end; IOU resolves the entry's base by name.
-  const map = routable.map((t) => ({ value: t.name, keywords: (t.keywords ?? []).slice(0, 50) }));
-  // Roster instruction so the image/vision path (which skips the keyword_map post-pass) can still
-  // pick a template by name. Truncated to the 1000-char instruction cap.
-  let roster =
-    'If the transaction matches one of these saved types, set "template" to its exact name — ' +
-    routable.map((t) => `${t.name} (${(t.keywords ?? []).join(", ")})`).join("; ") +
-    '. Otherwise omit "template".';
-  if (roster.length > 1000) roster = roster.slice(0, 997) + "...";
-  return [
-    { kind: "keyword_map", field: "template", mode: "override", map },
-    { kind: "instruction", text: roster },
-  ];
+/** Public rule set for registration; private account templates are deliberately ignored. */
+export function buildIouRules(_templates: ManifestTemplate[]): AiActionRule[] {
+  // Manifests are public and global to a user. Account template names and keywords are private.
+  return [...IOU_EXTRACTION_RULES];
 }
 
-/** Full rule set for the registered manifest: the static IOU vocabulary first, then template routing. */
-export function buildIouRules(templates: ManifestTemplate[]): AiActionRule[] {
-  return [...IOU_EXTRACTION_RULES, ...buildTemplateRules(templates)];
-}
-
-/** Output schema with an optional free-form `template` string (advertised only when routable). */
-export function buildIouOutputSchema(templates: ManifestTemplate[]): Record<string, unknown> {
+/** Public output schema; it contains no fields derived from private account templates. */
+export function buildIouOutputSchema(_templates: ManifestTemplate[]): Record<string, unknown> {
   const schema = JSON.parse(JSON.stringify(iouActionManifest.outputSchema)) as {
     properties: Record<string, unknown>;
     [k: string]: unknown;
   };
-  if (templates.some((t) => (t.keywords ?? []).length > 0)) {
-    // Free-form string (NOT an enum of ids): an enum would strip a model-emitted id on the image path.
-    schema.properties.template = { type: "string" };
-  }
   return schema;
 }
 

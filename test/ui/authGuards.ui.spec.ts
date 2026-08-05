@@ -1,7 +1,7 @@
 // Route auth-guards for a signed-OUT (anonymous) visitor (P0-23/24/25). Each test starts in a fresh
 // Playwright context = empty localStorage = anonymous (no signInDev). Guarded pages must redirect to
-// /sign-in; the OpenChat surfaces (/settings, /openchat/link-chat) must instead render sign-in INLINE
-// so the URL + hash/query survive (the deep-link destination isn't dropped).
+// /sign-in; the OpenChat connect surface (/settings#openchat-connect) renders sign-in inline so the
+// hash survives. The retired raw chat-link route must redirect to the landing page.
 
 import { test, expect } from "@playwright/test";
 
@@ -24,12 +24,10 @@ test.describe("route auth guards — anonymous visitor", () => {
     expect(new URL(page.url()).hash).toBe("#openchat-connect");
   });
 
-  // P0-25: /openchat/link-chat renders inline sign-in (NO redirect) and keeps ?chat.
-  test("/openchat/link-chat renders inline sign-in without redirect (?chat preserved)", async ({ page }) => {
+  test("retired /openchat/link-chat drops the raw query and redirects to /", async ({ page }) => {
     await page.goto("/openchat/link-chat?chat=group:xyz", { waitUntil: "domcontentloaded" });
-    await page.getByRole("button", { name: /Sign in with Internet Identity/ }).waitFor({ timeout: 20_000 });
-    expect(new URL(page.url()).pathname).toBe("/openchat/link-chat");
-    expect(new URL(page.url()).searchParams.get("chat")).toBe("group:xyz");
+    await expect(page).toHaveURL(/\/$/, { timeout: 20_000 });
+    expect(new URL(page.url()).search).toBe("");
   });
 
   // P1 (P7): the landing route while anonymous shows the sign-in CTA and does NOT redirect.
@@ -63,14 +61,4 @@ test.describe("route auth guards — anonymous visitor", () => {
     expect(new URL(page.url()).pathname).toBe("/");
   });
 
-  // P1 (P5): after inline sign-in on /openchat/link-chat, the SAME page renders the sheet picker
-  // (?chat kept) — the destination survives, no bounce to /pairs.
-  test("signed-out link-chat returns to the picker after inline sign-in (?chat kept)", async ({ page }) => {
-    await page.goto("/openchat/link-chat?chat=group:xyz", { waitUntil: "domcontentloaded" });
-    await page.getByRole("button", { name: /Sign in with Internet Identity/ }).waitFor({ timeout: 20_000 });
-    await page.getByRole("button", { name: /Sign in \(dev/ }).click();
-    await expect(page.getByRole("heading", { name: "Link this chat to a sheet" })).toBeVisible({ timeout: 30_000 });
-    expect(new URL(page.url()).pathname).toBe("/openchat/link-chat");
-    expect(new URL(page.url()).searchParams.get("chat")).toBe("group:xyz");
-  });
 });

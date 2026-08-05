@@ -1,5 +1,6 @@
 import { Routes, Route, Navigate } from "react-router-dom";
-import { AuthProvider} from "../features/auth/AuthProvider";
+import { AuthProvider, useAuth } from "../features/auth/AuthProvider";
+import { authSessionScope } from "../features/auth/sessionIsolation";
 import {SignIn} from "../features/auth/SignIn";
 import {SetDisplayName} from "../features/auth/SetDisplayName";
 import {Hello} from "../features/auth/Hello";
@@ -20,7 +21,6 @@ import { ConsumerKeypairSync } from "../features/openchat/ConsumerKeypairSync";
 import { DefaultCurrencySync } from "../features/settings/DefaultCurrencySync";
 import { ManifestTypesSync } from "../features/openchat/ManifestTypesSync";
 import { EmbeddedBanner } from "../features/openchat/EmbeddedBanner";
-import { LinkChatPage } from "../features/openchat/LinkChatPage";
 import { OpenChatCardPage } from "../features/openchat/OpenChatCardPage";
 import { AcceptInvitePage } from "../features/invite/AcceptInvitePage";
 import { useDeepLinks } from "../features/deeplinks/deepLink";
@@ -52,6 +52,22 @@ export function App() {
 function AuthedApp() {
   return (
     <AuthProvider>
+      <AuthenticatedSession />
+    </AuthProvider>
+  );
+}
+
+function AuthenticatedSession() {
+  const { state } = useAuth();
+  const scope = authSessionScope(
+    state.kind,
+    state.kind === "authenticated" ? state.principal : undefined,
+  );
+  return <SessionProviders key={scope} />;
+}
+
+function SessionProviders() {
+  return (
       <PreferencesProvider>
       <TemplatesProvider>
       <SheetKeyProvider>
@@ -63,9 +79,8 @@ function AuthedApp() {
             {/* Pulls the user's ONE default currency from the canister (and pushes a
                 browser-only value up once), so it follows them across devices. */}
             <DefaultCurrencySync />
-            {/* App-load OpenChat manifest re-sync from ACCOUNT-SCOPED types
-                (needs the sheet-key unwrapper, so it lives inside
-                SheetKeyProvider — see ManifestTypesSync). */}
+            {/* Refreshes IOU's static public OpenChat manifest. Private
+                account templates never enter registration. */}
             <ManifestTypesSync />
             <EmbeddedBanner />
             <Routes>
@@ -87,9 +102,6 @@ function AuthedApp() {
                 element={<ArchivedSheetsPage />}
               />
               <Route path="/settings" element={<SettingsPage />} />
-              {/* OpenChat "chat_link" surface: opened by OpenChat (in a bottom-sheet
-                  iframe) with ?chat=<chatKey> to map that chat to a sheet. */}
-              <Route path="/openchat/link-chat" element={<LinkChatPage />} />
               <Route path="*" element={<Navigate to="/" replace />} />
             </Routes>
             </ErrorBoundary>
@@ -98,6 +110,5 @@ function AuthedApp() {
       </SheetKeyProvider>
       </TemplatesProvider>
       </PreferencesProvider>
-    </AuthProvider>
   );
 }

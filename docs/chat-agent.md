@@ -10,6 +10,14 @@ adapters (`src/features/crypto/{devVetkd,prodVetkd}.ts`), the entry payload
 (`src/features/templates/TemplatesContext.tsx`), and the Node→canister call
 pattern in `scripts/awa-smoke-vetkd.ts` / `scripts/awa-smoke-solo.ts`.
 
+> **Security correction (2026-08-01):** transport-key persistence statements
+> retained in historical design snapshots below are superseded. Production
+> vetKD transport keys are fresh ephemeral session keys. Deterministic
+> sheet/user keys are recovered through the authenticated canister. Production
+> web consumer JWKs use session memory plus the wrapped canister record; native
+> production may use platform secure storage; plaintext localStorage is
+> development-only and a one-time migration source.
+
 ---
 
 > **⚠️ Direction update (2026-06-21) — supersedes the developer-API / server-bot framing below.**
@@ -213,7 +221,7 @@ card across members:
   the card for **everyone** — the partner's copy disappears on their next entries reload (also
   triggered when the tab regains visibility). Mid-bearing cards match ONLY on `import_message_id`,
   never the content-hash `draft_id` (per-user template sets make the derived hash diverge, and two
-  legitimately-distinct same-content cards must not suppress each other); wrapper-less (pre-v2)
+  legitimately-distinct same-content cards must not suppress each other); wrapper-less (pre-v4)
   cards fall back to `draft_id` equality, mirroring the paste path's `isDuplicateDraft` rule.
 - **Dismiss syncs to ALL members (supersedes the earlier per-user design).** "✕" appends the card's
   `context.messageId` to the dismisser's own encrypted pair slot — the slot payload is a versioned
@@ -379,7 +387,7 @@ seam; real users go through the model.)
 
 #### Settings simplification + shared account types — BUILT 2026-07-22
 
-- **Settings**: the 6-digit **Connect to OpenChat** (+ Disconnect) is now the ONLY default-visible
+- **Settings**: the claim-token **Connect to OpenChat** (+ Disconnect) is now the ONLY default-visible
   integration flow. The admin/debug surfaces — "Link to OpenChat" (manifest registration; end users
   never need it since the manifest auto-syncs on Connect/type-edit/app-load and first bootstrap is
   CI's `register:openchat`), the SPKI PEM + "Copy public key" + fingerprint (legacy
@@ -525,7 +533,7 @@ The single invariant that governs everything (verified against the IOU source): 
 | B — ChatGPT remote MCP / Apps | Developer server (or behind tunnel, but payloads transit OpenAI) | Weakened |
 | C — Claude.ai remote connector | Developer server | Weakened |
 
-**Only surface D keeps `K_sheet` on the user's device and preserves true E2E.** This is not a limitation of the agent/vetKeys stack — IOU's own headless Node smoke tests already prove the full path runs outside a browser: `scripts/awa-smoke-vetkd.ts` runs the complete vetKD IBE round-trip and asserts that **both members derive an identical 32-byte `K_sheet`**, and `scripts/awa-smoke-solo.ts` calls `add_entry`, both using `@dfinity/agent` `HttpAgent` + `Ed25519KeyIdentity` + a `node:crypto` WebCrypto polyfill, no browser. (Two honest qualifications on the smoke proof: it exercises headless *derivation* using `newTransportKey()` with no storage — the persisted on-device custody an MCP needs requires swapping `prodVetkd.ts`'s IndexedDB shim, and `devVetkd.ts`'s localStorage, for a local file, a trivial change; and `@dfinity/vetkeys@0.4.0` has an ESM packaging defect requiring the repo's `scripts/patch-vetkeys-esm.mjs` postinstall patch, so the path is feasible but not zero-config.)
+**Only surface D keeps `K_sheet` on the user's device and preserves true E2E.** This is not a limitation of the agent/vetKeys stack — IOU's own headless Node smoke tests already prove the full path runs outside a browser: `scripts/awa-smoke-vetkd.ts` runs the complete vetKD IBE round-trip and asserts that **both members derive an identical 32-byte `K_sheet`**, and `scripts/awa-smoke-solo.ts` calls `add_entry`, both using `@dfinity/agent` `HttpAgent` + `Ed25519KeyIdentity` + a `node:crypto` WebCrypto polyfill, no browser. The vetKD transport key is deliberately fresh session material and requires no durable storage; a headless client must instead protect its long-lived authentication and application keys. `@dfinity/vetkeys@0.4.0` has an ESM packaging defect requiring the repo's `scripts/patch-vetkeys-esm.mjs` postinstall patch, so the path is feasible but not zero-config.
 
 **The tradeoff for surfaces A/B/C** is explicit and unavoidable: any remote server that *meaningfully composes-and-encrypts* an entry must hold `K_sheet` (or material to derive it) and joins the trust boundary — it can read and forge every entry in that sheet for as long as it holds the key. The corollary "remote surfaces cannot preserve E2E without making the server-side tool degenerate" holds, with two qualifications that are not counterexamples: (a) even a key-blind ciphertext relay still sees the **plaintext entry content** whenever the LLM composes it from natural language on the server (a separate E2E concern from key custody); and (b) a TEE/confidential-computing enclave with attestation could in theory run the derivation off-device without persisting `K_sheet`, but that relocates trust to the enclave + attestation chain rather than preserving the IC's native "only the two members can read" guarantee, so it is not E2E in the sense IOU means.
 
@@ -537,7 +545,7 @@ Two further custody hazards for remote surfaces, both grounded in the IOU model:
 
 Thin prototype (no developer LLM key, builds on code that already exists in-repo):
 1. Package a small Node MCP server exposing one tool, e.g. `create_iou_entry({ sheet_id, amount, currency, counterparty, date, memo, direction })`.
-2. Inside the tool, reuse IOU's existing crypto verbatim — `prodVetkd.ts` (vetKD path) or `devVetkd.ts` (dev ECDH path) — swapping the IndexedDB/localStorage shim for a local encrypted file / OS keychain to persist the transport secret key. Derive `K_sheet`, `encryptEntryPayload`, and call `add_entry` with `@dfinity/agent` + the user's II delegation or local identity, exactly as `awa-smoke-solo.ts` already does headless. Pin `@dfinity/vetkeys@0.4.0` and apply `scripts/patch-vetkeys-esm.mjs`.
+2. Inside the tool, reuse IOU's existing crypto verbatim — `prodVetkd.ts` (vetKD path) or `devVetkd.ts` (dev ECDH path). Generate a fresh vetKD transport key for each process session, and keep the long-lived II/local identity and application keys in an OS keychain or equivalent encrypted store. Derive `K_sheet`, `encryptEntryPayload`, and call `add_entry` with `@dfinity/agent` + the user's II delegation or local identity, exactly as `awa-smoke-solo.ts` already does headless. Pin `@dfinity/vetkeys@0.4.0` and apply `scripts/patch-vetkeys-esm.mjs`.
 3. Register it: Claude Desktop via `claude_desktop_config.json` (or a `.mcpb` Desktop Extension); Claude Code via `claude mcp add --transport stdio iou -- node server.js`.
 4. UX: the user pastes a transfer screenshot, Claude OCRs it and proposes the JSON; **show the extracted fields for explicit confirmation** before the tool encrypts and writes (mitigates OCR error and the direction-sign hazard).
 
@@ -545,7 +553,7 @@ Thin prototype (no developer LLM key, builds on code that already exists in-repo
 
 ### 5. Residual unknowns
 - Whether a non-technical IOU end user can realistically install and run a local stdio MCP server (manual JSON config / `.mcpb`), and how Free-tier connector limits and Windows clipboard-paste quirks affect onboarding.
-- The on-device MCP server introduces a new at-rest secret (the BLS12-381 transport key); the right cross-platform secure-storage story (OS keychain vs. encrypted file) is unspecified.
+- The on-device MCP server must protect its long-lived identity and application keys; the BLS12-381 transport key itself is ephemeral session material.
 - Supply-chain trust: a local MCP server runs with the Claude app's full OS permissions; how the binary/script is signed and distributed needs a trust model.
 - `@dfinity/vetkeys` API churn (0.4.x has already broken constructors and a double-derive bug fixed in v1.2.2 per `prodVetkd.ts` comments); an independent MCP reimplementation must pin the exact version to avoid re-introducing "Invalid VetKey" failures.
 
@@ -684,9 +692,9 @@ Option 1, confirm the deep-link variant (a) as the first cut.
 
 Be explicit: **the mobile handoff is largely unbuilt.**
 
-- **Built / shipping (verified):** ciphertext-only `add_entry`; `caller_owns_sheet` gate; K_sheet held in-memory only (`SheetKeyContext`); on-device dev (P-256 ECDH unwrap) and prod (vetKD IBE via `@dfinity/vetkeys` + HKDF) derivation; the Capacitor Android shell loading the same `dist/` bundle (WebCrypto/IndexedDB/localStorage all available in the WebView).
+- **Built / shipping (verified):** ciphertext-only `add_entry`; `caller_owns_sheet` gate; K_sheet held in-memory only (`SheetKeyContext`); on-device dev (P-256 ECDH unwrap) and prod (vetKD IBE via `@dfinity/vetkeys` + HKDF) derivation; ephemeral production vetKD transport keys; production native consumer JWK custody through platform secure storage; and the Capacitor Android shell loading the same `dist/` bundle.
 - **NOT built / corrected from the optimistic framing:**
-  - **Keystore-backed transport-key custody is NOT wired.** Despite the convenient "transport key in Android Keystore / iOS Keychain" claim, at v1.4.0 `prodVetkd.ts` still calls `loadOrCreateTransportKey()` against **IndexedDB unconditionally** and has **zero reference to `mobileSecureStorage`**. The secure-storage adapter exists but its only consumer is `replaceMember.ts` (an Ed25519 signing seed, **not** the vetKD transport key). The prodVetkd integration was a v1.1.5 item that never landed. On the web/WebView path the transport key currently lives in IndexedDB, not the device keystore. (K_sheet itself is still in-memory-only; the encryption design is sound — but do **not** cite keystore custody of the transport key as verified.)
+  - **Historical correction:** pre-review builds persisted the vetKD transport key in IndexedDB and described keystore custody as a goal. Current builds purge that retired record and generate a fresh session transport key. Platform secure storage is reserved for long-lived production application secrets such as the OpenChat consumer JWK.
   - **M1 deep/universal-link receiver does not exist.** `AndroidManifest.xml` has only the `MAIN/LAUNCHER` intent-filter (no `VIEW`/`BROWSABLE`, no `<data scheme>`, no `autoVerify`); the `custom_url_scheme` string in `strings.xml` is inert; `@capacitor/app` is only transitive in `pnpm-lock.yaml`, not a declared dependency; routing is `BrowserRouter` with no scheme route and no `appUrlOpen` listener. Deep links are an explicit v1.1.5 TODO (`docs/08-mobile.md`, `README.md`).
   - **M2 share/paste receiver does not exist.** No `ACTION_SEND` share-target, no iOS Share Extension, no Web Share Target, and no "Import from AI" field/route.
   - **iOS is doubly unbuilt:** no iOS target (`cap add ios` pending), no Associated Domains entitlement, no `apple-app-site-association`; and no `assetlinks.json` is hosted for Android App Link verification.
@@ -789,12 +797,12 @@ Four key-blind server pieces + an on-device receiver:
 4. **On-device write** in the IOU app: re-derive K_sheet from the on-device transport key + identity, encrypt, call `add_entry` **as the user's own principal** (so `created_by = caller` and credit/debt direction is correct).
 
 ### K_sheet / draft custody
-- **K_sheet never leaves the device** in every path: derived only inside the IOU app (prod = vetKD: transport key in IndexedDB → `vetkd_wrap_sheet_key` → `@dfinity/vetkeys` `decryptAndVerify` → HKDF; dev = P-256 ECDH). It is **in-memory only** (`SheetKeyContext`), so a cold/headless wake **must fully re-derive** it.
+- **K_sheet never leaves the device** in every path: derived only inside the IOU app (prod = fresh session transport key → `vetkd_wrap_sheet_key` → `@dfinity/vetkeys` `decryptAndVerify` → HKDF; dev = P-256 ECDH). It is **in-memory only** (`SheetKeyContext`), so a cold/headless wake **must fully re-derive** it.
 - **Draft plaintext** is the same content the user already handed to Claude. With wake-and-fetch, only the connector/relay see it; with draft-in-push it additionally transits FCM/APNs. **Prefer wake-and-fetch.** Never put K_sheet, a transport key, or any secret in a push payload or link.
 
 ### What IOU must build
 - Add `@capacitor/push-notifications` for token registration (note: it will **not** run code when the app is killed and has **no iOS silent push**).
-- For the silent attempt: a **custom `FirebaseMessagingService`** or **`@capacitor/background-runner`** to receive data-only messages. The Background Runner is a **headless JS engine, not a WebView — no DOM, no IndexedDB, no localStorage, only CapacitorKV** — so the **transport key + identity custody must be migrated off IndexedDB/localStorage** into CapacitorKV (or OS keychain) and `deriveSheetKey` + `@dfinity/agent` `add_entry` **re-ported** against the runner API with an **injected `fetch` shim** (`getDefaultFetch` throws without `window/global/self.fetch`, and the runner's fetch drops the `Request` object). Verify the runner's `crypto.subtle` covers HKDF / AES-GCM / BLS used by `@dfinity/vetkeys`. **This is a real port, not "reuse the existing code."**
+- For the silent attempt: a **custom `FirebaseMessagingService`** or **`@capacitor/background-runner`** to receive data-only messages. The Background Runner is a **headless JS engine, not a WebView — no DOM, no IndexedDB, no localStorage, only CapacitorKV** — so long-lived identity/application-key custody must be available through an OS keychain-compatible runner API; the vetKD transport key can be generated fresh. `deriveSheetKey` + `@dfinity/agent` `add_entry` still need to be **re-ported** against the runner API with an **injected `fetch` shim**. Verify the runner's `crypto.subtle` covers HKDF / AES-GCM / BLS used by `@dfinity/vetkeys`. **This is a real port, not "reuse the existing code."**
 - On Android 12+, start a foreground service **promptly** on high-priority receipt (else `ForegroundServiceStartNotAllowedException`); move >10s work to WorkManager.
 - **OEM survival kit:** request battery-unrestricted + autostart (dontkillmyapp helper); educate users (settings reset on OS updates).
 - The **dependable path:** a visible "Add to IOU" notification + tap handler + a **"Pending from chat" inbox** the app drains on every foreground — both reusing the existing `draft → Partial<EntryPayload> → EntryForm → onSubmit → encryptEntryPayload → add_entry` seam (crypto + `add_entry` untouched).
@@ -807,7 +815,7 @@ Send a **visible** "Add to IOU" notification carrying the opaque draft pointer. 
 - **No** `@capacitor/push-notifications`, `firebase`, or `background-runner` deps (`package.json`).
 - `AndroidManifest.xml` has only `MAIN/LAUNCHER` + `INTERNET` — no FCM service, no push/foreground-service/wake permissions, no deep-link receiver.
 - **No iOS target** (`cap add ios` pending; no entitlements).
-- `prodVetkd.ts` `loadOrCreateTransportKey()` **throws if `indexedDB` is undefined**; transport key lives in IndexedDB (`iou-vetkd` / `iou:vetkd:transport:v1`).
+- `prodVetkd.ts` creates the transport key in session memory and purges the obsolete IndexedDB/native record; a headless runner still needs compatible randomness, BLS, WebCrypto, agent fetch, and long-lived identity custody.
 - K_sheet is **in-memory only** (`SheetKeyContext`); the secure-storage adapter (`mobileSecureStorage.ts`) is **unwired** into the vetKD load path (only `replaceMember.ts` uses it).
 - `docs/chat-agent.md` already classifies the silent push-woken write as *"technically possible but drops the confirm gate and is unreliable on mobile; not recommended for financial writes."*
 
@@ -1035,7 +1043,7 @@ touches K_sheet, and nothing is written until you confirm in the form.
 
 **Milestone 2 — Android opportunistic silent write (the optimization).**
 - Add a **custom `FirebaseMessagingService`** or `@capacitor/background-runner`; push backend additionally sends a high-priority **data** message (Android only).
-- **Port** transport-key + identity custody off IndexedDB/localStorage into CapacitorKV (or OS keychain); re-port `deriveSheetKey` + `@dfinity/agent` `add_entry` to the runner API with an **injected fetch shim**; verify runner `crypto.subtle` covers HKDF/AES-GCM/BLS.
+- **Port** long-lived identity/application-key custody to the runner through an OS keychain-compatible API; generate the vetKD transport key per session; re-port `deriveSheetKey` + `@dfinity/agent` `add_entry` with an **injected fetch shim**; verify runner `crypto.subtle` covers HKDF/AES-GCM/BLS.
 - Start a foreground service promptly (Android 12+); WorkManager for >10s; add OEM battery-unrestricted/autostart prompts + manifest permissions.
 - Idempotency (deterministic `entry_key`) guarantees the silent write and the still-queued notification/inbox converge to one entry.
 - *Risky / may not pan out:* runner `crypto.subtle` BLS coverage is **unverified**; reliability is best-effort (Doze/quota/deprioritization/Force-Stop/OEM-kill). If it underperforms, **ship M0+M1 and stop** — the owner already accepts the tap fallback.
@@ -1047,7 +1055,7 @@ touches K_sheet, and nothing is written until you confirm in the form.
 
 - Whether the Background Runner's exposed crypto.subtle fully covers the SubtleCrypto operations @dfinity/vetkeys needs (HKDF, AES-GCM, and the BLS12-381 pairing used in decryptAndVerify) — unverified and must be tested in the runtime before committing to the silent path.
 - Real-world Android silent-delivery success rate per OEM (Xiaomi/Huawei/Samsung/OnePlus) and per Android version, including how often swipe-from-Recents becomes a force-stop — must be measured on physical devices, not assumed.
-- The size and correctness of the actual port of identity + transport-key custody from IndexedDB/localStorage to CapacitorKV (or OS keychain) and re-wiring deriveSheetKey/add_entry with an injected fetch shim — scoped as a real rewrite, effort not yet estimated.
+- The size and correctness of the actual port of long-lived identity/application-key custody to an OS keychain-compatible runner API, plus re-wiring deriveSheetKey/add_entry with an injected fetch shim — scoped as a real rewrite, effort not yet estimated.
 - II delegation expiry in the background: a headless silent write cannot do an interactive re-login, so behavior after delegation expiry (currently 30-day maxTimeToLive) is unhandled and only the tap path can recover it.
 - OAuth subject → IOU principal mapping has no guaranteed stable cross-provider sub; the connector must persist its own mapping — a new key-blind but trusted state store whose abuse/rotation story is unspecified.
 - iOS is entirely unbuilt (no cap add ios, no entitlements, no apple-app-site-association); all iOS conclusions rest on Apple docs/DTS, not on this repo, and the silent path there should be treated as non-viable until empirically disproven.

@@ -4,18 +4,18 @@
 // cards and the history list. "Add entry" and "edit" both open the
 // same form in a modal.
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useParams, Link } from "react-router-dom";
 import { unwrap, isActive, useActor } from "../flows/useActor";
 import { useSheetKey } from "../flows/SheetKeyContext";
 import { useAuth } from "../auth/AuthProvider";
 import {
-  decryptEntryPayload,
   encryptEntryPayload,
   decryptName,
   encryptName,
 } from "../crypto/devVetkd";
-import { decodeEntry, type EntryPayload } from "./types";
+import type { EntryPayload } from "./types";
+import { decryptEntryRecords, type DecryptedEntry } from "./decryptEntries";
 import {
   computeBalances,
   computeBalancesAsOf,
@@ -54,24 +54,32 @@ import {
   deletePending,
   type PendingDraft,
 } from "../relay/relay";
-import { pollActionInbox, getActionInboxConfig } from "../openchat/actionInboxClient";
+import {
+  acknowledgeActionInbox,
+  pollActionInbox,
+  getActionInboxConfig,
+} from "../openchat/actionInboxClient";
+import {
+  InboxAcknowledgementQueue,
+  isDurablyHandledInboxMessage,
+} from "../openchat/actionInboxAcknowledgement";
 import {
   parseImportedMessageIds,
   serializeImportedMessageIds,
   deriveDeployTag,
-  planScopedInboxKey,
+  inboxDedupeStorageKey,
   isImportedIntoSheet,
+  planObsoleteInboxStorageCleanup,
 } from "../openchat/inboxDedupe";
 import { visibleInboxFor } from "../openchat/inboxFilter";
+import {
+  restoreOpenChatTemplateRefs,
+} from "../openchat/templateRefImport";
 
-// The two inbox dedup sets below (dismissed inbox ids; imported messageIds) persist so a handled
-// draft stays gone across refreshes — the inbox is append-only and the poll cursor is in-memory.
-// But they are SPECIFIC TO ONE OpenChat deployment: inbox action ids (`oc-<id>`) restart from 1 on
-// every clean redeploy, and messageIds come from a specific OpenChat instance. A set carried over
-// from an EARLIER deployment would wrongly suppress a fresh deployment's low-/reused-id deposits —
-// the "confirmed in OpenChat but never imported after an environment restart" bug. So we SCOPE both
-// by the OpenChat user_index canister id, which changes on every clean redeploy: a new deployment
-// reads empty sets, and keys from other deployments (and the pre-scoping legacy key) are purged.
+// The two inbox dedup sets below (signed delivery identities; imported messageIds) persist so a
+// handled draft stays gone across refreshes. They remain specific to one OpenChat deployment, so
+// both stores are scoped by UserIndex. Recreated local deployments start empty and obsolete scopes
+// are purged without ever trusting the ActionInbox query's numeric storage id as an identity.
 function deployTag(): string {
   try {
     const env = (import.meta as unknown as { env?: Record<string, string> }).env;
@@ -81,47 +89,7 @@ function deployTag(): string {
   }
 }
 const DEPLOY_TAG = deployTag();
-function scopedInboxKey(prefix: string, legacyKey: string): string {
-  try {
-    const existing: string[] = [];
-    for (let i = 0; i < localStorage.length; i++) {
-      const k = localStorage.key(i);
-      if (k) existing.push(k);
-    }
-    const { keep, remove } = planScopedInboxKey(prefix, DEPLOY_TAG, legacyKey, existing);
-    for (const k of remove) localStorage.removeItem(k); // legacy + other-deployment keys
-    return keep;
-  } catch {
-    /* no localStorage in tests/Node */
-    return `${prefix}.${DEPLOY_TAG}`;
-  }
-}
-const HANDLED_INBOX_KEY = scopedInboxKey(
-  "iou.openchat.handledInboxDrafts.v2",
-  "iou.openchat.handledInboxDrafts.v1",
-);
 const HANDLED_INBOX_CAP = 1000;
-function loadHandledInboxIds(): Set<string> {
-  try {
-    const raw = localStorage.getItem(HANDLED_INBOX_KEY);
-    const parsed: unknown = raw === null ? [] : JSON.parse(raw);
-    return new Set(Array.isArray(parsed) ? parsed.filter((v): v is string => typeof v === "string") : []);
-  } catch {
-    return new Set();
-  }
-}
-const handledInboxIds = loadHandledInboxIds();
-function markInboxDraftHandled(id: string): void {
-  handledInboxIds.add(id);
-  try {
-    localStorage.setItem(
-      HANDLED_INBOX_KEY,
-      JSON.stringify([...handledInboxIds].slice(-HANDLED_INBOX_CAP)),
-    );
-  } catch {
-    /* best-effort: the in-memory set still applies for this session */
-  }
-}
 
 // A single chat message can, in a rare double-confirm race, produce two on-chain
 // deposits with the SAME context.messageId (different confirmedBy). The draft-id
@@ -129,26 +97,87 @@ function markInboxDraftHandled(id: string): void {
 // accepted before the first entry lands. We dedupe by messageId as well: once a
 // messageId has been imported we treat any sibling card as already-added. Persist
 // it (same rationale as handledInboxIds) so the guard survives a reload.
-const IMPORTED_MSG_KEY = scopedInboxKey(
-  "iou.openchat.importedMessageIds.v2",
-  "iou.openchat.importedMessageIds.v1",
-);
 const IMPORTED_MSG_CAP = 1000;
-const importedMessageIds = parseImportedMessageIds(
-  (() => {
-    try {
-      return localStorage.getItem(IMPORTED_MSG_KEY);
-    } catch {
-      return null;
-    }
-  })(),
-);
-function markMessageImported(messageId: string): void {
-  importedMessageIds.add(messageId);
+
+type ScopedInboxState = {
+  handledKey: string | null;
+  importedKey: string | null;
+  handledInboxIds: Set<string>;
+  importedMessageIds: Set<string>;
+};
+const inboxStateByScope = new Map<string, ScopedInboxState>();
+
+function loadScopedInboxState(principal: string | null): ScopedInboxState {
+  if (!principal) {
+    return {
+      handledKey: null,
+      importedKey: null,
+      handledInboxIds: new Set(),
+      importedMessageIds: new Set(),
+    };
+  }
+  const handledKey = inboxDedupeStorageKey(
+    "iou.openchat.handledInboxDrafts.v3",
+    principal,
+    DEPLOY_TAG,
+  );
+  const importedKey = inboxDedupeStorageKey(
+    "iou.openchat.importedMessageIds.v3",
+    principal,
+    DEPLOY_TAG,
+  );
+  const existing = inboxStateByScope.get(handledKey);
+  if (existing) return existing;
+  let handledRaw: string | null = null;
+  let importedRaw: string | null = null;
   try {
-    localStorage.setItem(IMPORTED_MSG_KEY, serializeImportedMessageIds(importedMessageIds, IMPORTED_MSG_CAP));
+    handledRaw = localStorage.getItem(handledKey);
+    importedRaw = localStorage.getItem(importedKey);
+    function* existingStorageKeys(): Generator<string> {
+      for (let index = 0; index < localStorage.length; index++) {
+        const key = localStorage.key(index);
+        if (key !== null) yield key;
+      }
+    }
+    for (const obsolete of planObsoleteInboxStorageCleanup(existingStorageKeys())) {
+      localStorage.removeItem(obsolete);
+    }
   } catch {
-    /* best-effort: the in-memory set still applies for this session */
+    /* storage-denied contexts retain only the scoped in-memory sets */
+  }
+  const state: ScopedInboxState = {
+    handledKey,
+    importedKey,
+    handledInboxIds: parseImportedMessageIds(handledRaw),
+    importedMessageIds: parseImportedMessageIds(importedRaw),
+  };
+  inboxStateByScope.set(handledKey, state);
+  return state;
+}
+
+function markScopedInboxHandled(state: ScopedInboxState, id: string): void {
+  state.handledInboxIds.add(id);
+  if (!state.handledKey) return;
+  try {
+    localStorage.setItem(
+      state.handledKey,
+      serializeImportedMessageIds(state.handledInboxIds, HANDLED_INBOX_CAP),
+    );
+  } catch {
+    /* in-memory isolation still applies */
+  }
+}
+
+function markScopedMessageImported(state: ScopedInboxState, messageId: string): void {
+  state.importedMessageIds.add(messageId);
+  if (!state.importedKey) return;
+  try {
+    localStorage.setItem(
+      state.importedKey,
+      serializeImportedMessageIds(state.importedMessageIds, IMPORTED_MSG_CAP),
+    );
+  } catch {
+    /* in-memory isolation still applies */
   }
 }
 import {
@@ -181,18 +210,6 @@ function dueDisplayLines(
   }));
 }
 
-type EntryHistoryVersion = { payload: EntryPayload; replacedAt: number };
-
-type DecryptedEntry = {
-  id: number;
-  created_by: string;
-  created_at_server: number;
-  updated_at_server: number | null;
-  payload: EntryPayload;
-  deleted: boolean;
-  history: EntryHistoryVersion[]; // prior versions, oldest first
-};
-
 type SortKey = "newest" | "oldest" | "amount-desc" | "amount-asc";
 
 const SORT_OPTIONS: { value: SortKey; label: string }[] = [
@@ -205,6 +222,13 @@ const SORT_OPTIONS: { value: SortKey; label: string }[] = [
 export function SheetPage() {
   const { sheetId = "" } = useParams();
   const { state } = useAuth();
+  const principal = state.kind === "authenticated" ? state.principal : null;
+  const inboxDedupe = useMemo(
+    () => loadScopedInboxState(principal),
+    [principal],
+  );
+  const { handledInboxIds, importedMessageIds } = inboxDedupe;
+  const inboxAckQueueRef = useRef(new InboxAcknowledgementQueue());
   const { actor } = useActor();
   const { get, unwrapFor } = useSheetKey();
   const toasts = useToasts();
@@ -324,11 +348,13 @@ export function SheetPage() {
   const [pending, setPending] = useState<PendingDraft[]>([]);
   const [inboxPending, setInboxPending] = useState<PendingDraft[]>([]);
   const [pendingRelayId, setPendingRelayId] = useState<string | null>(null);
-  // messageId of the draft under review (openchat v2 wrapper only) — recorded on
+  // messageId of the draft under review (OpenChat v4 wrapper only) — recorded on
   // a successful write so a sibling double-confirm card can't be imported twice.
   const [pendingMessageId, setPendingMessageId] = useState<string | null>(null);
   // Chat → sheet mapping (delivery provenance): canister-backed, cache-first.
-  const [chatLinks, setChatLinks] = useState<ChatSheetLinks>(() => readCachedLinks());
+  const [chatLinks, setChatLinks] = useState<ChatSheetLinks>(
+    () => readCachedLinks(principal),
+  );
   // The chat key of the draft currently being reviewed (openchat drafts only),
   // and whether "remember this chat → this sheet" is ticked (default on).
   const [pendingChatKey, setPendingChatKey] = useState<string | null>(null);
@@ -343,7 +369,7 @@ export function SheetPage() {
   }>(null);
   const [batchBusy, setBatchBusy] = useState(false);
   const reloadPending = async () => {
-    const cfg = getRelayConfig();
+    const cfg = getRelayConfig(principal);
     if (!cfg) {
       setPending([]);
       return;
@@ -354,16 +380,26 @@ export function SheetPage() {
       /* relay unreachable — leave the inbox as-is */
     }
   };
+  const flushInboxAcknowledgements = () => {
+    void inboxAckQueueRef.current
+      .flush(handledInboxIds, ({ id, acknowledgementSecret, config }) =>
+        acknowledgeActionInbox({ config, throughId: id, acknowledgementSecret }),
+      )
+      .catch(() => {
+        /* update unavailable/rejected: retain the encrypted capability and retry on the next poll */
+      });
+  };
   const clearRelay = async (id: string) => {
     if (id.startsWith("oc-")) {
       // On-chain inbox actions are append-only; drop it from the local pending view and remember
       // it as handled so it does not reappear on the next refresh/poll. (This local set is the
       // instant/offline echo — cross-member sync rides on the pair slot, see dismissCard below.)
-      markInboxDraftHandled(id);
+      markScopedInboxHandled(inboxDedupe, id);
       setInboxPending((prev) => prev.filter((p) => p.id !== id));
+      flushInboxAcknowledgements();
       return;
     }
-    const cfg = getRelayConfig();
+    const cfg = getRelayConfig(principal);
     if (cfg) {
       try {
         await deletePending(cfg, id);
@@ -379,7 +415,7 @@ export function SheetPage() {
   // next pair load / visibility-regain reload. Best-effort: if the publish fails, the local echo
   // still applies and the partner simply keeps their copy of the card.
   const dismissDraft = (p: PendingDraft) => {
-    const mid = p.context?.messageId;
+    const mid = p.context?.messageHandle;
     if (mid !== undefined && p.id.startsWith("oc-")) {
       void pairTemplates.dismissCard(mid).catch(() => {
         /* best-effort — local echo already hides it for me */
@@ -393,12 +429,41 @@ export function SheetPage() {
     setPendingChatKey(null);
     setPendingMessageId(null);
   };
-  const importFromRelay = (p: PendingDraft) => {
+  const importFromRelay = async (p: PendingDraft) => {
+    let inboundDraft = p.draft;
+    if (p.source === "openchat") {
+      try {
+        const K_sheet = get(sheetId) ?? (await unwrapFor(sheetId));
+        inboundDraft = await restoreOpenChatTemplateRefs(
+          p.draft,
+          K_sheet,
+          p.context
+            ? {
+              sheetId,
+                contextVersion: p.context.contextVersion,
+                appSubject: p.context.appSubject,
+                chatHandle: p.context.chatHandle,
+                messageHandle: p.context.messageHandle,
+                appId: p.context.appId,
+                appRevision: BigInt(p.context.appRevision),
+                actionId: p.context.actionId,
+              }
+            : undefined,
+          new Set(allTemplates.map((template) => template.id)),
+        );
+      } catch {
+        toasts.show({
+          kind: "error",
+          text: "The account type selected in OpenChat could not be verified. Reload the card and try again.",
+        });
+        return;
+      }
+    }
     // A card's confirmPayload is EITHER a single entry (JSON object) or MULTIPLE (a JSON array);
     // parseDraftBatch normalizes both. resolveTemplateBase runs per element (each may route to a
     // different template) and the IOU default currency is injected per element.
     const { drafts, errors } = parseDraftBatch(
-      p.draft,
+      inboundDraft,
       resolveTemplateBase,
       prefs.defaultCurrency,
     );
@@ -414,7 +479,7 @@ export function SheetPage() {
     // pastes that have no messageId (a multi-entry wrapper-less card keys off its FIRST entry). The
     // mid branch checks BOTH my local imported set and the sheet's decrypted entries
     // (import_message_id) — the latter catches the PARTNER's import of their fanned-out copy.
-    const mid = p.context?.messageId;
+    const mid = p.context?.messageHandle;
     const alreadyAdded = mid
       ? importedMessageIds.has(mid) || isImportedIntoSheet(entries, mid, undefined)
       : isDuplicateDraft(entries, drafts[0].draftId);
@@ -425,7 +490,12 @@ export function SheetPage() {
     }
     // ≥2 entries → confirm the whole batch once through the BatchConfirmModal (one deposit consumed).
     if (drafts.length > 1) {
-      setBatch({ drafts, messageId: mid ?? null, relayId: p.id, chatKey: p.context?.chat ?? null });
+      setBatch({
+        drafts,
+        messageId: mid ?? null,
+        relayId: p.id,
+        chatKey: p.context?.chatHandle ?? null,
+      });
       setRememberChat(true);
       return;
     }
@@ -436,7 +506,7 @@ export function SheetPage() {
     if (mid) drafts[0].initial.import_message_id = mid;
     setPendingRelayId(p.id);
     // Track the source chat so confirming can remember chat → sheet.
-    setPendingChatKey(p.context?.chat ?? null);
+    setPendingChatKey(p.context?.chatHandle ?? null);
     setPendingMessageId(mid ?? null);
     setRememberChat(true);
     openAdd(drafts[0].initial);
@@ -447,16 +517,16 @@ export function SheetPage() {
     const prev = chatLinks;
     const next = { ...prev, [chatKey]: sheetId };
     setChatLinks(next);
-    writeCachedLinks(next);
+    writeCachedLinks(principal, next);
     if (!actor) return;
     void storeChatSheetLink(actor, chatKey, sheetId).catch(() => {
       setChatLinks(prev);
-      writeCachedLinks(prev);
+      writeCachedLinks(principal, prev);
       toasts.show({ kind: "error", text: "Could not save the chat → sheet mapping" });
     });
   };
   useEffect(() => {
-    const cfg = getRelayConfig();
+    const cfg = getRelayConfig(principal);
     if (!cfg) return;
     let cancelled = false;
     const load = async () => {
@@ -473,15 +543,18 @@ export function SheetPage() {
       cancelled = true;
       clearInterval(iv);
     };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  }, [principal]);
 
   // Refresh the chat → sheet links from the canister (cache-first: state is
   // seeded from localStorage above, the canister copy wins when it arrives).
   useEffect(() => {
     if (!actor) return;
     let cancelled = false;
-    void fetchChatSheetLinks(actor)
+    if (!principal) {
+      setChatLinks({});
+      return;
+    }
+    void fetchChatSheetLinks(actor, principal)
       .then((links) => {
         if (!cancelled) setChatLinks(links);
       })
@@ -491,39 +564,53 @@ export function SheetPage() {
     return () => {
       cancelled = true;
     };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [actor]);
+  }, [actor, principal]);
 
   // "Pending from OpenChat": confirmed actions OpenChat deposited on-chain. We pull them from the action_inbox
   // canister, verify OpenChat's provenance signature + decrypt locally, then feed each through the same seam.
   useEffect(() => {
     let cancelled = false;
     let iv: ReturnType<typeof setInterval> | undefined;
-    // The inbox canister id is auto-derived from OpenChat's registered manifest (getActionInboxConfig
-    // is async), so the fetch + null-guard live inside this IIFE; the effect callback stays sync.
+    const ackQueue = new InboxAcknowledgementQueue();
+    inboxAckQueueRef.current = ackQueue;
+    // Resolve through the short-lived manifest cache on every poll. This lets a mounted page follow
+    // re-registration while preserving each old action's originating route for acknowledgement.
     void (async () => {
-      const cfg = await getActionInboxConfig();
-      if (cancelled || !cfg) return;
-      let since = 0n;
       const load = async () => {
         try {
-          const drafts = await pollActionInbox({ config: cfg, sinceId: since });
-          if (cancelled || drafts.length === 0) return;
-          for (const d of drafts) if (d.id >= since) since = d.id + 1n;
+          if (!actor) return;
+          const cfg = await getActionInboxConfig(actor);
+          if (cancelled || !cfg) return;
+          const drafts = await pollActionInbox({ config: cfg });
+          if (cancelled) return;
+          ackQueue.observe(
+            drafts.map(({ id, deliveryId, acknowledgementSecret }) => ({
+              id,
+              deliveryId,
+              acknowledgementSecret,
+              config: cfg,
+            })),
+          );
+          void ackQueue
+            .flush(handledInboxIds, ({ id, acknowledgementSecret, config }) =>
+              acknowledgeActionInbox({ config, throughId: id, acknowledgementSecret }),
+            )
+            .catch(() => {
+              /* keep the candidate queued for the next 15-second poll */
+            });
+          if (drafts.length === 0) return;
           setInboxPending((prev) => {
             const seen = new Set(prev.map((p) => p.id));
             const add: PendingDraft[] = drafts
-              .filter((d) => !seen.has(`oc-${d.id}`) && !handledInboxIds.has(`oc-${d.id}`))
+              .filter((d) => !seen.has(`oc-${d.deliveryId}`) && !handledInboxIds.has(`oc-${d.deliveryId}`))
               .map((d) => ({
-                id: `oc-${d.id}`,
+                id: `oc-${d.deliveryId}`,
                 draft: d.draft,
                 // action_inbox stores TimestampMillis — no nanosecond conversion.
                 created_at: Number(d.created_at),
                 source: "openchat",
-                // Real delivery provenance from the v2 envelope wrapper; older
-                // wrapper-less deposits have no context and keep the fallback.
-                provenance: { openchat_user: d.context?.confirmedBy ?? "action-inbox" },
-                ...(d.context ? { context: d.context } : {}),
+                // Polling emits only fully verified v4 envelopes with authenticated context.
+                context: d.context,
               }));
             return add.length ? [...prev, ...add] : prev;
           });
@@ -538,9 +625,12 @@ export function SheetPage() {
     return () => {
       cancelled = true;
       if (iv) clearInterval(iv);
+      if (inboxAckQueueRef.current === ackQueue) {
+        inboxAckQueueRef.current = new InboxAcknowledgementQueue();
+      }
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  }, [principal, handledInboxIds]);
 
   const myPrincipal = state.kind === "authenticated"
     ? state.identity.getPrincipal().toText()
@@ -606,43 +696,25 @@ export function SheetPage() {
         /* names are best-effort */
       }
       const res = await (actor as any).list_entries(sheetId, [], 200);
-      const dec: DecryptedEntry[] = [];
-      for (const e of res.entries) {
-        const pt = await decryptEntryPayload(
-          new Uint8Array(e.entry_key),
-          new Uint8Array(e.iv),
-          new Uint8Array(e.ciphertext),
-          K_sheet,
-        );
-        // Decrypt prior versions (edit history), oldest first.
-        const versions: any[] = e.history && e.history.length ? e.history[0] : [];
-        const history: EntryHistoryVersion[] = [];
-        for (const v of versions) {
-          try {
-            const vpt = await decryptEntryPayload(
-              new Uint8Array(v.entry_key),
-              new Uint8Array(v.iv),
-              new Uint8Array(v.ciphertext),
-              K_sheet,
-            );
-            history.push({ payload: decodeEntry(vpt), replacedAt: Number(v.replaced_at) });
-          } catch {
-            /* skip an undecryptable version */
-          }
-        }
-        dec.push({
-          id: Number(e.id),
-          created_by: e.created_by.toText(),
-          created_at_server: Number(e.created_at_server),
-          updated_at_server: e.updated_at_server && e.updated_at_server.length
-            ? Number(e.updated_at_server[0])
-            : null,
-          payload: decodeEntry(pt),
-          deleted: !!(e.deleted_at && e.deleted_at.length),
-          history,
+      const decoded = await decryptEntryRecords(res.entries, K_sheet);
+      if (decoded.failures.length > 0) {
+        const entryFailures = decoded.failures.filter((failure) => failure.stage === "entry").length;
+        const historyFailures = decoded.failures.length - entryFailures;
+        toasts.show({
+          kind: "error",
+          text: [
+            entryFailures
+              ? `${entryFailures} unreadable entr${entryFailures === 1 ? "y" : "ies"}`
+              : "",
+            historyFailures ? `${historyFailures} unreadable history version(s)` : "",
+          ]
+            .filter(Boolean)
+            .join(" and ")
+            .replace(/^/, "Skipped "),
+          ms: 8000,
         });
       }
-      setEntries(dec);
+      setEntries(decoded.entries);
     } catch (e) {
       setErr((e as Error).message);
       toasts.show({ kind: "error", text: (e as Error).message });
@@ -712,6 +784,34 @@ export function SheetPage() {
     [inboxPending, chatLinks, sheetId, entries, pairTemplates.shared, pairTemplates.dismissed],
   );
 
+  // A partner can import or dismiss their fanned-out copy before this browser acts. Once that
+  // durable pair/sheet evidence arrives, this copy is handled too: mark it locally and release the
+  // encrypted inbox capability. Do not infer handling merely because routing hides another sheet.
+  useEffect(() => {
+    const newlyHandled: string[] = [];
+    for (const draft of inboxPending) {
+      if (!draft.id.startsWith("oc-") || handledInboxIds.has(draft.id)) continue;
+      const messageId = draft.context?.messageHandle;
+      if (
+        isDurablyHandledInboxMessage(
+          messageId,
+          importedMessageIds,
+          pairTemplates.dismissed,
+          (id) => isImportedIntoSheet(entries, id, undefined),
+        )
+      ) {
+        markScopedInboxHandled(inboxDedupe, draft.id);
+        newlyHandled.push(draft.id);
+      }
+    }
+    if (newlyHandled.length === 0) return;
+    const remove = new Set(newlyHandled);
+    setInboxPending((current) => current.filter((draft) => !remove.has(draft.id)));
+    flushInboxAcknowledgements();
+    // Sets are stable, mutable scope stores; inbox/entry/template changes trigger reconciliation.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [inboxPending, entries, pairTemplates.dismissed, importedMessageIds, handledInboxIds]);
+
   // Headless encrypt-under-K_sheet + add_entry. No toast/modal/reload side effects — the caller
   // orchestrates those. Used by both onSubmit's single-add path and the batch confirm-all path so
   // the write seam is identical for one entry or N.
@@ -757,7 +857,7 @@ export function SheetPage() {
       if (pendingRelayId) await clearRelay(pendingRelayId);
       // Remember this messageId so a sibling double-confirm card is caught by
       // the accept-path guard even before the new entry is re-fetched.
-      if (pendingMessageId) markMessageImported(pendingMessageId);
+      if (pendingMessageId) markScopedMessageImported(inboxDedupe, pendingMessageId);
       // First import from a chat that isn't mapped yet: honour the
       // "remember" checkbox (default on) by pinning chat → this sheet.
       if (pendingRelayId && pendingChatKey && rememberChat && !chatLinks[pendingChatKey]) {
@@ -783,7 +883,7 @@ export function SheetPage() {
         await writeEntry(parsedToPayload(d.initial));
       }
       await clearRelay(batch.relayId);
-      if (batch.messageId) markMessageImported(batch.messageId);
+      if (batch.messageId) markScopedMessageImported(inboxDedupe, batch.messageId);
       if (batch.chatKey && rememberChat && !chatLinks[batch.chatKey]) {
         rememberChatMapping(batch.chatKey);
       }
@@ -1079,15 +1179,15 @@ export function SheetPage() {
                         className="lock-cue"
                         title={
                           p.context
-                            ? `Confirmed by ${p.context.confirmedBy} in ${p.context.chat} (message ${p.context.messageId})`
-                            : `Forwarded by OpenChat user ${p.provenance?.openchat_user ?? "?"}`
+                            ? "Verified OpenChat delivery with app-scoped provenance"
+                            : "Forwarded chat draft"
                         }
                         style={{ marginRight: 6 }}
                       >
                         ✦ OpenChat
                         {p.context && (
                           <span className="muted" style={{ marginLeft: 4 }}>
-                            · {p.context.chat}
+                            · {p.context.chatHandle.slice(0, 8)}…
                           </span>
                         )}
                       </span>
@@ -1098,7 +1198,7 @@ export function SheetPage() {
                     {batchSummary(rb)}
                   </span>
                   <span className="row" style={{ gap: 6 }}>
-                    <button className="secondary small" onClick={() => importFromRelay(p)}>
+                    <button className="secondary small" onClick={() => void importFromRelay(p)}>
                       Review &amp; add
                     </button>
                     <button

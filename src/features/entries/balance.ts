@@ -65,9 +65,13 @@ export function portionsOf(e: EntryPayload): Portion[] {
   let allocated = 0;
   for (let i = 0; i < sched.length; i++) {
     const isLast = i === sched.length - 1;
+    const remaining = Math.max(0, gross - allocated);
     const amt = isLast
-      ? gross - allocated
-      : Math.round((gross * sched[i].percent) / 100);
+      ? remaining
+      : Math.min(
+          remaining,
+          Math.max(0, Math.round((gross * sched[i].percent) / 100)),
+        );
     allocated += amt;
     portions.push({
       currency: e.currency,
@@ -89,7 +93,11 @@ export function portionsOf(e: EntryPayload): Portion[] {
     // A fixed fee charged in a DIFFERENT currency is its own balance line: a deduction (opposite
     // direction), due with the final installment, totalled with other entries of that currency.
     const fc = e.fee.fixed_currency;
-    if (fc && fc !== e.currency && (e.fee.fixed_minor ?? 0) > 0) {
+    if (
+      fc &&
+      fc.toUpperCase() !== e.currency.toUpperCase() &&
+      (e.fee.fixed_minor ?? 0) > 0
+    ) {
       portions.push({
         currency: fc,
         due_ts: sched[sched.length - 1].due_ts,

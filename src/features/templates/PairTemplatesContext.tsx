@@ -30,17 +30,14 @@
 //     its next pair load (reload() is exposed for the visibilitychange
 //     hook). Every publish carries MY current dismissed list forward, so
 //     type CRUD never drops a dismissal;
-//   * after each publish, re-syncs the OpenChat manifest from SLOT sources
-//     across ALL my accounts (loadAllSharedTemplates) — each account's chat
-//     routes through my manifest, so its keyword rules must cover every
-//     account's types (the legacy personal store no longer feeds it).
+//   * keeps those decrypted names and keywords inside the linked account;
+//     they are never folded into OpenChat's public, user-global manifest.
 
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { useAuth } from "../auth/AuthProvider";
 import { useActor, unwrap } from "../flows/useActor";
 import { useSheetKey } from "../flows/SheetKeyContext";
 import { encryptWithSheetKey } from "../crypto/devVetkd";
-import { syncManifestWithTypes } from "../openchat/syncManifest";
 import type { TxnTemplate } from "./TemplatesContext";
 import {
   type SharedTemplate,
@@ -52,7 +49,7 @@ import {
   removeTemplateFromSlot,
   visibleTemplates,
 } from "./pairTemplates";
-import { decryptSlot, loadAllSharedTemplates, myMemberIndex } from "./pairTemplatesActor";
+import { decryptSlot, myMemberIndex } from "./pairTemplatesActor";
 
 export type PairTemplatesApi = {
   /** Visible merged shared templates (tombstones hidden), name-sorted. */
@@ -165,20 +162,8 @@ export function usePairTemplates(
       );
       await actor.set_pair_templates(pairId, Array.from(ciphertext), Array.from(iv));
       setMySlot(next);
-      // Keep the OpenChat manifest in lock-step with what this member can
-      // now be routed to: the slot types of ALL my accounts (each account's
-      // chat routes through my manifest). Best-effort fire-and-forget — a
-      // slow/unreachable fold must never block a type save or a dismissal.
-      void (async () => {
-        try {
-          const all = await loadAllSharedTemplates(actor, unwrapFor);
-          await syncManifestWithTypes(identity, all);
-        } catch {
-          /* best-effort */
-        }
-      })();
     },
-    [pairId, sheetId, actor, get, unwrapFor, identity],
+    [pairId, sheetId, actor, get, unwrapFor],
   );
 
   const upsertMyTemplate = useCallback(
@@ -232,6 +217,5 @@ export function usePairTemplates(
   };
 }
 
-// The non-hook helpers (rotateMyPairTemplates for the sheet-rotation step,
-// loadAllSharedTemplates for the manifest folds) live in
+// Non-hook helpers for sheet rotation and diagnostics live in
 // pairTemplatesActor.ts so Node-side callers never import React.

@@ -35,8 +35,11 @@ async function pushToRelay(draft: unknown): Promise<boolean> {
   try {
     const r = await fetch(`${RELAY_URL.replace(/\/+$/, "")}/v1/drafts`, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ token: LINK_TOKEN, draft }),
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${LINK_TOKEN}`,
+      },
+      body: JSON.stringify({ draft }),
     });
     return r.ok;
   } catch {

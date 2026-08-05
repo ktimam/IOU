@@ -1,21 +1,56 @@
-// Chat → sheet mapping for OpenChat-delivered drafts (delivery provenance).
+// App-scoped chat-handle → sheet mapping for OpenChat-delivered drafts.
 //
-// The v2 inbox envelope carries the source chat key (see actionInboxClient's
-// InboxDraftContext). The user can pin "always import this chat's drafts into
+// The v4 inbox envelope carries a UserIndex-issued app-scoped chat handle (see
+// actionInboxClient's InboxDraftContext). The user can pin "always import this chat's drafts into
 // this sheet"; the mapping is CANISTER-BACKED (set_chat_sheet_link /
 // remove_chat_sheet_link / chat_sheet_links — caller-keyed, so it follows the
 // user across devices) with localStorage as an optimistic cache.
 //
 // The canister stores sheet_id as a nat64: IOU sheet ids are 16 hex chars
 // (8 raw_rand bytes from now_id()), so the string ↔ u64 mapping is loss-free.
-// The chat key is opaque text end to end.
+// The stable Candid field is still named chat_key for compatibility, but new values are exactly
+// 32-byte app-scoped handles encoded as canonical unpadded base64url. Raw OpenChat coordinates are
+// never accepted or persisted.
 
-const LS_KEY = "iou.openchat.chatSheetLinks.v1";
+import { scopedStorageKey } from "../storage/scopedStorage";
 
-/** chat key → sheet id (16-hex-char string), both as the app uses them. */
+const LEGACY_LS_KEY = "iou.openchat.chatSheetLinks.v1";
+const LS_KEY = "iou.openchat.chatSheetLinks.v2";
+
+export function chatLinksStorageKey(
+  principal: string,
+  deployment?: string,
+): string {
+  return scopedStorageKey(LS_KEY, principal, deployment);
+}
+
+/** App-scoped chat handle → sheet id (16-hex-char string), both as the app uses them. */
 export type ChatSheetLinks = Record<string, string>;
 
 const SHEET_ID_RE = /^[0-9a-f]{16}$/;
+const APP_SCOPED_HANDLE_RE = /^[A-Za-z0-9_-]{42}[AEIMQUYcgkosw048]$/;
+
+/** Exactly 32 bytes encoded as canonical, unpadded base64url. */
+export function isCanonicalAppScopedChatHandle(value: unknown): value is string {
+  return typeof value === "string" && APP_SCOPED_HANDLE_RE.test(value);
+}
+
+function exactChatSheetLinks(value: unknown): ChatSheetLinks {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return {};
+  const out: ChatSheetLinks = {};
+  for (const [handle, sheetId] of Object.entries(value)) {
+    if (isCanonicalAppScopedChatHandle(handle) && typeof sheetId === "string" && SHEET_ID_RE.test(sheetId)) {
+      out[handle] = sheetId;
+    }
+  }
+  return out;
+}
+
+function requireCanonicalAppScopedChatHandle(value: unknown): asserts value is string {
+  if (!isCanonicalAppScopedChatHandle(value)) {
+    throw new Error("chat handle must be canonical unpadded base64url for exactly 32 bytes");
+  }
+}
 
 /** Encode a 16-hex-char sheet id as the canister's nat64. Throws on other shapes. */
 export function sheetIdToNat64(sheetId: string): bigint {
@@ -45,12 +80,13 @@ export function nat64ToSheetId(v: bigint): string {
  * correct sheet" — SheetPage's visible-inbox filter calls it.
  */
 export function draftBelongsOnSheet(
-  chatKey: string | null | undefined,
+  chatHandle: string | null | undefined,
   links: ChatSheetLinks,
   sheetId: string,
 ): boolean {
-  if (!chatKey) return true;
-  const mapped = links[chatKey];
+  if (!chatHandle) return true;
+  if (!isCanonicalAppScopedChatHandle(chatHandle)) return false;
+  const mapped = links[chatHandle];
   if (!mapped) return true;
   return mapped === sheetId;
 }
@@ -92,25 +128,31 @@ export function otherChatsLinkedTo(
   return Object.keys(links).filter((k) => k !== thisChatKey && links[k] === sheetId);
 }
 
-export function readCachedLinks(): ChatSheetLinks {
+export function readCachedLinks(principal: string | null | undefined): ChatSheetLinks {
+  if (!principal) return {};
   try {
-    const raw = globalThis.localStorage?.getItem(LS_KEY);
+    globalThis.localStorage?.removeItem(LEGACY_LS_KEY);
+    globalThis.localStorage?.removeItem(scopedStorageKey(LEGACY_LS_KEY, principal));
+    const raw = globalThis.localStorage?.getItem(chatLinksStorageKey(principal));
     if (!raw) return {};
-    const parsed = JSON.parse(raw);
-    if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) return {};
-    const out: ChatSheetLinks = {};
-    for (const [k, v] of Object.entries(parsed)) {
-      if (typeof v === "string" && SHEET_ID_RE.test(v)) out[k] = v;
-    }
-    return out;
+    return exactChatSheetLinks(JSON.parse(raw));
   } catch {
     return {};
   }
 }
 
-export function writeCachedLinks(links: ChatSheetLinks): void {
+export function writeCachedLinks(
+  principal: string | null | undefined,
+  links: ChatSheetLinks,
+): void {
+  if (!principal) return;
   try {
-    globalThis.localStorage?.setItem(LS_KEY, JSON.stringify(links));
+    globalThis.localStorage?.removeItem(LEGACY_LS_KEY);
+    globalThis.localStorage?.removeItem(scopedStorageKey(LEGACY_LS_KEY, principal));
+    globalThis.localStorage?.setItem(
+      chatLinksStorageKey(principal),
+      JSON.stringify(exactChatSheetLinks(links)),
+    );
   } catch {
     /* non-persistent contexts still work for the session */
   }
@@ -123,28 +165,34 @@ type RawLink = { chat_key: string; sheet_id: bigint };
  * `actor` is the authenticated backend actor (src/backend/declarations.ts).
  */
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
-export async function fetchChatSheetLinks(actor: any): Promise<ChatSheetLinks> {
+export async function fetchChatSheetLinks(
+  actor: any,
+  principal: string,
+): Promise<ChatSheetLinks> {
   const raw = (await actor.chat_sheet_links()) as RawLink[];
   const out: ChatSheetLinks = {};
   for (const l of raw ?? []) {
     try {
+      requireCanonicalAppScopedChatHandle(l.chat_key);
       out[l.chat_key] = nat64ToSheetId(BigInt(l.sheet_id));
     } catch {
       /* skip a malformed record rather than break the whole map */
     }
   }
-  writeCachedLinks(out);
+  writeCachedLinks(principal, out);
   return out;
 }
 
 /** Upsert a mapping on the canister (the caller updates the cache optimistically). */
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
-export async function storeChatSheetLink(actor: any, chatKey: string, sheetId: string): Promise<void> {
-  await actor.set_chat_sheet_link(chatKey, sheetIdToNat64(sheetId));
+export async function storeChatSheetLink(actor: any, chatHandle: string, sheetId: string): Promise<void> {
+  requireCanonicalAppScopedChatHandle(chatHandle);
+  await actor.set_chat_sheet_link(chatHandle, sheetIdToNat64(sheetId));
 }
 
 /** Remove a mapping on the canister. */
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
-export async function removeChatSheetLink(actor: any, chatKey: string): Promise<void> {
-  await actor.remove_chat_sheet_link(chatKey);
+export async function removeChatSheetLink(actor: any, chatHandle: string): Promise<void> {
+  requireCanonicalAppScopedChatHandle(chatHandle);
+  await actor.remove_chat_sheet_link(chatHandle);
 }

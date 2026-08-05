@@ -4,7 +4,11 @@ import { useAuth } from "../auth/AuthProvider";
 import { useActor } from "./useActor";
 import { useSheetKey } from "./SheetKeyContext";
 import { usePreferences } from "../settings/usePreferences";
-import { createSheetForPair, publishAccountNames } from "./createSheet";
+import {
+  createSheetForPair,
+  publishAccountNames,
+  SheetCreatedSetupError,
+} from "./createSheet";
 
 export function NewSheet() {
   const [params] = useSearchParams();
@@ -54,6 +58,12 @@ export function NewSheet() {
       if (sheetName.trim()) cacheSheetName(sheet.id, sheetName.trim());
       nav(`/sheet/${sheet.id}`, { replace: true });
     } catch (e) {
+      if (e instanceof SheetCreatedSetupError) {
+        if (e.K_sheet) cache(e.sheet.id, e.K_sheet);
+        if (sheetName.trim()) cacheSheetName(e.sheet.id, sheetName.trim());
+        nav(`/sheet/${e.sheet.id}`, { replace: true });
+        return;
+      }
       const msg = (e as Error).message;
       setError(
         msg.includes("pair is not active")

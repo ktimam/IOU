@@ -15,6 +15,7 @@ import { HttpAgent, Actor, type Identity } from "@dfinity/agent";
 import { Ed25519KeyIdentity } from "@dfinity/identity";
 import { webcrypto } from "node:crypto";
 import { idlFactory as iouIdlFactory } from "../../src/backend/declarations";
+import { resolveE2EMode } from "../../src/security/e2ePolicy";
 
 // Node < 20 has no global WebCrypto; the crypto helpers need it.
 if (!(globalThis as unknown as { crypto?: Crypto }).crypto) {
@@ -97,14 +98,19 @@ async function resolve(): Promise<E2EConfig> {
 }
 
 export const E2E: E2EConfig = await resolve();
+const E2E_MODE = resolveE2EMode({
+  up: E2E.up,
+  reason: E2E.reason,
+  allowSkip: process.env.IOU_E2E_ALLOW_SKIP === "1",
+});
 
-if (!E2E.up) {
+if (E2E_MODE === "skip") {
   // eslint-disable-next-line no-console
-  console.warn(`\n[e2e] SKIPPING E2E suite: ${E2E.reason}\n[e2e] Bring the local env up (see test/README.md) and re-run \`pnpm test:e2e\`.\n`);
+  console.warn(`\n[e2e] EXPLICITLY SKIPPING E2E suite: ${E2E.reason}\n`);
 }
 
-/** describe that runs only when the local env is up; otherwise the whole block skips cleanly. */
-export const describeE2E = E2E.up ? describe : describe.skip;
+/** Required by default; an intentional local skip needs IOU_E2E_ALLOW_SKIP=1. */
+export const describeE2E = E2E_MODE === "run" ? describe : describe.skip;
 
 export function freshIdentity(): Ed25519KeyIdentity {
   return Ed25519KeyIdentity.generate();

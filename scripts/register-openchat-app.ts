@@ -40,16 +40,23 @@
 // stable across runs. OpenChat's register guard accepts a non-user principal in test_mode, which
 // is exactly what a deploy script needs locally.
 
-import { readFileSync, writeFileSync, existsSync } from "node:fs";
+import { createHash } from "node:crypto";
+import { readFileSync, writeFileSync, existsSync, mkdirSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { Actor, HttpAgent } from "@dfinity/agent";
 import { IDL } from "@dfinity/candid";
 import { Ed25519KeyIdentity } from "@dfinity/identity";
+import { Principal } from "@dfinity/principal";
 import { buildIdl, buildManifestWire, type CandidOpt } from "../src/features/openchat/registerAiApp";
+import {
+  encodeManifestCommitmentV2,
+  MANIFEST_COMMITMENT_DOMAIN_V2,
+} from "../src/features/openchat/manifestCommitmentV2";
 
 const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const IDENTITY_FILE = resolve(REPO_ROOT, ".openchat-registrar.json");
+const VERIFICATION_BINDING_FILE = resolve(REPO_ROOT, ".openchat-iou", "verification-binding.did");
 
 const TAG = "[register-openchat-app]";
 
@@ -228,6 +235,45 @@ async function main(): Promise<void> {
   console.log(
     `${TAG} registered: id ${registration.id}, name "${registration.manifest.name}", ` +
       `owner ${registration.owner.toText()}`,
+  );
+
+  if (!appCanisterId) {
+    throw new Error("OC_APP_CANISTER_ID is required to build the publication verifier V2 binding");
+  }
+  const commitment = {
+    user_index_canister_id: Principal.fromText(userIndexCanisterId),
+    app_id: registration.id,
+    app_revision: registration.updated,
+    owner: registration.owner,
+    canonical_name: "iou",
+    manifest: registration.manifest,
+  };
+  const encodedCommitment = encodeManifestCommitmentV2(commitment);
+  const manifestHash = createHash("sha256")
+    .update(Buffer.from(MANIFEST_COMMITMENT_DOMAIN_V2))
+    .update(Buffer.from(encodedCommitment))
+    .digest();
+  const blob = Array.from(manifestHash, (byte) => `\\${byte.toString(16).padStart(2, "0")}`).join("");
+  const registeredInbox = registration.manifest.inbox_canister_id as CandidOpt<Principal>;
+  const inboxCandid = registeredInbox.length
+    ? `opt principal "${registeredInbox[0].toText()}"`
+    : "null";
+  const bindingCandid = `(opt record {
+  user_index_canister_id = principal "${userIndexCanisterId}";
+  app_id = ${registration.id} : nat32;
+  app_revision = ${registration.updated} : nat64;
+  owner = principal "${registration.owner.toText()}";
+  canonical_name = "iou";
+  app_canister_id = principal "${appCanisterId}";
+  inbox_canister_id = ${inboxCandid};
+  manifest_hash = blob "${blob}";
+})\n`;
+  mkdirSync(dirname(VERIFICATION_BINDING_FILE), { recursive: true });
+  writeFileSync(VERIFICATION_BINDING_FILE, bindingCandid, { encoding: "utf8", mode: 0o600 });
+  console.log(`${TAG} verifier V2 binding: ${VERIFICATION_BINDING_FILE}`);
+  console.log(
+    TAG + " before publish, set_ai_app_owner to " + registration.owner.toText() +
+      " and install the exact generated verification-binding.did on iou_backend",
   );
 
   const listed = await actor.ai_apps({});

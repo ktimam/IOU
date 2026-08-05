@@ -4,7 +4,11 @@ import { useAuth } from "../auth/AuthProvider";
 import { useActor } from "./useActor";
 import { useSheetKey } from "./SheetKeyContext";
 import { usePreferences } from "../settings/usePreferences";
-import { createSheetForPair, publishAccountNames } from "./createSheet";
+import {
+  createSheetForPair,
+  publishAccountNames,
+  SheetCreatedSetupError,
+} from "./createSheet";
 
 // Creating a new account. Joining an existing one no longer lives here — a
 // partner joins by opening an invite link (see AcceptInvitePage), so this page
@@ -55,6 +59,13 @@ export function NewPair() {
       if (sheetName.trim()) cacheSheetName(sheet.id, sheetName.trim());
       nav(`/sheet/${sheet.id}`, { replace: true });
     } catch (e) {
+      if (e instanceof SheetCreatedSetupError) {
+        if (e.K_sheet) cache(e.sheet.id, e.K_sheet);
+        if (sheetName.trim()) cacheSheetName(e.sheet.id, sheetName.trim());
+        if (accountName.trim()) cacheAccountName(e.sheet.pair_id, accountName.trim());
+        nav(`/sheet/${e.sheet.id}`, { replace: true });
+        return;
+      }
       setError((e as Error).message);
     } finally {
       setBusy(false);

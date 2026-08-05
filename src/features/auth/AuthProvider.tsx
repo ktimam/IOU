@@ -66,6 +66,11 @@ function loadDevIdentityIfPresent(): Secp256k1KeyIdentity | null {
   }
 }
 
+/** Development-only live-test bridge; production builds always return null. */
+export function loadDevIdentityForDiagnostics(): Secp256k1KeyIdentity | null {
+  return import.meta.env.DEV ? loadDevIdentityIfPresent() : null;
+}
+
 export function AuthProvider({ children }: { children: ReactNode }) {
   const [state, setState] = useState<AuthState>({ kind: "loading" });
 

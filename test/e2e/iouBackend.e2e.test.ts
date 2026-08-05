@@ -116,19 +116,41 @@ describeE2E("IOU backend — two-user pair/sheet/entry E2E", () => {
     await expect(decryptEntryPayload(enc.entryKey, enc.iv, enc.ciphertext, newSheetKey())).rejects.toBeTruthy();
   });
 
-  it("consumer keypair is caller-keyed (per-user) and deletable in isolation", async () => {
+  it("consumer keypair is caller-keyed and its stable epoch rejects stale/ABA writes", async () => {
     // The canister guards: wrapped key non-empty ≤8192 bytes; pem must be a 1..2000-char SPKI PEM.
     const PEM_A = "-----BEGIN PUBLIC KEY-----\nAAAA-KEY-A\n-----END PUBLIC KEY-----\n";
     const PEM_B = "-----BEGIN PUBLIC KEY-----\nBBBB-KEY-B\n-----END PUBLIC KEY-----\n";
-    await A.actor.set_consumer_keypair(new Array(32).fill(7), PEM_A);
-    await B.actor.set_consumer_keypair(new Array(32).fill(9), PEM_B);
-    expect(optVal(await A.actor.get_consumer_keypair())?.public_key_pem).toBe(PEM_A);
-    expect(optVal(await B.actor.get_consumer_keypair())?.public_key_pem).toBe(PEM_B);
+    const a0 = await A.actor.get_consumer_keypair();
+    const b0 = await B.actor.get_consumer_keypair();
+    expect(a0).toMatchObject({ mutation_epoch: 0n, keypair: [] });
+    expect(b0).toMatchObject({ mutation_epoch: 0n, keypair: [] });
+    expect(await A.actor.set_consumer_keypair(0n, new Array(32).fill(7), PEM_A))
+      .toEqual({ Ok: 1n });
+    expect(await B.actor.set_consumer_keypair(0n, new Array(32).fill(9), PEM_B))
+      .toEqual({ Ok: 1n });
+    expect(optVal((await A.actor.get_consumer_keypair()).keypair)?.public_key_pem).toBe(PEM_A);
+    expect(optVal((await B.actor.get_consumer_keypair()).keypair)?.public_key_pem).toBe(PEM_B);
 
-    await A.actor.delete_consumer_keypair();
-    expect(optVal(await A.actor.get_consumer_keypair())).toBeNull();
+    expect(await A.actor.delete_consumer_keypair(1n)).toEqual({ Ok: 2n });
+    expect(await A.actor.get_consumer_keypair()).toMatchObject({ mutation_epoch: 2n, keypair: [] });
+    // A request prepared before delete cannot land after its tombstone.
+    expect(await A.actor.set_consumer_keypair(1n, new Array(32).fill(8), PEM_A))
+      .toEqual({
+        Err: { StaleEpoch: { expected_epoch: 1n, current_epoch: 2n } },
+      });
+
+    // Reconnect is allowed only by explicitly observing the tombstone epoch.
+    expect(await A.actor.set_consumer_keypair(2n, new Array(32).fill(10), PEM_A))
+      .toEqual({ Ok: 3n });
+    // The old epoch is still rejected after the value cycles absent -> present (ABA).
+    expect(await A.actor.set_consumer_keypair(1n, new Array(32).fill(11), PEM_A))
+      .toEqual({
+        Err: { StaleEpoch: { expected_epoch: 1n, current_epoch: 3n } },
+      });
+    expect(await A.actor.delete_consumer_keypair(3n)).toEqual({ Ok: 4n });
+    expect(await A.actor.get_consumer_keypair()).toMatchObject({ mutation_epoch: 4n, keypair: [] });
     // B's copy is untouched.
-    expect(optVal(await B.actor.get_consumer_keypair())?.public_key_pem).toBe(PEM_B);
+    expect(optVal((await B.actor.get_consumer_keypair()).keypair)?.public_key_pem).toBe(PEM_B);
   });
 
   it("chat→sheet links are caller-scoped and round-trip loss-free", async () => {

@@ -1,16 +1,15 @@
-// OpenChat user_index AI-app registry E2E (candid-exposed surface) against the
+// OpenChat user_index AI-app public registry E2E against the
 // LIVE replica. Registers a UNIQUELY-NAMED throwaway app (never touches the real
 // "iou" registration — register_ai_app is an upsert-by-name), then exercises
-// upsert / read-back / explore / delete, the claim + revoke negative paths
-// (on-chain code lookup + proof-of-possession signature verify), and the
-// per-caller throttle. The link-code HAPPY path + per-user-key pairing are
-// msgpack-only → covered by the Rust integration test (see test/README.md).
+// upsert / read-back / explore / delete. Per-user claim/revoke is deliberately
+// absent here: browsers call the signed-in IOU backend, and only IOU's registered
+// app canister invokes OpenChat's authenticated C2C endpoints.
 
 import { it, expect } from "vitest";
 import { Actor } from "@dfinity/agent";
 import { describeE2E, E2E, freshIdentity, agentFor } from "./env";
 import { registryService } from "./registryIdl";
-import { buildManifestWire, getRegisteredInboxCanisterId, claimAiAppLinkCode, revokeAiAppUserKey } from "../../src/features/openchat/registerAiApp";
+import { buildManifestWire, getRegisteredInboxCanisterId } from "../../src/features/openchat/registerAiApp";
 
 async function registryActor(identity: Parameters<typeof agentFor>[0]) {
   const agent = await agentFor(identity);
@@ -22,19 +21,7 @@ function uniqueName(): string {
   return "iou-e2e-" + Date.now().toString(36) + "-" + Math.random().toString(36).slice(2, 8);
 }
 
-async function p256SpkiPemAndSigner(): Promise<{ pem: string; sign: (p: Uint8Array) => Promise<Uint8Array> }> {
-  const kp = (await crypto.subtle.generateKey({ name: "ECDSA", namedCurve: "P-256" }, true, ["sign"])) as CryptoKeyPair;
-  const spki = new Uint8Array(await crypto.subtle.exportKey("spki", kp.publicKey));
-  let bin = "";
-  for (const b of spki) bin += String.fromCharCode(b);
-  const body = (btoa(bin).match(/.{1,64}/g) ?? []).join("\n");
-  const pem = `-----BEGIN PUBLIC KEY-----\n${body}\n-----END PUBLIC KEY-----\n`;
-  const sign = async (preimage: Uint8Array) =>
-    new Uint8Array(await crypto.subtle.sign({ name: "ECDSA", hash: "SHA-256" }, kp.privateKey, preimage.slice().buffer as ArrayBuffer));
-  return { pem, sign };
-}
-
-describeE2E("OpenChat registry — register/explore/delete + claim/revoke negatives", () => {
+describeE2E("OpenChat registry — register/explore/delete", () => {
   it("reads back the LIVE 'iou' app's registered inbox (read-only, non-destructive)", async () => {
     const inbox = await getRegisteredInboxCanisterId({
       host: E2E.host,
@@ -83,11 +70,8 @@ describeE2E("OpenChat registry — register/explore/delete + claim/revoke negati
     expect("NotFound" in del2).toBe(true); // idempotent-ish: already gone
   });
 
-  it("P0-15: a base-manifest redeploy self-heals when re-registered with the user's types (template rule restored)", async () => {
-    // The core of the "types not mapped after a fresh start" journey, proven at the live canister:
-    // a deploy registers the BASE manifest (no template rules); IOU's app-load sync then re-registers
-    // the SAME app (upsert) with the user's saved types, restoring the `template` keyword_map so a
-    // chat message can route to a type again.
+  it("keeps private account templates out of a live public manifest re-registration", async () => {
+    // Prove the privacy boundary across the real Candid register/read-back path.
     const identity = freshIdentity();
     const actor = await registryActor(identity);
     const name = uniqueName();
@@ -98,23 +82,24 @@ describeE2E("OpenChat registry — register/explore/delete + claim/revoke negati
         (a) => a.manifest.name === name,
       )!.manifest;
 
-    // 1. Deploy/CI registers the BASE manifest (no user types).
+    // 1. Deploy/CI registers the static public manifest.
     const base = { ...buildManifestWire("", undefined, () => {}, E2E.actionInboxId, []), name, description: "p0-15 base" };
     const r1 = await actor.register_ai_app({ manifest: base });
     expect("Success" in r1).toBe(true);
     const appId = Number(r1.Success.id);
-    expect(tmplRule(await readManifest())).toBeUndefined(); // no template routing yet
+    expect(tmplRule(await readManifest())).toBeUndefined();
 
-    // 2. App-load sync re-registers the SAME app WITH the user's types (upsert → same id).
-    const templates = [{ id: "z1", name: "Reservation", keywords: ["reservation", "booking"] }];
+    // 2. Supply private values through the regression-only builder seam.
+    const templates = [{ id: "z1", name: "Private Reservation", keywords: ["private-booking-trigger"] }];
     const healed = { ...buildManifestWire("", undefined, () => {}, E2E.actionInboxId, templates), name, description: "p0-15 healed" };
     const r2 = await actor.register_ai_app({ manifest: healed });
     expect(Number(r2.Success.id)).toBe(appId);
 
-    // 3. The template keyword_map is back — routing restored.
-    const rule = tmplRule(await readManifest());
-    expect(rule).toBeDefined();
-    expect(rule!.keyword_map!.map.map((m) => m.value)).toContain("Reservation");
+    // 3. The live public record contains neither the roster nor its values.
+    const registered = await readManifest();
+    expect(tmplRule(registered)).toBeUndefined();
+    expect(JSON.stringify(registered)).not.toContain("Private Reservation");
+    expect(JSON.stringify(registered)).not.toContain("private-booking-trigger");
 
     await actor.delete_ai_app({ name });
   });
@@ -141,48 +126,4 @@ describeE2E("OpenChat registry — register/explore/delete + claim/revoke negati
     await actorB.delete_ai_app({ name }); // B (the current owner) cleans up
   });
 
-  it("claim with a nonexistent code returns CodeNotFound", async () => {
-    const out = await claimAiAppLinkCode({
-      host: E2E.host,
-      userIndexCanisterId: E2E.userIndexId,
-      code: "000000",
-      publicKeyPem: "-----BEGIN PUBLIC KEY-----\nX\n-----END PUBLIC KEY-----\n",
-      identity: freshIdentity(),
-    });
-    expect(out.kind).toBe("code_not_found");
-  });
-
-  it("revoke of an unpaired key returns KeyNotFound after verifying the proof-of-possession signature", async () => {
-    const { pem, sign } = await p256SpkiPemAndSigner();
-    const out = await revokeAiAppUserKey({
-      host: E2E.host,
-      userIndexCanisterId: E2E.userIndexId,
-      publicKeyPem: pem,
-      sign, // signs the canonical challenge with the matching private key → on-chain verify passes
-      identity: freshIdentity(),
-    });
-    // The signature is valid (verified on-chain) but the key was never paired → KeyNotFound.
-    expect(out.kind).toBe("key_not_found");
-  });
-
-  it("throttles a caller after repeated failed claims (per-caller failure window)", async () => {
-    const throttled = freshIdentity();
-    const outcomes: string[] = [];
-    for (let i = 0; i < 13; i++) {
-      const out = await claimAiAppLinkCode({
-        host: E2E.host,
-        userIndexCanisterId: E2E.userIndexId,
-        code: "000000",
-        publicKeyPem: "-----BEGIN PUBLIC KEY-----\nX\n-----END PUBLIC KEY-----\n",
-        identity: throttled,
-      });
-      outcomes.push(out.kind);
-      if (out.kind === "oc_error") break; // throttle kicked in
-    }
-    // Early attempts are plain CodeNotFound; after the per-caller cap the canister returns a
-    // throttle Error (oc_error). If the environment's window was already primed we still expect
-    // to observe the throttle.
-    expect(outcomes).toContain("oc_error");
-    expect(outcomes[0]).toBe("code_not_found");
-  });
 });

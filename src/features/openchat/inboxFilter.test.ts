@@ -1,35 +1,25 @@
 // visibleInboxFor — the SheetPage wiring that decides which chat cards a sheet shows.
 //
-// WHY A SECOND FILE when placeDraftOnSheet is already covered. The reported bug ("the child's drafts
-// are pending on the father's House sheet, and on House etc") was never a bug INSIDE a predicate: the
-// predicates were right, the call site asked the wrong question. It passed the raw chat key with no
-// confirmer, so a partner's fanned-out copy — keyed from THEIR side, naming the father — matched
-// nothing the father had linked, read as "unpinned", and unpinned means "show on every sheet".
-//
-// That call site is the only caller of placeDraftOnSheet. Dropping `confirmedBy` from the argument,
-// or reverting to the old chat-only predicate, restores the bug with every other unit test still
-// green — draftVisibility.test.ts keeps passing, because the function it tests is untouched. So this
-// file tests the WIRING: the same real card, asked about three different sheets.
+// This tests the SheetPage wiring: a verified app-scoped chat handle linked to one sheet must not
+// appear on any other sheet, while dismissal/import dedupe uses the app-scoped message handle.
 
 import { describe, it, expect } from "vitest";
 import { visibleInboxFor, type InboxCard, type ImportedEntry } from "./inboxFilter";
 import { parseDraftBatch } from "../entries/draft";
 
-const FATHER = "father-oc-id";
-const CHILD = "child-oc-id";
+const CHAT_HANDLE = "AgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgI";
+const OTHER_CHAT_HANDLE = "BAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQ";
 
 const FC_SHEET = "c819f76d77f260b3"; // the father↔child sheet, the one HE linked that chat to
 const HOUSE_SHEET = "1ac9c9c2d4b54061"; // House — where the drafts wrongly appeared
 const OTHER_SHEET = "0000000000000000"; // "…etc": any other sheet the father owns
 
 // The father's view: he linked his side of the chat with the child.
-const FATHER_LINKS = { [`direct:${CHILD}`]: FC_SHEET };
+const FATHER_LINKS = { [CHAT_HANDLE]: FC_SHEET };
 
-// The card as it reaches the FATHER: OpenChat built it in the child's canister, so the chat key names
-// the father and the confirmer is the child.
 const CHILDS_CARD: InboxCard & { id: string } = {
   id: "1",
-  context: { chat: `direct:${FATHER}`, confirmedBy: CHILD, messageId: "m1" },
+  context: { chatHandle: CHAT_HANDLE, messageHandle: "m1" },
   draft: { amount: 10, currency: "USD" },
 };
 
@@ -66,13 +56,16 @@ describe("visibleInboxFor — the reported bug, at the call site that caused it"
   });
 
   it("keeps an UNLINKED chat's card visible everywhere, so the user can choose where it lands", () => {
-    const stranger = { ...CHILDS_CARD, context: { chat: "direct:stranger", confirmedBy: "stranger", messageId: "m9" } };
+    const stranger = {
+      ...CHILDS_CARD,
+      context: { chatHandle: OTHER_CHAT_HANDLE, messageHandle: "m9" },
+    };
     for (const sheetId of [FC_SHEET, HOUSE_SHEET, OTHER_SHEET]) {
       expect(visible(sheetId, { inboxPending: [stranger] })).toHaveLength(1);
     }
   });
 
-  it("keeps a wrapper-less (pre-v2) card visible — it carries no provenance to route by", () => {
+  it("keeps a wrapper-less (pre-v4 local) card visible — it carries no provenance to route by", () => {
     const noContext = { id: "2", draft: { amount: 10, currency: "USD" } };
     expect(visible(HOUSE_SHEET, { inboxPending: [noContext] })).toHaveLength(1);
   });
@@ -90,14 +83,14 @@ describe("visibleInboxFor — the cross-member layers stay wired", () => {
     expect(visible(FC_SHEET, { entries: [{ deleted: true, payload: { import_message_id: "m1" } }] })).toHaveLength(1);
   });
 
-  it("collapses a double-confirm race to one card per messageId", () => {
-    const twin = { ...CHILDS_CARD, id: "2", context: { ...CHILDS_CARD.context!, confirmedBy: FATHER } };
+  it("collapses a double-confirm race to one card per app-scoped message handle", () => {
+    const twin = { ...CHILDS_CARD, id: "2" };
     expect(visible(FC_SHEET, { inboxPending: [CHILDS_CARD, twin] })).toHaveLength(1);
   });
 });
 
 describe("visibleInboxFor — the wrapper-less draft_id fallback needs BOTH parse inputs", () => {
-  // A pre-v2 card has no messageId, so "already imported" falls back to the content-hash draft_id —
+  // A pre-v4 wrapper-less local card has no messageId, so duplicate detection falls back to draft_id —
   // which only exists if the draft parses. Both the template resolver and the default currency feed
   // that parse, and dropping either silently turns the fallback off: the card would reappear after a
   // successful import, with nothing failing.

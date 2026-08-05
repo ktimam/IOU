@@ -52,6 +52,10 @@ const reservation = tpl({
 
 const EMPTY_PAYLOAD = { templates: [], dismissed: [] };
 
+function rawPairSlot(value: unknown): Uint8Array {
+  return new TextEncoder().encode(JSON.stringify(value));
+}
+
 describe("pair slot codec (v2 envelope)", () => {
   it("round-trips templates through encode/decode (empty dismissed by default)", () => {
     const slot = [reservation, tpl({ id: "rent", name: "Rent" })];
@@ -114,6 +118,139 @@ describe("pair slot codec (v2 envelope)", () => {
       JSON.stringify({ v: 2, templates: [], dismissed: "nope" }),
     );
     expect(decodePairSlot(nonArray)).toEqual(EMPTY_PAYLOAD);
+  });
+
+  it.each([
+    ["numeric name", { name: 7 }],
+    ["blank name", { name: "   " }],
+    ["invalid direction", { direction: "sideways" }],
+    ["invalid transaction type", { txn_type: "refund" }],
+    ["invalid updatedAt", { updatedAt: "yesterday" }],
+    ["out-of-range updatedAt", { updatedAt: 8_640_000_000_000_001 }],
+    ["zero revision", { rev: 0 }],
+    ["fractional revision", { rev: 1.5 }],
+    ["false tombstone marker", { deleted: false }],
+    ["null tombstone marker", { deleted: null }],
+    ["invalid currency", { currency: "USDX" }],
+    ["negative amount", { amount_minor: -1 }],
+    ["invalid fee percent", { fee_percent: 101 }],
+    ["negative fixed fee", { fee_fixed_minor: -1 }],
+    ["invalid fixed-fee currency", { fee_fixed_currency: "USDX" }],
+    [
+      "fixed-fee currency without a fixed fee",
+      { fee_fixed_minor: undefined, fee_fixed_currency: "EGP" },
+    ],
+    ["fee on a settlement", { txn_type: "settlement", fee_percent: 20 }],
+    ["non-array schedule", { schedule: "tomorrow" }],
+    ["empty schedule", { schedule: [] }],
+    ["negative schedule offset", { schedule: [{ offset_days: -1, percent: 100 }] }],
+    ["oversized schedule offset", { schedule: [{ offset_days: 36_501, percent: 100 }] }],
+    [
+      "invalid schedule anchor",
+      { schedule: [{ offset_days: 0, percent: 100, anchor: "end_of_month" }] },
+    ],
+    ["schedule total other than 100", { schedule: [{ offset_days: 0, percent: 99 }] }],
+    [
+      "schedule on a settlement",
+      {
+        txn_type: "settlement",
+        fee_percent: undefined,
+        schedule: [{ offset_days: 0, percent: 100 }],
+      },
+    ],
+    [
+      "oversized schedule",
+      {
+        schedule: Array.from({ length: 101 }, () => ({
+          offset_days: 0,
+          percent: 1,
+        })),
+      },
+    ],
+    ["non-array keywords", { keywords: "reservation" }],
+    ["too many keywords", { keywords: Array.from({ length: 51 }, (_, i) => "k" + i) }],
+    ["oversized keyword", { keywords: ["k".repeat(65)] }],
+    ["blank keyword", { keywords: ["   "] }],
+    ["oversized id", { id: "i".repeat(129) }],
+    ["oversized name", { name: "n".repeat(201) }],
+    ["oversized note", { note: "n".repeat(2_001) }],
+  ])(
+    "isolates a malformed partner template (%s), retaining valid neighbors and tombstones",
+    (_label, override) => {
+      const left = tpl({ id: "left", name: "Left" });
+      const tombstone = tpl({
+        id: "gone",
+        name: "Gone",
+        deleted: true,
+        rev: 4,
+        updatedAt: 4_000,
+      });
+      const right = tpl({ id: "right", name: "Right" });
+      const bad = { ...reservation, id: "bad", ...override };
+      const decoded = decodePairSlot(
+        rawPairSlot({
+          v: 2,
+          templates: [left, bad, tombstone, right],
+          dismissed: [],
+        }),
+      );
+
+      expect(() => mergePairTemplates(decoded.templates, [])).not.toThrow();
+      expect(decoded.templates.map((template) => template.id)).toEqual([
+        "left",
+        "gone",
+        "right",
+      ]);
+      expect(
+        visibleTemplates(mergePairTemplates(decoded.templates, [])).map(
+          (template) => template.id,
+        ),
+      ).toEqual(["left", "right"]);
+    },
+  );
+
+  it("bounds decoded template and dismissed arrays while retaining the newest valid dismissals", () => {
+    const templates = Array.from({ length: 101 }, (_, i) =>
+      tpl({ id: "template-" + i, name: "Template " + i }),
+    );
+    const dismissed = [
+      "",
+      "valid-but-old",
+      "x".repeat(129),
+      7,
+      ...Array.from({ length: 305 }, (_, i) => "d" + i),
+    ];
+    const decoded = decodePairSlot(
+      rawPairSlot({ v: 2, templates, dismissed }),
+    );
+
+    expect(decoded.templates).toHaveLength(100);
+    expect(decoded.templates[0].id).toBe("template-0");
+    expect(decoded.templates[99].id).toBe("template-99");
+    expect(decoded.dismissed).toHaveLength(DISMISSED_CAP);
+    expect(decoded.dismissed[0]).toBe("d5");
+    expect(decoded.dismissed[DISMISSED_CAP - 1]).toBe("d304");
+    expect(decoded.dismissed).not.toContain("");
+    expect(decoded.dismissed).not.toContain("valid-but-old");
+    expect(decoded.dismissed).not.toContain("x".repeat(129));
+  });
+
+  it("rejects unrecognized envelope versions and plaintext over the slot byte cap", () => {
+    expect(
+      decodePairSlot(
+        rawPairSlot({ v: 3, templates: [reservation], dismissed: [] }),
+      ),
+    ).toEqual(EMPTY_PAYLOAD);
+    expect(
+      decodePairSlot(
+        rawPairSlot({
+          v: 2,
+          templates: [reservation],
+          dismissed: [],
+          padding: "x".repeat(64_001),
+        }),
+      ),
+    ).toEqual(EMPTY_PAYLOAD);
   });
 });
 

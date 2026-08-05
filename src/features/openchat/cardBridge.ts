@@ -13,23 +13,31 @@
 // values and hands them back over the bridge.
 
 import type { EntryDraft } from "../entries/draft";
+import { isEncryptedTemplateRef } from "./templateRef";
 import type { Direction } from "../entries/types";
 
 // The bridge message type strings, both directions. Exactly the values in the
 // build contract; kept in one table so page + tests can't drift.
 export const CARD_MSG = {
+  // host → iframe bootstrap (fresh for every iframe load)
+  bootstrap: "oc:card:bootstrap",
   // iframe (app) → host
   ready: "oc:card:ready",
+  privateContextReady: "oc:card:private-context-ready",
   resize: "oc:card:resize",
   confirm: "oc:card:confirm",
   cancel: "oc:card:cancel",
   // host → iframe (app)
   init: "oc:card:init",
   busy: "oc:card:busy",
+  privateContextRequest: "oc:card:private-context-request",
 } as const;
 
 // The init protocol version this page speaks. parseInit rejects any other.
-export const CARD_INIT_VERSION = 1 as const;
+export const CARD_INIT_VERSION = 2 as const;
+export const CARD_FRAME_NONCE_BYTES = 32;
+export const CARD_RECIPIENT_KEY_SCHEME = "iou.vetkd.bls12-381.v1";
+export const APP_SCOPED_CARD_CONTEXT_VERSION = 1 as const;
 
 // Upper bound on how many entries a MULTI card will render. A real "several transactions in one
 // message" extraction is a handful; this only exists so a hostile/oversized init can't ask the page to
@@ -38,14 +46,31 @@ export const MAX_CARD_ENTRIES = 100;
 
 export type CardTheme = "light" | "dark";
 
+export type AppScopedCardContextV1 = {
+  contextVersion: typeof APP_SCOPED_CARD_CONTEXT_VERSION;
+  appSubject: string;
+  chatHandle: string;
+  messageHandle: string;
+  appId: number;
+  appRevision: bigint;
+  actionId: string;
+};
+
+export type CardPrivateContext = {
+  capability: string;
+  expiresAt: bigint;
+  context: AppScopedCardContextV1;
+};
+
 // The normalized init context the page renders against. `data` is the extraction
 // object (loose EntryDraft prefill); theme + readonly drive presentation.
 export type CardInitContext = {
-  chatKey?: string;
-  appId?: string;
-  actionId?: string;
+  appId: number;
+  appRevision: bigint;
+  actionId: string;
   theme: CardTheme;
   readonly: boolean;
+  privateContext?: CardPrivateContext;
 };
 
 // The init `data` is EITHER a bare EntryDraft (SINGLE mode — the current, byte-identical behavior)
@@ -55,6 +80,7 @@ export type CardInitContext = {
 export type CardInitData = EntryDraft & { entries?: EntryDraft[] };
 
 export type CardInit = {
+  frameNonce: string;
   data: CardInitData;
   context: CardInitContext;
 };
@@ -82,7 +108,9 @@ export type CardFormState = {
   //
   // Not editable, and cannot be: the frame is storage-partitioned and cannot read the account's saved
   // types, so it has no roster to offer. It can only carry what the extraction chose.
-  template?: string;
+  // Selected account-scoped type id. It exists only in iframe memory;
+  // confirmation carries an encrypted template_ref, never this id or name.
+  templateId?: string;
   amount: string;
   currency: string;
   direction: Direction;
@@ -97,6 +125,100 @@ function isPlainObject(v: unknown): v is Record<string, unknown> {
   return typeof v === "object" && v !== null && !Array.isArray(v);
 }
 
+const U64_MAX = 18_446_744_073_709_551_615n;
+const U32_MAX = 4_294_967_295;
+
+function isCanonicalBase64Url(value: unknown, bytesLength: number): value is string {
+  if (typeof value !== "string" || !/^[A-Za-z0-9_-]{43}$/.test(value)) return false;
+  try {
+    const standard = value.replace(/-/g, "+").replace(/_/g, "/") + "=";
+    const bytes = Uint8Array.from(atob(standard), (c) => c.charCodeAt(0));
+    const canonical = btoa(String.fromCharCode(...bytes))
+      .replace(/\+/g, "-")
+      .replace(/\//g, "_")
+      .replace(/=+$/, "");
+    return bytes.length === bytesLength && canonical === value;
+  } catch {
+    return false;
+  }
+}
+
+export function isCanonicalFrameNonce(value: unknown): value is string {
+  return isCanonicalBase64Url(value, CARD_FRAME_NONCE_BYTES);
+}
+
+/** A UserIndex-issued app subject/chat/message handle: exactly 32 canonical bytes. */
+export function isCanonicalAppScopedHandle(value: unknown): value is string {
+  return isCanonicalBase64Url(value, 32);
+}
+
+export function parseBootstrap(msg: unknown): { frameNonce: string } | null {
+  if (!isPlainObject(msg)) return null;
+  if (msg.type !== CARD_MSG.bootstrap || msg.version !== CARD_INIT_VERSION) return null;
+  return isCanonicalFrameNonce(msg.frameNonce) ? { frameNonce: msg.frameNonce } : null;
+}
+
+/** Exact target for iframe-to-parent messages after a trusted bootstrap. */
+export function cardParentTargetOrigin(eventOrigin: string): string {
+  return eventOrigin && eventOrigin !== "null" ? eventOrigin : "*";
+}
+
+const RAW_CORRELATION_FIELDS = [
+  "userId",
+  "user_id",
+  "userIds",
+  "chat",
+  "chatKey",
+  "chat_key",
+  "messageId",
+  "message_id",
+  "threadRootMessageIndex",
+  "thread_root_message_index",
+  "confirmedBy",
+  "confirmed_by",
+] as const;
+
+function hasRawCorrelationField(value: Record<string, unknown>): boolean {
+  return RAW_CORRELATION_FIELDS.some((field) => Object.prototype.hasOwnProperty.call(value, field));
+}
+
+function parseAppScopedContext(
+  value: unknown,
+  outer: Pick<CardInitContext, "appId" | "appRevision" | "actionId">,
+): AppScopedCardContextV1 | null {
+  if (!isPlainObject(value) || hasRawCorrelationField(value)) return null;
+  if (
+    value.contextVersion !== APP_SCOPED_CARD_CONTEXT_VERSION ||
+    !isCanonicalAppScopedHandle(value.appSubject) ||
+    !isCanonicalAppScopedHandle(value.chatHandle) ||
+    !isCanonicalAppScopedHandle(value.messageHandle) ||
+    typeof value.appId !== "number" ||
+    !Number.isSafeInteger(value.appId) ||
+    value.appId < 0 ||
+    value.appId > U32_MAX ||
+    typeof value.appRevision !== "bigint" ||
+    value.appRevision < 0n ||
+    value.appRevision > U64_MAX ||
+    typeof value.actionId !== "string" ||
+    value.actionId.length === 0 ||
+    value.actionId.length > 128 ||
+    value.appId !== outer.appId ||
+    value.appRevision !== outer.appRevision ||
+    value.actionId !== outer.actionId
+  ) {
+    return null;
+  }
+  return {
+    contextVersion: APP_SCOPED_CARD_CONTEXT_VERSION,
+    appSubject: value.appSubject,
+    chatHandle: value.chatHandle,
+    messageHandle: value.messageHandle,
+    appId: value.appId,
+    appRevision: value.appRevision,
+    actionId: value.actionId,
+  };
+}
+
 /**
  * Parse an inbound postMessage into a normalized CardInit, or null when it is
  * not a well-formed `oc:card:init` (wrong type, wrong/missing version, not an
@@ -104,10 +226,11 @@ function isPlainObject(v: unknown): v is Record<string, unknown> {
  * to null so the page ignores them. `data` and `context` are defaulted, never
  * trusted verbatim.
  */
-export function parseInit(msg: unknown): CardInit | null {
+export function parseInit(msg: unknown, expectedFrameNonce: string): CardInit | null {
   if (!isPlainObject(msg)) return null;
   if (msg.type !== CARD_MSG.init) return null;
   if (msg.version !== CARD_INIT_VERSION) return null;
+  if (!isCanonicalFrameNonce(expectedFrameNonce) || msg.frameNonce !== expectedFrameNonce) return null;
 
   let data: CardInitData;
   if (isPlainObject(msg.data)) {
@@ -125,27 +248,80 @@ export function parseInit(msg: unknown): CardInit | null {
     data = {};
   }
 
-  const ctxIn = isPlainObject(msg.context) ? msg.context : {};
+  if (!isPlainObject(msg.context)) return null;
+  const ctxIn = msg.context;
+  if (hasRawCorrelationField(ctxIn)) return null;
+  if (
+    typeof ctxIn.appId !== "number" ||
+    !Number.isSafeInteger(ctxIn.appId) ||
+    ctxIn.appId < 0 ||
+    ctxIn.appId > U32_MAX ||
+    typeof ctxIn.appRevision !== "bigint" ||
+    ctxIn.appRevision < 0n ||
+    ctxIn.appRevision > U64_MAX ||
+    typeof ctxIn.actionId !== "string" ||
+    ctxIn.actionId.length === 0 ||
+    ctxIn.actionId.length > 128
+  ) {
+    return null;
+  }
+  const appCoordinates = {
+    appId: ctxIn.appId,
+    appRevision: ctxIn.appRevision,
+    actionId: ctxIn.actionId,
+  };
+  let privateContext: CardPrivateContext | undefined;
+  if (ctxIn.privateContext !== undefined) {
+    if (!isPlainObject(ctxIn.privateContext) || hasRawCorrelationField(ctxIn.privateContext)) {
+      return null;
+    }
+    const scopedContext = parseAppScopedContext(ctxIn.privateContext.context, appCoordinates);
+    if (
+      !isCanonicalFrameNonce(ctxIn.privateContext.capability) ||
+      typeof ctxIn.privateContext.expiresAt !== "bigint" ||
+      ctxIn.privateContext.expiresAt < 0n ||
+      ctxIn.privateContext.expiresAt > U64_MAX ||
+      !scopedContext
+    ) {
+      return null;
+    }
+    privateContext = {
+      capability: ctxIn.privateContext.capability,
+      expiresAt: ctxIn.privateContext.expiresAt,
+      context: scopedContext,
+    };
+  }
   const context: CardInitContext = {
+    appId: ctxIn.appId,
+    appRevision: ctxIn.appRevision,
+    actionId: ctxIn.actionId,
     theme: ctxIn.theme === "light" ? "light" : "dark",
     readonly: ctxIn.readonly === true,
-    ...(typeof ctxIn.chatKey === "string" ? { chatKey: ctxIn.chatKey } : {}),
-    ...(typeof ctxIn.appId === "string" ? { appId: ctxIn.appId } : {}),
-    ...(typeof ctxIn.actionId === "string" ? { actionId: ctxIn.actionId } : {}),
+    ...(privateContext ? { privateContext } : {}),
   };
 
-  return { data, context };
+  return { frameNonce: expectedFrameNonce, data, context };
 }
 
 // Parse an inbound `oc:card:busy` — the host's progress signal while a confirm/cancel round-trips
 // (deposit + fan-out). Returns { busy } or null for anything else, so the page's one listener can try
 // this alongside parseInit. Like parseInit it trusts only the SHAPE (a bare boolean), never any
 // origin-carried data — the message conveys no secret and drives presentation only.
-export function parseBusy(msg: unknown): { busy: boolean } | null {
+export function parseBusy(msg: unknown, expectedFrameNonce: string): { busy: boolean } | null {
   if (!isPlainObject(msg)) return null;
   if (msg.type !== CARD_MSG.busy) return null;
+  if (msg.version !== CARD_INIT_VERSION || msg.frameNonce !== expectedFrameNonce) return null;
   if (typeof msg.busy !== "boolean") return null;
   return { busy: msg.busy };
+}
+
+export function parsePrivateContextRequest(msg: unknown, expectedFrameNonce: string): boolean {
+  return (
+    isPlainObject(msg) &&
+    msg.type === CARD_MSG.privateContextRequest &&
+    msg.version === CARD_INIT_VERSION &&
+    msg.frameNonce === expectedFrameNonce
+  );
 }
 
 /** Seed the editable form from the (loose, untrusted) extraction object. */
@@ -215,11 +391,9 @@ export function initToFormState(data: EntryDraft, seedCurrency = ""): CardFormSt
   const date = typeof data.date === "string" ? data.date : "";
   // Carried only when the extraction actually routed to a type, so a card that never had one gains
   // no empty field (and buildConfirmPayload emits nothing new for it).
-  const template = typeof data.template === "string" ? data.template.trim() : "";
   return {
     ...(typeof data.message === "string" ? { message: data.message } : {}),
     kind,
-    ...(template !== "" ? { template } : {}),
     amount,
     currency,
     direction,
@@ -249,7 +423,10 @@ export function initEntries(data: CardInitData, seedCurrency = ""): CardFormStat
  * string (so downstream validation surfaces a bad amount rather than silently
  * coercing it).
  */
-export function buildConfirmPayload(state: CardFormState): CardConfirmPayload {
+export function buildConfirmPayload(
+  state: CardFormState,
+  templateRef?: string,
+): CardConfirmPayload {
   const trimmedAmount = state.amount.trim();
   const amountNum = Number(trimmedAmount);
   const amount: number | string =
@@ -272,8 +449,9 @@ export function buildConfirmPayload(state: CardFormState): CardConfirmPayload {
   // (fee %, due schedule, currency/note/direction) — the payload REPLACES the stored extraction, so
   // anything the card omits is lost, not inherited. parseDraft itself ignores the field; SheetPage's
   // resolveTemplateBase is what consumes it.
-  const template = (state.template ?? "").trim();
-  if (template !== "") payload.template = template;
+  if (isEncryptedTemplateRef(templateRef)) {
+    payload.template_ref = templateRef;
+  }
   if (state.date.trim() !== "") payload.date = state.date;
   return payload;
 }
@@ -283,30 +461,55 @@ export function buildConfirmPayload(state: CardFormState): CardConfirmPayload {
  * the SAME buildConfirmPayload the single card uses. Handed back UNWRAPPED (a top-level array, not
  * `{ entries: [...] }`) — IOU's canister side (parseDraftBatch) imports the array element-by-element.
  */
-export function buildMultiConfirmPayload(states: CardFormState[]): CardConfirmPayload[] {
-  return states.map((s) => buildConfirmPayload(s));
+export function buildMultiConfirmPayload(
+  states: CardFormState[],
+  templateRefs: (string | undefined)[] = [],
+): CardConfirmPayload[] {
+  return states.map((s, index) => buildConfirmPayload(s, templateRefs[index]));
 }
 
 // ── Outbound message builders (iframe → host) ────────────────────────────────
 // Thin, so the page can't misspell a bridge type and tests can assert the wire.
 
-export function buildReady(): { type: typeof CARD_MSG.ready } {
-  return { type: CARD_MSG.ready };
+export function buildReady(frameNonce: string) {
+  if (!isCanonicalFrameNonce(frameNonce)) throw new Error("invalid card frame nonce");
+  return {
+    type: CARD_MSG.ready,
+    version: CARD_INIT_VERSION,
+    frameNonce,
+  } as const;
 }
 
-export function buildResize(height: number): { type: typeof CARD_MSG.resize; height: number } {
-  return { type: CARD_MSG.resize, height };
+export function buildPrivateContextReady(frameNonce: string, recipientPublicKey: string) {
+  if (!isCanonicalFrameNonce(frameNonce)) throw new Error("invalid card frame nonce");
+  if (typeof recipientPublicKey !== "string" || !/^[A-Za-z0-9_-]{64}$/.test(recipientPublicKey)) {
+    throw new Error("invalid card recipient public key");
+  }
+  return {
+    type: CARD_MSG.privateContextReady,
+    version: CARD_INIT_VERSION,
+    frameNonce,
+    privateContext: {
+      recipientKeyScheme: CARD_RECIPIENT_KEY_SCHEME,
+      recipientPublicKey,
+    },
+  } as const;
+}
+
+export function buildResize(frameNonce: string, height: number) {
+  return { type: CARD_MSG.resize, version: CARD_INIT_VERSION, frameNonce, height } as const;
 }
 
 // Accepts a single EntryDraft (SINGLE mode) or an array of them (MULTI mode). The payload is passed
 // through verbatim — the host distinguishes the two by whether payload is an array (parseDraftBatch
 // handles both), so the same bridge type carries both shapes.
 export function buildConfirm(
+  frameNonce: string,
   payload: CardConfirmPayload | CardConfirmPayload[],
-): { type: typeof CARD_MSG.confirm; payload: CardConfirmPayload | CardConfirmPayload[] } {
-  return { type: CARD_MSG.confirm, payload };
+) {
+  return { type: CARD_MSG.confirm, version: CARD_INIT_VERSION, frameNonce, payload } as const;
 }
 
-export function buildCancel(): { type: typeof CARD_MSG.cancel } {
-  return { type: CARD_MSG.cancel };
+export function buildCancel(frameNonce: string) {
+  return { type: CARD_MSG.cancel, version: CARD_INIT_VERSION, frameNonce } as const;
 }

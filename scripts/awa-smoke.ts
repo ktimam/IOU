@@ -27,6 +27,7 @@ import {
   wrapSheetKey,
 } from "../src/features/crypto/devVetkd";
 import { canonicalReplaceBytes } from "../src/features/replaceMember/replaceMember";
+import { encryptClosingBalances } from "../src/features/entries/closingBalances";
 
 // Node polyfill for WebCrypto (and the localStorage shim is implicit:
 // devVetkd's localStorage access is guarded with try/catch so it
@@ -369,7 +370,8 @@ async function main() {
 
   // ─── 9. close_sheet as partner ───
   console.log("\n=== close_sheet (partner) ===");
-  await (partner as any).close_sheet(sheetId, []);
+  const closingSnapshot = await encryptClosingBalances([], K_sheet);
+  await (partner as any).close_sheet_encrypted(sheetId, closingSnapshot);
   const closedSheet = unwrap(await (tester as any).get_sheet(sheetId));
   console.log("state:", closedSheet.state);
   ok(isClosed(closedSheet.state), "sheet is Closed");
@@ -409,9 +411,12 @@ async function main() {
   ok(archived[0].closed_at != null && archived[0].closed_at !== undefined
     && (!Array.isArray(archived[0].closed_at) || archived[0].closed_at.length > 0),
     "archived sheet has closed_at");
-  ok(archived[0].closing_balances != null
-    && (!Array.isArray(archived[0].closing_balances) || archived[0].closing_balances.length >= 0),
-    "archived sheet has closing_balances array");
+  ok(!("closing_balances" in archived[0]),
+    "archived sheet does not expose legacy plaintext closing_balances");
+  ok(!isEmptyOpt(archived[0].closing_balances_key)
+    && !isEmptyOpt(archived[0].closing_balances_enc)
+    && !isEmptyOpt(archived[0].closing_balances_iv),
+    "archived sheet has an encrypted closing-balance envelope");
 
   // Non-member cannot list archived sheets.
   console.log("\n=== list_archived_sheets (default identity, should trap) ===");

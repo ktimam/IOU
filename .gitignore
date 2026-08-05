@@ -61,7 +61,11 @@ Thumbs.db
 # per-app action_inbox deploy state (deploy:inbox)
 .openchat-inbox/
 
+# Generated local co-deployment project (canister ids, wallets, DID/JS, WASMs)
+.openchat-iou/
+
 # Playwright UI-test scratch
 .pw-profiles/
+.pw-profiles-scenarios/
 test-results/
 playwright-report/

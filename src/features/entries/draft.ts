@@ -40,6 +40,9 @@ export type EntryDraft = {
   // Template id the manifest keyword_map (or the model) chose for this message. The caller resolves
   // it to a defaults baseline and passes it to parseDraft as `base`; parseDraft itself ignores it.
   template?: string;
+  // Encrypted account-scoped template id from an OpenChat card. This is opaque to chat participants;
+  // only the linked IOU sheet can authenticate/decrypt it for the exact card message and entry row.
+  template_ref?: string;
 };
 
 export type ParsedDraft = {

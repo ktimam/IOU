@@ -16,8 +16,10 @@ import {
   createElement,
   type ReactNode,
 } from "react";
+import { useAuth } from "../auth/AuthProvider";
+import { scopedStorageKey } from "../storage/scopedStorage";
 
-const PREFS_KEY = "iou:prefs:v1";
+const PREFS_KEY_PREFIX = "iou:prefs:v2";
 
 export type Preferences = {
   defaultCurrency: string;
@@ -35,21 +37,60 @@ const DEFAULTS: Preferences = {
   partnerNames: {},
 };
 
-function load(): Preferences {
-  if (typeof localStorage === "undefined") return { ...DEFAULTS };
+function defaultPreferences(): Preferences {
+  return {
+    ...DEFAULTS,
+    accountNames: {},
+    sheetNames: {},
+    partnerNames: {},
+  };
+}
+
+function stringMap(value: unknown): Record<string, string> {
+  if (value == null || typeof value !== "object" || Array.isArray(value)) return {};
+  return Object.fromEntries(
+    Object.entries(value).filter((entry): entry is [string, string] => typeof entry[1] === "string"),
+  );
+}
+
+function normalizePreferences(value: unknown): Preferences {
+  if (value == null || typeof value !== "object" || Array.isArray(value)) {
+    return defaultPreferences();
+  }
+  const candidate = value as Record<string, unknown>;
+  const currency =
+    typeof candidate.defaultCurrency === "string" &&
+    /^[A-Za-z]{3}$/.test(candidate.defaultCurrency.trim())
+      ? candidate.defaultCurrency.trim().toUpperCase()
+      : DEFAULTS.defaultCurrency;
+  return {
+    defaultCurrency: currency,
+    profileName: typeof candidate.profileName === "string" ? candidate.profileName : "",
+    accountNames: stringMap(candidate.accountNames),
+    sheetNames: stringMap(candidate.sheetNames),
+    partnerNames: stringMap(candidate.partnerNames),
+  };
+}
+
+export function preferencesStorageKey(principal: string | null | undefined): string {
+  return scopedStorageKey(PREFS_KEY_PREFIX, principal);
+}
+
+export function loadPreferences(principal: string | null | undefined): Preferences {
+  if (typeof localStorage === "undefined") return defaultPreferences();
   try {
-    const raw = localStorage.getItem(PREFS_KEY);
-    if (!raw) return { ...DEFAULTS };
-    return { ...DEFAULTS, ...(JSON.parse(raw) as Partial<Preferences>) };
+    const raw = localStorage.getItem(preferencesStorageKey(principal));
+    if (!raw) return defaultPreferences();
+    return normalizePreferences(JSON.parse(raw) as unknown);
   } catch {
-    return { ...DEFAULTS };
+    return defaultPreferences();
   }
 }
 
-function save(p: Preferences) {
+export function savePreferences(principal: string | null | undefined, p: Preferences) {
   if (typeof localStorage === "undefined") return;
   try {
-    localStorage.setItem(PREFS_KEY, JSON.stringify(p));
+    localStorage.setItem(preferencesStorageKey(principal), JSON.stringify(p));
   } catch {
     /* quota / disabled — non-fatal */
   }
@@ -67,26 +108,36 @@ type PrefsCtx = {
 const Ctx = createContext<PrefsCtx | null>(null);
 
 export function PreferencesProvider({ children }: { children: ReactNode }) {
-  const [prefs, setPrefs] = useState<Preferences>(load);
+  const { state } = useAuth();
+  const principal = state.kind === "authenticated" ? state.principal : null;
+  const scope = preferencesStorageKey(principal);
+  const [stored, setStored] = useState<{ scope: string; prefs: Preferences }>(() => ({
+    scope,
+    prefs: loadPreferences(principal),
+  }));
+  // Auth changes must not expose the previous principal's values even for one render.
+  const prefs = stored.scope === scope ? stored.prefs : loadPreferences(principal);
 
   const update = useCallback((patch: Partial<Preferences>) => {
-    setPrefs((prev) => {
+    setStored((previous) => {
+      const prev = previous.scope === scope ? previous.prefs : loadPreferences(principal);
       const next = { ...prev, ...patch };
-      save(next);
-      return next;
+      savePreferences(principal, next);
+      return { scope, prefs: next };
     });
-  }, []);
+  }, [principal, scope]);
 
   const mergeMap = useCallback(
     (key: "accountNames" | "sheetNames" | "partnerNames", id: string, name: string) => {
-      setPrefs((prev) => {
-        if (prev[key][id] === name) return prev; // no-op, avoid re-render churn
+      setStored((previous) => {
+        const prev = previous.scope === scope ? previous.prefs : loadPreferences(principal);
+        if (prev[key][id] === name) return { scope, prefs: prev }; // no-op, but adopt the new auth scope
         const next = { ...prev, [key]: { ...prev[key], [id]: name } };
-        save(next);
-        return next;
+        savePreferences(principal, next);
+        return { scope, prefs: next };
       });
     },
-    [],
+    [principal, scope],
   );
 
   const value = useMemo<PrefsCtx>(

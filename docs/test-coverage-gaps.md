@@ -1,10 +1,24 @@
 # Test coverage gap report
 
+> Security-review supersession (2026-08-01): historical rows below that require
+> account template names/keywords to be folded into OpenChat's public manifest are
+> intentionally obsolete. The secure contract is now a static public manifest plus
+> local matching against only the linked IOU account. Regression coverage lives in
+> `actionManifest.test.ts`, `registerAiApp.test.ts`, `manifestSync.test.ts`, and the
+> live registry test.
+>
+> Correlation-boundary supersession (2026-08-05): the raw
+> `/openchat/link-chat?chat=...` surface has been retired. Any historical row below that
+> asks to preserve, validate, or deep-link a raw `chat` query is obsolete and must not be
+> reintroduced. Current coverage proves that the old route redirects to `/` with its query
+> discarded, and that chat-to-sheet storage accepts only canonical app-scoped 32-byte
+> base64url handles while malformed or legacy raw values fail closed.
+
 ## Progress log (test + fix, P0 first)
 
 - ✅ **P0-20** deep-link hash drop — fixed (`deepLinkToPath` preserves `#openchat-connect`) + regression test.
-- ✅ **P0-9** — test proving types reach the wire manifest as a `template` keyword_map (+ negative).
-- ✅ **P0-8/10/11/12/13/14/17/18/27/28/29** manifest-sync — fixed: `shouldSyncOpenChatManifest` honors `connected`; new `readManifestSyncState`/`maybeSyncManifest` seams (unit-covered); sync now fires on Connect + type edit + app load (self-heals a base-manifest redeploy); `OC_CONNECTED_KEY` marker set on Connect, cleared on Disconnect.
+- ✅ **P0-9 security replacement** — tests prove private types do **not** reach the public wire manifest.
+- ✅ **Static manifest sync** — `shouldSyncOpenChatManifest` honors `connected`; refresh runs on Connect + app load without decrypting or accepting private templates; `OC_CONNECTED_KEY` is set on Connect and cleared on Disconnect.
 - ✅ **P0-34/4/5** fresh-device/recovery — resolved by **removing** the non-functional mnemonic recovery option (user decision): deleted `src/features/recovery/`, its route + settings link. (Data is device-local by design in the dev-crypto path; the misleading "recovery key" UI is gone.)
 
 ### Batch 2 (verified by parallel investigation against real code)
@@ -12,7 +26,7 @@
 - ✅ **P0-7** close-&-rotate stale chat link — **fixed**: `repointChatLinks` helper + `CloseSheetButton` re-points every chat pinned to the archived sheet onto the new active sheet (canister + cache). 5 unit tests.
 - ✅ **P0-3** sheet-key read-path — extracted pure `recoverSheetKey(blob, myKp)` from `SheetKeyContext.unwrapFor` (behavior-preserving) + 7 unit tests (self-unwrap-first, tagged fallback, empty/foreign/wrong-recipient/truncated errors, round-trip) — also first direct coverage of wrap/unwrapTaggedSheetKey.
 - ✅ **P0-26** invite-accept return-to-destination — **fixed**: `AcceptInvitePage` anonymous branch renders `SignInButtons` inline (like Settings/LinkChat) so `/pair/accept#…` survives sign-in. (Playwright test pending — needs live env.)
-- ℹ️ **P0-33** poll-cursor scoping — **already-handled**: the cursor is in-memory (reset to 0n per mount), not persisted; dedup sets are deploy-scoped. No change.
+- ✅ **P0-33** unsigned/persisted poll-cursor suppression — **resolved in source and unit coverage**: `actions` is now a replicated update, IOU always reads from `since_id = 0n`, and durable dedupe uses the signed full-width delivery identity. The numeric id is retained only as the exact acknowledgement locator paired with that delivery's secret.
 - ℹ️ **P0-21/22** fan-out post-time recipient keys — **by-design**: recipient keys are authored client-side into a self-contained card; the "zero recipients" case is already guarded (synchronous routing-less confirm). Pocket-ic lock-in tests pending.
 
 ### Batch 3 (e2e — live replica)
@@ -30,7 +44,7 @@
 
 ### Batch 6 (P0-15 core + first P1 units — all run-verified)
 
-- ✅ **P0-15** (verifiable core) — new e2e in `registry.e2e.test.ts`: a base-manifest redeploy (no template rules) self-heals when re-registered with the user's types (upsert → same app, `template` keyword_map restored). Run-verified on the live replica. (The full chat-extraction routing is the on-device model — not deterministically testable.)
+- ✅ **P0-15 privacy core** — live registry E2E proves re-registration ignores supplied private template names/keywords and keeps the public manifest roster-free.
 - ✅ **P1 U29** — `deepLinkToPath` drops the `iou://openchat/...` host (OpenChat surfaces use HTTPS, not deep links).
 - ✅ **P1 U1** — `createSheetForPair` solo seal: self-wrap in slot A, empty placeholder in slot B.
 
@@ -42,7 +56,7 @@ Triage of all 30 unit P1s vs the current suite: **8 already covered** by the bat
 
 ### Batch 8 (vitest-e2e P1 wave — live replica)
 
-Triaged 17 e2e P1s: 2 covered, 13 need a live OpenChat 6-digit code (deferred), 8 feasible → done (all green live):
+Triaged 17 e2e P1s: 2 covered, 13 need a live OpenChat claim token (deferred), 8 feasible → done (all green live):
 - ✅ **E2/E3/E4/E6** invite/leave guards — creator can't accept own code; accept_invite + issue_invite refused while archived; leave refused on a solo account.
 - ✅ **E1** a promoted member (creator left) re-invites → new partner joins + reads K.
 - ✅ **E5** accept_invite seals only the rewrapped sheets (others stay anonymous).
@@ -60,7 +74,7 @@ Triaged 17 e2e P1s: 2 covered, 13 need a live OpenChat 6-digit code (deferred), 
 The three "not automatable here" buckets were all closed:
 
 ### Batch 10 — live journey + the two "hard" ones
-- ✅ **P0-30/32 class (live journey)** — `scripts/live/journey-fanout.ts`: fully automated + repeatable with assertions. Resolves the manager↔father direct chat, pairs any member missing a per-user key via the REAL 6-digit Connect UI, proposes via the DETERMINISTIC manual-JSON prompt (no on-device model), partner confirms (disclosure ack; confirm label = manifest confirmLabel), asserts one confirm → +1 envelope in BOTH members' buckets. Passed twice consecutively. Gotchas encoded in the script (single CDP connection per port, `.chat-summary` rows, message-menu propose).
+- ✅ **P0-30/32 class (live journey)** — `scripts/live/journey-fanout.ts`: fully automated + repeatable with assertions. Resolves the manager↔father direct chat, pairs any member missing a per-user key via the real claim-token Connect UI, proposes via the DETERMINISTIC manual-JSON prompt (no on-device model), partner confirms (disclosure ack; confirm label = manifest confirmLabel), asserts one confirm → +1 envelope in BOTH members' buckets. Passed twice consecutively. Gotchas encoded in the script (single CDP connection per port, `.chat-summary` rows, message-menu propose).
 - ✅ **U23** — `handleAppUrl` extracted from useDeepLinks + unit tests (navigate on mapped, never on unmapped).
 - ✅ **U22** — DEV-only `?e2eDelayAuth` hook + Playwright test for the transient loading state.
 
@@ -356,12 +370,12 @@ Generated from an adversarial multi-agent coverage sweep. **284 scenarios analyz
   - sketch: Component test of ActionInboxSettings.linkToOpenChat with useTemplates() returning 2 routable types + mocked registerAiApp: assert the templates arg passed through == current types. Guards the ADMIN-link path (distinct from the reRegister path). Also add a registry.e2e variant registering buildManifestWire(..., [types]) and reading it back via ai_apps to assert the keyword_map survives the round-trip (registry.e2e currently registers EMPTY templates only).
 - **[P0/ordering]** Add-type-then-Connect (never Link): types added before Connect stay unmapped
   - layer: `vitest-unit`
-  - procedure: Save types → do 6-digit Connect (connectWithCode → claimAiAppLinkCode only). Never Link.
+  - procedure: Save types → do claim-token Connect (connectWithCode → signed-in IOU backend → C2C claim). Never Link.
   - expected: connectWithCode NEVER calls registerAiApp, so unless a connected-only re-sync exists the types remain unmapped. Post-fix: connecting (or the next type edit as connected) should trigger a manifest sync.
   - sketch: ActionInboxSettings.connectWithCode test asserting current behaviour (no registerAiApp) + a fix-target test that after a successful claim the manifest is (re)registered with the user's current types (or that the connected flag now makes the next addTemplate sync). Pairs with the connected-only caller-wiring row.
 - **[P0/regression]** Connect-only, no type edits ever (base manifest forever) — the named 'not mapped after a fresh start' bug
   - layer: `vitest-e2e`
-  - procedure: User only ever does 6-digit Connect; saves types but the app was deployed with the base manifest and no edit happens afterwards.
+  - procedure: User only ever does claim-token Connect; saves types but the app was deployed with the base manifest and no edit happens afterwards.
   - expected: Without an app-load sync, chat messages can never route to the user's types (base manifest has no `template` keyword_map).
   - sketch: End-to-end: register base manifest (empty templates), user has types, no edit → ai_apps read-back shows NO template keyword_map. Then trigger the on-load sync and assert it appears. Currently NOTHING re-syncs on load; see next row.
 - **[P0/ordering]** FRESH DEPLOY re-registers BASE manifest, linked user does nothing → types silently unmapped until next edit
@@ -432,9 +446,9 @@ Generated from an adversarial multi-agent coverage sweep. **284 scenarios analyz
   - procedure: Signed-in user opens /settings, clicks 'Link to OpenChat'. registerAiApp returns {kind:'success'}.
   - expected: invalidateInboxCache() runs, localStorage[OC_LINKED_KEY] is set to identity.getPrincipal().toText(), status = 'Linked to OpenChat…'.
   - sketch: describe('ActionInboxSettings linkToOpenChat'){ mock registerAiApp -> success, spy invalidateInboxCache; render with a fake identity; click 'Link to OpenChat'; expect localStorage.getItem(OC_LINKED_KEY)===principal, invalidateInboxCache called once, 'Linked to OpenChat' visible }. Only registerAiApp OUTCOME decode is unit-tested today (registerAiApp.outcomes.test); the success->localStorage/cache side-effects in the component are untested.
-- **[P0/regression]** CONNECT-only user (6-digit Connect, never 'Link to OpenChat') should still sync manifest — decision vs wiring
+- **[P0/regression]** CONNECT-only user (claim-token Connect, never 'Link to OpenChat') should still sync manifest — decision vs wiring
   - layer: `vitest-unit`
-  - procedure: User completes the 6-digit Connect (claim_ai_app_link_code) so they have a per-user delivery key, but never taps 'Link to OpenChat' (OC_LINKED_KEY unset). They save a type with keywords.
+  - procedure: User completes claim-token Connect through IOU's app-authenticated C2C claim so they have a per-user delivery key, but never taps 'Link to OpenChat' (OC_LINKED_KEY unset). They save a type with keywords.
   - expected: Their type should fold into the manifest (shouldSyncOpenChatManifest returns true for connected:true). Today the DECISION function ignores `connected` (returns linkedPrincipal===myPrincipal) AND the caller hardcodes connected:false, so the type never reaches the manifest.
   - sketch: The named test EXISTS but is RED (impl returns linkedPrincipal===myPrincipal, ignoring connected) — the fix is not applied. Separately, NO test covers the WIRING: reRegisterOpenChatIfLinked passes connected:false hardcoded and nothing derives a real connected value from the registered per-user key. Add: (a) make manifestSync honour connected; (b) a TemplatesContext test where a connected-but-unlinked user's addTemplate triggers registerAiApp.
 - **[P0/ordering]** No manifest re-sync on app load after a fresh deploy re-registered the BASE manifest
@@ -446,7 +460,7 @@ Generated from an adversarial multi-agent coverage sweep. **284 scenarios analyz
   - layer: `playwright-ui`
   - procedure: Unsigned visitor (e.g. OpenChat 'Open the code page in IOU' opens a fresh browser tab) lands on /settings#openchat-connect.
   - expected: SettingsPage renders SignInButtons inline (does not Navigate to '/'), so the URL + #openchat-connect survive; after sign-in the page re-renders authenticated and the Connect section scrolls into view with the code input focused.
-  - sketch: This is the JUST-FIXED bug and has NO test. In a signed-out context goto('/settings#openchat-connect'); assert 'Sign in to manage your account and connect OpenChat' visible and URL still ends with #openchat-connect (not '/'); click dev sign-in; assert the 'Connect to OpenChat' heading is in view and the 6-digit input is focused.
+  - sketch: This is the JUST-FIXED bug and has NO test. In a signed-out context goto('/settings#openchat-connect'); assert 'Sign in to manage your account and connect OpenChat' visible and URL still ends with #openchat-connect (not '/'); click dev sign-in; assert the 'Connect to OpenChat' heading is in view and the claim-token input is focused.
 - **[P0/regression]** Desktop deep link iou://settings#openchat-connect DROPS the hash (lands on /settings, no scroll to Connect)
   - layer: `vitest-unit`
   - procedure: On the native/desktop app, OpenChat opens iou://settings#openchat-connect.
@@ -469,13 +483,14 @@ Generated from an adversarial multi-agent coverage sweep. **284 scenarios analyz
   - sketch: buildManifestWire/buildIouRules with templates is covered by actionManifest.test + registerAiApp.test using STATIC arrays; nothing asserts ActionInboxSettings passes the LIVE useTemplates() value. Render inside a TemplatesProvider seeded with 2 types; spy registerAiApp; assert opts.templates equals the live list.
 - **[P1/happy]** connectWithCode success clears the input and shows the connected message
   - layer: `vitest-unit (RTL component)`
-  - procedure: User enters a valid 6-digit code; claimAiAppLinkCode returns success.
+  - procedure: User enters a valid 64-character claim token; `actor.connect_openchat` returns Success.
   - expected: linkCode is cleared, status = 'Connected — OpenChat now delivers…'.
-  - sketch: claim OUTCOME success is decoded in registerAiApp.outcomes.test, but the component wiring (clear input + success copy) is untested; the UI e2e (openchat.ui.spec) only drives the two REJECTION paths, never a real success (no live code available). Mock claimAiAppLinkCode->success; type 123456; click Connect; assert input empty + connected text.
-- **[P1/edge]** connectWithCode code_expired / invalid_request / oc_error each show distinct copy
+  - sketch: Rust/Candid contract tests cover the outcome; the component wiring is untested. Mock
+    `actor.connect_openchat` → Success; paste a valid token; assert input empty + connected text.
+- **[P1/edge]** connectWithCode CodeExpired / InvalidRequest / RemoteError each show distinct copy
   - layer: `vitest-unit (RTL component)`
-  - procedure: claimAiAppLinkCode returns code_expired, then invalid_request, then oc_error{code}.
-  - expected: 'This code has expired…', 'OpenChat rejected the request: <m>', 'OpenChat error <code>…' respectively.
+  - procedure: `actor.connect_openchat` returns CodeExpired, then InvalidRequest, then RemoteError.
+  - expected: expired, rejected-request, and remote-failure copy respectively.
   - sketch: Outcome DECODE is covered; the component's switch->message mapping (esp. the expired branch, which no test drives) is not. Mock each outcome; assert the exact rendered error string.
 - **[P1/ordering]** Template edit re-registers manifest ONLY when OC_LINKED_KEY === current principal
   - layer: `vitest-unit (RTL component / context)`
@@ -492,26 +507,29 @@ Generated from an adversarial multi-agent coverage sweep. **284 scenarios analyz
   - procedure: User taps Link (sets flag), then adds a type with keywords.
   - expected: Second registerAiApp (from the edit) carries inbox_canister_id (else deposits go NotConfigured) and the new template rules.
   - sketch: registerAiApp.outcomes.test guards that the inbox override is present on a single register call; nothing tests the link->edit SEQUENCE. Drive both steps; assert both registerAiApp calls include inboxCanisterId and the second includes the new template.
-- **[P1/ordering]** disconnectFromOpenChat: revoke runs BEFORE clearConsumerKeypair (PEM needed for the revoke signature)
-  - layer: `vitest-unit (RTL component)`
-  - procedure: Connected user clicks 'Disconnect from OpenChat'.
-  - expected: revokeAiAppUserKey (signing with the still-present private key) is called first; only then clearConsumerKeypair() wipes the key. Reversing the order would make the revoke unsignable.
-  - sketch: revoke OUTCOME decode + preimage layout are covered in registerAiApp.outcomes.test, but the disconnect ORDER in ActionInboxSettings is untested. Spy revokeAiAppUserKey + clearConsumerKeypair; assert revoke resolves before clear is invoked and that sign() saw the pre-clear key.
-- **[P1/edge]** disconnect when the user_index is unreachable still deletes the local key and shows the 'couldn't be reached' copy
-  - layer: `vitest-unit (RTL component)`
-  - procedure: revokeAiAppUserKey throws (network down); user still clicks Disconnect.
-  - expected: clearConsumerKeypair still runs, pubKeyPem/fingerprint cleared, status = the 'also press Disconnect in the chat's Apps settings' variant (revoked=false).
-  - sketch: Mock revokeAiAppUserKey to throw; assert clearConsumerKeypair called, key state cleared, and the non-revoked success message rendered.
+- **[RESOLVED/P1/ordering]** coordinated disconnect signs before C2C revoke and deletes locally only afterwards
+  - `disconnectOpenChat.test.ts` pins the exact V2 challenge and asserts the order
+    `sign → IOU backend disconnect → clearConsumerKeypair` for both Success and KeyNotFound.
+- **[RESOLVED/P1/fail-closed]** unreachable/rejecting OpenChat retains the local key
+  - The former silent local-delete fallback was unsafe and has been removed. The normal UI keeps
+    the binding/key for retry on every non-clean outcome; the sequencing test proves the delete
+    callback is not invoked. Raw `delete_consumer_keypair` remains a separate explicit emergency
+    local erase and may leave an unusable public key in OpenChat.
 - **[P1/ordering]** CLAIM happy path then REVOKE happy path then RECONNECT with a fresh key (full round-trip ordering)
   - layer: `vitest-e2e (against live user_index) / cargo-pocket-ic`
   - procedure: Pair a live code (claim success) -> disconnect (revoke success + local clear) -> get a new code and claim again with a freshly generated keypair.
   - expected: Each step succeeds; the reconnect uses a NEW consumer keypair (old one was cleared) so the fingerprint changes; deposits after reconnect target the new key.
   - sketch: IOU e2e only covers claim CodeNotFound + revoke KeyNotFound (registry.e2e). OpenChat Rust covers claim single-use + revoke-then-KeyNotFound separately, but no test sequences claim->revoke->reclaim, nor asserts the reconnect fingerprint differs. Add an e2e that pairs, revokes, re-pairs and checks the new key is the one receiving fan-out.
+  - covered below this remaining OpenChat boundary: IOU's canister/client tests now prove
+    set(epoch 0) -> delete/tombstone(epoch 2) -> reconnect(epoch 3), stale two-device
+    rejection, cross-process delayed upload rejection, ABA rejection, delete conflict retry,
+    and stable-map reopen. The missing evidence here is still the live claim/revoke/fan-out
+    sequence across the OpenChat canisters, not IOU's key mutation ordering.
 - **[P1/happy]** /settings#openchat-connect opened SIGNED-IN scrolls to the Connect section and focuses the code input
   - layer: `playwright-ui`
   - procedure: Signed-in user navigates to /settings#openchat-connect.
   - expected: The useEffect on location.hash==='#openchat-connect' scrolls #openchat-connect into view and focuses the code input.
-  - sketch: openchat.ui.spec.openSettings navigates to '/settings' with no hash. Add: goto('/settings#openchat-connect'); assert document.activeElement is the 6-digit input (or the input is focused).
+  - sketch: openchat.ui.spec.openSettings navigates to '/settings' with no hash. Add: goto('/settings#openchat-connect'); assert document.activeElement is the claim-token input (or the input is focused).
 - **[P1/ordering]** /openchat/link-chat?chat=... opened SIGNED-OUT renders inline sign-in and preserves ?chat
   - layer: `playwright-ui`
   - procedure: Unsigned visitor (external browser from OpenChat) opens /openchat/link-chat?chat=group:xyz.
@@ -522,19 +540,18 @@ Generated from an adversarial multi-agent coverage sweep. **284 scenarios analyz
   - procedure: OC_USER_INDEX_CANISTER_ID is undefined. User clicks Link.
   - expected: status = 'VITE_OC_USER_INDEX_CANISTER_ID is not set…', registerAiApp is never called.
   - sketch: Mock ocConfig.OC_USER_INDEX_CANISTER_ID = undefined; click Link; assert error text and that the registerAiApp spy was not called.
-- **[P2/nonobvious]** connectWithCode ensures the consumer keypair exists (auto-create) before claiming
+- **[P2/nonobvious]** connectWithCode ensures the consumer keypair exists (auto-create) before the IOU C2C claim
   - layer: `vitest-unit (RTL component)`
   - procedure: User with no cached consumer keypair enters a valid code and connects.
-  - expected: consumerPublicKeyPem() is awaited first (creates + wraps the keypair), then claimAiAppLinkCode is called with that PEM.
-  - sketch: consumerKeypair.test covers keypair creation in isolation; nothing asserts connectWithCode calls it before claim. Spy consumerPublicKeyPem + claimAiAppLinkCode; assert call order and that claim received the generated PEM.
-- **[P2/edge]** revoke returns key_not_found (already revoked / never paired) is treated as a clean disconnect
-  - layer: `vitest-unit (RTL component)`
-  - procedure: User disconnects; OpenChat returns KeyNotFound.
-  - expected: revoked=true branch (key_not_found counts as success), key cleared, 'removed from OpenChat' copy shown.
-  - sketch: Outcome (key_not_found) decoded in unit + e2e; the component's mapping of key_not_found->revoked=true (success copy) is untested. Mock outcome; assert the revoked-variant message.
+  - expected: consumerPublicKeyPem() is awaited first (creates + wraps the keypair), then
+    `actor.connect_openchat` receives the token and PEM; the browser never calls UserIndex directly.
+  - sketch: consumerKeypair.test covers keypair creation in isolation; add a settings wiring test.
+- **[RESOLVED/P2/edge]** KeyNotFound is a clean coordinated disconnect
+  - `disconnectOpenChat.test.ts` asserts KeyNotFound triggers local deletion, while every other
+    non-clean variant does not.
 - **[P2/nonobvious]** Reconnecting after Disconnect generates a NEW keypair (fingerprint changes)
   - layer: `playwright-ui`
-  - procedure: Connected user disconnects, then reconnects via a new 6-digit code.
+  - procedure: Connected user disconnects, then reconnects via a new claim token.
   - expected: clearConsumerKeypair wiped the device cache + canister blob, so loadOrCreateConsumerKeypair mints a fresh keypair — the settings-card fingerprint differs from before.
   - sketch: openchat.ui.spec shows per-user fingerprints but never disconnect->reconnect. Capture fingerprint, disconnect, reconnect (mock/live), assert fingerprint changed.
 - **[P2/edge]** /openchat/link-chat with missing ?chat shows the 'missing chat reference' error
@@ -600,16 +617,16 @@ Generated from an adversarial multi-agent coverage sweep. **284 scenarios analyz
   - procedure: Member registers key K1; a card is posted capturing K1; member rotates to K2 via set_my_ai_app_key; then confirms.
   - expected: Deposit goes to K1's fingerprint (baked on card), NOT K2; the member polling with K2 sees nothing. Verifies rotation-ordering delivery to old vs new key.
   - sketch: register K1; post_card [K1]; set_my_ai_app_key(K2); confirm; assert K1 bucket populated, K2 bucket empty. Also assert my_ai_app_keys now returns only K2 (rotation replaced, not appended).
-- **[P1/regression]** CROSS-REPO E2E: real OpenChat confirm DEPOSIT -> IOU pollActionInbox IMPORT of the same envelope
+- **[P0/release]** CROSS-REPO E2E: real OpenChat confirmation → replicated deposit/read → IOU verify/decrypt/import/exact acknowledgement
   - layer: `vitest-e2e`
-  - procedure: Drive a live OpenChat confirm that deposits into the action_inbox; then run IOU's pollActionInbox against that same inbox with the recipient's real consumer keypair and feed the payload through parseDraft->add_entry.
-  - expected: The deposited envelope verifies OpenChat's signature, decrypts to the v2 wrapper, splits context+payload, and imports as a ledger draft — closing the deposit+poll loop end to end.
-  - sketch: Both actionInbox.e2e and iouBackend.e2e stop at the poll/import half with EMPTY buckets; the deposit half is deferred to Rust. Add an e2e that deposits (via LUI c2c or a seeded action) then polls, asserting one imported draft with correct context.chat/messageId/confirmedBy.
-- **[P1/ordering]** SheetPage poll loop advances the since_id cursor and never re-imports an already-seen inbox id
+  - procedure: Confirm a real group/channel card through the rebuilt PR2 canisters, let UserIndex sign and ActionInbox store it, poll through IOU with the recipient key, import via `parseDraft`/`add_entry`, then acknowledge that exact action secret.
+  - expected: The independently pinned v4 key verifies; every outer commitment matches the decrypted inner context/payload; exactly one ledger draft is written; one replicated exact acknowledgement removes it without deleting adjacent actions.
+  - sketch: Current focused suites cover every component and the integration target compiles, but Windows cannot execute the repository's Linux ELF PocketIC server. Run the whole chain in Linux CI and a disposable live backend upgrade. Empty-bucket E2E is not sufficient release evidence.
+- **[P1/ordering]** SheetPage repeated full-page polls never re-import one signed delivery replayed under the same or a forged numeric id
   - layer: `vitest-unit`
-  - procedure: Mount SheetPage; first poll returns actions ids [5,6]; cursor advances to 7; second poll (same or overlapping) must not re-add ids <=6 or ids already in handledInboxIds/importedMessageIds.
-  - expected: since advances to max(id)+1 per tick; setInboxPending filters out oc-<id> already seen or handled; no duplicate 'Pending from OpenChat' cards across 15s ticks.
-  - sketch: The cursor-advance + dedupe wiring in SheetPage.tsx (lines ~452-474) is untested; only pollActionInbox passthrough and helpers are unit-tested. Extract the cursor/merge reducer or mount with a mocked poll and assert cursor monotonicity + no duplicate PendingDraft.
+  - procedure: Mount SheetPage; first poll returns one valid signed v4 delivery, then a later poll returns the same signed envelope under the same or another numeric locator.
+  - expected: the pending id remains `oc-<signed delivery id>`, only one card appears, and a later honest locator can replace a failed forged-locator acknowledgement candidate without changing delivery identity.
+  - sketch: client and acknowledgement helpers cover replay collapse and locator replacement. Add a mounted SheetPage test with fake timers to pin the UI merge/render wiring across two 15-second polls.
 - **[P1/edge]** IOU import UI collapses a double-confirm (same messageId, two confirmedBy) to one visible card and blocks re-accept
   - layer: `playwright-ui`
   - procedure: Two deposits with the SAME context.messageId (different confirmedBy) reach the inbox; SheetPage builds visibleInbox = collapseByMessageId(...) and the accept path guards on importedMessageIds.
@@ -741,9 +758,9 @@ Generated from an adversarial multi-agent coverage sweep. **284 scenarios analyz
 
 ## Cross-repo end-to-end user journeys (IOU ↔ OpenChat) where ORDER across both apps matters — pairing, connect/link orderi
 
-- **[P0/ordering]** Connect-only user (6-digit Connect, never Link) — their saved types must still reach the manifest
+- **[P0/ordering]** Connect-only user (claim-token Connect, never Link) — their saved types must still reach the manifest
   - layer: `scripted-live-driver (IOU scripts/live + OpenChat OC profile) end-to-end; plus a unit test wiring the real connected flag into TemplatesContext.reRegisterOpenChatIfLinked`
-  - procedure: User signs into IOU, saves a 'Reservation' type with keywords, does the OpenChat 6-digit Connect (claim_ai_app_link_code — registers a per-user delivery key) but NEVER taps 'Link to OpenChat'. A chat message 'reservation 5000' is sent.
+  - procedure: User signs into IOU, saves a 'Reservation' type with keywords, does OpenChat claim-token Connect through IOU's app-authenticated C2C claim, but NEVER taps 'Link to OpenChat'. A chat message 'reservation 5000' is sent.
   - expected: Manifest re-registers with the user's types folded in as template keyword_map rules; the chat message routes to the Reservation type. Today shouldSyncOpenChatManifest returns false (link-only) AND the TemplatesContext caller hardcodes connected:false, so the manifest stays on the deploy BASE manifest and the message routes to nothing.
   - sketch: describe('connect-only manifest sync') — drive Connect (claim link code so ai_app_user_keys has this user's key), save a type with keywords via set_user_templates, then assert register_ai_app was called with a template keyword_map containing those keywords (read back via explore_ai_apps/ai_apps). The manifestSync.test 'syncs a CONNECTED user' is a pure-decision test only; this asserts the WIRING: connected=true is actually derived at the call site and register_ai_app actually fires. Then post a chat message and assert it classifies to the type.
 - **[P0/nonobvious]** TemplatesContext hardcodes connected:false — a type edit by a connect-only user never re-registers
@@ -801,11 +818,14 @@ Generated from an adversarial multi-agent coverage sweep. **284 scenarios analyz
   - procedure: B (joined via cross-wrap) imports several chat drafts into the shared sheet, then leaves. A re-invites; C accepts a fresh link (re-wrap). C reads the sheet.
   - expected: Entries B wrote remain decryptable by C (same K re-sealed to C), and B's wrapped key is actually purged across ALL sheets of the pair (not just the one test sheet). inviteReissue.e2e proves C can read K but asserts neither that B's prior entries survive for C nor that B's stale wrapped keys are purged beyond a single sheet.
   - sketch: Multi-sheet pair; B writes entries on 2 sheets, leaves; C accepts; assert C decrypts B's old entries on both sheets AND B's wrapped_key_b is gone on every sheet. Covers the multi-sheet partial-rewrap gap too.
-- **[P1/happy]** Successful 6-digit Connect against a live OpenChat code (not just rejection paths)
+- **[P1/happy]** Successful claim-token Connect against a live OpenChat token (not just rejection paths)
   - layer: `scripted-live-driver (mint a real link code in OpenChat, claim from IOU)`
   - procedure: User enters a valid OpenChat AI-app link code in IOU's Connect field.
-  - expected: claimAiAppLinkCode succeeds, per-user delivery key is registered, IOU reflects connected state, and (with the fix) manifest sync becomes eligible. openchat.ui.spec + registry.e2e only exercise REJECTION (invalid/unknown code, CodeNotFound); no test drives a SUCCESSFUL connect against a real user_index-minted code.
-  - sketch: Owner create_ai_app_link_code in OC, IOU claimAiAppLinkCode with its consumer key, assert my_ai_app_keys shows the key and IOU treats the user as connected. The success side of connectWithCode is a total blind spot.
+  - expected: IOU's `connect_openchat` C2C claim succeeds, the per-user key and revision-bound
+    binding are registered, and IOU reflects connected state.
+  - sketch: Owner creates a link code in OC; the signed-in IOU actor claims it with the consumer
+    key; assert UserIndex holds the key and IOU's `get_openchat_binding` returns the same
+    user/app/revision/key-version tuple.
 - **[P1/nonobvious]** Chat message routed via a TEMPLATE keyword (not just a settlement/credit draft)
   - layer: `scripted-live-driver (chat message → classify → import) or playwright-ui import variant`
   - procedure: In a linked chat, send a message whose text matches a type's keyword (e.g. 'reservation ...'); it should extract using that template's base (fee %, schedule) then import.
@@ -839,11 +859,7 @@ Generated from an adversarial multi-agent coverage sweep. **284 scenarios analyz
 
 ## completeness-critic
 
-- **[P0/ordering]** since_id poll CURSOR is not deployment-scoped — a cursor from a prior deploy suppresses all fresh low-id deposits
-  - layer: `vitest-unit (cursor persistence keying) + vitest-e2e (redeploy then confirm)`
-  - procedure: SheetPage advances a persisted since_id cursor (say 40). OpenChat is cleanly redeployed → action_inbox ids restart at 1. New confirmed actions get ids 1..5. Poll still calls pollActionInbox({ sinceId: 40 }).
-  - expected: Fresh deposits import. inboxDedupe.ts deploy-scopes the dismissed-ids and importedMessageIds SETS, but the monotonic since_id CURSOR is a separate value; if it is persisted un-scoped it stays at 40 and the inbox query returns nothing (id must be > since_id) — confirmed-in-OpenChat-never-imported, distinct from the messageId-suppression case already enumerated. Verify the cursor is reset/scoped on deploy-tag change.
-  - sketch: it('resets the since_id cursor when the deploy tag changes'): seed localStorage cursor=40 under old userIndexId, switch VITE_OC_USER_INDEX_CANISTER_ID, mount poll, assert first actions() call uses since_id 0n (or scoped key), and an id=3 deposit is imported.
+- ✅ **[P0/ordering]** prior-deployment `since_id` suppression — resolved: IOU does not persist or advance an ActionInbox cursor and every replicated read sends `since_id = 0n`. Signed delivery-id dedupe and deployment/principal-scoped handled sets prevent re-import. The remaining redeploy proof belongs to the full Linux/live chain above, not to cursor state.
 - **[P0/nonobvious]** Fresh-device resume LOSES templates: deriveUserKey is non-deterministic (random localStorage keypair), so templates_enc cannot decrypt
   - layer: `vitest-unit (devVetkd deriveUserKey determinism) + integration (TemplatesProvider after localStorage wipe)`
   - procedure: User has saved types (templates_enc/iv on their UserRecord, encrypted under deriveUserKey(principal)). Wipe device/localStorage, re-auth as the same principal on a fresh device. TemplatesContext load effect derives K=deriveUserKey(principal) → deriveUserKeypair generates a NEW random P-256 keypair → decryptWithSheetKey fails.
@@ -886,7 +902,7 @@ Generated from an adversarial multi-agent coverage sweep. **284 scenarios analyz
   - sketch: it('retry after partial failure does not duplicate to already-delivered recipients'): confirm with [good,good,bad], expect fail, fix key, retry, assert each good recipient inbox has exactly ONE action.
 - **[P1/edge]** connectWithCode interrupted after the code is burned but before local key/flag persist → user is stuck (code consumed, not connected)
   - layer: `vitest-component (mock claim resolving then a thrown persist) + manual recovery doc`
-  - procedure: User enters the 6-digit code. claim_ai_app_link_code succeeds on OpenChat (code marked consumed, per-user key registered), then the network drops / tab closes before IOU persists the consumer keypair association or invalidates the inbox cache.
+  - procedure: User enters the claim token. IOU's C2C claim succeeds on OpenChat (token marked consumed, per-user key registered), then the network drops / tab closes before IOU persists the binding or invalidates the inbox cache.
   - expected: Either the whole connect is atomic/resumable, or a clear recovery path exists. Because the code is single-use and now burned, re-entering it returns code_expired, yet the local side never finished — the user cannot reconnect without a NEW code. No enumerated scenario covers an INTERRUPTED connect (only distinct rejection copies for expired/invalid).
   - sketch: it('surfaces a recoverable state when claim succeeds but local persist fails'): mock claim ok, force ensureConsumerKeypair/persist to throw, assert UI does not show 'Connected' falsely and guides re-issue rather than re-entry of the dead code.
 - **[P1/ordering]** Native deep link arrives while auth is still 'loading' → useDeepLinks navigates immediately and the guard bounces to /sign-in, losing the destination

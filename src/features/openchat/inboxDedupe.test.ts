@@ -1,50 +1,102 @@
 import { describe, it, expect } from "vitest";
 import {
-  collapseByMessageId,
+  collapseByMessageHandle,
   parseImportedMessageIds,
   serializeImportedMessageIds,
   isImportedIntoSheet,
+  inboxDedupeStorageKey,
+  OBSOLETE_INBOX_STORAGE_SCAN_CAP,
+  planObsoleteInboxStorageCleanup,
 } from "./inboxDedupe";
 
-type Draft = { id: string; context?: { messageId?: string } };
-const d = (id: string, messageId?: string): Draft =>
-  messageId === undefined ? { id } : { id, context: { messageId } };
+describe("inbox dedupe storage scope", () => {
+  it("separates principals, IOU deployments, and OpenChat deployments", () => {
+    const key = (principal: string, iou: string, oc: string) =>
+      inboxDedupeStorageKey("handled", principal, oc, iou);
+    expect(key("a", "iou-1", "oc-1")).not.toBe(key("b", "iou-1", "oc-1"));
+    expect(key("a", "iou-1", "oc-1")).not.toBe(key("a", "iou-2", "oc-1"));
+    expect(key("a", "iou-1", "oc-1")).not.toBe(key("a", "iou-1", "oc-2"));
+  });
 
-describe("collapseByMessageId", () => {
+  it("purges v2 inbox keys from every old OpenChat deployment, not only the current one", () => {
+    const obsolete = [
+      "iou.openchat.handledInboxDrafts.v1",
+      "iou.openchat.importedMessageIds.v1",
+      "iou.openchat.handledInboxDrafts.v2.current-deployment",
+      "iou.openchat.handledInboxDrafts.v2.previous-deployment",
+      "iou.openchat.importedMessageIds.v2.previous-deployment",
+      "iou.openchat.viewerUserId.v1.iou-principal-a",
+      "iou.openchat.viewerUserId.v1.iou-principal-b",
+    ];
+    const retained = [
+      "iou.openchat.handledInboxDrafts.v3.current-deployment:iou:alice",
+      "iou.openchat.importedMessageIds.v3.current-deployment:iou:alice",
+      "iou.openchat.handledInboxDrafts.v20.lookalike",
+      "unrelated.key",
+    ];
+
+    const remove = planObsoleteInboxStorageCleanup([...obsolete, ...retained]);
+
+    expect(remove).toEqual(expect.arrayContaining(obsolete));
+    for (const key of retained) expect(remove).not.toContain(key);
+  });
+
+  it("bounds stale-key discovery even when the supplied key sequence is unbounded", () => {
+    let yielded = 0;
+    function* keys(): Generator<string> {
+      while (true) {
+        yielded += 1;
+        yield `unrelated.${yielded}`;
+      }
+    }
+
+    expect(planObsoleteInboxStorageCleanup(keys())).toEqual([
+      "iou.openchat.handledInboxDrafts.v1",
+      "iou.openchat.importedMessageIds.v1",
+    ]);
+    expect(yielded).toBe(OBSOLETE_INBOX_STORAGE_SCAN_CAP);
+  });
+});
+
+type Draft = { id: string; context?: { messageHandle?: string } };
+const d = (id: string, messageHandle?: string): Draft =>
+  messageHandle === undefined ? { id } : { id, context: { messageHandle } };
+
+describe("collapseByMessageHandle", () => {
   it("returns an empty list unchanged", () => {
-    expect(collapseByMessageId([])).toEqual([]);
+    expect(collapseByMessageHandle([])).toEqual([]);
   });
 
   it("keeps a single draft", () => {
     const items = [d("a", "m1")];
-    expect(collapseByMessageId(items)).toEqual(items);
+    expect(collapseByMessageHandle(items)).toEqual(items);
   });
 
   it("collapses two drafts sharing a messageId to the FIRST (earliest) one", () => {
     const first = d("a", "m1");
     const second = d("b", "m1");
-    expect(collapseByMessageId([first, second])).toEqual([first]);
+    expect(collapseByMessageHandle([first, second])).toEqual([first]);
   });
 
   it("keeps drafts with distinct messageIds and preserves input order", () => {
     const items = [d("a", "m1"), d("b", "m2"), d("c", "m3")];
-    expect(collapseByMessageId(items)).toEqual(items);
+    expect(collapseByMessageHandle(items)).toEqual(items);
   });
 
   it("NEVER collapses drafts without a messageId — each undefined stays distinct", () => {
     const items = [d("a"), d("b"), d("c")];
-    expect(collapseByMessageId(items)).toEqual(items);
+    expect(collapseByMessageHandle(items)).toEqual(items);
   });
 
   it("collapses only the messageId'd duplicates, leaving wrapper-less drafts intact", () => {
     const items = [d("a", "m1"), d("b"), d("c", "m1"), d("e"), d("f", "m2")];
     // b and e (no messageId) stay; the second m1 (c) is dropped.
-    expect(collapseByMessageId(items).map((x) => x.id)).toEqual(["a", "b", "e", "f"]);
+    expect(collapseByMessageHandle(items).map((x) => x.id)).toEqual(["a", "b", "e", "f"]);
   });
 
   it("keeps the earliest of three siblings for the same messageId", () => {
     const items = [d("a", "m1"), d("b", "m1"), d("c", "m1")];
-    expect(collapseByMessageId(items).map((x) => x.id)).toEqual(["a"]);
+    expect(collapseByMessageHandle(items).map((x) => x.id)).toEqual(["a"]);
   });
 });
 

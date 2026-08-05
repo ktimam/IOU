@@ -11,7 +11,11 @@ import { useActor } from "../flows/useActor";
 import { useAuth } from "../auth/AuthProvider";
 import { useSheetKey } from "../flows/SheetKeyContext";
 import { usePreferences } from "../settings/usePreferences";
-import { createSheetForPair, publishAccountNames } from "../flows/createSheet";
+import {
+  createSheetForPair,
+  publishAccountNames,
+  SheetCreatedSetupError,
+} from "../flows/createSheet";
 import { rotateMyPairTemplates } from "../templates/pairTemplatesActor";
 import {
   fetchChatSheetLinks,
@@ -21,6 +25,7 @@ import {
   repointChatLinks,
 } from "../openchat/chatSheetLinks";
 import { encryptEntryPayload } from "../crypto/devVetkd";
+import { encryptClosingBalances } from "./closingBalances";
 import { useToasts } from "../ui/Toasts";
 import { useNavigate } from "react-router-dom";
 
@@ -39,6 +44,7 @@ export function CloseSheetButton({
 }: CloseSheetButtonProps) {
   const { actor } = useActor();
   const { state } = useAuth();
+  const principal = state.kind === "authenticated" ? state.principal : null;
   const { cache, get, unwrapFor } = useSheetKey();
   const { prefs } = usePreferences();
   const toasts = useToasts();
@@ -52,13 +58,16 @@ export function CloseSheetButton({
     if (!actor || state.kind !== "authenticated") return;
     setSubmitting(true);
     try {
-      // 1. Record closing balances + close the old sheet.
-      const payload = balances.map((b) => ({
+      // 1. Encrypt the closing snapshot under the old sheet key before closing. Currency, amount,
+      // and direction never cross the canister boundary in plaintext.
+      const oldSheetKey = get(sheetId) ?? (await unwrapFor(sheetId));
+      const snapshot = balances.map((b) => ({
         currency: b.currency,
-        amount_minor: BigInt(Math.abs(b.amount_minor)),
-        direction: b.amount_minor < 0 ? { Debt: null } : { Credit: null },
+        amount_minor: Math.abs(b.amount_minor),
+        direction: b.amount_minor < 0 ? ("debt" as const) : ("credit" as const),
       }));
-      await (actor as any).close_sheet(sheetId, payload);
+      const encryptedSnapshot = await encryptClosingBalances(snapshot, oldSheetKey);
+      await (actor as any).close_sheet_encrypted(sheetId, encryptedSnapshot);
 
       // 2. Open a fresh sheet for the same account.
       const { sheet: newSheet, K_sheet } = await createSheetForPair(
@@ -88,23 +97,24 @@ export function CloseSheetButton({
 
       // 3b. Re-point any chat→sheet links from the just-archived sheet onto the new one, so the next
       //     confirmed draft from a pinned chat imports into the ACTIVE sheet — not the read-only
-      //     archived one. Best-effort: a failure leaves LinkChatPage's manual re-link as the fallback.
+      //     archived one. Best-effort: after a failure the next confirmed import can remember the
+      //     app-scoped chat handle again.
       try {
-        let links = readCachedLinks();
+        let links = readCachedLinks(principal);
         try {
-          links = await fetchChatSheetLinks(actor);
+          links = await fetchChatSheetLinks(actor, state.principal);
         } catch {
           /* canister unreachable — fall back to the cached copy */
         }
         const { next, affected } = repointChatLinks(links, sheetId, newSheet.id);
         if (affected.length > 0) {
-          writeCachedLinks(next);
+          writeCachedLinks(principal, next);
           for (const chatKey of affected) {
             await storeChatSheetLink(actor, chatKey, newSheet.id);
           }
         }
       } catch {
-        /* best-effort: the manual re-link path in LinkChatPage remains as the fallback */
+        /* best-effort: the next confirmed import can remember the mapping again */
       }
 
       // 4. Carry the outstanding balance forward as opening entries (one per
@@ -136,6 +146,12 @@ export function CloseSheetButton({
       toasts.show({ kind: "success", text: "Sheet closed — new sheet started" });
       nav(`/sheet/${newSheet.id}`, { replace: true });
     } catch (e) {
+      if (e instanceof SheetCreatedSetupError) {
+        if (e.K_sheet) cache(e.sheet.id, e.K_sheet);
+        toasts.show({ kind: "error", text: e.message });
+        nav(`/sheet/${e.sheet.id}`, { replace: true });
+        return;
+      }
       toasts.show({ kind: "error", text: (e as Error).message });
     } finally {
       setSubmitting(false);

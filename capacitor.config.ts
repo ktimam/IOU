@@ -20,8 +20,8 @@ const config: CapacitorConfig = {
       launchShowDuration: 0,
     },
   },
-  // In a real release we'd sign the bundle. For v1.1.4 the dev
-  // build is debuggable; production signing is a v1.1.5 item.
+  // Android debug builds remain developer-signable. Gradle release tasks
+  // fail closed unless the gitignored release keystore configuration exists.
 };
 
 export default config;

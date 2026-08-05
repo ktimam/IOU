@@ -58,6 +58,28 @@ async function main() {
   const evaluate = async (expression: string) =>
     (await cdp("Runtime.evaluate", { expression, awaitPromise: true, returnByValue: true }))?.result?.value;
 
+  // A clean local replica invalidates every cached OpenChat delegation. Clear only account/session
+  // state before creating the replacement account, while retaining the user's local model choice.
+  const cleared = await evaluate(`new Promise(function(resolve){
+    (async () => {
+      try {
+        const key = "openchat_selected_model_id";
+        const selectedModel = localStorage.getItem(key);
+        localStorage.clear();
+        if (selectedModel !== null) localStorage.setItem(key, selectedModel);
+        sessionStorage.clear();
+        const dbs = (await indexedDB.databases()) || [];
+        for (const db of dbs) if (db.name) indexedDB.deleteDatabase(db.name);
+        const registrations = await navigator.serviceWorker.getRegistrations();
+        for (const registration of registrations) await registration.unregister();
+        resolve({ selectedModelPreserved: selectedModel !== null, databasesCleared: dbs.length });
+      } catch (error) {
+        resolve({ error: String(error) });
+      }
+    })();
+  })`);
+  console.log(`[${USER}] cleared stale session:`, JSON.stringify(cleared));
+
   // Click the first visible element whose trimmed text matches /^rx$/i (same matcher as oc-provision).
   const clickExact = (rx: string) => evaluate(
     `(() => {

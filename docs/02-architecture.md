@@ -183,6 +183,19 @@ All state is in stable memory. `postupgrade` rebuilds in-memory indices.
 > `entries_lives_on_dedicated_memory_id` / `schema_version_bumped_for_memory_id_move`
 > tests for the in-code contract.
 
+The consumer delivery key deliberately uses two stable maps without changing the released
+MemoryId 18 value type: MemoryId 18 stores the opaque wrapped keypair, while fresh MemoryId 25 stores
+the caller's monotonic `nat64` mutation epoch. Missing epochs mean a legacy record at epoch 0. An
+accepted delete removes only the keypair and advances/retains the epoch, making the epoch row a
+stable tombstone across upgrades. Both set and delete are synchronous compare-and-swap updates with
+no `await` between checking the expected epoch and mutating the maps. Never migrate the keypair by
+reinitializing MemoryId 18 under a combined value type.
+
+The v1.14 Candid signatures are not wire-compatible with the old unversioned consumer-key methods.
+Rollout order is backend first, matching assets second; mixed-version clients fail mutation/decode
+rather than bypassing compare-and-swap. Operators should expect cached pre-v1.14 PWAs to require a
+reload and must include that case in the upgrade drill.
+
 ### 3.3 Type sketch
 ```motoko
 type UserRecord = {

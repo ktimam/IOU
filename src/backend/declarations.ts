@@ -38,24 +38,94 @@ export const idlFactory = ({ IDL: idl }: { IDL: IDL }) => {
     // get_my_user returns it.
     default_currency: idl.Opt(idl.Text),
   });
+  const AiAppVerificationBinding = idl.Record({
+    user_index_canister_id: idl.Principal,
+    app_id: idl.Nat32,
+    app_revision: idl.Nat64,
+    owner: idl.Principal,
+    canonical_name: idl.Text,
+    app_canister_id: idl.Principal,
+    inbox_canister_id: idl.Opt(idl.Principal),
+    manifest_hash: idl.Vec(idl.Nat8),
+  });
   const Config = idl.Record({
     creator_principal: idl.Principal,
     deployed_at: idl.Nat64,
     // v1.12.0: deployment-wide currency the app-rendered card pre-selects (anonymously readable).
     card_currency: idl.Opt(idl.Text),
+    ai_app_owner: idl.Opt(idl.Principal),
+    openchat_user_index_canister_id: idl.Opt(idl.Principal),
+    ai_app_verification_binding: idl.Opt(AiAppVerificationBinding),
+  });
+  const VerifyAiAppArgs = idl.Record({ name: idl.Text, owner: idl.Principal });
+  const VerifyAiAppResponse = idl.Record({
+    vouched: idl.Bool,
+    name: idl.Opt(idl.Text),
+    owner: idl.Opt(idl.Principal),
+  });
+  const VerifyAiAppV2Args = idl.Record({ binding: AiAppVerificationBinding });
+  const VerifyAiAppV2Response = idl.Record({
+    vouched: idl.Bool,
+    binding: AiAppVerificationBinding,
+  });
+  const AttestedActionCardRow = idl.Record({
+    label: idl.Text,
+    value: idl.Text,
+  });
+  const AiAppCardContentV1 = idl.Record({
+    title: idl.Text,
+    rows: idl.Vec(AttestedActionCardRow),
+    confirm_label: idl.Text,
+    cancel_label: idl.Text,
+    action_id: idl.Text,
+    disclosure: idl.Opt(idl.Text),
+    expires_at: idl.Opt(idl.Nat64),
+    confirm_payload: idl.Opt(idl.Vec(idl.Nat8)),
+  });
+  const AppScopedCardContextV1 = idl.Record({
+    context_version: idl.Nat16,
+    app_subject: idl.Vec(idl.Nat8),
+    chat_handle: idl.Vec(idl.Nat8),
+    message_handle: idl.Vec(idl.Nat8),
+    app_id: idl.Nat32,
+    app_revision: idl.Nat64,
+    action_id: idl.Text,
+  });
+  const AppScopedCardContentCommitmentV1 = idl.Record({
+    context: AppScopedCardContextV1,
+    content: AiAppCardContentV1,
+  });
+  const CardAttestationBindingV1 = idl.Record({
+    user_index_canister_id: idl.Principal,
+    app_canister_id: idl.Principal,
+    commitment: AppScopedCardContentCommitmentV1,
+    authority_content_hash: idl.Vec(idl.Nat8),
+  });
+  const AttestAiAppCardV1Args = idl.Record({
+    binding: CardAttestationBindingV1,
+  });
+  const AttestAiAppCardV1Response = idl.Record({
+    vouched: idl.Bool,
+    binding: CardAttestationBindingV1,
+  });
+  const CardConfirmationAttestationBindingV1 = idl.Record({
+    user_index_canister_id: idl.Principal,
+    app_canister_id: idl.Principal,
+    context: AppScopedCardContextV1,
+    content_hash: idl.Vec(idl.Nat8),
+    confirm_payload: idl.Vec(idl.Nat8),
+    app_user_key_version: idl.Opt(idl.Nat64),
+  });
+  const AttestAiAppCardConfirmationV1Args = idl.Record({
+    binding: CardConfirmationAttestationBindingV1,
+  });
+  const AttestAiAppCardConfirmationV1Response = idl.Record({
+    vouched: idl.Bool,
+    binding: CardConfirmationAttestationBindingV1,
   });
   const SheetState = idl.Variant({
     Active: idl.Null,
     Closed: idl.Null,
-  });
-  const Direction = idl.Variant({
-    Credit: idl.Null,
-    Debt: idl.Null,
-  });
-  const ClosingBalance = idl.Record({
-    currency: idl.Text,
-    amount_minor: idl.Nat64,
-    direction: Direction,
   });
   const Pair = idl.Record({
     id: idl.Text,
@@ -100,7 +170,9 @@ export const idlFactory = ({ IDL: idl }: { IDL: IDL }) => {
     member_b: idl.Principal,
     created_at: idl.Nat64,
     closed_at: idl.Opt(idl.Nat64),
-    closing_balances: idl.Opt(idl.Vec(ClosingBalance)),
+    closing_balances_key: idl.Opt(idl.Vec(idl.Nat8)),
+    closing_balances_enc: idl.Opt(idl.Vec(idl.Nat8)),
+    closing_balances_iv: idl.Opt(idl.Vec(idl.Nat8)),
     name_enc: idl.Opt(idl.Vec(idl.Nat8)),
     name_iv: idl.Opt(idl.Vec(idl.Nat8)),
   });
@@ -115,6 +187,11 @@ export const idlFactory = ({ IDL: idl }: { IDL: IDL }) => {
     wrapped_key_b: idl.Vec(idl.Nat8),
     name_enc: idl.Opt(idl.Vec(idl.Nat8)),
     name_iv: idl.Opt(idl.Vec(idl.Nat8)),
+  });
+  const EncryptedClosingBalances = idl.Record({
+    entry_key: idl.Vec(idl.Nat8),
+    ciphertext: idl.Vec(idl.Nat8),
+    iv: idl.Vec(idl.Nat8),
   });
   const EntryVersion = idl.Record({
     entry_key: idl.Vec(idl.Nat8),
@@ -172,9 +249,82 @@ export const idlFactory = ({ IDL: idl }: { IDL: IDL }) => {
     wrapped_private_key: idl.Vec(idl.Nat8),
     public_key_pem: idl.Text,
   });
+  const ConsumerKeypairState = idl.Record({
+    mutation_epoch: idl.Nat64,
+    keypair: idl.Opt(ConsumerKeypair),
+  });
+  const ConsumerKeyEpochConflict = idl.Record({
+    expected_epoch: idl.Nat64,
+    current_epoch: idl.Nat64,
+  });
+  const ConsumerKeyMutationError = idl.Variant({
+    StaleEpoch: ConsumerKeyEpochConflict,
+    EpochExhausted: idl.Null,
+  });
+  const ConsumerKeyMutationResult = idl.Variant({
+    Ok: idl.Nat64,
+    Err: ConsumerKeyMutationError,
+  });
   const ChatSheetLink = idl.Record({
     chat_key: idl.Text,
     sheet_id: idl.Nat64,
+  });
+  const OpenChatBinding = idl.Record({
+    iou_principal: idl.Principal,
+    user_index_canister_id: idl.Principal,
+    app_id: idl.Nat32,
+    app_revision: idl.Nat64,
+    app_canister_id: idl.Principal,
+    key_version: idl.Nat64,
+    app_subject: idl.Vec(idl.Nat8),
+    subject_version: idl.Nat16,
+    consumer_queue_selector: idl.Vec(idl.Nat8),
+    consumer_queue_selector_version: idl.Nat16,
+    linked_at: idl.Nat64,
+  });
+  const ConnectOpenChatResult = idl.Variant({
+    Success: OpenChatBinding,
+    NotConfigured: idl.Null,
+    CodeNotFound: idl.Null,
+    CodeExpired: idl.Null,
+    InvalidRequest: idl.Text,
+    WrongApp: idl.Null,
+    RemoteError: idl.Text,
+  });
+  const DisconnectOpenChatResult = idl.Variant({
+    Success: idl.Null,
+    KeyNotFound: idl.Null,
+    NotConfigured: idl.Null,
+    NotLinked: idl.Null,
+    InvalidBinding: idl.Null,
+    InvalidRequest: idl.Text,
+    BindingChanged: idl.Null,
+    RemoteError: idl.Text,
+  });
+  const OpenChatCardContext = idl.Record({
+    sheet_id: idl.Text,
+    context_version: idl.Nat16,
+    app_subject: idl.Vec(idl.Nat8),
+    chat_handle: idl.Vec(idl.Nat8),
+    message_handle: idl.Vec(idl.Nat8),
+    app_id: idl.Nat32,
+    app_revision: idl.Nat64,
+    action_id: idl.Text,
+    vetkd_public_key: idl.Vec(idl.Nat8),
+    encrypted_vet_key: idl.Vec(idl.Nat8),
+    templates_a_enc: idl.Opt(idl.Vec(idl.Nat8)),
+    templates_a_iv: idl.Opt(idl.Vec(idl.Nat8)),
+    templates_b_enc: idl.Opt(idl.Vec(idl.Nat8)),
+    templates_b_iv: idl.Opt(idl.Vec(idl.Nat8)),
+  });
+  const OpenChatCardContextResult = idl.Variant({
+    Success: OpenChatCardContext,
+    NotConfigured: idl.Null,
+    InvalidCapability: idl.Null,
+    NotLinked: idl.Null,
+    ChatNotLinked: idl.Null,
+    NotAuthorized: idl.Null,
+    KeyUnavailable: idl.Null,
   });
   return idl.Service({
     // Phase 1
@@ -193,7 +343,22 @@ export const idlFactory = ({ IDL: idl }: { IDL: IDL }) => {
     set_default_currency: idl.Func([idl.Text], [UserRecord], []),
     get_config: idl.Func([], [Config], ["query"]),
     set_creator_principal: idl.Func([idl.Principal], [], []),
+    set_ai_app_owner: idl.Func([idl.Principal], [], []),
+    set_openchat_user_index_canister_id: idl.Func([idl.Principal], [], []),
+    set_ai_app_verification_binding: idl.Func([idl.Opt(AiAppVerificationBinding)], [], []),
     set_card_currency: idl.Func([idl.Text], [], []),
+    c2c_verify_ai_app: idl.Func([VerifyAiAppArgs], [VerifyAiAppResponse], ["query"]),
+    c2c_verify_ai_app_v2: idl.Func([VerifyAiAppV2Args], [VerifyAiAppV2Response], ["query"]),
+    c2c_attest_ai_app_card_v1: idl.Func(
+      [AttestAiAppCardV1Args],
+      [AttestAiAppCardV1Response],
+      [],
+    ),
+    c2c_attest_ai_app_card_confirmation_v1: idl.Func(
+      [AttestAiAppCardConfirmationV1Args],
+      [AttestAiAppCardConfirmationV1Response],
+      [],
+    ),
     // Phase 2
     create_pair: idl.Func([], [CreatePairResult], []),
     join_pair: idl.Func([idl.Text], [idl.Text], []),
@@ -213,7 +378,7 @@ export const idlFactory = ({ IDL: idl }: { IDL: IDL }) => {
       [idl.Opt(idl.Vec(idl.Nat8))],
       ["query"],
     ),
-    close_sheet: idl.Func([idl.Text, idl.Vec(ClosingBalance)], [], []),
+    close_sheet_encrypted: idl.Func([idl.Text, EncryptedClosingBalances], [], []),
     start_new_sheet: idl.Func([CreateSheetReq], [Sheet], []),
     // v1.5.0: E2E-encrypted names
     set_pair_name: idl.Func(
@@ -280,9 +445,17 @@ export const idlFactory = ({ IDL: idl }: { IDL: IDL }) => {
       [],
     ),
     // v1.8.0: OpenChat per-user consumer keypair
-    set_consumer_keypair: idl.Func([idl.Vec(idl.Nat8), idl.Text], [], []),
-    get_consumer_keypair: idl.Func([], [idl.Opt(ConsumerKeypair)], ["query"]),
-    delete_consumer_keypair: idl.Func([], [], []),
+    set_consumer_keypair: idl.Func(
+      [idl.Nat64, idl.Vec(idl.Nat8), idl.Text],
+      [ConsumerKeyMutationResult],
+      [],
+    ),
+    get_consumer_keypair: idl.Func([], [ConsumerKeypairState], ["query"]),
+    delete_consumer_keypair: idl.Func(
+      [idl.Nat64],
+      [ConsumerKeyMutationResult],
+      [],
+    ),
     vetkd_wrap_consumer_key: idl.Func(
       [idl.Vec(idl.Nat8)],
       [idl.Vec(idl.Nat8)],
@@ -292,6 +465,18 @@ export const idlFactory = ({ IDL: idl }: { IDL: IDL }) => {
     set_chat_sheet_link: idl.Func([idl.Text, idl.Nat64], [], []),
     remove_chat_sheet_link: idl.Func([idl.Text], [], []),
     chat_sheet_links: idl.Func([], [idl.Vec(ChatSheetLink)], ["query"]),
+    connect_openchat: idl.Func([idl.Text, idl.Text], [ConnectOpenChatResult], []),
+    get_openchat_binding: idl.Func([], [idl.Opt(OpenChatBinding)], ["query"]),
+    disconnect_openchat: idl.Func(
+      [idl.Text, idl.Vec(idl.Nat8), idl.Nat64],
+      [DisconnectOpenChatResult],
+      [],
+    ),
+    openchat_card_context: idl.Func(
+      [idl.Vec(idl.Nat8), idl.Text, idl.Vec(idl.Nat8)],
+      [OpenChatCardContextResult],
+      [],
+    ),
   });
 };
 

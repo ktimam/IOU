@@ -11,8 +11,28 @@
 // Treat it like a password. Mobile/production would replace it with OAuth
 // (Claude-user → IOU-principal); the relay API below is unchanged.
 
+import { scopedStorageKey } from "../storage/scopedStorage";
+import type { InboxDraftContext } from "../openchat/actionInboxClient";
+
 const URL_KEY = "iou:relay:url";
 const TOKEN_KEY = "iou:relay:token";
+
+export function relayStorageKey(
+  kind: "url" | "token",
+  principal: string,
+  deployment?: string,
+): string {
+  return scopedStorageKey(kind === "url" ? URL_KEY : TOKEN_KEY, principal, deployment);
+}
+
+function purgeUnscopedRelaySecrets(): void {
+  try {
+    localStorage.removeItem(URL_KEY);
+    localStorage.removeItem(TOKEN_KEY);
+  } catch {
+    /* storage may be unavailable */
+  }
+}
 
 export type RelayConfig = { url: string; token: string };
 export type PendingDraft = {
@@ -23,47 +43,86 @@ export type PendingDraft = {
   // or a paste; "openchat" = forwarded by a paired OpenChat integration.
   source?: "connector" | "openchat";
   provenance?: { openchat_user: string };
-  // Delivery provenance from the on-chain inbox's v2 envelope wrapper
-  // (openchat source only; absent for wrapper-less/pre-v2 deposits).
-  // chat is OpenChat's canonical chat key ("group:<principal>" or
-  // "channel:<community principal>:<channel id>").
-  context?: { chat: string; messageId: string; confirmedBy: string; confirmedAt: number };
+  // App-scoped delivery provenance from the on-chain v4 envelope. It contains only
+  // HMAC pseudonyms; raw OpenChat user/chat/message coordinates never enter IOU.
+  context?: InboxDraftContext;
 };
 export type OpenChatPairing = { openchat_user: string; created_at: number };
 
-export function getRelayConfig(): RelayConfig | null {
+const LOOPBACK_HOSTS = new Set(["localhost", "127.0.0.1", "[::1]"]);
+
+/**
+ * Relay credentials are bearer secrets. Remote relays therefore require TLS;
+ * cleartext HTTP is accepted only for an exact loopback hostname during local
+ * development. A relay setting is an origin, not a path-bearing endpoint.
+ */
+export function normalizeRelayUrl(value: string): string {
+  let url: URL;
   try {
-    const url = localStorage.getItem(URL_KEY)?.trim();
-    const token = localStorage.getItem(TOKEN_KEY)?.trim();
+    url = new URL(value.trim());
+  } catch {
+    throw new Error("relay URL must be an absolute HTTPS origin");
+  }
+  const loopback = LOOPBACK_HOSTS.has(url.hostname);
+  if (url.protocol !== "https:" && !(url.protocol === "http:" && loopback)) {
+    throw new Error("relay URL must use HTTPS (HTTP is allowed only for loopback development)");
+  }
+  if (url.username || url.password || url.search || url.hash) {
+    throw new Error("relay URL must not contain credentials, a query, or a fragment");
+  }
+  if (url.pathname !== "/") {
+    throw new Error("relay URL must be an origin without a path");
+  }
+  return url.origin;
+}
+
+export function getRelayConfig(principal: string | null | undefined): RelayConfig | null {
+  if (!principal) return null;
+  try {
+    purgeUnscopedRelaySecrets();
+    const url = localStorage.getItem(relayStorageKey("url", principal))?.trim();
+    const token = localStorage.getItem(relayStorageKey("token", principal))?.trim();
     if (!url || !token) return null;
-    return { url, token };
+    return { url: normalizeRelayUrl(url), token };
   } catch {
     return null;
   }
 }
 
-export function getRelayUrl(): string {
+export function getRelayUrl(principal: string | null | undefined): string {
+  if (!principal) return "";
   try {
-    return localStorage.getItem(URL_KEY)?.trim() ?? "";
+    purgeUnscopedRelaySecrets();
+    return localStorage.getItem(relayStorageKey("url", principal))?.trim() ?? "";
   } catch {
     return "";
   }
 }
 
-export function getRelayToken(): string {
+export function getRelayToken(principal: string | null | undefined): string {
+  if (!principal) return "";
   try {
-    return localStorage.getItem(TOKEN_KEY)?.trim() ?? "";
+    purgeUnscopedRelaySecrets();
+    return localStorage.getItem(relayStorageKey("token", principal))?.trim() ?? "";
   } catch {
     return "";
   }
 }
 
-export function setRelayConfig(url: string, token: string): void {
+export function setRelayConfig(
+  principal: string | null | undefined,
+  url: string,
+  token: string,
+): void {
+  if (!principal) throw new Error("sign in before saving relay credentials");
   try {
-    if (url.trim()) localStorage.setItem(URL_KEY, url.trim());
-    else localStorage.removeItem(URL_KEY);
-    if (token.trim()) localStorage.setItem(TOKEN_KEY, token.trim());
-    else localStorage.removeItem(TOKEN_KEY);
+    purgeUnscopedRelaySecrets();
+    const urlKey = relayStorageKey("url", principal);
+    const tokenKey = relayStorageKey("token", principal);
+    if (url.trim()) localStorage.setItem(urlKey, normalizeRelayUrl(url));
+    else localStorage.removeItem(urlKey);
+    if (token.trim()) localStorage.setItem(tokenKey, token.trim());
+    else localStorage.removeItem(tokenKey);
   } catch {
     /* ignore */
   }
@@ -80,13 +139,21 @@ export function generateToken(): string {
 }
 
 function base(url: string): string {
-  return url.replace(/\/+$/, "");
+  return normalizeRelayUrl(url);
+}
+
+function authenticatedInit(token: string, init: RequestInit = {}): RequestInit {
+  return {
+    ...init,
+    headers: { ...Object.fromEntries(new Headers(init.headers).entries()), Authorization: `Bearer ${token}` },
+    cache: "no-store",
+    credentials: "omit",
+    referrerPolicy: "no-referrer",
+  };
 }
 
 export async function fetchPending(cfg: RelayConfig): Promise<PendingDraft[]> {
-  const r = await fetch(
-    `${base(cfg.url)}/v1/drafts?token=${encodeURIComponent(cfg.token)}`,
-  );
+  const r = await fetch(`${base(cfg.url)}/v1/drafts`, authenticatedInit(cfg.token));
   if (!r.ok) throw new Error(`relay ${r.status}`);
   const j = await r.json();
   return Array.isArray(j.drafts) ? j.drafts : [];
@@ -94,8 +161,8 @@ export async function fetchPending(cfg: RelayConfig): Promise<PendingDraft[]> {
 
 export async function deletePending(cfg: RelayConfig, id: string): Promise<void> {
   await fetch(
-    `${base(cfg.url)}/v1/drafts/${encodeURIComponent(id)}?token=${encodeURIComponent(cfg.token)}`,
-    { method: "DELETE" },
+    `${base(cfg.url)}/v1/drafts/${encodeURIComponent(id)}`,
+    authenticatedInit(cfg.token, { method: "DELETE" }),
   );
 }
 
@@ -109,9 +176,7 @@ export async function startPairing(
   cfg: RelayConfig,
 ): Promise<{ code: string; expires_in_ms: number }> {
   const r = await fetch(`${base(cfg.url)}/v1/pairings/start`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ token: cfg.token }),
+    ...authenticatedInit(cfg.token, { method: "POST" }),
   });
   if (!r.ok) throw new Error(`pairing start ${r.status}`);
   return r.json();
@@ -119,9 +184,7 @@ export async function startPairing(
 
 /** List the OpenChat users currently linked to this account. */
 export async function listPairings(cfg: RelayConfig): Promise<OpenChatPairing[]> {
-  const r = await fetch(
-    `${base(cfg.url)}/v1/pairings?token=${encodeURIComponent(cfg.token)}`,
-  );
+  const r = await fetch(`${base(cfg.url)}/v1/pairings`, authenticatedInit(cfg.token));
   if (!r.ok) throw new Error(`pairings ${r.status}`);
   const j = await r.json();
   return Array.isArray(j.pairings) ? j.pairings : [];
@@ -130,7 +193,7 @@ export async function listPairings(cfg: RelayConfig): Promise<OpenChatPairing[]>
 /** Revoke a linked OpenChat user. */
 export async function revokePairing(cfg: RelayConfig, openchatUser: string): Promise<void> {
   await fetch(
-    `${base(cfg.url)}/v1/pairings/${encodeURIComponent(openchatUser)}?token=${encodeURIComponent(cfg.token)}`,
-    { method: "DELETE" },
+    `${base(cfg.url)}/v1/pairings/${encodeURIComponent(openchatUser)}`,
+    authenticatedInit(cfg.token, { method: "DELETE" }),
   );
 }
