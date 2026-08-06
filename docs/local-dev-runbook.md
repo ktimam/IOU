@@ -99,12 +99,16 @@ discard an existing canister identity automatically.
   legacy `iou.openchat.actionInbox.v1` value is auto-purged on load). So `weosr` (and any hand-typed
   id) can no longer win — ignore it. Resolution uses `VITE_OPENCHAT_HOST` + `VITE_OC_USER_INDEX_CANISTER_ID`;
   keep both pointing at the same OpenChat replica.
-- **Connect vs Open setup are different, both needed:**
-  - **Connect** = pair THIS user's delivery key (64-character claim token → IOU backend →
+- **Connection and chat-to-sheet mapping are separate, but there is no longer an “Open setup” link:**
+  - **Connect** pairs THIS user's delivery key (64-character claim token → IOU backend →
     app-authenticated `c2c_claim_ai_app_link_code`). This is the
-    "connected/disconnected" status and is what lets OpenChat encrypt your confirmed deposits to you.
-  - **Open setup** = open IOU's chat-link page to map THIS chat → an IOU sheet (the import destination).
-    It does not pair a key, so it stays "disconnected" until you also Connect.
+    "connected/disconnected" status and lets OpenChat encrypt confirmed deposits for that user.
+  - The first time the user imports a verified v4 OpenChat draft, leave
+    **“Remember: always import this chat's drafts into this sheet”** checked (the default). IOU then
+    stores a caller-private, app-scoped opaque chat-handle → sheet mapping. Each of the four local
+    accounts must Connect separately and establish its own mapping by importing into its intended sheet.
+  - The old `/openchat/link-chat?chat=...` route and OpenChat **Open setup** surface were removed because
+    raw chat coordinates are a public correlation risk. Treat any old link/setup instructions as stale.
 - **Auto-propose chip requires all of:** the app **enabled** for the group (Group details → AI apps
   toggle ON), the **"Suggest AI actions"** setting on, and a **trigger keyword** — `owe`, `owes`,
   `owed`, `paid`/`sent`/`transferred`/`settled`/`received`, `rent`, `due`, etc. Matching uses

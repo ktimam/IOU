@@ -10,26 +10,32 @@ fork-authored change altered its trust boundary.
 The review found critical key-lifecycle defects, authorization and storage-exhaustion
 risks, browser-session data separation defects, relay and mobile trust-boundary issues,
 and test gates that could report false success. Every directly remediable IOU source
-finding listed below has a fix and failing-first plus adjacent regression coverage in
-the current working tree. Cross-process consumer-key mutation ordering is now guarded by
-a canister-owned stable epoch/tombstone (#39). The GitHub issues intentionally remain open until the changes are
-reviewed, committed, exercised in hosted CI, and validated against a live replica and a
-real upgraded canister.
+finding listed below has a fix and failing-first plus adjacent regression coverage. The
+reviewed IOU changes are committed and pushed on `main`; cross-process consumer-key
+mutation ordering is guarded by a canister-owned stable epoch/tombstone (#39). Issues
+remain open where hosted CI, production rollout, upgrade/recovery drills, or cross-project
+acceptance evidence is still required.
 
 OpenChat must be upstreamed as exactly two independent, generic pull requests:
 
 1. optional on-device inference and local-model management; and
 2. generic in-chat cards and the interface between chats and external applications.
 
-PR 1 passed its original local security gates, but the continuation review found an
-unbounded, path-only native model cache (#71); its content-addressed bounded replacement
-and final revalidation are recorded below. PR 2 fixes substantial registry, link, inbox,
-key-lifecycle and delivery defects, but is not ready to ship. IOU now
+PR 1 is the clean generic draft [upstream PR #9132](https://github.com/open-chat-labs/open-chat/pull/9132)
+at `f7825b347b5f8449053778450b934110e0ee3537`; it has passed its isolated local security
+gates, including the content-addressed bounded replacement for the path-only native model
+cache (#71). PR 2 is the clean generic stacked draft [fork PR #73](https://github.com/ktimam/open-chat/pull/73)
+at `13a34fa2a167d551860c435ed544df2bf47be184`, based on that exact PR 1 head. Its
+dependency-compatible deployment checkpoint is `cdbea7ae35843fa813fde31267e3dfe053b19fc5`.
+The three initial OpenChat index upgrades from that checkpoint preserved the four development
+accounts and app registration, but issue #72's live entropy/keyring acceptance still failed and
+issue #74 reproduces missing PocketIC lifecycle coverage. PR 2 is not ready for production. IOU now
 independently attests the exact displayed card and the exact final confirmation payload
 for #48, and the product owner approved that narrow attestation flow plus #54's one-time
 private-context capability. The generic OpenChat backend/frontend candidate carries those
-contracts, but every runtime activation switch remains false while durable confirmation,
-bounded-call, signing-trust, stable migration and PocketIC gates remain open. The private
+contracts. Production switches remain hard-disabled; the explicit local switches are also
+still false until entropy recovery passes, the key ceremony completes, and the staged browser
+acceptance flow passes. The private
 Type display is a required acceptance criterion, not permission to republish Type metadata;
 it may appear only inside the authorized app iframe and leaves it only as an opaque encrypted
 reference. Additional open architecture and release findings are tracked through #71.
@@ -107,8 +113,11 @@ version change invalidates restored short-lived bearers/authorities and requires
 issuing link, provenance, capability, grant, signature/key-stage, ECIES, acknowledgement, or
 GroupIndex authority material. This uses the IC rule that loading a snapshot increments the target
 [canister version](https://docs.internetcomputer.org/references/ic-interface-spec/abstract-behavior/).
-Executable local state-machine tests replace the ignored rollback fixtures, but the real
-stop/snapshot/issue/load/reseed sequence must still run in Linux PocketIC and a disposable deployment.
+Unit state-machine tests replace the ignored rollback fixtures, but the exact checkpoint's
+PocketIC acceptance did not pass: the fresh keyring remained `NotInitialised`, the snapshot
+drills used the wrong UserIndex controller, and their tick loop never advanced the 60-second
+watchdog clock. These failures are tracked in #72 and #74; corrected canister-level
+stop/snapshot/issue/load/reseed coverage and a disposable deployment remain required.
 
 This continuation also found an upgrade-compatibility release gate during the final audit:
 the exact committed pre-PR2 heap schema is now decoded, empty state upgrades while preserving
@@ -121,10 +130,139 @@ reseed and correlation mechanisms are implemented, but their missing real
 confirmation→deposit→replicated-read→IOU import→exact-ack, snapshot-load, stopped-canister, and
 upgrade runtime chains keep PR 2 and every feature switch blocked.
 
-No backend canister was deployed or upgraded. The current local backend therefore cannot be used
-as evidence for these source fixes. Windows can compile the integration target, but the repository's
-PocketIC server is a Linux ELF executable; the runtime chain must run in Linux CI and against a
-disposable live upgrade before activation.
+That statement described the 2026-08-05 checkpoint. The preserved local deployment was
+subsequently upgraded as recorded in the 2026-08-06 snapshot below. It is useful local
+state-preserving upgrade evidence, but it does not replace Linux PocketIC, hosted CI, or a
+disposable production-like rollout.
+
+## Current implementation and local deployment snapshot — 2026-08-06
+
+This section supersedes older statements elsewhere in this dated report that describe the
+IOU fixes as uncommitted, the OpenChat PRs as unreconstructed, or the backend as not deployed.
+
+### Committed branches and exact PR boundary
+
+- IOU `main` is pushed through `1457aa1`. The security/integration fix is `db7db41`; exact
+  compressed ActionInbox WASM hash verification is `b110060faad76e53d004ee9823b6865f95d21184`;
+  rejection of unsupported manifest regex `pattern` fields is
+  `271c00f8b3eefb80a911c506bdc3e9ed155c616f`; and the v2 browser-card coverage repair is
+  `1457aa1`.
+- PR 1 is the clean generic branch `codex/pr1-local-models`, commit
+  `f7825b347b5f8449053778450b934110e0ee3537`, based on upstream `3c49a7302` and pushed.
+  It is open as draft [upstream PR #9132](https://github.com/open-chat-labs/open-chat/pull/9132).
+  Its preservation checkpoint is `codex/review-checkpoint-pr1` at `2222706e2`. It contains
+  only reusable local/on-device model functionality.
+- PR 2 is the clean branch `codex/pr2-app-chat-interfaces`, currently
+  `13a34fa2a167d551860c435ed544df2bf47be184`, stacked on the exact PR 1 head and open as
+  draft [fork PR #73](https://github.com/ktimam/open-chat/pull/73). It is the only PR for
+  generic in-chat cards and external-app/chat interfaces; it contains no IOU product
+  behavior and no local-model implementation delta. The pushed non-submission preservation/
+  deployment branch `codex/review-checkpoint-pr2` is
+  `cdbea7ae35843fa813fde31267e3dfe053b19fc5`. Both heads contain the attempted #72
+  exact-ticket entropy-watchdog recovery; its focused source tests pass, but live acceptance
+  remains failed as described below.
+
+### Current verification evidence
+
+- The latest IOU unit run passed **824/824**; `pnpm typecheck` passed; the focused affected
+  unit set passed **34/34**.
+- The repaired Playwright card suite passed **18/18**, including **10/10** focused v2 and
+  D8 security cases. It now uses the host-first v2 bootstrap, a valid 32-byte frame nonce,
+  and required app context. Version 1, missing/wrong nonces, and a rotated-nonce replay all
+  fail closed. The configuration can opt into an already installed browser using
+  `PLAYWRIGHT_EXECUTABLE_PATH`, avoiding an unnecessary browser download.
+- PR 1's clean candidate passed **178 frontend tests**, zero TypeScript errors, **15/15**
+  native tests and **16/16** catalog tests. Registry, integration and shipping feature
+  builds compile, and its security, secret, license and formatting audits pass.
+- PR 2's clean branch passed the focused entropy set **21/21**, the relevant shared-types/
+  UserIndex/LocalUserIndex/GroupIndex suites **318/318**, and three `wasm32` checks. The
+  dependency-compatible checkpoint passed the same focused set **21/21**, its corresponding
+  suites **309/309**, and three `wasm32` checks. These are source/component results, not the
+  failed lifecycle acceptance described under #72/#74. The local-only frontend gate passed
+  **22/22** focused security tests, TypeScript validation, and targeted Svelte validation
+  with zero errors or warnings. The repository-wide Svelte check still has the inherited
+  `VideoCallsReleased.svelte` baseline (339 errors and 559 warnings), which is not attributed
+  to these fork changes.
+
+### Preserved local canister deployment and registration
+
+The local ICP replica and the father, mother, child, and property-manager browser/account
+state were preserved; no clean replica start or reinstall was used. State-preserving upgrades
+deployed the reviewed checkpoint as follows:
+
+- UserIndex `vg3po-ix777-77774-qaafa-cai` is version `0.0.4` from checkpoint
+  `cdbea7ae35843fa813fde31267e3dfe053b19fc5`; its deployed compressed-module SHA-256 is
+  `39c703a7057a83a1bbebfea3012709bb8d320ba39da6e8f0a3d572788a4f08a0`.
+- LocalUserIndex `xad5d-bh777-77774-qaaia-cai` is version `0.0.2` from the same checkpoint;
+  its deployed compressed-module SHA-256 is
+  `710d59ffa2d0f2a91a877b9b287c4cd5054b861613bbc89d51aa340dfaebb66d`, and it remains
+  bound to ActionInbox.
+- GroupIndex `uxrrr-q7777-77774-qaaaq-cai` is version `0.0.2` from the same checkpoint;
+  its deployed compressed-module SHA-256 is
+  `54d0579c33728488cd1e6e51307302443891b8f2e1cc99251452ebd719986d49`.
+- UserIndex still reports six created users; LocalUserIndex still reports four local and six
+  global users. The four existing User canisters remain on User WASM `0.0.1`. There are no
+  pending, in-progress, or failed upgrades.
+- Group and Community child WASMs remain uploaded/active at `0.0.1`; this preserved deployment
+  still has no groups or communities.
+- ActionInbox `ll5dv-z7777-77777-aaaca-cai` was upgraded in place to `1.0.1` from
+  `e570a28b6`. Its state is empty, migration is complete, the deployed compressed module hash
+  matches the exact IOU-pinned artifact, app id 1 is registered, and only UserIndex may
+  deposit. Its preserved local `cycles_dispenser` value still points at LocalUserIndex;
+  because there is no non-destructive setter, this is a documented local-only caveat, not a
+  production configuration claim.
+- IOU backend `lqy7q-dh777-77777-aaaaq-cai` was upgraded in place. Its WASM SHA-256 is
+  `4fdee82d5e12e73eca6e5470a9f7d9ceedb5c7b5c96ea34e6b5fd61ebff9bf66`, and its stable
+  owner and deployment timestamp survived the upgrade.
+
+IOU app id `1`, canonical name `iou`, remained registered and published through all three index
+upgrades. Its exact owner/registrar is
+`wty7a-joybz-2ahtd-agtlr-ya5ce-xgl77-mfwne-7kvuz-hxdf6-yrimv-tae` and revision is
+`1785968455520`. The generated verification binding and IOU `get_config` agree on UserIndex,
+app id, revision, owner, canonical name, app canister, ActionInbox and manifest hash. The
+public UserIndex directory query independently reports the same published owner, revision,
+name, app/inbox canisters, and per-user-key requirement.
+
+### Account-Type privacy and authorized card visibility
+
+Issue #13's public disclosure is resolved independently of card activation. Public manifest
+and extraction data contain no account-Type id, name, keyword, or plaintext template. Without
+authorized private context the card still renders the `Account type` control, but its only
+choice is `None`; even a plaintext template supplied by the host is neither rendered nor
+returned. With the linked account's encrypted, nonce-bound private context, existing unit
+coverage proves its decrypted Type roster is visible in both the editable selector and the
+read-only IOU card. Thus Type is visible where requested—inside the authorized IOU iframe—while
+remaining absent from public OpenChat state and from other accounts.
+
+### Failed entropy acceptance and remaining key/browser activation
+
+The checkpoint now deployed in UserIndex includes the governance-only `inspect_message`
+allowlist entries for `stage_action_signing_key` and `activate_action_signing_key`; the earlier
+IC0406 ingress omission is therefore no longer the current blocker. It also includes #72's
+persisted attempt generation/deadline, exact `{canister_version, attempt}` tickets, watchdog,
+bounded retry/backoff, and stale-callback isolation. The focused source and Wasm checks pass.
+
+Live acceptance nevertheless failed. After the state-preserving UserIndex `0.0.4` upgrade,
+`action_signing_keys` remained `NotInitialised` for more than five minutes despite PocketIC
+auto-progress and ordinary timer activity. No signing key was staged, queried, independently
+pinned, or activated. Issue [#72](https://github.com/ktimam/open-chat/issues/72) therefore
+remains open: its code-level fix is present, but its local acceptance criterion is not met.
+
+Issue [#74](https://github.com/ktimam/open-chat/issues/74) records the independent checkpoint
+PocketIC reproduction. The fresh-canister fan-out filter also returned `NotInitialised`; both
+snapshot filters failed before their intended assertions because they used the external
+governance identity rather than OpenChat Installer as UserIndex controller; and the recovery
+helper performed 20 `tick()` calls without advancing the persisted 60-second watchdog clock.
+Those harness defects must be corrected and the intended assertions must pass against exact-commit
+WASMs before #72 can be accepted.
+
+Consequently every local card feature switch remains false, and the complete visible-Type/
+final-confirmation browser flow remains pending. Renderer and proposal paths still require exact
+lowercase opt-in flags, a development build, local network, and loopback host; non-local bundles
+hard-compile the switches to false. After entropy readiness is proven, the local ceremony must
+stage, query, pin, and activate the exact key, then smoke content verification first, private
+context second, and final confirmation last across the preserved browser accounts. Production
+remains disabled.
 
 ## Scope and provenance
 
@@ -312,19 +450,24 @@ and the [canister upgrade guidance](https://docs.internetcomputer.org/guides/sec
 
 ## IOU verification evidence
 
-The final 2026-08-05 IOU verification passed `pnpm test` with **67 files and 819 tests**,
-`pnpm typecheck`, `pnpm build`, and all **48/48** Rust canister tests. This is the current
-post-correlation source evidence. It includes the final
+The latest IOU verification passed `pnpm test` with **824/824 tests**, `pnpm typecheck`,
+the focused affected unit set with **34/34**, and the repaired card Playwright suite with
+**18/18**. The focused v2 and D8 subset passed **10/10**. The preceding complete build and
+Rust checkpoint also passed `pnpm build` and all **48/48** Rust canister tests. This evidence
+includes the final
 session, disconnect, cross-process stale-epoch, two-device ordering, ABA,
 multiple-orphan-upload, terminal-import, StrictMode, cross-deployment cleanup, inbox
 exact acknowledgement, signed-delivery replay/locator replacement, keyring substitution and
 verify-only cutoff, stale manifest-route race, deployment-owned manifest,
 manifest-icon validation, private account-type visibility, exact card-context binding, encrypted
 type-reference isolation/tamper, strict v4 ActionInbox decoding, and key-lifecycle regressions.
-The instrumented security-critical coverage below is an earlier checkpoint that includes the
+The browser repair tests the host-first v2 bootstrap, exact 32-byte frame nonce and app context,
+and rejects v1, missing/wrong nonces and stale replay after nonce rotation. The instrumented
+security-critical coverage below is an earlier checkpoint that includes the
 private card-context and account-type display/import additions, exact initial/final OpenChat
 card-attestation wire, ActionInbox protocol correction, and Hono advisory pin. Coverage was not
-rerun after the final correlation changes and must not be presented as the final 819-test run.
+rerun after the final correlation/browser changes and must not be presented as the latest
+824-test run.
 
 - TypeScript `pnpm typecheck`: passed.
 - Security-critical coverage: 86.01% statements/lines (4,570/5,313), 85.00% branches
@@ -373,23 +516,22 @@ preserved the runnable
 canister state, and the four browser profiles. Removed artifacts are not in the recycle
 bin; Cargo can regenerate them.
 
-The final continuation used isolated `C:\tmp` targets for PR 1 native tests, PR 2
-unit/WASM and integration compilation, and the IOU/opaque-handle suites. After each
-owning validation completed, those exact five targets were resolved, checked, and
-removed, reclaiming another **21.21 GiB**. The tiny untracked PR 1 `.vite` cache was also
-removed. The final measured free space on drive C was **66.94 GiB**. Active frontend
-outputs, source/untracked PR material, repository-local IOU history, browser profiles,
-and replica/canister state were preserved.
+The clean PR 2 submission worktree's rebuildable
+`C:\tmp\openchat-pr2-submit\target` contained 67,417 files: approximately **40.44 GiB**
+logical and **37.93 GiB** allocated. After its owning validation completed, that exact target
+was resolved, checked, and removed. Source, `.dfx`, the clean PR branch, untracked material,
+browser profiles, and replica/canister state were preserved. This was an intermediate clean-PR2
+target cleanup, not a final cleanup claim: the reusable checkpoint target was subsequently used
+for exact WASM builds, deployment, and PocketIC compilation and remained available at this
+report snapshot. No later free-space figure is presented as final.
 
-After the final declaration/card changes, the IOU and safe fail-closed OpenChat Vite
-processes were restarted from the current source. IOU on port 3000, OpenChat on port
-5003, and the preserved local replica status endpoint on port 8080 each returned HTTP
-200. Browser profiles, local storage, canister state, backend WASMs, feature switches,
-and the father/mother/child/property-manager account model were not reset. No OpenChat
-canister upgrade was deployed: the new backend source remains uncommitted,
-deployment-gated, and without the required PocketIC attestation-chain coverage. This
-frontend health check is not live proof of the backend fixes or visible Type; the
-running card still fails closed.
+The IOU and safe fail-closed OpenChat Vite processes run on ports 3000 and 5003, and the
+preserved local replica remains healthy on port 8080. Browser profiles, local storage,
+canister state, and the father/mother/child/property-manager account model were not reset.
+The reviewed checkpoint OpenChat canisters and IOU backend were upgraded in place as listed
+in the 2026-08-06 snapshot. The local switches remain false while #72/#74 entropy recovery,
+the signing-key ceremony, and staged four-profile browser acceptance are pending, so frontend
+health alone is not proof of the complete private-Type or final-confirmation browser flow.
 
 ## IOU residual release boundaries
 
@@ -398,8 +540,9 @@ running card still fails closed.
 3. Dev P-256 member replacement still needs per-sheet historical rewrap to match
    production vetKD. This does not affect recreation of the four local accounts.
 4. Production-web restoration requires a live authenticated canister/vetKD path.
-5. Verified HTTPS mobile association, real Android signing, live replica E2E, upgraded
-   canister tests, and recovery drills remain release gates.
+5. Verified HTTPS mobile association, real Android signing, complete live-replica E2E,
+   production-like upgraded-canister tests, and recovery drills remain release gates. The
+   preserved local state has been upgraded, but that is narrower evidence.
 6. The new #39 stable epoch must still be exercised by an in-place canister-upgrade/live
    two-agent drill, including the backend-first breaking-Candid rollout and a cached old
    PWA; unit state-machine and stable-map reopen coverage pass locally.
@@ -408,13 +551,16 @@ running card still fails closed.
 8. Production must provision and rotate the #42 allowlist of dedicated v4 signing-key ids
    through an independently authenticated release channel. UserIndex keyring discovery is
    not a remote trust root; the empty-allowlist exception is exact-loopback development only.
-9. Fixes are uncommitted; issues remain open until review and CI.
+9. IOU fixes, both exact OpenChat PR branches, and the PR 2 deployment checkpoint are committed
+   and pushed. Draft PRs are #9132 and #73. Issues remain open where hosted CI, failed entropy
+   acceptance, runtime ceremonies, or release drills remain.
 10. The owner approved the exact full-card/final-payload attestation and one-time
     viewer/card/recipient-key-bound private capability, and both generic/client contracts
-    are implemented locally. Activation remains disabled until the remaining OpenChat
-    architecture, Candid, PocketIC, signing-trust and live four-profile gates pass. Until
-    then the deployed OpenChat card cannot load the private Type roster, even though IOU's
-    renderer and cryptographic import path are complete and tested.
+    are implemented locally. Activation remains disabled until #72/#74 pass against exact WASMs
+    and the local signing-key ceremony and staged browser smoke pass; production also
+    retains the architecture, Candid, PocketIC, signing-trust and four-profile release gates. Until
+    local activation, the deployed OpenChat card cannot load the private Type roster, even though
+    IOU's renderer and cryptographic import path are complete and tested.
 
 ## OpenChat review
 
@@ -446,31 +592,13 @@ The browser Gemma catalog pins revision
 `0314792d7f1f7e229411f620751375812bb9faf2` with exact hashes/sizes and licensing. CI
 real inference uses an immutable 13,893,600-byte MIT GGUF fixture.
 
-Latest PR 1 worktree evidence: the app TypeScript check passed, nine focused Vitest files passed
-143/143, and the default-feature native plugin passed 14/14. Earlier same-day #71 evidence remains
-focused cache lifecycle 15 passed with three explicit fixture ignores, full inference 28 passed with
-four explicit fixture ignores, and pinned TinyLlama real inference exactly 1/1. The shipping
-`inference,store` feature check passed
-with five pre-existing warnings (three deprecated llama APIs and two unused legacy finder
-helpers). The external Tauri/TypeScript contract did not change, so the prior app/shared/plugin
-TypeScript checks and zero changed-path Svelte diagnostics remain applicable. The
-non-mutating formatting gate
-passes all 24 human-maintained candidate source/config files and records nine explicit
-generated/legal exclusions. SBOM generation previously produced 556 components and
-694,546 bytes with no local paths; Windows compile, Cargo formatting and diff checks
-passed. The worktree CI/format/license policy records 15 package licenses, pins Node 24.18.1, and
-passes through 2026-08-31. It is not yet an upstream-PR baseline: it compares against old base
-`05ec432`, local `upstream/master` has moved, and the browser `@wllama/wllama` dependency must be
-audited and reflected in the reconstructed lockfile, license record, and SBOM. Regenerate the policy
-against the fetched clean PR 1 base. The repository-wide Svelte baseline remains 338 errors/554
-warnings outside the fork-changed surface.
-
-The current worktree npm audit reports 71 production findings (11 low, 43 moderate, 16 high,
-1 critical) and 124 including development dependencies (14 low, 44 moderate, 60 high, 6 critical).
-The present policy describes those as inherited, but final ownership depends on the clean PR 1
-dependency diff. Inherited RustSec is 19 vulnerabilities/39 warnings, with
-zero introduced. The baseline expires 2026-08-31 (#23); 15 introduced Rust packages
-have exact source/version/license records.
+The final PR 1 evidence comes from the clean branch `codex/pr1-local-models` at
+`f7825b347b5f8449053778450b934110e0ee3537`, based on upstream `3c49a7302`, rather than the
+old combined worktree. It passes **178 frontend tests**, the app TypeScript check with zero
+errors, **15/15** native tests and **16/16** catalog tests. Registry, integration and shipping
+feature builds compile, and its security, secret, license and formatting audits pass. The
+candidate contains only generic model functionality and is pushed. The repository-wide Svelte
+diagnostics remain inherited upstream debt outside this changed surface.
 
 CI pins Node 24.18.1. Node 20 reached EOL on 2026-03-24 per the
 [official lifecycle](https://nodejs.org/en/about/previous-releases); the exact release
@@ -552,13 +680,13 @@ Current hardening fixes:
   ids; keyring discovery is not their trust root. Deterministic Rust/WebCrypto vectors and
   route/key/purpose mutation tests pass; Linux PocketIC/live rollout proof remains.
 
-Latest affected PR 2 Rust evidence: shared `types` 31/31, UserIndex 212/212, GroupIndex 19/19,
-and LocalUserIndex 32/32 passed; the complete integration-test target also compiles with
-`--no-run`. The earlier ActionInbox implementation checkpoint remains 58/58. The PR 2 worktree
-policy passes with Node 24.18.1, cargo-audit 0.22.2, Dependabot checks, and the 2026-08-31 expiry,
-but its `baseCommit` is the already-combined `f0c7402` branch head, so it hides the preceding 125
-interleaved commits and is not valid upstream-PR evidence. Regenerate it against the exact frozen
-PR 1 head after reconstruction.
+The clean PR 2 branch at `13a34fa2a167d551860c435ed544df2bf47be184` is pushed and open as
+draft [#73](https://github.com/ktimam/open-chat/pull/73), stacked on exact PR 1 head
+`f7825b347b5f8449053778450b934110e0ee3537`. The dependency-compatible checkpoint is
+preserved at `cdbea7ae35843fa813fde31267e3dfe053b19fc5`. Focused entropy tests and component/
+Wasm checks are green on both sources, and the safe local frontend gate passes **22/22** focused
+security tests, TypeScript, and targeted Svelte diagnostics. These results do not supersede the
+failed #72/#74 PocketIC acceptance.
 
 The final source-scoped PR 2 frontend run is green: shared 8 files/175 tests, agent 8/32, client 15/164,
 and app 23/382, for **54 files and 753 tests**. The agent capability mapper passes 4/4, the new worker
@@ -566,18 +694,22 @@ response-contract regression passes 1/1, Turbo worker build/typecheck passes 4/4
 dependency typecheck passes 7/7. The broad package command also collected tests from a pnpm-linked
 Rollbar dependency and failed on that vendor package's deprecated APIs; `--dir src` establishes the
 application-source result and the vendor collection is a local harness artifact, not an OpenChat source
-failure. Clean reconstruction, strict generated/bidirectional Candid comparison, rebuilt WASMs, hosted
-CI, formatting/diff/genericity gates, Linux PocketIC, and live upgrade evidence remain pending.
+failure. The checkpoint frontend source result is retained as regression evidence. The clean
+reconstruction, exact checkpoint WASMs, formatting/diff, and genericity gates now exist; strict
+generated/bidirectional Candid comparison, hosted CI, corrected PocketIC lifecycle tests, and
+complete live action-flow evidence remain pending. The state-preserving checkpoint upgrade is not
+a substitute for those final gates.
 
-The integration targets and new interleaving assertions compile, but the complete PocketIC
-suite was not run against rebuilt WASMs. Unit coverage exercises attestation, content-hash
-relay, post-await checks, collision/legacy behavior, retry and mutation boundaries; it is
-not evidence for the complete asynchronous chain, stopped canisters, upgrades or ambiguous
-outcomes on a replica.
+The integration target compiles, and three exact-checkpoint filters were run through WSL against
+an isolated PocketIC v11 server. None reached a passing release assertion: the fresh keyring
+filter reproduced `NotInitialised`, while the two snapshot filters stopped at
+`CanisterInvalidController`; their wait helper also does not advance watchdog time. This is
+negative runtime evidence under #72/#74, not proof for the complete asynchronous chain, stopped
+canisters, upgrades, or ambiguous outcomes.
 
-The 100-by-1,000 ActionInbox capacity test and acknowledgement-sybil PocketIC tests
-compile but remain unexecuted locally because the repository's PocketIC server is a Linux
-ELF and cannot run on Windows. They are not counted as runtime evidence. The exact old
+The broader PocketIC suite, including the 100-by-1,000 ActionInbox capacity and
+acknowledgement-sybil cases, remains unexecuted against the final exact-commit matrix and is not
+counted as runtime evidence. The exact old
 heap snapshot necessarily deserializes before the O(1) non-empty guard; it now rolls the
 upgrade back with a migration-required trap instead of losing data. A non-empty legacy
 deployment therefore needs a drain/export/reinstall decision, while current-v4 capacity
@@ -585,20 +717,26 @@ and upgrade behavior still need their explicit Linux release runs.
 
 Architecture/release blockers include:
 
-1. **#13:** finish installer/controller/cycles/metrics wiring and the UserIndex →
-   ActionInbox → LocalUserIndex rollout. A non-empty committed pre-PR2 heap snapshot now
-   traps explicitly because its rows cannot be authenticated as v4. Before upgrading such
-   a canister, drain it or use a reviewed export/reinstall policy; prove empty-legacy,
-   current-state, restart, saturation and recovery in PocketIC/live replicas.
-2. **#38/#45:** stage/activate/verify-only logic and independently pinned remote trust are
-   implemented. Provision real pins, validate partial rollout/convergence/retirement, and
-   define the controller/backup threat model plus bounded scrubbing before claiming physical
-   deletion of retired private-key copies from heap or stale upgrade memory.
+1. **#13:** installer/controller/metrics wiring and the UserIndex-to-ActionInbox-to-
+   LocalUserIndex path are deployed in the preserved local environment. The existing local
+   ActionInbox `cycles_dispenser` value remains a documented test-only mismatch because no
+   non-destructive setter exists. Separately, a non-empty committed pre-PR2 heap snapshot traps
+   explicitly because its rows cannot be authenticated as v4. Before upgrading such a production
+   canister, drain it or use a reviewed export/reinstall policy; prove current-state, restart,
+   saturation and recovery in PocketIC/live replicas.
+2. **#38/#45/#72/#74:** stage/activate/verify-only logic, independently pinned remote trust,
+   and the `inspect_message` ingress entries are deployed in the initial checkpoint upgrade.
+   The live keyring nevertheless remained `NotInitialised`; the focused PocketIC harness also
+   uses the wrong controller and does not advance watchdog time. Correct those lifecycle paths,
+   prove a Staged key appears, then provision the local key-id pin before activation and validate partial rollout/
+   convergence/retirement, and define the controller/backup threat model plus bounded scrubbing
+   before claiming physical deletion of retired private-key copies from heap or stale upgrade memory.
 3. **#48/#54:** exact initial/final attesters and the approved click-only private-capability
-   bridge are implemented. Keep every switch false until strict generated-contract CI,
-   Linux PocketIC and the live four-profile matrix prove the full chain. The authorized IOU
-   card must show Type; public OpenChat state must never contain it.
-4. **#49/#51/#69:** the immutable semantic outbox, exact retry/late-result policy, and persisted
+   bridge are implemented. Production remains hard-disabled. The local-only gates may be enabled
+   in order—content, private context, then final confirmation—after the clean UserIndex upgrade
+   and key ceremony, with each stage smoked before the next. The authorized IOU card must show
+   Type; public OpenChat state must never contain it.
+4. **#49/#51/#69/#72/#74:** the immutable semantic outbox, exact retry/late-result policy, and persisted
    canister-version/`raw_rand` entropy gates are implemented in source. Prove actual
    stop/snapshot/issue/load/reseed, stopped-inbox/timeout, restart/upgrade, and ambiguous-callback
    recovery across the coordinated state graph before activation.
@@ -620,8 +758,9 @@ Architecture/release blockers include:
    Focused validation passed: UserIndex directory filters 6/6, near-capacity page cloning 1/1,
    search totals 1/1, API contract tests 4/4, agent client/mapper tests 9/9 and action/card/surface/
    auto-propose tests 86/86; the agent typecheck passed. Manifest validation passed 9/9 backend and
-   56/56 frontend focused tests. These are source results only; no backend upgrade is deployed and
-   every PR2 feature flag remains false.
+    56/56 frontend focused tests. A reviewed checkpoint backend upgrade is deployed locally, but
+    entropy/keyring acceptance and the complete browser chain remain pending; every PR2
+    feature flag is therefore still false.
 8. **#58:** app-authenticated private claim/selector operations, secret-derived per-app subjects and
     selectors, canonical chat/message handles, and removal of the raw IOU link URL are fixed in source.
     The Rust integration target compiles; 15 link/revoke integration tests compile without runtime,
@@ -633,26 +772,25 @@ Architecture/release blockers include:
    PR2 link, card, capability, grant, route or deposit operations in User, LocalUserIndex, UserIndex,
    GroupIndex, Group and Community. ActionInbox preserves its stable tuple compatibility but never
    restores or re-persists historical traces. Focused logger purge tests pass 2/2, ActionInbox stable
-   restore tests pass 4/4, and source-contract checks pass 2/2. This remains a release gate until an
-   actual upgrade of disposable canisters proves the historical entries are removed from exported
-   logs and stay absent after another upgrade; the preserved local backend was not upgraded.
-10. Rebuild generated clients and every affected WASM, run strict bidirectional Candid checks,
-   and execute the real confirmation→deposit→replicated-read→IOU verify/decrypt/import→
-   exact-ack flow in Linux PocketIC and a disposable live upgrade. Windows compilation alone
-   is not runtime evidence.
+   restore tests pass 4/4, and source-contract checks pass 2/2. The preserved local canisters were
+   upgraded, but no before/after exported-log drill was captured; a disposable upgrade must still
+   prove historical entries are removed and stay absent after another upgrade.
+10. Correct #72/#74 and rebuild/redeploy any resulting exact PR 2 UserIndex change in place,
+    prove Staged-key initialization, complete stage/query/pin/activate, and execute the real confirmation-to-deposit-to-replicated-
+    read-to-IOU-verify/decrypt/import-to-exact-ack flow. Also run strict bidirectional Candid checks,
+    Linux PocketIC, and a disposable live upgrade; the successful local checkpoint upgrade alone
+    is not complete release evidence.
 
 ## Exact two-PR plan
 
 ### PR 1
 
-Include only generic model contracts/catalog/integrity, downloader/store, llama.cpp and
-Tauri bridge, browser text/vision inference, model UI, and only platform support required by those
-model features,
+The clean pushed branch is `codex/pr1-local-models` at
+`f7825b347b5f8449053778450b934110e0ee3537`, based on upstream `3c49a7302`. It includes only
+generic model contracts/catalog/integrity, downloader/store, llama.cpp and Tauri bridge,
+browser text/vision inference, model UI, platform support required by those model features,
 tests, SBOM, license/dependency policy, and the shared model-refresh event contract.
-The earlier short PR 1 path examples were not exhaustive. A complete committed-plus-dirty audit found
-79 PR 1 candidate paths and 42 paths also present in the combined PR 2 workspace, including Tauri,
-shared model contracts, stores, catalog/inference files, `Cargo.lock`, and Dependabot policy. Freeze an
-exact reviewed path-and-hunk manifest rather than inferring ownership from a filename example.
+It is open as draft [upstream PR #9132](https://github.com/open-chat-labs/open-chat/pull/9132).
 
 Exclude ActionCard/external-app code, IOU material, fork notes, local scripts, generated
 profiles/WASM, general desktop-shell/navigation changes, and mixed lockfiles. Require clean
@@ -668,20 +806,20 @@ confirmation state machines/leases, card UI, external-host provenance, and optio
 generic proposal support. It may consume PR 1's generic inference interface, but card/external-app
 behavior must fail cleanly without a local model and PR 2 must contain no model implementation delta.
 
-Do not classify the broad product tree by exclusion. The current PR 2 branch is 125 commits over old
-base `05ec432`, contains merge `b24437f` of PR 1 and later interleaved model work, and its complete
-candidate manifest spans 496 paths. Reconstruct PR 1 first from fetched upstream; while it is under
-review, stack PR 2 only against that exact frozen head and use path/hunk review plus `range-diff` to
-prove the PR 2 delta contains no Model Manager, `/ai`, browser/native inference, cache, catalog, or
-model dependency changes. After PR 1 merges, rebase/reconstruct PR 2 onto updated upstream.
-Fork notes, caches, local deployment helpers, generated artifacts and mixed lockfiles
-are not thereby admitted. Finish #13's legacy-inbox rollout decision and #38's physical
-key-erasure threat model, validate the #36/#45 source closures in PocketIC/live upgrades,
-then scan for every IOU string, URL, prompt, ID, fixture, canister ID, and WASM.
+The pushed `codex/review-checkpoint-pr2` branch at
+`cdbea7ae35843fa813fde31267e3dfe053b19fc5` preserves the dependency-compatible deployed work
+but is not the PR submission diff. The clean `codex/pr2-app-chat-interfaces` branch at
+`13a34fa2a167d551860c435ed544df2bf47be184` is stacked on the exact frozen PR 1 commit above and
+open as draft [fork PR #73](https://github.com/ktimam/open-chat/pull/73). Path/hunk and genericity
+review found no IOU identifiers or local-model implementation delta; rerun those gates for every
+subsequent change.
+Fork notes, caches, local deployment helpers, generated artifacts and mixed lockfiles are not
+admitted. Correct and pass #72/#74, complete the key ceremony and final isolated gates,
+and finish #36/#45 PocketIC/live proof, then scan for every IOU string, URL, prompt, ID, fixture, canister
+ID and WASM.
 
-There is no third mixed PR. Reconstruct each candidate from an exact clean-base path
-manifest and validate it in isolation; do not submit either current broad worktree as
-the PR diff. IOU-specific adoption remains in IOU.
+There is no third mixed PR. The two draft PRs are exactly upstream #9132 and fork #73; PR 2 also
+has one non-submission preservation/deployment checkpoint. IOU-specific adoption remains in IOU.
 
 ## Tracking uncommitted OpenChat material
 
@@ -760,11 +898,11 @@ are duplicate reports redirected to the named canonical issue.
 | [#36](https://github.com/ktimam/IOU/issues/36) | Open | Post-await authorization |
 | [#37](https://github.com/ktimam/IOU/issues/37) | Open | Mobile custom-scheme invite |
 | [#38](https://github.com/ktimam/IOU/issues/38) | Open | Android signing guard |
-| [#39](https://github.com/ktimam/IOU/issues/39) | Open; fixed in worktree, live upgrade pending | Cross-process consumer-key mutation epoch |
+| [#39](https://github.com/ktimam/IOU/issues/39) | Open; committed/pushed on main, live two-agent upgrade drill pending | Cross-process consumer-key mutation epoch |
 | [#40](https://github.com/ktimam/IOU/issues/40) | Open; exact-secret acknowledgement fixed, live drill pending | Handled ActionInbox items were never acknowledged |
 | [#41](https://github.com/ktimam/IOU/issues/41) | Open; cursor removed/replicated read fixed, live drill pending | Exclusive inbox cursor skipped an adjacent action |
 | [#42](https://github.com/ktimam/IOU/issues/42) | Open; v4 key-id pins/rotation cutoffs fixed, production pins pending | Uncertified OpenChat signing-key query |
-| [#43](https://github.com/ktimam/IOU/issues/43) | Open; fixed in worktree, hosted clean-install CI pending | Transitive Hono CORS ReDoS advisory |
+| [#43](https://github.com/ktimam/IOU/issues/43) | Open; committed/pushed on main, hosted clean-install CI pending | Transitive Hono CORS ReDoS advisory |
 | [#44](https://github.com/ktimam/IOU/issues/44) | Open; complete v4 verification fixed, cross-repo/live proof pending | Stale ActionInbox v2 signature and permissive envelope decoder |
 
 Earlier #1–#7 are closed historical issues; current work did not reopen them.
@@ -843,15 +981,18 @@ Earlier #1–#7 are closed historical issues; current work did not reopen them.
 | [#68](https://github.com/ktimam/open-chat/issues/68) | Open; bounded/set-based fix and boundary tests pass in tree | Quadratic unbounded recipient-key bindings |
 | [#69](https://github.com/ktimam/open-chat/issues/69) | Open; timeouts/throttles/durable exact-byte outbox fixed in tree, stopped-inbox/PocketIC proof pending | Unbounded ActionInbox waits and shared call-pool starvation |
 | [#70](https://github.com/ktimam/open-chat/issues/70) | Open; complete dedicated v4 binding fixed, Linux/live interop pending | Missing action-signature protocol/routing domain separation |
-| [#71](https://github.com/ktimam/open-chat/issues/71) | Open; content-addressed bounded cache and failure-adjacent lifecycle tests pass in tree, clean-baseline reconstruction/hosted CI pending | Stale and unbounded native model cache |
+| [#71](https://github.com/ktimam/open-chat/issues/71) | Open; fixed and tested on clean pushed PR1 candidate, hosted CI pending | Stale and unbounded native model cache |
+| [#72](https://github.com/ktimam/open-chat/issues/72) | Open; watchdog source tests pass, but state-preserving local acceptance still failed | Lost `raw_rand` callback permanently wedges the entropy gate |
+| [#74](https://github.com/ktimam/open-chat/issues/74) | Open; exact-checkpoint PocketIC reproduction captured, harness correction and passing rerun pending | Entropy snapshot drills use the wrong controller and never advance watchdog time |
 
 ## Release recommendation
 
-Do not deploy solely because local checks pass. Review and commit, run pinned hosted CI,
-deploy to a disposable replica, exercise fresh install
-and upgrades, test all four durable named profiles across restarts and same-profile
-principal switching, and complete production key/Android drills.
+Do not promote to production solely because local checks and the preserved checkpoint upgrade
+pass. The reviewed changes are committed and pushed; next run pinned hosted CI and Linux PocketIC,
+exercise fresh install and disposable upgrades, test all four durable named profiles across
+restarts and same-profile principal switching, and complete production key/Android drills.
 
-Do not upstream either broad OpenChat branch. Construct the two PRs from the classified
-paths, resolve PR 2 blockers, run PocketIC, and audit each resulting diff independently
-for genericity and dependency delta.
+Submit only the two clean OpenChat candidates, never either broad preservation worktree. Draft PR 1
+#9132 and stacked draft PR 2 #73 are open. Correct #72/#74, rerun exact-Wasm PocketIC lifecycle
+acceptance, complete the signing-key ceremony and four-profile browser flow, and obtain hosted CI
+before presenting PR 2 as production-ready.
