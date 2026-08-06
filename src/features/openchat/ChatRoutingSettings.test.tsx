@@ -4,6 +4,7 @@ import {
   activeRouteSheets,
   buildChatRouteRows,
   ChatRoutingView,
+  routableSheetIdSet,
   type PendingChatRoute,
 } from "./ChatRoutingSettings";
 
@@ -12,6 +13,20 @@ const OLDER_PENDING_ID = "cd".repeat(32);
 const HOUSE = "1111111111111111";
 
 describe("Chat routing settings", () => {
+  it("accepts the BigUint64Array shape returned for Candid vec nat64", () => {
+    const wire = BigUint64Array.from([0x0188dbbbfeaca7c7n]);
+
+    expect([...routableSheetIdSet(wire)]).toEqual(["0188dbbbfeaca7c7"]);
+  });
+
+  it("keeps ordinary Candid arrays compatible and rejects unrelated wire shapes", () => {
+    expect([...routableSheetIdSet([0x1111111111111111n])]).toEqual([
+      "1111111111111111",
+    ]);
+    expect([...routableSheetIdSet(new Uint8Array([1]))]).toEqual([]);
+    expect([...routableSheetIdSet(null)]).toEqual([]);
+  });
+
   it("labels active sheets from caller-local decrypted caches, with a non-identity fallback", () => {
     const rows = activeRouteSheets(
       [

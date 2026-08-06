@@ -78,6 +78,22 @@ export function activeRouteSheets(
     .sort((left, right) => left.label.localeCompare(right.label) || left.sheetId.localeCompare(right.sheetId));
 }
 
+export function routableSheetIdSet(routableWire: unknown): Set<string> {
+  const routableIds = new Set<string>();
+  const values =
+    Array.isArray(routableWire) || routableWire instanceof BigUint64Array
+      ? routableWire
+      : [];
+  for (const value of values) {
+    try {
+      routableIds.add(nat64ToSheetId(BigInt(value as bigint)));
+    } catch {
+      // Ignore malformed values from a stale/mismatched declaration.
+    }
+  }
+  return routableIds;
+}
+
 export function buildChatRouteRows(
   pending: PendingChatRoute[],
 ): ChatRouteRow[] {
@@ -247,14 +263,7 @@ export function ChatRoutingSettings({ principal }: { principal: string }) {
         actor.pending_chat_routes(),
       ]);
       if (generation !== reloadGeneration.current) return;
-      const routableIds = new Set<string>();
-      for (const value of Array.isArray(routableWire) ? routableWire : []) {
-        try {
-          routableIds.add(nat64ToSheetId(BigInt(value as bigint)));
-        } catch {
-          // Ignore malformed values from a stale/mismatched declaration.
-        }
-      }
+      const routableIds = routableSheetIdSet(routableWire);
       const nextSheets = activeRouteSheets(
         Array.isArray(pairWire) ? (pairWire as PairSummary[]) : [],
         prefs,
