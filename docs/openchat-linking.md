@@ -255,10 +255,23 @@ On top of the provenance IOU keeps a per-user **app-scoped chat handle → sheet
   encoding of exactly 32 bytes. Raw OpenChat chat/user/message coordinates are rejected. The sheet
   id travels as a `nat64` (IOU sheet ids are 16 hex chars, i.e. exactly 64 bits).
 
-The old `/openchat/link-chat?chat={chatKey}` surface was removed. A URL is a public correlation and
-referrer channel, so it must not carry either a raw OpenChat chat coordinate or the private
-app-scoped handle. The secure mapping is learned only after IOU decrypts a v4 action-inbox envelope;
-the import screen's **Remember** checkbox is the supported mapping flow.
+The old `/openchat/link-chat?chat={chatKey}` surface remains removed. A URL is a public correlation
+and referrer channel, so it must not carry either a raw OpenChat chat coordinate or the private
+app-scoped handle. Two safe mapping flows are supported:
+
+- When an authenticated IOU card first requests private context for an unmapped chat, the IOU
+  canister records a caller-private pending route. Settings exposes only a principal-scoped SHA-256
+  pending id—not the app-scoped handle—under **Chat routing**. The user selects one of their own
+  active account/sheets, and can later reassign or remove the saved route—even if its former sheet
+  was later closed or access was revoked. Pending rows expire after 24 hours, are capped at 32 per
+  principal and 4096 globally, and stale rows are reclaimed on subsequent authenticated requests.
+  The backend permits assignment/unlink only for its deterministically newest live row and rechecks
+  the exact current manifest revision, UserIndex/app coordinates, binding, and consumer key.
+- The first verified v4 draft import can still store the same mapping through the default-on
+  **Remember** checkbox.
+
+The raw-free OpenChat **Open setup** surface points only to
+`/settings#openchat-routing`. It carries no chat, user, message, handle, token, or pending id.
 
 ## App surfaces: raw-free external and embedded pages
 
@@ -271,10 +284,11 @@ part of the registered manifest (`AiAppManifest.surfaces`); each one carries:
 - `display` — `"sheet"` (embedded in OpenChat as an iframe inside a bottom sheet) or
   `"external"` (opened in the system browser / a new tab).
 
-IOU registers three raw-free surfaces:
+IOU registers four raw-free surfaces:
 
 ```
 kind: connect   url: <app origin>/settings#openchat-connect   display: external
+kind: chat_link url: <app origin>/settings#openchat-routing   display: external
 kind: home      url: <app origin>/                             display: sheet
 kind: card      url: <app origin>/openchat/card                display: sheet
 ```

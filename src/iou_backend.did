@@ -333,6 +333,15 @@ type ChatSheetLink = record {
     sheet_id : nat64;
 };
 
+// Caller-private setup candidate. pending_id is a principal-scoped SHA-256
+// digest; the app-scoped chat handle never leaves the canister on this path.
+type PendingChatRoute = record {
+    pending_id : text;
+    last_seen : nat64;
+    has_current_link : bool;
+    current_sheet_id : opt nat64;
+};
+
 type OpenChatBinding = record {
     iou_principal : principal;
     user_index_canister_id : principal;
@@ -477,6 +486,11 @@ service : {
     set_chat_sheet_link : (text, nat64) -> ();
     remove_chat_sheet_link : (text) -> ();
     chat_sheet_links : () -> (vec ChatSheetLink) query;
+    chat_routable_sheet_ids : () -> (vec nat64) query;
+    pending_chat_routes : () -> (vec PendingChatRoute) query;
+    assign_pending_chat_route : (text, nat64) -> ();
+    dismiss_pending_chat_route : (text) -> ();
+    remove_pending_chat_route_link : (text) -> ();
 
     // v1.15.0: authoritative OpenChat identity link and capability-gated,
     // ciphertext-only app-card context.

@@ -176,10 +176,10 @@ runs proposing on "hi".
 
 ## 6. ~~`test/ui/openchat.ui.spec.ts:61` — chat→sheet link~~ — FIXED (`ee85f1b`)
 
-> Superseded 2026-08-05: the raw `/openchat/link-chat?chat=...` surface was removed
-> and must not be restored. IOU now accepts only canonical app-scoped opaque handles
-> through the authenticated integration boundary; the old path redirects to `/` and
-> discards its query.
+> Superseded 2026-08-06: the raw `/openchat/link-chat?chat=...` surface remains removed
+> and must not be restored. A raw-free **Open setup** surface now opens
+> `/settings#openchat-routing`; an authenticated card request creates a caller-private,
+> expiring pending route and the page never receives or renders the app-scoped handle.
 
 Kept as a historical note because the *mistake* is reusable, not because the retired
 surface remains supported.

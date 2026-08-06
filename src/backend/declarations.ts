@@ -270,6 +270,12 @@ export const idlFactory = ({ IDL: idl }: { IDL: IDL }) => {
     chat_key: idl.Text,
     sheet_id: idl.Nat64,
   });
+  const PendingChatRoute = idl.Record({
+    pending_id: idl.Text,
+    last_seen: idl.Nat64,
+    has_current_link: idl.Bool,
+    current_sheet_id: idl.Opt(idl.Nat64),
+  });
   const OpenChatBinding = idl.Record({
     iou_principal: idl.Principal,
     user_index_canister_id: idl.Principal,
@@ -466,6 +472,11 @@ export const idlFactory = ({ IDL: idl }: { IDL: IDL }) => {
     set_chat_sheet_link: idl.Func([idl.Text, idl.Nat64], [], []),
     remove_chat_sheet_link: idl.Func([idl.Text], [], []),
     chat_sheet_links: idl.Func([], [idl.Vec(ChatSheetLink)], ["query"]),
+    chat_routable_sheet_ids: idl.Func([], [idl.Vec(idl.Nat64)], ["query"]),
+    pending_chat_routes: idl.Func([], [idl.Vec(PendingChatRoute)], ["query"]),
+    assign_pending_chat_route: idl.Func([idl.Text, idl.Nat64], [], []),
+    dismiss_pending_chat_route: idl.Func([idl.Text], [], []),
+    remove_pending_chat_route_link: idl.Func([idl.Text], [], []),
     connect_openchat: idl.Func([idl.Text, idl.Text], [ConnectOpenChatResult], []),
     get_openchat_binding: idl.Func([], [idl.Opt(OpenChatBinding)], ["query"]),
     disconnect_openchat: idl.Func(

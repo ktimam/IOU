@@ -21,6 +21,7 @@ import { IOUMark } from "../ui/Logo";
 import { RelaySettings } from "../relay/RelaySettings";
 import { RelayPairingCard } from "../openchat/OpenChatSettings";
 import { ActionInboxSettings } from "../openchat/ActionInboxSettings";
+import { ChatRoutingSettings } from "../openchat/ChatRoutingSettings";
 
 export function SettingsPage() {
   const { state, signOut } = useAuth();
@@ -239,6 +240,8 @@ export function SettingsPage() {
         <RelaySettings />
         <RelayPairingCard />
       </ActionInboxSettings>
+
+      <ChatRoutingSettings principal={state.principal} />
     </div>
   );
 }

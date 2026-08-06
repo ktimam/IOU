@@ -17,13 +17,19 @@ self-skipping.
 Layers 1–2 live in **this** repo and are green here. Layers 3–4 live in their canonical home repos
 (the generic primitives are upstreamed from there); this file is the index + cross-reference.
 
-### Verification status (all layers green)
+### Historical verification snapshot
+
+> The counts below are a dated snapshot, not a substitute for the current release run. In
+> particular, the old `openchat.ui.spec.ts` chat-link/unlink claim became stale when the raw
+> `/openchat/link-chat?chat=...` route was retired. Current routing coverage lives in
+> `openchatChatRouting.ui.spec.ts`: the raw-free settings surface, first-use pending-row UI,
+> saved-route assignment/reassignment/removal, caller isolation, and URL/visible-DOM privacy.
 
 | Layer | Result |
 |---|---|
 | 1 — IOU unit | **264 pass / 29 files**, `tsc --noEmit` clean |
 | 2 — IOU E2E (live `:8080`) | **27 pass / 5 files** |
-| 2b — IOU UI E2E (Playwright) | **green** — `multiUser` (3 users · 3 sheets · cross-user mirror · chat links) + `openchat` (settings/consumer-key, chat link/unlink/isolation, ✨ Import) + `closeAndName` (global-username eager-publish to an existing account · close-&-start carries balance forward in the correct direction · persists across reload) |
+| 2b — IOU UI E2E (Playwright) | Historical green snapshot for `multiUser`, `openchat`, and `closeAndName`; raw-free routing now has its own `openchatChatRouting` release gate (first-use pending UI, live saved-route lifecycle/isolation, URL/DOM privacy). |
 | 3a — TS facade (open-chat) | **25 pass / 2 files** (vitest, jsdom); + **38 pass** `aiAction.test.ts` (open-chat-cycle, incl. fan-out card fields) |
 | 3b — tauri-plugin-oc (Rust) | **7 hermetic pass** on the default build; real-model smoke gated |
 | 4 — OpenChat canisters | **20 pass** — compile-clean on Windows + run green under WSL pocket-ic (~95s); incl. **fan-out delivery** (`fan_out_delivery_tests.rs`: partner-confirm deposits to BOTH members' buckets with cross-key isolation; repeated-key dedupe; `ai_app_user_keys` lookup scoping) |
@@ -148,10 +154,11 @@ via in-app clicks).
 
 | Test | Proves (real clicks against the live app) |
 |---|---|
-| `multiUser.ui.spec.ts` | 3 users sign in; **3 pairs/sheets** created + partner joins via **invite LINK → Accept (no grant step)** (Alice↔Bob, Alice↔Carol, Bob↔Carol; each user in 2); entries added through the real `EntryForm` (settlement + IOU, multiple currencies); the creator's balance reflects them; **cross-user shared view** — the accepted partner opens the SAME sheet and decrypts the same net, and sees the **per-viewer mirror** (Alice "…owes you", Bob "you owe…" — fix #2); a fresh **deep-link/refresh** of a guarded page renders instead of bouncing (fix #1); **2 chat→sheet links** |
+| `openchatChatRouting.ui.spec.ts` | The restored raw-free routing journey: `/settings#openchat-routing` is discoverable; a first-use pending chat can select an active account/sheet and be dismissed; a saved route can be reassigned and removed through real clicks; a second principal cannot read the first principal's route; pending ids, app-scoped handles, and raw chat coordinates never enter the visible DOM or navigation URL. The saved-route/isolation half uses the live caller-keyed canister map; the pending-row UI uses a browser fixture because only a valid OpenChat card capability may create a real pending row. Rust production-path tests separately prove exact vouched attestation creates the row, a later request invalidates the older id inside the backend, stale manifest coordinates fail closed, and global/per-principal bounds hold. The combined live OpenChat card → pending row → Settings save → card retry is still a required local release gate, not claimed by the fixture. |
+| `multiUser.ui.spec.ts` | 3 users sign in; **3 pairs/sheets** created + partner joins via **invite LINK → Accept (no grant step)** (Alice↔Bob, Alice↔Carol, Bob↔Carol; each user in 2); entries added through the real `EntryForm` (settlement + IOU, multiple currencies); the creator's balance reflects them; **cross-user shared view** — the accepted partner opens the SAME sheet and decrypts the same net, and sees the **per-viewer mirror** (Alice "…owes you", Bob "you owe…" — fix #2); a fresh **deep-link/refresh** of a guarded page renders instead of bouncing (fix #1). |
 | `membership.ui.spec.ts` | The v1.10.0 membership lifecycle end-to-end (2 users): the creator hits **🔗 Invite** on the sheet, the invitee opens the LINK and clicks **Accept** → lands on the SAME shared sheet **immediately, no grant**; both read/write (invitee writes, creator decrypts); **Archive** moves the account to the "📦 Archived" section, **Unarchive** brings it back; the partner **Leaves** → is locked out while the creator keeps the account solo; the creator **Archives** then **Deletes forever** (typed `DELETE` confirm) the solo account → it's gone |
-| `openchat.ui.spec.ts` | The IOU-app side of the OpenChat confirmable-action feature, multi-user: the **action-inbox settings card** (per-user consumer key + distinct fingerprints, auto-derived inbox `<id> @ <host>`, connect-code validation incl. a live-`user_index` `CodeNotFound`); **chat→sheet link / current import target / unlink / per-user isolation**; and the **✨ Import** chat-draft flow (paste JSON → parseDraft → EntryForm → written). SAFE-BY-DESIGN: never clicks "Link to OpenChat" (that upsert would clobber the shared live "iou" registration — the full loop is the api-e2e + Rust integration tests) |
-| `flows.ts` | reusable actions: dev sign-in, create account, **read the sheet's invite link**, **accept an invite link**, **leave / archive / unarchive / delete** an account, open sheet, add entry, link/unlink chat, import draft, open settings, read consumer fingerprint, connect-with-code, read balances |
+| `openchat.ui.spec.ts` | The IOU-app side of the OpenChat confirmable-action feature: the **action-inbox settings card** (per-user consumer key + distinct fingerprints, auto-derived inbox `<id> @ <host>`, connect-code validation incl. a live-`user_index` `CodeNotFound`); the **✨ Import** chat-draft flow (paste JSON → parseDraft → EntryForm → written); and signed-in connect-surface focus. Chat routing is covered separately by `openchatChatRouting.ui.spec.ts`. SAFE-BY-DESIGN: never clicks "Link to OpenChat" (that upsert would clobber the shared live "iou" registration — the full loop is the api-e2e + Rust integration tests). |
+| `flows.ts` | reusable actions: dev sign-in, create account, **read the sheet's invite link**, **accept an invite link**, **leave / archive / unarchive / delete** an account, open sheet, add entry, import draft, open settings, read consumer fingerprint, connect-with-code, read balances. |
 
 `scripts/ui-multiuser-demo.ts` (`pnpm ui:demo`) reuses the same flows to open **one persistent Chromium
 window per user** (Alice/Bob/Carol), gives each their own accounts/sheets/entries (+ Alice's chat

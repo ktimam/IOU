@@ -153,6 +153,55 @@ describe("security-sensitive Candid bindings", () => {
     ).toEqual({ KeyNotFound: null });
   });
 
+  it("keeps chat-routing handles inside the canister and exposes only opaque pending ids", () => {
+    const service = idlFactory({ IDL }) as any;
+    const method = (name: string) =>
+      service._fields.find(([field]: [string]) => field === name)[1];
+
+    const pending = method("pending_chat_routes");
+    const decoded = IDL.decode(
+      pending.retTypes,
+      IDL.encode(pending.retTypes, [[{
+        pending_id: "ab".repeat(32),
+        last_seen: 123n,
+        has_current_link: true,
+        current_sheet_id: [0x1111111111111111n],
+      }]]),
+    ) as any[];
+    expect(decoded[0][0]).toEqual({
+      pending_id: "ab".repeat(32),
+      last_seen: 123n,
+      has_current_link: true,
+      current_sheet_id: [0x1111111111111111n],
+    });
+    expect(decoded[0][0]).not.toHaveProperty("chat_key");
+    expect(decoded[0][0]).not.toHaveProperty("chat_handle");
+
+    const routable = method("chat_routable_sheet_ids");
+    expect(
+      Array.from(
+        IDL.decode(
+          routable.retTypes,
+          IDL.encode(routable.retTypes, [[0x1111111111111111n]]),
+        )[0] as unknown as BigUint64Array,
+      ),
+    ).toEqual([0x1111111111111111n]);
+
+    for (const name of [
+      "assign_pending_chat_route",
+      "dismiss_pending_chat_route",
+      "remove_pending_chat_route_link",
+    ]) {
+      const args =
+        name === "assign_pending_chat_route"
+          ? ["cd".repeat(32), 0x1111111111111111n]
+          : ["cd".repeat(32)];
+      expect(
+        IDL.decode(method(name).argTypes, IDL.encode(method(name).argTypes, args))[0],
+      ).toBe("cd".repeat(32));
+    }
+  });
+
   it("encodes exact card and final-confirmation attestation bindings without plaintext Type fields", () => {
     const service = idlFactory({ IDL }) as any;
     const p = Principal.fromText("rrkah-fqaaa-aaaaa-aaaaq-cai");

@@ -27,10 +27,11 @@ There are two intentionally different workflows:
    UserIndex; and the installer is controlled by the selected local dfx identity. A mismatch
    is a stop condition.
 3. Identify which source or artifact layer you are changing. The current clean PR 2 source head is
-   `68aadfd35d93b3bbb25d352edb81c83790160c0c`; the dependency-compatible checkpoint source
+   `dda2833d6545c68599feccdd90f4faac86197717`; the dependency-compatible checkpoint source
    head is `790bb76d00240ca5a8a4c124db4535dd7795f96b`. They include generic #77's test-mode
    backend gate, #78's bounded bootstrap retry, and #79's structured-clone-safe private-context
-   handoff. The latter two changes are frontend-only and do not change any canister Wasm.
+   handoff, plus #80's exact pending-link-token cancellation. #78/#79 are frontend-only; #80
+   requires a UserIndex-only upgrade and does not change LocalUserIndex, GroupIndex, or child Wasms.
 
    The current index canisters still run the tested artifacts built from embedded git SHA
    `7c997f4b1ef10f8217d526e82f8016b7e05d0486`:
@@ -94,8 +95,8 @@ There are two intentionally different workflows:
    It must also use the local canister ids; a stale Vite process that contacts mainnet ids is not
    valid local evidence. Verify that an IOU module response to `Origin: null` carries
    `Access-Control-Allow-Origin: *` (#45) while the HTML `frame-ancestors` policy still permits
-   only the approved OpenChat origins. For current PR 2 acceptance, serve either clean
-   `68aadfd35` or dependency-compatible checkpoint `790bb76d0`; `8ae34cf38` is the deployed
+   only the approved OpenChat origins. For current PR 2 acceptance, serve clean
+   `dda2833d6` (or a deployment checkpoint proven to contain it); `8ae34cf38` is the deployed
    child-Wasm provenance, not the final frontend source head.
 9. Recheck zero upgrade failures, six global/four local users (for this fixture), the
    published app revision/inbox/app-canister binding, exact active key pin, frontend HTTP
@@ -108,7 +109,8 @@ There are two intentionally different workflows:
     after explicit load and its one-time encrypted private context. Generic OpenChat #78/#79 are
     present in the source heads above. IOU #47/#48 are also fixed in the current IOU main changes:
     the crypto/poll suites pass **42/42** and repository-policy tests pass **12/12**. The exact
-    clean-head PR 2 focused rerun at `68aadfd35` passes **68/68**. A fresh reload imported the
+    earlier PR 2 card-focused rerun at `68aadfd35` passed **68/68**; #80's endpoint/model/API/
+    consent/worker suites at `dda2833d6` pass **37/37**. A fresh reload imported the
     already-stored setup action without reconfirming it. The separate local `Rent` smoke then passed:
     the card options were exactly `[None, Rent]`, `Rent` was selected through its private account-local
     identifier, edited final-payload approval passed, and the resulting draft was deposited/routed
@@ -117,8 +119,8 @@ There are two intentionally different workflows:
 
     Do not treat the current whole-workspace `svelte-check` as authoritative or green: its
     `node_modules` is linked to the deployment repository, `marked` and `svelte-easy-crop` are
-    missing, and inherited `VideoCallsReleased` parser errors remain. Use the focused **68/68**
-    clean-head rerun as the latest PR 2 frontend evidence until that workspace baseline is repaired.
+    missing, and inherited `VideoCallsReleased` parser errors remain. Use the isolated focused
+    suites above, including #80's **37/37**, until that workspace baseline is repaired.
 
 Snapshot restoration has an additional mandatory transition. Use **stop → load snapshot →
 upgrade the same tested Wasm while the canister remains stopped → start**. Loading a
@@ -228,7 +230,7 @@ discard an existing canister identity automatically.
   must stop on ready, reset, timeout, or teardown and must never change the frame nonce.
 - **`DataCloneError` after “Share private context” is generic OpenChat #79, not an IOU Type or key
   failure.** The OpenChat build must copy Svelte-proxied capability/context data into fresh
-  structured-clone-safe values before `postMessage`. This is present in clean `68aadfd35` and
+  structured-clone-safe values before `postMessage`. This is present in clean `dda2833d6` and
   checkpoint `790bb76d0` and requires a frontend restart, not a canister upgrade.
 - **A full reload that starts calling mainnet canister ids means the OpenChat Vite environment is
   stale.** Stop/restart only the `:5003` frontend with the local canister URLs and four local PR 2
@@ -252,16 +254,23 @@ discard an existing canister identity automatically.
   legacy `iou.openchat.actionInbox.v1` value is auto-purged on load). So `weosr` (and any hand-typed
   id) can no longer win — ignore it. Resolution uses `VITE_OPENCHAT_HOST` + `VITE_OC_USER_INDEX_CANISTER_ID`;
   keep both pointing at the same OpenChat replica.
-- **Connection and chat-to-sheet mapping are separate, but there is no longer an “Open setup” link:**
+- **Connection and chat-to-sheet mapping are separate; Open setup is raw-free:**
   - **Connect** pairs THIS user's delivery key (64-character claim token → IOU backend →
     app-authenticated `c2c_claim_ai_app_link_code`). This is the
     "connected/disconnected" status and lets OpenChat encrypt confirmed deposits for that user.
-  - The first time the user imports a verified v4 OpenChat draft, leave
-    **“Remember: always import this chat's drafts into this sheet”** checked (the default). IOU then
-    stores a caller-private, app-scoped opaque chat-handle → sheet mapping. Each of the four local
-    accounts must Connect separately and establish its own mapping by importing into its intended sheet.
-  - The old `/openchat/link-chat?chat=...` route and OpenChat **Open setup** surface were removed because
-    raw chat coordinates are a public correlation risk. Treat any old link/setup instructions as stale.
+  - Propose/open an IOU card once in an unmapped chat. Its authenticated private-context request
+    creates a caller-private pending route in IOU. Then use Chat details → AI apps → **Open setup**,
+    or open IOU **Settings → Chat routing**, and choose the destination account/sheet. Retry the
+    card after saving.
+  - Open setup is a static external URL ending in `/settings#openchat-routing`. It contains no raw
+    chat coordinates, app-scoped handle, user/message id, token, or pending id. IOU lists only
+    expiring principal-scoped digests and enforces ownership of the selected active sheet. Only
+    the canister-selected newest live request can be assigned or unlinked; equal timestamps use the
+    same deterministic digest ordering in UI and backend. Rows are capped per principal and
+    globally, and exact manifest revision/UserIndex/app/key trust is rechecked at save time.
+  - The verified-v4 import screen's default-on **Remember** checkbox remains a second way to store
+    the same caller-private mapping. Each of the four local accounts connects and routes separately.
+  - The old `/openchat/link-chat?chat=...` route remains retired and must not be restored.
 - **IOU #49 is a backend-plus-assets rollout and requires one relink per account.** Upgrade
   `iou_backend`, rebuild/deploy the matching IOU frontend assets, then hard-reload the four
   father/mother/child/property-manager IOU profiles. No OpenChat canister or frontend upgrade is

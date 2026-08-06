@@ -237,7 +237,9 @@ function resultError(result: Exclude<RawResult, { Success: RawSuccess }>): Error
     return new Error("Connect this IOU account to OpenChat to show its types.");
   }
   if ("ChatNotLinked" in result) {
-    return new Error("Link this chat to an IOU account to show its types.");
+    return new Error(
+      "Choose this chat's account/sheet in IOU Settings → Chat routing, then retry the card.",
+    );
   }
   if ("NotConfigured" in result) return new Error("Private card context is not configured.");
   if ("KeyUnavailable" in result) return new Error("Account types are temporarily unavailable.");

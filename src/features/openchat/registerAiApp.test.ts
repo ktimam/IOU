@@ -152,8 +152,11 @@ describe("buildManifestWire", () => {
   it("carries only raw-free connect + home + card surfaces with snake-label display variants", () => {
     const manifest = buildManifestWire("", undefined, () => {});
     const surfaces = manifest.surfaces as { kind: string; url: string; display: Record<string, null> }[];
-    expect(surfaces).toHaveLength(3);
-    expect(surfaces.some((s) => s.kind === "chat_link")).toBe(false);
+    expect(surfaces).toHaveLength(4);
+    const routing = surfaces.find((s) => s.kind === "chat_link");
+    expect(routing).toBeDefined();
+    expect(routing!.url).toMatch(/\/settings#openchat-routing$/);
+    expect(routing!.display).toEqual({ external: null });
     expect(surfaces.every((s) => !/[?&](?:chat|message|user)=/i.test(s.url))).toBe(true);
     const connect = surfaces.find((s) => s.kind === "connect")!;
     expect(connect.url).toContain("/settings#openchat-connect");

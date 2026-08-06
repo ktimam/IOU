@@ -13,6 +13,21 @@
 > reintroduced. Current coverage proves that the old route redirects to `/` with its query
 > discarded, and that chat-to-sheet storage accepts only canonical app-scoped 32-byte
 > base64url handles while malformed or legacy raw values fail closed.
+>
+> Routing-remediation supersession (2026-08-06): retiring the raw route also removed the
+> only first-use picker, which was a regression. The generic public `chat_link` surface is
+> now restored as the raw-free `/settings#openchat-routing` URL. IOU learns a pending chat
+> only from an authenticated OpenChat card capability and exposes only a caller-scoped opaque
+> pending id; neither the raw coordinate nor app-scoped handle enters the URL or visible UI.
+> `ChatRoutingSettings.test.tsx`, the new Candid/privacy assertions, Rust attestation/newest/
+> stale-trust/authorization/quota/cleanup tests, and `openchatChatRouting.ui.spec.ts` cover
+> assignment, reassignment, removal,
+> active-sheet eligibility, caller isolation, first-use UI, and URL/DOM privacy. Historical
+> green rows and proposed gaps below that exercise `/openchat/link-chat?chat=...` describe the
+> retired design and must not be treated as current coverage or reimplemented.
+> The browser pending-row half is deliberately a fixture; the combined live OpenChat
+> attestation → pending row → Settings save → card retry remains a deployment release gate and
+> must be recorded separately rather than inferred from the fixture.
 
 ## Progress log (test + fix, P0 first)
 
@@ -35,7 +50,7 @@
 
 ### Batch 4 (Playwright-UI — live dev server + replica)
 
-- ✅ **P0-23/24/25** route auth-guards — new `test/ui/authGuards.ui.spec.ts`: anonymous visitor is redirected to /sign-in on the guarded pages (/pairs, /pair/new, /sheet/new, /set-name, /pair/:id), and gets INLINE sign-in with URL+hash/query preserved on /settings#openchat-connect and /openchat/link-chat. 7 tests.
+- ✅ **P0-23/24/25** route auth-guards — `test/ui/authGuards.ui.spec.ts` covers anonymous redirects on the guarded account pages and inline sign-in on `/settings#openchat-connect`. Its historical `/openchat/link-chat` assertion belongs to the retired raw-coordinate design; current chat-routing coverage is `openchatChatRouting.ui.spec.ts` as described above.
 - ✅ **P0-26** signed-out invite — new `test/ui/inviteSignedOut.ui.spec.ts`: a fresh signed-out invitee opening the link gets inline sign-in on /pair/accept and, after signing in, is back on the accept surface (not bounced to /pairs) and completes onto the shared sheet. 1 test.
 
 ### Batch 5 (OpenChat Rust pocket-ic — fork repo, feat/confirmable-action-cycle)
@@ -65,7 +80,7 @@ Triaged 17 e2e P1s: 2 covered, 13 need a live OpenChat claim token (deferred), 8
 
 ### Batch 9 (Playwright + registry P1s — live)
 
-- ✅ **P4/P5/P7/P8/P9** route/surface: landing CTA (no redirect), /me→/settings, unknown→/, signed-out link-chat returns to the picker after inline sign-in, signed-in /settings#openchat-connect focuses the code input.
+- ✅ **P4/P5/P7/P8/P9** route/surface: landing CTA (no redirect), /me→/settings, unknown→/, and signed-in `/settings#openchat-connect` focus. The former signed-out raw-link picker result is historical; the current raw-free routing settings journey is covered separately by `openchatChatRouting.ui.spec.ts`.
 - ✅ **P1/P2** close-and-rotate: partner's mirror of the carry-forward; the JOINER (member_b) closes & rotates and both sides read the new sheet correctly.
 - ✅ **register_ai_app re-own** (remaining P0, run-verifiable half): a different owner re-owns the same app name in test_mode (registry.e2e).
 

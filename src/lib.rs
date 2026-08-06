@@ -25,6 +25,7 @@ use ic_stable_structures::memory_manager::{MemoryId, MemoryManager, VirtualMemor
 use ic_stable_structures::{DefaultMemoryImpl, StableBTreeMap, StableCell, Storable};
 use ic_stable_structures::storable::Bound;
 use serde::de::{self, MapAccess, SeqAccess, Visitor};
+use sha2::{Digest, Sha256};
 use std::borrow::Cow;
 use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet};
@@ -44,6 +45,9 @@ const MAX_SHEET_ENCRYPTED_BYTES: u64 = 32 * 1024 * 1024;
 const MAX_WRAPPED_KEY_BYTES: usize = 8_192;
 const MAX_REWRAPS_PER_REQUEST: usize = MAX_SHEETS_PER_PAIR;
 const MAX_CHAT_LINKS_PER_PRINCIPAL: usize = 1_024;
+const MAX_PENDING_CHAT_ROUTES_PER_PRINCIPAL: usize = 32;
+const MAX_PENDING_CHAT_ROUTES_TOTAL: usize = 4_096;
+const PENDING_CHAT_ROUTE_TTL_NS: u64 = 24 * 60 * 60 * 1_000_000_000;
 // Legacy PAIRS/SHEETS maps predate secondary indexes. Keep every externally reachable fallback
 // scan instruction-bounded and fail closed once the deployment outgrows this ceiling. A resumable
 // controller-driven stable-index migration is required before raising/removing this guard.
@@ -441,10 +445,14 @@ impl Storable for RecoveryKey {
 //     One canister-verified OpenChat binding per IOU principal.
 //   MemoryId 27: OPENCHAT_BINDINGS_BY_OC
 //     Reverse index from deployment/app/OpenChat-user to IOU principal.
+//   MemoryId 28: PENDING_CHAT_ROUTES
+//     Short-lived, caller-private app-scoped chat handles learned only from an
+//     authenticated OpenChat card capability/attestation. Public APIs expose
+//     only a domain-separated digest, never the handle.
 //
 //   DO NOT re-use these orphaned MemoryIds for a new structure
 //   with a different key/value type — see issue #7. If you need
-//   a new region, use the next free number (currently 28+).
+//   a new region, use the next free number (currently 29+).
 
 // v1.5.0 (schema v3 -> v4): added optional encrypted name fields to Pair,
 // Sheet, PairSummary, CreateSheetReq.
@@ -489,7 +497,9 @@ impl Storable for RecoveryKey {
 // v14 stable bytes decode and is anonymous for new rows. Legacy raw-subject rows fail closed.
 // v1.18.0 (schema v15 -> v16): added optional OpenChatBinding.consumer_public_key_pem. Existing
 // bindings decode with None and deliberately fail key-bound authorization until the owner relinks.
-const SCHEMA_VERSION: u32 = 16;
+// v1.19.0 (schema v16 -> v17): added MemoryId 28 PENDING_CHAT_ROUTES. Rows are
+// bounded, expiring and caller-scoped; no existing chat-link migration is needed.
+const SCHEMA_VERSION: u32 = 17;
 
 thread_local! {
     static MEMORY_MANAGER: RefCell<MemoryManager<DefaultMemoryImpl>> =
@@ -612,6 +622,11 @@ thread_local! {
     static OPENCHAT_BINDINGS_BY_OC: RefCell<StableBTreeMap<String, Principal, Memory>> =
         RefCell::new(StableBTreeMap::init(
             MEMORY_MANAGER.with(|m| m.borrow().get(MemoryId::new(27)))
+        ));
+
+    static PENDING_CHAT_ROUTES: RefCell<StableBTreeMap<String, PendingChatRoute, Memory>> =
+        RefCell::new(StableBTreeMap::init(
+            MEMORY_MANAGER.with(|m| m.borrow().get(MemoryId::new(28)))
         ));
 
     // V6: cache the result of vetkd_public_key after first derivation.
@@ -1189,6 +1204,11 @@ fn inspect_message() {
         "set_chat_sheet_link",
         "remove_chat_sheet_link",
         "chat_sheet_links",
+        "chat_routable_sheet_ids",
+        "pending_chat_routes",
+        "assign_pending_chat_route",
+        "dismiss_pending_chat_route",
+        "remove_pending_chat_route_link",
         // v1.15.0: authenticated OC identity binding + anonymous,
         // capability-gated encrypted card context.
         "connect_openchat",
@@ -1247,6 +1267,9 @@ fn inspect_message() {
         "vetkd_wrap_consumer_key",
         "set_chat_sheet_link",
         "remove_chat_sheet_link",
+        "assign_pending_chat_route",
+        "dismiss_pending_chat_route",
+        "remove_pending_chat_route_link",
         "connect_openchat",
         "disconnect_openchat",
     ];
@@ -1960,9 +1983,29 @@ fn c2c_attest_ai_app_card_v1(
         app_canister_id,
         caller,
     );
+    remember_pending_chat_route_from_attestation(
+        vouched,
+        link.as_ref(),
+        &args.binding.commitment.context.chat_handle,
+        ic_cdk::api::time(),
+    );
     AttestAiAppCardV1Response {
         vouched,
         binding: args.binding,
+    }
+}
+
+fn remember_pending_chat_route_from_attestation(
+    vouched: bool,
+    link: Option<&OpenChatBinding>,
+    chat_handle: &[u8],
+    now: u64,
+) {
+    if !vouched {
+        return;
+    }
+    if let (Some(link), Some(chat_key)) = (link, scoped_chat_handle_key(chat_handle)) {
+        remember_pending_chat_route(link.iou_principal, &chat_key, now);
     }
 }
 
@@ -2086,7 +2129,7 @@ fn set_creator_principal(p: Principal) {
 fn set_ai_app_owner(owner: Principal) {
     require_authed();
     let caller = ic_cdk::api::msg_caller();
-    CONFIG.with(|c| {
+    let trust_changed = CONFIG.with(|c| {
         let mut cfg = c.borrow_mut();
         let current = cfg.get().clone();
         if !can_manage_config(
@@ -2101,6 +2144,8 @@ fn set_ai_app_owner(owner: Principal) {
             .ai_app_verification_binding
             .clone()
             .filter(|binding| Some(binding.owner) == next_owner);
+        let trust_changed = current.ai_app_owner != next_owner
+            || current.ai_app_verification_binding != verification_binding;
         let _ = cfg.set(Config {
             creator_principal: current.creator_principal,
             deployed_at: current.deployed_at,
@@ -2109,7 +2154,11 @@ fn set_ai_app_owner(owner: Principal) {
             openchat_user_index_canister_id: current.openchat_user_index_canister_id,
             ai_app_verification_binding: verification_binding,
         });
+        trust_changed
     });
+    if trust_changed {
+        clear_all_pending_chat_routes();
+    }
 }
 
 /// Pin the only OpenChat UserIndex whose link claims and card capabilities
@@ -2119,7 +2168,7 @@ fn set_ai_app_owner(owner: Principal) {
 fn set_openchat_user_index_canister_id(canister_id: Principal) {
     require_authed();
     let caller = ic_cdk::api::msg_caller();
-    CONFIG.with(|c| {
+    let trust_changed = CONFIG.with(|c| {
         let mut cfg = c.borrow_mut();
         let current = cfg.get().clone();
         if !can_manage_config(
@@ -2134,6 +2183,8 @@ fn set_openchat_user_index_canister_id(canister_id: Principal) {
             .ai_app_verification_binding
             .clone()
             .filter(|binding| Some(binding.user_index_canister_id) == next_user_index);
+        let trust_changed = current.openchat_user_index_canister_id != next_user_index
+            || current.ai_app_verification_binding != verification_binding;
         let _ = cfg.set(Config {
             creator_principal: current.creator_principal,
             deployed_at: current.deployed_at,
@@ -2142,7 +2193,11 @@ fn set_openchat_user_index_canister_id(canister_id: Principal) {
             openchat_user_index_canister_id: next_user_index,
             ai_app_verification_binding: verification_binding,
         });
+        trust_changed
     });
+    if trust_changed {
+        clear_all_pending_chat_routes();
+    }
 }
 
 /// Install or clear the exact OpenChat verifier-v2 commitment reviewed for this IOU deployment.
@@ -2154,7 +2209,7 @@ fn set_openchat_user_index_canister_id(canister_id: Principal) {
 fn set_ai_app_verification_binding(binding: Option<AiAppVerificationBinding>) {
     require_authed();
     let caller = ic_cdk::api::msg_caller();
-    CONFIG.with(|c| {
+    let trust_changed = CONFIG.with(|c| {
         let mut cfg = c.borrow_mut();
         let current = cfg.get().clone();
         if !can_manage_config(
@@ -2176,6 +2231,7 @@ fn set_ai_app_verification_binding(binding: Option<AiAppVerificationBinding>) {
                 );
             }
         }
+        let trust_changed = current.ai_app_verification_binding != binding;
         let _ = cfg.set(Config {
             creator_principal: current.creator_principal,
             deployed_at: current.deployed_at,
@@ -2184,7 +2240,11 @@ fn set_ai_app_verification_binding(binding: Option<AiAppVerificationBinding>) {
             openchat_user_index_canister_id: current.openchat_user_index_canister_id,
             ai_app_verification_binding: binding,
         });
+        trust_changed
     });
+    if trust_changed {
+        clear_all_pending_chat_routes();
+    }
 }
 
 /// set_card_currency: the deployment-wide currency IOU's confirmable card pre-selects.
@@ -2886,6 +2946,10 @@ fn sheet_is_active(sheet_id: &str) -> bool {
     })
 }
 
+fn sheet_is_chat_routable(sheet: &Sheet, principal: Principal) -> bool {
+    matches!(sheet.state, SheetState::Active) && principal_can_read_sheet(sheet, principal)
+}
+
 fn record_entry_timestamp(sheet_id: &str, now: u64) {
     update_sheet_field(sheet_id, |sh| {
         sh.last_entry_at = Some(now);
@@ -3525,6 +3589,36 @@ pub struct ChatSheetLink {
     pub sheet_id: u64,
 }
 
+#[derive(Clone, CandidType, Deserialize, Debug, PartialEq, Eq)]
+pub struct PendingChatRoute {
+    // Canonical app-scoped handle. It is stable-state-only and never returned by
+    // pending_chat_routes; the caller receives only pending_id.
+    pub chat_key: String,
+    pub last_seen: u64,
+}
+
+impl Storable for PendingChatRoute {
+    fn to_bytes(&self) -> Cow<'_, [u8]> {
+        Cow::Owned(Encode!(self).unwrap())
+    }
+    fn from_bytes(bytes: Cow<[u8]>) -> Self {
+        Decode!(bytes.as_ref(), Self).unwrap()
+    }
+    const BOUND: Bound = Bound::Unbounded;
+}
+
+#[derive(Clone, CandidType, Deserialize, Debug, PartialEq, Eq)]
+pub struct PendingChatRouteView {
+    /// Domain-separated digest scoped to this IOU principal; never an OpenChat coordinate/handle.
+    pub pending_id: String,
+    pub last_seen: u64,
+    /// True even when the saved destination was closed or caller access was revoked.
+    pub has_current_link: bool,
+    /// Current destination, if this recently requested chat is already linked.
+    /// Returned only when that destination is still an active, caller-readable route target.
+    pub current_sheet_id: Option<u64>,
+}
+
 /// Authoritative cross-origin identity binding established only when the IOU
 /// canister itself redeems an OpenChat link code. Browser localStorage and a
 /// delivery public-key fingerprint are intentionally not authority here.
@@ -3648,7 +3742,39 @@ fn openchat_binding_key_matches_current(
     )
 }
 
+fn openchat_binding_matches_verification(
+    binding: &OpenChatBinding,
+    configured: &AiAppVerificationBinding,
+) -> bool {
+    binding.user_index_canister_id == configured.user_index_canister_id
+        && binding.app_id == configured.app_id
+        && binding.app_revision == Some(configured.app_revision)
+        && binding.app_canister_id == Some(configured.app_canister_id)
+}
+
+fn openchat_binding_matches_current_trust(
+    iou_principal: &Principal,
+    binding: &OpenChatBinding,
+) -> bool {
+    if !openchat_binding_key_matches_current(iou_principal, binding)
+        || public_openchat_binding(binding).is_none()
+    {
+        return false;
+    }
+    let config = CONFIG.with(|config| config.borrow().get().clone());
+    let Some(configured) = config.ai_app_verification_binding.as_ref() else {
+        return false;
+    };
+    verification_binding_is_valid(
+        configured,
+        config.ai_app_owner,
+        config.openchat_user_index_canister_id,
+        ic_cdk::api::canister_self(),
+    ) && openchat_binding_matches_verification(binding, configured)
+}
+
 fn remove_openchat_binding_for_iou(iou_principal: Principal) {
+    clear_pending_chat_routes_for_principal(iou_principal);
     if let Some(binding) =
         OPENCHAT_BINDINGS_BY_IOU.with(|m| m.borrow_mut().remove(&iou_principal))
     {
@@ -3682,6 +3808,7 @@ fn replace_openchat_binding(binding: OpenChatBinding) {
     let reverse = openchat_subject_key(binding.user_index_canister_id, binding.app_id, subject);
     if let Some(previous_iou) = OPENCHAT_BINDINGS_BY_OC.with(|m| m.borrow().get(&reverse)) {
         if previous_iou != binding.iou_principal {
+            clear_pending_chat_routes_for_principal(previous_iou);
             OPENCHAT_BINDINGS_BY_IOU.with(|m| {
                 let mut map = m.borrow_mut();
                 if map
@@ -4295,7 +4422,18 @@ async fn openchat_card_context(
     let Some(chat_handle_key) = scoped_chat_handle_key(&grant.context.chat_handle) else {
         return OpenChatCardContextResult::InvalidCapability;
     };
+    if binding.app_revision != Some(grant.context.app_revision)
+        || binding.app_canister_id != Some(ic_cdk::api::canister_self())
+        || binding.key_version.is_none()
+    {
+        return OpenChatCardContextResult::NotAuthorized;
+    }
     let Some(sheet_id) = linked_sheet_for(binding.iou_principal, &chat_handle_key) else {
+        remember_pending_chat_route(
+            binding.iou_principal,
+            &chat_handle_key,
+            ic_cdk::api::time(),
+        );
         return OpenChatCardContextResult::ChatNotLinked;
     };
     if !card_access_still_valid(
@@ -4440,13 +4578,155 @@ fn validate_legacy_chat_key_for_removal(chat_key: &str) {
     }
 }
 
-/// set_chat_sheet_link: caller-keyed upsert of an app-scoped chat handle → sheet mapping. The stable
-/// argument remains named chat_key for compatibility; raw OpenChat coordinates are rejected.
-#[ic_cdk::update]
-fn set_chat_sheet_link(chat_key: String, sheet_id: u64) {
-    require_authed();
+fn pending_chat_route_id(caller: &Principal, chat_key: &str) -> String {
+    let mut digest = Sha256::new();
+    digest.update(b"iou.pending-chat-route.v1\0");
+    digest.update(caller.as_slice());
+    digest.update([0]);
+    digest.update(chat_key.as_bytes());
+    lowercase_hex(&digest.finalize())
+}
+
+fn pending_chat_route_key(caller: &Principal, pending_id: &str) -> String {
+    format!("{}\0{}", caller.to_text(), pending_id)
+}
+
+fn pending_chat_route_bounds(caller: &Principal) -> (String, String) {
+    (
+        format!("{}\0", caller.to_text()),
+        format!("{}\u{1}", caller.to_text()),
+    )
+}
+
+fn validate_pending_chat_route_id(pending_id: &str) {
+    if pending_id.len() != 64
+        || !pending_id
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    {
+        ic_cdk::trap("pending_id must be a canonical lowercase SHA-256 digest");
+    }
+}
+
+fn pending_chat_route_is_live(route: &PendingChatRoute, now: u64) -> bool {
+    now.saturating_sub(route.last_seen) <= PENDING_CHAT_ROUTE_TTL_NS
+}
+
+fn clear_pending_chat_routes_for_principal(caller: Principal) {
+    let (start, end) = pending_chat_route_bounds(&caller);
+    PENDING_CHAT_ROUTES.with(|routes| {
+        let mut map = routes.borrow_mut();
+        let keys: Vec<String> = map.range(start..end).map(|(key, _)| key).collect();
+        for key in keys {
+            map.remove(&key);
+        }
+    });
+}
+
+fn clear_all_pending_chat_routes() {
+    PENDING_CHAT_ROUTES.with(|routes| {
+        let mut map = routes.borrow_mut();
+        let keys: Vec<String> = map.iter().map(|(key, _)| key).collect();
+        for key in keys {
+            map.remove(&key);
+        }
+    });
+}
+
+/// Remember a setup candidate only after OpenChat has supplied an authenticated,
+/// app-scoped handle. The handle never enters a URL or pending-route response.
+fn remember_pending_chat_route(caller: Principal, chat_key: &str, now: u64) {
+    if !is_canonical_app_scoped_chat_handle(chat_key) {
+        return;
+    }
+    let pending_id = pending_chat_route_id(&caller, chat_key);
+    let key = pending_chat_route_key(&caller, &pending_id);
+    let (start, end) = pending_chat_route_bounds(&caller);
+    PENDING_CHAT_ROUTES.with(|routes| {
+        let mut map = routes.borrow_mut();
+        let expired: Vec<String> = map
+            .iter()
+            .filter(|(_, route)| !pending_chat_route_is_live(route, now))
+            .map(|(key, _)| key)
+            .collect();
+        for expired_key in expired {
+            map.remove(&expired_key);
+        }
+        if !map.contains_key(&key) {
+            let rows: Vec<(String, u64)> = map
+                .range(start.clone()..end.clone())
+                .map(|(row_key, route)| (row_key, route.last_seen))
+                .collect();
+            if rows.len() >= MAX_PENDING_CHAT_ROUTES_PER_PRINCIPAL {
+                if let Some((oldest, _)) = rows.into_iter().min_by_key(|(_, seen)| *seen) {
+                    map.remove(&oldest);
+                }
+            }
+            if map.len() >= MAX_PENDING_CHAT_ROUTES_TOTAL as u64 {
+                if let Some((oldest, _)) = map
+                    .iter()
+                    .map(|(row_key, route)| (row_key, route.last_seen))
+                    .min_by(|left, right| {
+                        left.1.cmp(&right.1).then_with(|| left.0.cmp(&right.0))
+                    })
+                {
+                    map.remove(&oldest);
+                }
+            }
+        }
+        map.insert(
+            key,
+            PendingChatRoute {
+                chat_key: chat_key.to_string(),
+                last_seen: now,
+            },
+        );
+    });
+}
+
+/// Return the one route that may be changed right now. This repeats the UI's ordering inside the
+/// canister so a newer authenticated card request arriving after page load cannot turn a stale
+/// button/API call into a wrong-chat assignment.
+fn newest_pending_chat_route(caller: Principal, now: u64) -> Option<(String, PendingChatRoute)> {
+    let (start, end) = pending_chat_route_bounds(&caller);
+    let mut rows: Vec<(String, PendingChatRoute)> = PENDING_CHAT_ROUTES.with(|routes| {
+        routes
+            .borrow()
+            .range(start..end)
+            .filter(|(_, route)| pending_chat_route_is_live(route, now))
+            .filter_map(|(key, route)| {
+                key.rsplit_once('\0')
+                    .map(|(_, pending_id)| (pending_id.to_string(), route))
+            })
+            .take(MAX_PENDING_CHAT_ROUTES_PER_PRINCIPAL)
+            .collect()
+    });
+    rows.sort_by(|left, right| {
+        right
+            .1
+            .last_seen
+            .cmp(&left.1.last_seen)
+            .then_with(|| left.0.cmp(&right.0))
+    });
+    rows.into_iter().next()
+}
+
+fn actionable_pending_chat_route(
+    caller: Principal,
+    pending_id: &str,
+    now: u64,
+) -> Option<PendingChatRoute> {
+    newest_pending_chat_route(caller, now).and_then(|(newest_id, route)| {
+        if newest_id == pending_id {
+            Some(route)
+        } else {
+            None
+        }
+    })
+}
+
+fn store_chat_sheet_link(caller: Principal, chat_key: String, sheet_id: u64) {
     validate_app_scoped_chat_handle(&chat_key);
-    let caller = ic_cdk::api::msg_caller();
     let sheet_id_text = format!("{sheet_id:016x}");
     if !principal_owns_sheet(caller, &sheet_id_text) {
         ic_cdk::trap("caller does not have access to the linked sheet");
@@ -4457,8 +4737,6 @@ fn set_chat_sheet_link(chat_key: String, sheet_id: u64) {
     CHAT_SHEET_LINKS.with(|m| {
         let mut map = m.borrow_mut();
         let key = chat_link_key(&caller, &chat_key);
-        // A successful new-format write is also a bounded lazy migration point: discard the caller's
-        // now-unusable raw-coordinate rows so they neither consume quota nor remain in stable memory.
         let (start, end) = chat_link_bounds(&caller);
         let legacy_keys: Vec<String> = map
             .range(start.clone()..end.clone())
@@ -4477,7 +4755,157 @@ fn set_chat_sheet_link(chat_key: String, sheet_id: u64) {
                 ic_cdk::trap("chat-to-sheet link quota reached");
             }
         }
-        map.insert(key, ChatSheetLink { chat_key, sheet_id })
+        map.insert(
+            key,
+            ChatSheetLink {
+                chat_key: chat_key.clone(),
+                sheet_id,
+            },
+        );
+    });
+}
+
+/// set_chat_sheet_link: caller-keyed upsert of an app-scoped chat handle → sheet mapping. The stable
+/// argument remains named chat_key for compatibility; raw OpenChat coordinates are rejected.
+#[ic_cdk::update]
+fn set_chat_sheet_link(chat_key: String, sheet_id: u64) {
+    require_authed();
+    let caller = ic_cdk::api::msg_caller();
+    store_chat_sheet_link(caller, chat_key, sheet_id);
+}
+
+/// Return only active sheets the caller is explicitly recorded on. Pair membership alone is not
+/// sufficient: a partner can join after a solo sheet was created and must not be offered that
+/// unreadable sheet as a routing destination.
+#[ic_cdk::query]
+fn chat_routable_sheet_ids() -> Vec<u64> {
+    require_authed();
+    let caller = ic_cdk::api::msg_caller();
+    SHEETS.with(|sheets| {
+        let mut scanned = 0usize;
+        let mut out = Vec::new();
+        for (_, sheet) in sheets.borrow().iter() {
+            require_legacy_scan_capacity(&mut scanned, "sheet");
+            if sheet_is_chat_routable(&sheet, caller) {
+                let Ok(sheet_id) = u64::from_str_radix(&sheet.id, 16) else {
+                    continue;
+                };
+                if out.len() >= MAX_PAIRS_PER_PRINCIPAL {
+                    ic_cdk::trap("account quota exceeded in legacy state; migration required");
+                }
+                out.push(sheet_id);
+            }
+        }
+        out.sort_unstable();
+        out
+    })
+}
+
+#[ic_cdk::query]
+fn pending_chat_routes() -> Vec<PendingChatRouteView> {
+    let caller = ic_cdk::api::msg_caller();
+    if caller == Principal::anonymous() {
+        return Vec::new();
+    }
+    let now = ic_cdk::api::time();
+    let (start, end) = pending_chat_route_bounds(&caller);
+    let mut rows: Vec<PendingChatRouteView> = PENDING_CHAT_ROUTES.with(|routes| {
+        routes
+            .borrow()
+            .range(start..end)
+            .filter(|(_, route)| pending_chat_route_is_live(route, now))
+            .take(MAX_PENDING_CHAT_ROUTES_PER_PRINCIPAL)
+            .filter_map(|(key, route)| {
+                key.rsplit_once('\0').map(|(_, pending_id)| {
+                    let linked_sheet = linked_sheet_for(caller, &route.chat_key);
+                    let current_sheet_id = linked_sheet.as_deref().and_then(|sheet_id| {
+                        let routable = SHEETS.with(|sheets| {
+                            sheets
+                                .borrow()
+                                .get(&sheet_id.to_string())
+                                .as_ref()
+                                .is_some_and(|sheet| sheet_is_chat_routable(sheet, caller))
+                        });
+                        routable
+                            .then(|| u64::from_str_radix(sheet_id, 16).ok())
+                            .flatten()
+                    });
+                    PendingChatRouteView {
+                        pending_id: pending_id.to_string(),
+                        last_seen: route.last_seen,
+                        has_current_link: linked_sheet.is_some(),
+                        current_sheet_id,
+                    }
+                })
+            })
+            .collect()
+    });
+    rows.sort_by(|left, right| {
+        right
+            .last_seen
+            .cmp(&left.last_seen)
+            .then_with(|| left.pending_id.cmp(&right.pending_id))
+    });
+    rows
+}
+
+#[ic_cdk::update]
+fn assign_pending_chat_route(pending_id: String, sheet_id: u64) {
+    require_authed();
+    validate_pending_chat_route_id(&pending_id);
+    let caller = ic_cdk::api::msg_caller();
+    let Some(route) =
+        actionable_pending_chat_route(caller, &pending_id, ic_cdk::api::time())
+    else {
+        ic_cdk::trap(
+            "only the most recent live chat request can be assigned; retry from that chat",
+        );
+    };
+    let binding_is_current = OPENCHAT_BINDINGS_BY_IOU.with(|bindings| {
+        bindings
+            .borrow()
+            .get(&caller)
+            .as_ref()
+            .is_some_and(|binding| openchat_binding_matches_current_trust(&caller, binding))
+    });
+    if !binding_is_current {
+        ic_cdk::trap("OpenChat connection changed; connect again before routing this chat");
+    }
+    store_chat_sheet_link(caller, route.chat_key, sheet_id);
+}
+
+#[ic_cdk::update]
+fn remove_pending_chat_route_link(pending_id: String) {
+    require_authed();
+    validate_pending_chat_route_id(&pending_id);
+    let caller = ic_cdk::api::msg_caller();
+    let key = pending_chat_route_key(&caller, &pending_id);
+    let Some(route) =
+        actionable_pending_chat_route(caller, &pending_id, ic_cdk::api::time())
+    else {
+        ic_cdk::trap(
+            "only the most recent live chat request can be unlinked; retry from that chat",
+        );
+    };
+    CHAT_SHEET_LINKS.with(|links| {
+        links
+            .borrow_mut()
+            .remove(&chat_link_key(&caller, &route.chat_key));
+    });
+    PENDING_CHAT_ROUTES.with(|routes| {
+        routes.borrow_mut().remove(&key);
+    });
+}
+
+#[ic_cdk::update]
+fn dismiss_pending_chat_route(pending_id: String) {
+    require_authed();
+    validate_pending_chat_route_id(&pending_id);
+    let caller = ic_cdk::api::msg_caller();
+    PENDING_CHAT_ROUTES.with(|routes| {
+        routes
+            .borrow_mut()
+            .remove(&pending_chat_route_key(&caller, &pending_id));
     });
 }
 
@@ -5311,6 +5739,196 @@ mod tests {
     }
 
     #[test]
+    fn pending_chat_route_ids_are_opaque_caller_scoped_digests() {
+        let owner = Principal::from_slice(&[1, 2, 3]);
+        let other = Principal::from_slice(&[4, 5, 6]);
+        let handle = "CAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAg";
+        let owner_id = pending_chat_route_id(&owner, handle);
+        let other_id = pending_chat_route_id(&other, handle);
+        assert_eq!(owner_id.len(), 64);
+        assert!(owner_id
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte)));
+        assert_ne!(owner_id, other_id);
+        assert!(!owner_id.contains(handle));
+        assert!(!owner_id.contains("group:"));
+        assert_eq!(owner_id, pending_chat_route_id(&owner, handle));
+    }
+
+    #[test]
+    fn pending_chat_route_ranges_exclude_other_principals() {
+        let owner = Principal::from_slice(&[1, 2, 3]);
+        let other = Principal::from_slice(&[4, 5, 6]);
+        let pending_id = "ab".repeat(32);
+        let key = pending_chat_route_key(&owner, &pending_id);
+        let other_key = pending_chat_route_key(&other, &pending_id);
+        let (start, end) = pending_chat_route_bounds(&owner);
+        assert!(key >= start && key < end);
+        assert!(other_key < start || other_key >= end);
+        assert_eq!(key.rsplit_once('\0').unwrap().1, pending_id);
+    }
+
+    #[test]
+    fn pending_chat_routes_expire_at_the_documented_boundary() {
+        let route = PendingChatRoute {
+            chat_key: "CAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAg".to_string(),
+            last_seen: 10,
+        };
+        assert!(pending_chat_route_is_live(
+            &route,
+            10 + PENDING_CHAT_ROUTE_TTL_NS
+        ));
+        assert!(!pending_chat_route_is_live(
+            &route,
+            11 + PENDING_CHAT_ROUTE_TTL_NS
+        ));
+        // A clock that moves backwards cannot underflow into an artificial expiry.
+        assert!(pending_chat_route_is_live(&route, 0));
+    }
+
+    #[test]
+    fn only_the_backend_selected_newest_pending_chat_is_actionable() {
+        let owner = p(241);
+        clear_pending_chat_routes_for_principal(owner);
+        let older_handle = base64url_no_pad(&[41; 32]);
+        let newer_handle = base64url_no_pad(&[42; 32]);
+        let older_id = pending_chat_route_id(&owner, &older_handle);
+        let newer_id = pending_chat_route_id(&owner, &newer_handle);
+
+        remember_pending_chat_route(owner, &older_handle, 10);
+        assert!(actionable_pending_chat_route(owner, &older_id, 10).is_some());
+
+        // A card request arriving after Settings loaded invalidates the older selection inside the
+        // canister; disabled markup is not the authorization boundary.
+        remember_pending_chat_route(owner, &newer_handle, 11);
+        assert!(actionable_pending_chat_route(owner, &older_id, 11).is_none());
+        assert!(actionable_pending_chat_route(owner, &newer_id, 11).is_some());
+
+        clear_pending_chat_routes_for_principal(owner);
+        remember_pending_chat_route(owner, &older_handle, 20);
+        remember_pending_chat_route(owner, &newer_handle, 20);
+        let expected = std::cmp::min(older_id.clone(), newer_id.clone());
+        assert_eq!(
+            newest_pending_chat_route(owner, 20).map(|(pending_id, _)| pending_id),
+            Some(expected.clone()),
+        );
+        assert!(actionable_pending_chat_route(owner, &expected, 20).is_some());
+        let other = if expected == older_id { newer_id } else { older_id };
+        assert!(actionable_pending_chat_route(owner, &other, 20).is_none());
+        clear_pending_chat_routes_for_principal(owner);
+    }
+
+    #[test]
+    fn pending_chat_routes_are_quota_bounded_and_cleared_with_the_binding() {
+        let owner = p(240);
+        clear_pending_chat_routes_for_principal(owner);
+        for index in 1u8..=33 {
+            let handle = base64url_no_pad(&[index; 32]);
+            remember_pending_chat_route(owner, &handle, u64::from(index));
+        }
+        let (start, end) = pending_chat_route_bounds(&owner);
+        let keys: Vec<String> = PENDING_CHAT_ROUTES.with(|routes| {
+            routes
+                .borrow()
+                .range(start.clone()..end.clone())
+                .map(|(key, _)| key)
+                .collect()
+        });
+        assert_eq!(keys.len(), MAX_PENDING_CHAT_ROUTES_PER_PRINCIPAL);
+        let evicted = pending_chat_route_key(
+            &owner,
+            &pending_chat_route_id(&owner, &base64url_no_pad(&[1; 32])),
+        );
+        assert!(!keys.contains(&evicted));
+
+        // Disconnect/relink cleanup is unconditional, even if no current binding row remains.
+        remove_openchat_binding_for_iou(owner);
+        let remaining = PENDING_CHAT_ROUTES.with(|routes| {
+            routes.borrow().range(start..end).count()
+        });
+        assert_eq!(remaining, 0);
+    }
+
+    #[test]
+    fn pending_chat_routes_have_a_global_bound_and_reclaim_expired_rows() {
+        clear_all_pending_chat_routes();
+        let handle = base64url_no_pad(&[71; 32]);
+        let mut oldest_key = String::new();
+        PENDING_CHAT_ROUTES.with(|routes| {
+            let mut map = routes.borrow_mut();
+            for index in 0..MAX_PENDING_CHAT_ROUTES_TOTAL {
+                let owner = Principal::from_slice(&(index as u32).to_be_bytes());
+                let pending_id = pending_chat_route_id(&owner, &handle);
+                let key = pending_chat_route_key(&owner, &pending_id);
+                if index == 0 {
+                    oldest_key = key.clone();
+                }
+                map.insert(
+                    key,
+                    PendingChatRoute {
+                        chat_key: handle.clone(),
+                        last_seen: (index + 1) as u64,
+                    },
+                );
+            }
+        });
+        let newcomer = Principal::from_slice(b"new-global-route");
+        let newcomer_handle = base64url_no_pad(&[72; 32]);
+        let newcomer_key = pending_chat_route_key(
+            &newcomer,
+            &pending_chat_route_id(&newcomer, &newcomer_handle),
+        );
+        remember_pending_chat_route(
+            newcomer,
+            &newcomer_handle,
+            MAX_PENDING_CHAT_ROUTES_TOTAL as u64 + 1,
+        );
+        PENDING_CHAT_ROUTES.with(|routes| {
+            let map = routes.borrow();
+            assert_eq!(map.len(), MAX_PENDING_CHAT_ROUTES_TOTAL as u64);
+            assert!(!map.contains_key(&oldest_key));
+            assert!(map.contains_key(&newcomer_key));
+        });
+
+        clear_all_pending_chat_routes();
+        let expired_owner = p(242);
+        let expired_handle = base64url_no_pad(&[73; 32]);
+        remember_pending_chat_route(expired_owner, &expired_handle, 1);
+        let live_owner = p(243);
+        let live_handle = base64url_no_pad(&[74; 32]);
+        remember_pending_chat_route(
+            live_owner,
+            &live_handle,
+            PENDING_CHAT_ROUTE_TTL_NS + 2,
+        );
+        let (expired_start, expired_end) = pending_chat_route_bounds(&expired_owner);
+        assert_eq!(
+            PENDING_CHAT_ROUTES.with(|routes| {
+                routes.borrow().range(expired_start..expired_end).count()
+            }),
+            0,
+        );
+        clear_all_pending_chat_routes();
+    }
+
+    #[test]
+    fn chat_routing_offers_only_active_sheets_with_explicit_sheet_consent() {
+        let active = test_sheet(SheetState::Active);
+        assert!(sheet_is_chat_routable(&active, p(1)));
+        assert!(sheet_is_chat_routable(&active, p(2)));
+        // A principal may have joined the Pair later, but Pair membership is not sheet consent.
+        assert!(!sheet_is_chat_routable(&active, p(3)));
+        assert!(!sheet_is_chat_routable(
+            &test_sheet(SheetState::Closed),
+            p(1),
+        ));
+        assert!(!sheet_is_chat_routable(
+            &active,
+            Principal::anonymous(),
+        ));
+    }
+
+    #[test]
     fn app_scoped_card_context_requires_exact_v1_handles() {
         let mut context = test_scoped_card_context();
         assert!(valid_app_scoped_card_context(&context));
@@ -5598,6 +6216,39 @@ mod tests {
     }
 
     #[test]
+    fn only_a_vouched_card_attestation_creates_the_pending_route() {
+        let link = test_card_link();
+        clear_pending_chat_routes_for_principal(link.iou_principal);
+        let context = test_scoped_card_context();
+        let expected_handle = scoped_chat_handle_key(&context.chat_handle).unwrap();
+        let expected_id = pending_chat_route_id(&link.iou_principal, &expected_handle);
+
+        remember_pending_chat_route_from_attestation(
+            false,
+            Some(&link),
+            &context.chat_handle,
+            10,
+        );
+        assert!(newest_pending_chat_route(link.iou_principal, 10).is_none());
+
+        remember_pending_chat_route_from_attestation(
+            true,
+            Some(&link),
+            &context.chat_handle,
+            11,
+        );
+        assert_eq!(
+            newest_pending_chat_route(link.iou_principal, 11)
+                .map(|(pending_id, route)| (pending_id, route.chat_key)),
+            Some((expected_id, expected_handle)),
+        );
+
+        clear_pending_chat_routes_for_principal(link.iou_principal);
+        remember_pending_chat_route_from_attestation(true, Some(&link), &[8; 31], 12);
+        assert!(newest_pending_chat_route(link.iou_principal, 12).is_none());
+    }
+
+    #[test]
     fn initial_card_payload_rejects_private_type_unknown_duplicate_and_malformed_fields() {
         for payload in [
             br#"{"amount":25,"template":"Rent"}"#.as_slice(),
@@ -5825,6 +6476,34 @@ mod tests {
             consumer_public_key_pem: Some("key-a".into()),
             openchat_user_id: Principal::anonymous(),
             linked_at: 55,
+        }
+    }
+
+    #[test]
+    fn pending_route_binding_must_match_every_current_manifest_coordinate() {
+        let configured = test_ai_app_v2_binding();
+        let mut binding = test_openchat_user_binding();
+        binding.user_index_canister_id = configured.user_index_canister_id;
+        binding.app_id = configured.app_id;
+        binding.app_revision = Some(configured.app_revision);
+        binding.app_canister_id = Some(configured.app_canister_id);
+        assert!(openchat_binding_matches_verification(&binding, &configured));
+
+        let mut cases = Vec::new();
+        let mut value = binding.clone();
+        value.user_index_canister_id = p(91);
+        cases.push(value);
+        let mut value = binding.clone();
+        value.app_id = binding.app_id.saturating_add(1);
+        cases.push(value);
+        let mut value = binding.clone();
+        value.app_revision = Some(configured.app_revision.saturating_add(1));
+        cases.push(value);
+        let mut value = binding.clone();
+        value.app_canister_id = Some(p(92));
+        cases.push(value);
+        for stale in cases {
+            assert!(!openchat_binding_matches_verification(&stale, &configured));
         }
     }
 
@@ -6448,6 +7127,16 @@ mod tests {
             assert!(
                 SCHEMA_VERSION >= 16,
                 "consumer-key-pinned OpenChat links require schema v16"
+            )
+        };
+    }
+
+    #[test]
+    fn schema_version_records_pending_chat_route_memory() {
+        const {
+            assert!(
+                SCHEMA_VERSION >= 17,
+                "MemoryId 28 pending chat routes require schema v17"
             )
         };
     }

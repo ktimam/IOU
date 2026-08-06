@@ -67,6 +67,54 @@ canister WASM, or documentation.
 This is a source and local-verification review, not a proof that no other vulnerability
 exists.
 
+## Routing and link-consent correction — 2026-08-06 (latest)
+
+This correction supersedes the older first-use routing, QC, and PR 2 head statements
+elsewhere in this dated report. The latest clean PR 2 head is `dda2833d6`; references to
+`68aadfd35` remain useful only as the earlier #79 verification checkpoint. PR 1/local-model
+scope is unchanged.
+
+[IOU #50](https://github.com/ktimam/IOU/issues/50) records a regression introduced when
+`/openchat/link-chat?chat=...` was removed to close a raw chat-coordinate URL leak: the raw
+route correctly stayed retired, but its only first-use routing UI was removed with it. The
+manifest also stopped publishing a `chat_link` surface. A user could therefore connect the
+app but could not discover a safe page for assigning the current chat to an IOU account/sheet.
+The earlier live journey pre-seeded the chat mapping and exercised only **Check connection**,
+so it never tested an unmapped chat opened through OpenChat. That was the QC gap; the previous
+coverage claim was too broad.
+
+The failing-first IOU regression was concrete: `actionManifest.test.ts` ran **22 tests with
+1 failure** because the `chat_link` surface was absent. The IOU remediation restores only a
+raw-free `chat_link` URL, `/settings#openchat-routing`. IOU learns a pending route exclusively
+from an authenticated OpenChat card-attestation/private-context call, exposes a
+principal-scoped opaque digest rather than a chat handle, and permits assignment only to an
+active sheet the caller can explicitly read. Pending rows have a 24-hour lifetime and a
+per-principal and global caps, are cleared on disconnect/rebinding or trust-configuration changes,
+and are revalidated against the exact current manifest coordinates and consumer key before
+assignment. The canister—not only the page—permits assignment/unlink of the deterministically newest
+live request, closing the arrival-after-page-load race. A saved link remains removable when its
+old sheet is closed or no longer readable. Raw chat/user/message coordinates, the
+app-scoped handle, and the pending id do not enter the navigation URL or visible UI. The newest
+authenticated request is the only actionable row; older ambiguous requests are dismiss-only.
+
+[OpenChat #80](https://github.com/ktimam/open-chat/issues/80) is the separate generic PR 2
+consent-lifecycle defect. Closing or backing out of the link-consent sheet called the installed-
+key removal path, so a normal dismissal disconnected an already connected external app and the
+next proposal asked the user to connect again. Its failing-first frontend regression was **3/3
+failed**: no exact pending-token cancellation was sent and the installed key was removed. At
+clean PR 2 head `dda2833d6`, UserIndex exposes caller-bound, exact-token, idempotent cancellation
+for an unclaimed link code; the desktop/mobile consent UI best-effort cancels only that returned
+token and always dismisses, while explicit **Disconnect** remains the sole installed-key removal
+action. This is reusable external-app/card interface code. It does not change inherited OpenChat
+features, contain IOU-specific behavior, or belong to the local-model PR.
+
+Current source verification after the remediation is green: IOU Rust **63/63**, full frontend
+**837/837**, TypeScript typecheck, production build, and the focused raw-free browser journey **1/1**;
+OpenChat endpoint **4/4**, model **12/12**, API contract **6/6**, consent/security frontend
+**14/14**, and shared-worker **1/1**. The preserved-state local canister upgrade/live first-use
+journey is the remaining release gate; these source results must not be described as a completed
+deployment.
+
 ## Final readiness and preserved local deployment update — 2026-08-06
 
 This section is the current handoff and supersedes every older statement later in this
@@ -1216,6 +1264,7 @@ have their implementation and validation evidence recorded in the linked issue.
 | [#47](https://github.com/ktimam/IOU/issues/47) | Closed; IOU-only domain-separated hash fix, crypto/poll 42/42, and stored-action recovery passed | Raw payload hash makes valid v4 actions invisible |
 | [#48](https://github.com/ktimam/IOU/issues/48) | Closed; actor dependency fix, policy 12/12, and fresh-reload polling passed | Sheet poll captures an undefined actor after reload |
 | [#49](https://github.com/ktimam/IOU/issues/49) | Closed; key/binding invariant, legacy fail-closed migration, 53/53 Rust, 830/830 frontend, in-place backend upgrade, four relinks, and post-upgrade card context passed | OpenChat binding can drift from the authoritative consumer key |
+| [#50](https://github.com/ktimam/IOU/issues/50) | Open; failing-first regression and source fix pass, preserved-state deployment/live first-use proof pending | Raw-route hardening removed the discoverable chat-to-sheet setup journey |
 
 Earlier #1–#7 are closed historical issues; current work did not reopen them.
 
@@ -1301,6 +1350,7 @@ Earlier #1–#7 are closed historical issues; current work did not reopen them.
 | [#77](https://github.com/ktimam/open-chat/issues/77) | Closed; persisted-test-mode fix pushed, 89/89 per worktree, `8ae34cf38` child deployment and live flow passed | Backend gates block approved private context and edited confirmation |
 | [#78](https://github.com/ktimam/open-chat/issues/78) | Closed; generic retry fix/tests pushed in clean `f93bffe0a` and checkpoint `4eed022b8`; delayed-listener and live flows passed | One-shot card bootstrap races external-app listener startup |
 | [#79](https://github.com/ktimam/open-chat/issues/79) | Closed; clone-safe bridge fix/tests pushed in clean `68aadfd35` and checkpoint `790bb76d0`; capability-bearing live flow passed | Svelte capability proxy crashes private-context `postMessage` |
+| [#80](https://github.com/ktimam/open-chat/issues/80) | Open; generic exact-token cancellation fix/tests pushed at `dda2833d6`, live proof pending | Closing link consent removes an installed app key and forces repeated Connect |
 
 ## Release recommendation
 

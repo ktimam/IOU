@@ -21,6 +21,9 @@ import { computeBalances } from "../../src/features/entries/balance";
 import { parseDraft } from "../../src/features/entries/draft";
 import { sheetIdToNat64, nat64ToSheetId } from "../../src/features/openchat/chatSheetLinks";
 
+const CHAT_HANDLE = "CAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAg";
+const IMPORT_CHAT_HANDLE = "CQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQk";
+
 function u8(v: Uint8Array | number[]): Uint8Array {
   return v instanceof Uint8Array ? v : Uint8Array.from(v);
 }
@@ -154,7 +157,7 @@ describeE2E("IOU backend — two-user pair/sheet/entry E2E", () => {
   });
 
   it("chat→sheet links are caller-scoped and round-trip loss-free", async () => {
-    const chatKey = "group:e2e-" + sheetId.slice(0, 6);
+    const chatKey = CHAT_HANDLE;
     await A.actor.set_chat_sheet_link(chatKey, sheetIdToNat64(sheetId));
     const aLinks = (await A.actor.chat_sheet_links()) as { chat_key: string; sheet_id: bigint }[];
     const link = aLinks.find((l) => l.chat_key === chatKey);
@@ -164,6 +167,19 @@ describeE2E("IOU backend — two-user pair/sheet/entry E2E", () => {
     // B does not see A's links.
     const bLinks = (await B.actor.chat_sheet_links()) as { chat_key: string }[];
     expect(bLinks.some((l) => l.chat_key === chatKey)).toBe(false);
+
+    // The same opaque handle is scoped by caller: B cannot remove A's mapping.
+    await B.actor.remove_chat_sheet_link(chatKey);
+    expect(
+      ((await A.actor.chat_sheet_links()) as { chat_key: string }[]).some(
+        (l) => l.chat_key === chatKey,
+      ),
+    ).toBe(true);
+
+    // Legacy raw coordinates are rejected rather than becoming URL/log correlators again.
+    await expect(
+      A.actor.set_chat_sheet_link("group:e2e-raw-coordinate", sheetIdToNat64(sheetId)),
+    ).rejects.toThrow(/canonical 32-byte app-scoped handle/i);
 
     await A.actor.remove_chat_sheet_link(chatKey);
     const after = (await A.actor.chat_sheet_links()) as { chat_key: string }[];
@@ -198,7 +214,7 @@ describeE2E("IOU backend — two-user pair/sheet/entry E2E", () => {
     };
 
     // Link the chat to this sheet, then import as if the draft arrived from that chat.
-    await A.actor.set_chat_sheet_link("group:import-e2e", sheetIdToNat64(sheetId));
+    await A.actor.set_chat_sheet_link(IMPORT_CHAT_HANDLE, sheetIdToNat64(sheetId));
     const enc = await encryptEntryPayload(encodeEntry(payload), K);
     const entry = await A.actor.add_entry({
       sheet_id: sheetId,
@@ -212,7 +228,7 @@ describeE2E("IOU backend — two-user pair/sheet/entry E2E", () => {
     const decoded = decodeEntry(await decryptEntryPayload(u8(mine.entry_key), u8(mine.iv), u8(mine.ciphertext), K));
     expect(decoded.draft_id).toBe("d:e2e-import"); // idempotency key survived the round-trip
     expect(decoded.amount_minor).toBe(4250);
-    await A.actor.remove_chat_sheet_link("group:import-e2e");
+    await A.actor.remove_chat_sheet_link(IMPORT_CHAT_HANDLE);
   });
 
   it("default currency: canister rejects non-ISO junk, stores uppercase, and is caller-keyed", async () => {

@@ -6,6 +6,7 @@ export const SECURITY_CRITICAL_COVERAGE_INCLUDE: string[] = [
   "src/features/storage/*.ts",
   "src/features/relay/relay.ts",
   "src/features/openchat/*.ts",
+  "src/features/openchat/*.tsx",
   "src/features/entries/csvExport.ts",
   "src/features/entries/decryptEntries.ts",
   "src/features/entries/closingBalances.ts",
@@ -21,6 +22,7 @@ export const SECURITY_CRITICAL_COVERAGE_INCLUDE: string[] = [
 
 export const SECURITY_CRITICAL_COVERAGE_EXCLUDE: string[] = [
   "src/**/*.test.ts",
+  "src/**/*.test.tsx",
   "src/**/*.d.ts",
   "src/declarations/**",
   "src/features/openchat/ecTestKit.ts",
@@ -39,7 +41,7 @@ export default defineConfig({
     // Unit fixtures remain deterministic/dev-mode unless a test explicitly
     // exercises or stubs the production adapter.
     env: { VITE_IOU_PROD_VETKD: "0" },
-    include: ["src/**/*.test.ts"],
+    include: ["src/**/*.test.ts", "src/**/*.test.tsx"],
     coverage: {
       provider: "v8",
       reporter: ["text-summary", "json-summary"],
