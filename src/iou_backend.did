@@ -316,6 +316,7 @@ type ConsumerKeyEpochConflict = record {
 type ConsumerKeyMutationError = variant {
     StaleEpoch : ConsumerKeyEpochConflict;
     EpochExhausted;
+    OpenChatBindingKeyMismatch;
 };
 
 type ConsumerKeyMutationResult = variant {

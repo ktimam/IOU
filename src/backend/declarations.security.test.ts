@@ -47,6 +47,13 @@ describe("security-sensitive Candid bindings", () => {
     expect(setArgs[0]).toBe(7n);
     expect(Array.from(setArgs[1])).toEqual([1, 2, 3]);
 
+    const bindingConflictWire = IDL.encode(setMethod.retTypes, [
+      { Err: { OpenChatBindingKeyMismatch: null } },
+    ]);
+    expect(IDL.decode(setMethod.retTypes, bindingConflictWire)[0]).toEqual({
+      Err: { OpenChatBindingKeyMismatch: null },
+    });
+
     const deleteWire = IDL.encode(deleteMethod.argTypes, [8n]);
     expect(IDL.decode(deleteMethod.argTypes, deleteWire)[0]).toBe(8n);
 

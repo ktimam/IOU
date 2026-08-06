@@ -4,6 +4,7 @@
 
 import {
   acknowledgementSecretHashV1,
+  aiAppCardConfirmPayloadHashV1,
   actionCardContextHashV2,
   actionSigningKeyId,
   sha256,
@@ -204,7 +205,7 @@ export async function buildStoredAction(opts: {
   const inboxCanisterId = opts.inboxCanisterId ?? TEST_INBOX_CANISTER_ID;
   const consumerKeySelector = opts.consumerKeySelector ?? TEST_CONSUMER_QUEUE_SELECTOR;
   if (consumerKeySelector.length !== 32) throw new Error("test selector must be exactly 32 bytes");
-  const payloadHash = await sha256(payloadBytes);
+  const payloadHash = await aiAppCardConfirmPayloadHashV1(payloadBytes);
   const cardContextHash = await actionCardContextHashV2(context, payloadHash);
   const idempotencyKey = await sha256(
     new TextEncoder().encode(`test-delivery:${opts.id}:${context.messageHandle}`),

@@ -629,8 +629,7 @@ export function SheetPage() {
         inboxAckQueueRef.current = new InboxAcknowledgementQueue();
       }
     };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [principal, handledInboxIds]);
+  }, [actor, principal, handledInboxIds]);
 
   const myPrincipal = state.kind === "authenticated"
     ? state.identity.getPrincipal().toText()

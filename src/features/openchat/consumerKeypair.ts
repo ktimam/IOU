@@ -444,7 +444,8 @@ type ConsumerKeyMutationResult =
               current_epoch: bigint | number;
             };
           }
-        | { EpochExhausted: null };
+        | { EpochExhausted: null }
+        | { OpenChatBindingKeyMismatch: null };
     };
 
 function asMutationEpoch(value: unknown): bigint {
@@ -489,6 +490,11 @@ function requireMutationApplied(value: unknown): bigint {
   if ("Err" in result && result.Err && "EpochExhausted" in result.Err) {
     throw new NonRecoverableConsumerKeyError(
       "consumer-key mutation epoch is exhausted; no further mutation is safe",
+    );
+  }
+  if ("Err" in result && result.Err && "OpenChatBindingKeyMismatch" in result.Err) {
+    throw new NonRecoverableConsumerKeyError(
+      "the linked OpenChat account pins a different delivery key; disconnect or reset the link before replacing it",
     );
   }
   throw new NonRecoverableConsumerKeyError("invalid consumer-key mutation result");

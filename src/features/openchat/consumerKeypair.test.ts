@@ -17,6 +17,7 @@ const s = vi.hoisted(() => ({
   deleteCalls: 0,
   getCalls: 0,
   getGate: null as Promise<void> | null,
+  bindingKeyMismatch: false,
 }));
 
 vi.mock("../../backend/declarations", () => ({
@@ -27,6 +28,9 @@ vi.mock("../../backend/declarations", () => ({
       return { mutation_epoch: s.epoch, keypair: s.remote ? [s.remote] : [] };
     },
     set_consumer_keypair: async (expected: bigint, wrapped: number[], pem: string) => {
+      if (s.bindingKeyMismatch) {
+        return { Err: { OpenChatBindingKeyMismatch: null } };
+      }
       if (expected !== s.epoch) {
         return {
           Err: { StaleEpoch: { expected_epoch: expected, current_epoch: s.epoch } },
@@ -105,6 +109,7 @@ beforeEach(() => {
   s.deleteCalls = 0;
   s.getCalls = 0;
   s.getGate = null;
+  s.bindingKeyMismatch = false;
   configureConsumerKeypairBackend(null);
 });
 
@@ -171,6 +176,17 @@ describe("consumerKeypair — canister sync branches", () => {
     const kp = await loadOrCreateConsumerKeypair();
     expect(s.setCalls).toEqual([kp.publicKeySpkiPem]); // uploaded exactly once
     expect(s.remote?.public_key_pem).toBe(kp.publicKeySpkiPem);
+  });
+
+  it("fails closed when an OpenChat binding pins a different backend key", async () => {
+    s.bindingKeyMismatch = true;
+    configureConsumerKeypairBackend(identity);
+
+    await expect(loadOrCreateConsumerKeypair()).rejects.toThrow(
+      /linked OpenChat account pins a different delivery key/i,
+    );
+    expect(s.remote).toBeNull();
+    expect(s.setCalls).toHaveLength(0);
   });
 
   it("recover-from-canister: a second device with the same wrap key unwraps the canister copy (no re-upload)", async () => {

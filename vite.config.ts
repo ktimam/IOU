@@ -30,6 +30,11 @@ function devFramingHeaders(): Plugin {
         const isDocument = (req.headers.accept ?? "").includes("text/html");
         const ancestors = isDocument ? OPENCHAT_DEV_FRAME_ANCESTORS.join(" ") : "'none'";
         res.setHeader("Content-Security-Policy", `frame-ancestors ${ancestors}`);
+        // The card iframe intentionally omits allow-same-origin, so its active origin is opaque
+        // (`null`). ES modules are consequently CORS fetches even though their URLs share the IOU
+        // server origin. These are public build assets and carry no credentials; wildcard ACAO lets
+        // the credentialless sandbox load them without widening frame-ancestors or API access.
+        res.setHeader("Access-Control-Allow-Origin", "*");
         next();
       });
     },
@@ -82,5 +87,9 @@ export default defineConfig({
     // "127.0.0.1" — so host and port here are load-bearing, not cosmetic. Change both together.
     port: 3000,
     host: "127.0.0.1",
+    // Vite's built-in CORS middleware runs after plugin middleware and owns the final ACAO header.
+    // `true` is safe here because this listener is loopback-only and serves public frontend assets;
+    // it is required for ES modules fetched by OpenChat's credentialless opaque-origin iframe.
+    cors: true,
   },
 });

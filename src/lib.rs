@@ -487,7 +487,9 @@ impl Storable for RecoveryKey {
 // v1.17.0 (schema v14 -> v15): added the optional app_subject/subject_version pair. Newly claimed
 // links use only OpenChat's app-scoped subject; the retained openchat_user_id field exists solely so
 // v14 stable bytes decode and is anonymous for new rows. Legacy raw-subject rows fail closed.
-const SCHEMA_VERSION: u32 = 15;
+// v1.18.0 (schema v15 -> v16): added optional OpenChatBinding.consumer_public_key_pem. Existing
+// bindings decode with None and deliberately fail key-bound authorization until the owner relinks.
+const SCHEMA_VERSION: u32 = 16;
 
 thread_local! {
     static MEMORY_MANAGER: RefCell<MemoryManager<DefaultMemoryImpl>> =
@@ -3315,6 +3317,7 @@ pub struct ConsumerKeyEpochConflict {
 pub enum ConsumerKeyMutationError {
     StaleEpoch(ConsumerKeyEpochConflict),
     EpochExhausted,
+    OpenChatBindingKeyMismatch,
 }
 
 #[derive(Clone, CandidType, Deserialize)]
@@ -3354,6 +3357,49 @@ fn consumer_key_epoch(caller: &Principal) -> u64 {
     CONSUMER_KEY_EPOCHS.with(|epochs| epochs.borrow().get(caller).unwrap_or(0))
 }
 
+fn consumer_key_update_preserves_binding(
+    binding_exists: bool,
+    binding_public_key: Option<&str>,
+    current_public_key: Option<&str>,
+    proposed_public_key: &str,
+) -> bool {
+    !binding_exists
+        || (openchat_binding_key_matches(binding_public_key, current_public_key)
+            && current_public_key == Some(proposed_public_key))
+}
+
+fn openchat_binding_key_matches(
+    binding_public_key: Option<&str>,
+    current_public_key: Option<&str>,
+) -> bool {
+    binding_public_key.is_some() && binding_public_key == current_public_key
+}
+
+fn consumer_key_snapshot_matches(
+    expected_epoch: u64,
+    expected_public_key: &str,
+    current_epoch: u64,
+    current_public_key: Option<&str>,
+) -> bool {
+    current_epoch == expected_epoch && current_public_key == Some(expected_public_key)
+}
+
+fn consumer_key_state_still_matches(
+    caller: &Principal,
+    expected_epoch: u64,
+    expected_public_key: &str,
+) -> bool {
+    let current = CONSUMER_KEYPAIRS.with(|keypairs| keypairs.borrow().get(caller));
+    consumer_key_snapshot_matches(
+        expected_epoch,
+        expected_public_key,
+        consumer_key_epoch(caller),
+        current
+            .as_ref()
+            .map(|keypair| keypair.public_key_pem.as_str()),
+    )
+}
+
 /// set_consumer_keypair: caller-keyed compare-and-swap upsert. The caller MUST
 /// supply the epoch returned by get_consumer_keypair. A delayed request
 /// prepared before a newer set/delete is rejected without changing stable
@@ -3383,6 +3429,23 @@ fn set_consumer_keypair(
         Ok(epoch) => epoch,
         Err(error) => return ConsumerKeyMutationResult::Err(error),
     };
+    let binding = OPENCHAT_BINDINGS_BY_IOU.with(|bindings| bindings.borrow().get(&caller));
+    let binding_exists = binding.is_some();
+    let current_keypair = CONSUMER_KEYPAIRS.with(|keypairs| keypairs.borrow().get(&caller));
+    if !consumer_key_update_preserves_binding(
+        binding_exists,
+        binding
+            .as_ref()
+            .and_then(|value| value.consumer_public_key_pem.as_deref()),
+        current_keypair
+            .as_ref()
+            .map(|keypair| keypair.public_key_pem.as_str()),
+        &public_key_pem,
+    ) {
+        return ConsumerKeyMutationResult::Err(
+            ConsumerKeyMutationError::OpenChatBindingKeyMismatch,
+        );
+    }
 
     // There is deliberately no await between compare and mutation. The IC
     // executes this as one atomic update message.
@@ -3479,6 +3542,10 @@ pub struct OpenChatBinding {
     pub subject_version: Option<u16>,
     pub consumer_queue_selector: Option<Vec<u8>>,
     pub consumer_queue_selector_version: Option<u16>,
+    // Optional only for stable decoding of links created before the consumer-key
+    // lifecycle invariant. Card authorization requires this exact link-time PEM
+    // to still be the caller's authoritative delivery key.
+    pub consumer_public_key_pem: Option<String>,
     // Stable-layout compatibility only. New links always store anonymous and no public endpoint
     // returns this field.
     pub openchat_user_id: Principal,
@@ -3563,6 +3630,22 @@ fn valid_consumer_queue_selector(binding: &OpenChatBinding) -> Option<&[u8]> {
         .then_some(binding.consumer_queue_selector.as_deref())
         .flatten()
         .filter(|selector| selector.len() == 32)
+}
+
+fn openchat_binding_key_matches_current(
+    iou_principal: &Principal,
+    binding: &OpenChatBinding,
+) -> bool {
+    if binding.iou_principal != *iou_principal {
+        return false;
+    }
+    let current = CONSUMER_KEYPAIRS.with(|keypairs| keypairs.borrow().get(iou_principal));
+    openchat_binding_key_matches(
+        binding.consumer_public_key_pem.as_deref(),
+        current
+            .as_ref()
+            .map(|keypair| keypair.public_key_pem.as_str()),
+    )
 }
 
 fn remove_openchat_binding_for_iou(iou_principal: Principal) {
@@ -3666,6 +3749,7 @@ fn openchat_binding_for_subject(
         binding.user_index_canister_id == user_index_canister_id
             && binding.app_id == app_id
             && valid_app_subject(binding) == Some(app_subject)
+            && openchat_binding_key_matches_current(&iou_principal, binding)
     })
 }
 
@@ -3739,7 +3823,20 @@ async fn connect_openchat(
         return ConnectOpenChatResult::NotConfigured;
     };
 
-    let args = ClaimAiAppLinkCodeArgs { code, public_key };
+    let consumer_key_epoch = consumer_key_epoch(&iou_principal);
+    // The claim must use the authoritative stored public key. Capture the
+    // epoch before the await so the continuation can reject a concurrent
+    // set/delete rather than binding OpenChat to an obsolete key.
+    if !consumer_key_state_still_matches(&iou_principal, consumer_key_epoch, &public_key) {
+        return ConnectOpenChatResult::InvalidRequest(
+            "public key does not match the current IOU delivery key".to_string(),
+        );
+    }
+
+    let args = ClaimAiAppLinkCodeArgs {
+        code,
+        public_key: public_key.clone(),
+    };
     let response = match ic_cdk::call::Call::bounded_wait(
         user_index_canister_id,
         "c2c_claim_ai_app_link_code",
@@ -3786,6 +3883,12 @@ async fn connect_openchat(
     if success.app_canister_id != ic_cdk::api::canister_self() {
         return ConnectOpenChatResult::WrongApp;
     }
+    if !consumer_key_state_still_matches(&iou_principal, consumer_key_epoch, &public_key) {
+        return ConnectOpenChatResult::InvalidRequest(
+            "IOU delivery key changed while connecting; create a new OpenChat link code and retry"
+                .to_string(),
+        );
+    }
     let binding = OpenChatBinding {
         iou_principal,
         user_index_canister_id,
@@ -3797,6 +3900,7 @@ async fn connect_openchat(
         subject_version: Some(success.subject_version),
         consumer_queue_selector: Some(success.consumer_queue_selector),
         consumer_queue_selector_version: Some(success.consumer_queue_selector_version),
+        consumer_public_key_pem: Some(public_key),
         openchat_user_id: Principal::anonymous(),
         linked_at: ic_cdk::api::time(),
     };
@@ -3871,13 +3975,11 @@ fn disconnect_state_still_matches(
         ic_cdk::api::canister_self(),
     ) && OPENCHAT_BINDINGS_BY_IOU.with(|bindings| {
         bindings.borrow().get(&caller).as_ref() == Some(binding)
-    }) && consumer_key_epoch(&caller) == expected_consumer_key_epoch
-        && CONSUMER_KEYPAIRS.with(|keypairs| {
-            keypairs
-                .borrow()
-                .get(&caller)
-                .is_some_and(|keypair| keypair.public_key_pem == public_key)
-        })
+    }) && consumer_key_state_still_matches(
+        &caller,
+        expected_consumer_key_epoch,
+        public_key,
+    )
 }
 
 /// Coordinated IOU-side disconnect. The browser supplies a proof signed by
@@ -5446,6 +5548,7 @@ mod tests {
             subject_version: Some(1),
             consumer_queue_selector: Some(vec![8; 32]),
             consumer_queue_selector_version: Some(1),
+            consumer_public_key_pem: Some("key-a".into()),
             openchat_user_id: Principal::anonymous(),
             linked_at: 1,
         }
@@ -5719,6 +5822,7 @@ mod tests {
             subject_version: Some(1),
             consumer_queue_selector: Some(vec![24; 32]),
             consumer_queue_selector_version: Some(1),
+            consumer_public_key_pem: Some("key-a".into()),
             openchat_user_id: Principal::anonymous(),
             linked_at: 55,
         }
@@ -5975,6 +6079,65 @@ mod tests {
     }
 
     #[test]
+    fn active_openchat_binding_allows_only_exact_consumer_key_rewrap() {
+        assert!(consumer_key_update_preserves_binding(
+            false, None, None, "key-a"
+        ));
+        assert!(consumer_key_update_preserves_binding(
+            false,
+            None,
+            Some("key-a"),
+            "key-b"
+        ));
+        assert!(consumer_key_update_preserves_binding(
+            true,
+            Some("key-a"),
+            Some("key-a"),
+            "key-a"
+        ));
+        assert!(!consumer_key_update_preserves_binding(
+            true,
+            Some("key-a"),
+            Some("key-a"),
+            "key-b"
+        ));
+        assert!(!consumer_key_update_preserves_binding(
+            true,
+            Some("key-a"),
+            Some("key-b"),
+            "key-b"
+        ));
+        assert!(!consumer_key_update_preserves_binding(
+            true,
+            None,
+            Some("key-a"),
+            "key-a"
+        ));
+    }
+
+    #[test]
+    fn openchat_connect_snapshot_rejects_missing_replaced_or_rewrapped_key() {
+        assert!(consumer_key_snapshot_matches(7, "key-a", 7, Some("key-a")));
+        assert!(!consumer_key_snapshot_matches(7, "key-a", 7, None));
+        assert!(!consumer_key_snapshot_matches(7, "key-a", 7, Some("key-b")));
+        assert!(!consumer_key_snapshot_matches(7, "key-a", 8, Some("key-a")));
+    }
+
+    #[test]
+    fn openchat_binding_authorization_requires_persisted_matching_key() {
+        assert!(openchat_binding_key_matches(
+            Some("key-a"),
+            Some("key-a")
+        ));
+        assert!(!openchat_binding_key_matches(None, Some("key-a")));
+        assert!(!openchat_binding_key_matches(
+            Some("key-a"),
+            Some("key-b")
+        ));
+        assert!(!openchat_binding_key_matches(Some("key-a"), None));
+    }
+
+    #[test]
     fn consumer_key_epoch_tombstone_prevents_delete_reordering_and_aba() {
         let set_epoch = next_consumer_key_epoch(0, 0).expect("initial set");
         let tombstone_epoch = next_consumer_key_epoch(set_epoch, set_epoch).expect("delete");
@@ -6225,7 +6388,48 @@ mod tests {
         assert_eq!(decoded.key_version, None);
         assert_eq!(decoded.app_subject, None);
         assert_eq!(decoded.subject_version, None);
+        assert_eq!(decoded.consumer_public_key_pem, None);
         assert!(public_openchat_binding(&decoded).is_none());
+    }
+
+    #[test]
+    fn openchat_binding_decodes_pre_key_pin_v2_links_as_unverified() {
+        #[derive(CandidType, Deserialize)]
+        struct PreKeyPinOpenChatBinding {
+            iou_principal: Principal,
+            user_index_canister_id: Principal,
+            app_id: u32,
+            app_revision: Option<u64>,
+            app_canister_id: Option<Principal>,
+            key_version: Option<u64>,
+            app_subject: Option<Vec<u8>>,
+            subject_version: Option<u16>,
+            consumer_queue_selector: Option<Vec<u8>>,
+            consumer_queue_selector_version: Option<u16>,
+            openchat_user_id: Principal,
+            linked_at: u64,
+        }
+        let old = PreKeyPinOpenChatBinding {
+            iou_principal: p(1),
+            user_index_canister_id: p(2),
+            app_id: 7,
+            app_revision: Some(8),
+            app_canister_id: Some(p(4)),
+            key_version: Some(9),
+            app_subject: Some(vec![5; 32]),
+            subject_version: Some(1),
+            consumer_queue_selector: Some(vec![6; 32]),
+            consumer_queue_selector_version: Some(1),
+            openchat_user_id: Principal::anonymous(),
+            linked_at: 10,
+        };
+        let decoded = OpenChatBinding::from_bytes(Cow::Owned(Encode!(&old).unwrap()));
+        assert!(public_openchat_binding(&decoded).is_some());
+        assert_eq!(decoded.consumer_public_key_pem, None);
+        assert!(!openchat_binding_key_matches(
+            decoded.consumer_public_key_pem.as_deref(),
+            Some("key-a"),
+        ));
     }
 
     #[test]
@@ -6234,6 +6438,16 @@ mod tests {
             assert!(
                 SCHEMA_VERSION >= 15,
                 "app-scoped OpenChat links require schema v15"
+            )
+        };
+    }
+
+    #[test]
+    fn schema_version_records_openchat_binding_consumer_key_pin() {
+        const {
+            assert!(
+                SCHEMA_VERSION >= 16,
+                "consumer-key-pinned OpenChat links require schema v16"
             )
         };
     }

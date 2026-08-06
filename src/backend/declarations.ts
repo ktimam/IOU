@@ -260,6 +260,7 @@ export const idlFactory = ({ IDL: idl }: { IDL: IDL }) => {
   const ConsumerKeyMutationError = idl.Variant({
     StaleEpoch: ConsumerKeyEpochConflict,
     EpochExhausted: idl.Null,
+    OpenChatBindingKeyMismatch: idl.Null,
   });
   const ConsumerKeyMutationResult = idl.Variant({
     Ok: idl.Nat64,

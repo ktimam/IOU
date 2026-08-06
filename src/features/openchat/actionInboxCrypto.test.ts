@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { Principal } from "@dfinity/principal";
 import {
+  aiAppCardConfirmPayloadHashV1,
   actionCardContextHashV2,
   actionSigningKeyId,
   decryptInboxEnvelope,
@@ -61,6 +62,40 @@ describe("action_inbox ECIES interoperability", () => {
 });
 
 describe("action_inbox v4 signing and card commitments", () => {
+  it("matches OpenChat's domain-separated v1 confirmation-payload hash", async () => {
+    const recipient = await generateConsumerKeys();
+    const signer = await generateOcSigner();
+    const action = await buildStoredAction({
+      id: 1n,
+      createdAt: 1_800_000_000_000n,
+      recipient,
+      signer,
+      payload: {},
+    });
+    const payloadBytes = new TextEncoder().encode("{}");
+    expect(bytesToHex(Uint8Array.from(action.payload_hash))).toBe(
+      "ef927aa531deb350681dc6c32a857619b5ea10bb55f74085fdf379c198d30c28",
+    );
+    expect(bytesToHex(Uint8Array.from(action.payload_hash))).not.toBe(
+      bytesToHex(await sha256(payloadBytes)),
+    );
+
+    const empty = await aiAppCardConfirmPayloadHashV1(new Uint8Array());
+    const oneZero = await aiAppCardConfirmPayloadHashV1(Uint8Array.of(0));
+    const twoZeroes = await aiAppCardConfirmPayloadHashV1(Uint8Array.of(0, 0));
+    expect(empty).toHaveLength(32);
+    expect(bytesToHex(empty)).not.toBe(bytesToHex(oneZero));
+    expect(bytesToHex(oneZero)).not.toBe(bytesToHex(twoZeroes));
+
+    const maxSupported = new Uint8Array(16 * 1024).fill(0xa5);
+    const changedByte = maxSupported.slice();
+    changedByte[changedByte.length - 1] ^= 1;
+    expect(await aiAppCardConfirmPayloadHashV1(maxSupported)).toHaveLength(32);
+    expect(bytesToHex(await aiAppCardConfirmPayloadHashV1(maxSupported))).not.toBe(
+      bytesToHex(await aiAppCardConfirmPayloadHashV1(changedByte)),
+    );
+  });
+
   it("matches OpenChat Rust's independent v4 preimage and private-context golden digests", async () => {
     const preimage = signingPreimageV4({
       keyId: new Uint8Array(32).fill(0x11),

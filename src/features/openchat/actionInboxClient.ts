@@ -7,11 +7,11 @@ import { Actor, HttpAgent, type Identity } from "@dfinity/agent";
 import { Principal } from "@dfinity/principal";
 import {
   acknowledgementSecretHashV1,
+  aiAppCardConfirmPayloadHashV1,
   actionCardContextHashV2,
   actionSigningKeyId,
   decryptInboxEnvelope,
   equalBytes,
-  sha256,
   verifyOpenChatActionSignature,
 } from "./actionInboxCrypto";
 import { loadOrCreateConsumerKeypair, type ConsumerKeypair } from "./consumerKeypair";
@@ -678,7 +678,7 @@ export async function pollActionInbox(opts: {
       );
       // On-chain deliveries never accept the parser's local-only wrapperless compatibility path.
       if (!payloadBytes || !context || !acknowledgementSecret) continue;
-      const computedPayloadHash = await sha256(payloadBytes);
+      const computedPayloadHash = await aiAppCardConfirmPayloadHashV1(payloadBytes);
       if (!equalBytes(computedPayloadHash, payloadHash)) continue;
       if (
         context.appId !== a.app_id ||

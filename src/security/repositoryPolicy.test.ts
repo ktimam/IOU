@@ -34,6 +34,38 @@ describe('repository security policy', () => {
     expect(config).not.toMatch(/sourcemap:\s*true/);
   });
 
+  it('has no emitted JavaScript config that shadows vite.config.ts', () => {
+    expect(existsSync(path.join(root, 'vite.config.js'))).toBe(false);
+  });
+
+  it('lets the credentialless opaque-origin card load its public module assets', () => {
+    const vite = read('vite.config.ts');
+    expect(vite).toMatch(
+      /setHeader\(\x22Access-Control-Allow-Origin\x22,\s*\x22\*\x22\)/,
+    );
+    expect(vite).toMatch(/cors:\s*true/);
+
+    const assetPolicy = read('public/.ic-assets.json5');
+    const wildcardHeaders = assetPolicy.match(
+      /\x22Access-Control-Allow-Origin\x22\s*:\s*\x22\*\x22/g,
+    );
+    // Both the generic assets and the later index.html override must carry ACAO.
+    expect(wildcardHeaders).toHaveLength(2);
+  });
+
+  it('restarts ActionInbox polling when the authenticated actor becomes ready', () => {
+    const sheetPage = read('src/features/entries/SheetPage.tsx');
+    const start = sheetPage.indexOf('// "Pending from OpenChat"');
+    const end = sheetPage.indexOf('const myPrincipal', start);
+    expect(start).toBeGreaterThanOrEqual(0);
+    expect(end).toBeGreaterThan(start);
+    const pollingEffect = sheetPage.slice(start, end);
+    expect(pollingEffect).toMatch(/\}, \[actor, principal, handledInboxIds\]\);/);
+    expect(pollingEffect).toMatch(/cancelled = true/);
+    expect(pollingEffect).toMatch(/clearInterval\(iv\)/);
+    expect(pollingEffect).toMatch(/inboxAckQueueRef\.current/);
+  });
+
   it('excludes Android application data from platform backup', () => {
     const manifest = read('android/app/src/main/AndroidManifest.xml');
     expect(manifest).toMatch(/android:allowBackup=\x22false\x22/);

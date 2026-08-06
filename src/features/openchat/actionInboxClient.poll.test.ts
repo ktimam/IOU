@@ -1,7 +1,12 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { Principal } from "@dfinity/principal";
 import type { OpenChatBindingWire } from "./disconnectOpenChat";
-import { signingPreimageV4, type ActionSignatureContextV4 } from "./actionInboxCrypto";
+import {
+  actionCardContextHashV2,
+  sha256,
+  signingPreimageV4,
+  type ActionSignatureContextV4,
+} from "./actionInboxCrypto";
 import {
   buildStoredAction,
   bytesToHex,
@@ -420,6 +425,28 @@ describe("pollActionInbox v4 end-to-end validation", () => {
         field,
       ).resolves.toEqual([]);
     }
+  });
+
+  it("rejects the previously self-consistent raw-SHA payload-hash contract", async () => {
+    const recipient = await generateConsumerKeys();
+    const signer = await generateOcSigner();
+    const createdAt = 1_800_000_001_100n;
+    const payload = { action_id: "iou.add", amount: 20 };
+    const action = await buildStoredAction({ id: 9n, createdAt, recipient, signer, payload });
+    const rawHash = await sha256(new TextEncoder().encode(JSON.stringify(payload)));
+    action.payload_hash = Array.from(rawHash);
+    action.card_context_hash = Array.from(
+      await actionCardContextHashV2(testContext(Number(createdAt)), rawHash),
+    );
+    await resign(action, signer);
+    h.userIndexActor = keyringActor(signer);
+    h.inboxActor = inboxActor([action]);
+    await expect(
+      pollActionInbox({
+        config: configFor(signer),
+        keypair: { privateKey: recipient.privateKey, fingerprint: recipient.fingerprint } as never,
+      }),
+    ).resolves.toEqual([]);
   });
 
   it("drops a correctly signed outer/inner metadata disagreement", async () => {

@@ -11,6 +11,9 @@ const INFO = "oc-action-inbox-v1";
 const SIGNATURE_DOMAIN_V4 = new TextEncoder().encode("openchat/action-inbox/deposit-signature/v4\0");
 const SIGNING_KEY_ID_DOMAIN_V1 = new TextEncoder().encode("openchat/action-inbox/signing-key-id/v1\0");
 const CARD_CONTEXT_DOMAIN_V2 = new TextEncoder().encode("openchat/action-inbox/card-context/v2\0");
+const CARD_CONFIRM_PAYLOAD_HASH_DOMAIN_V1 = new TextEncoder().encode(
+  "openchat.ai-app-card-confirm-payload.v1\0",
+);
 const ACK_SECRET_DOMAIN_V1 = new TextEncoder().encode("openchat-action-inbox-ack-secret-v1");
 const SIGNATURE_VERSION_V4 = 4;
 const SIGNATURE_PURPOSE_DEPOSIT = 1;
@@ -301,6 +304,18 @@ export async function actionCardContextHashV2(
     integerBytes(8, false, BigInt(context.confirmationLeaseGeneration)),
     integerBytes(8, false, BigInt(context.confirmedAt)),
     payloadHash,
+  ]);
+  return new Uint8Array(await getSubtle().digest("SHA-256", toBuf(canonical)));
+}
+
+/** Exact digest OpenChat binds into confirmation grants and v4 ActionInbox deposits. */
+export async function aiAppCardConfirmPayloadHashV1(payload: Uint8Array): Promise<Uint8Array> {
+  if (!(payload instanceof Uint8Array)) throw new Error("confirmation payload must be bytes");
+  if (payload.length > 0xffff_ffff) throw new Error("AI-app confirmation payload is too large");
+  const canonical = concatBytes([
+    CARD_CONFIRM_PAYLOAD_HASH_DOMAIN_V1,
+    integerBytes(4, false, payload.length),
+    payload,
   ]);
   return new Uint8Array(await getSubtle().digest("SHA-256", toBuf(canonical)));
 }
