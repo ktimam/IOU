@@ -1,13 +1,8 @@
-import React from "react";
-import ReactDOM from "react-dom/client";
-import { BrowserRouter } from "react-router-dom";
-import { App } from "./app/App";
-import "./styles/global.css";
+import { captureOpenChatRoutingLaunch } from "./features/openchat/chatLinkLaunch";
 
-ReactDOM.createRoot(document.getElementById("root")!).render(
-  <React.StrictMode>
-    <BrowserRouter>
-      <App />
-    </BrowserRouter>
-  </React.StrictMode>,
-);
+// This must run before importing React, AuthProvider, or any session-restoration code. The dynamic
+// import is a deliberate security boundary: a one-time chat-link token is removed from the visible
+// URL/history synchronously, while its value remains only in chatLinkLaunch's module memory.
+captureOpenChatRoutingLaunch();
+
+export const appBootstrap = import("./bootstrapApp");

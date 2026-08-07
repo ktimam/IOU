@@ -28,6 +28,22 @@ describe('repository security policy', () => {
     );
   });
 
+  it('keeps the deployed Candid surface in parity with per-chat token redemption', () => {
+    const candid = read('src/iou_backend.did');
+    const declarations = read('src/backend/declarations.ts');
+    const backend = read('src/lib.rs');
+    expect(candid).toMatch(
+      /type ClaimOpenChatChatRouteResult = variant \{[\s\S]*?Success : ClaimOpenChatChatRouteSuccess;[\s\S]*?WrongAccount;[\s\S]*?BindingChanged;[\s\S]*?RemoteError;[\s\S]*?\};/,
+    );
+    expect(candid).toMatch(
+      /claim_openchat_chat_route\s*:\s*\(text\)\s*->\s*\(ClaimOpenChatChatRouteResult\)/,
+    );
+    expect(declarations).toContain('claim_openchat_chat_route');
+    expect(backend).toMatch(
+      /#\[ic_cdk::update\]\s*async fn claim_openchat_chat_route\s*\(\s*encoded_token: String/,
+    );
+  });
+
   it('does not publish frontend source maps in the production bundle', () => {
     const config = read('vite.config.ts');
     expect(config).toMatch(/sourcemap:\s*false/);

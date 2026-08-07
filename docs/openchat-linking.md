@@ -259,19 +259,108 @@ The old `/openchat/link-chat?chat={chatKey}` surface remains removed. A URL is a
 and referrer channel, so it must not carry either a raw OpenChat chat coordinate or the private
 app-scoped handle. Two safe mapping flows are supported:
 
-- When an authenticated IOU card first requests private context for an unmapped chat, the IOU
-  canister records a caller-private pending route. Settings exposes only a principal-scoped SHA-256
-  pending id—not the app-scoped handle—under **Chat routing**. The user selects one of their own
-  active account/sheets, and can later reassign or remove the saved route—even if its former sheet
-  was later closed or access was revoked. Pending rows expire after 24 hours, are capped at 32 per
-  principal and 4096 globally, and stale rows are reclaimed on subsequent authenticated requests.
-  The backend permits assignment/unlink only for its deterministically newest live row and rechecks
-  the exact current manifest revision, UserIndex/app coordinates, binding, and consumer key.
+- From the individual chat's settings page, use AI apps → **Open setup**. OpenChat mints a one-time
+  32-byte token and substitutes its canonical 43-character unpadded base64url spelling into
+  `/settings#openchat-routing/{chatLinkToken}`. IOU's synchronous main entry captures and
+  removes that fragment from browser history before dynamically loading authentication/application
+  bootstrap, a network call, or routing render. It keeps the token only in the page instance's
+  module memory, and its
+  authenticated backend redeems it through the pinned UserIndex with the caller's exact current
+  app subject. A default browser signed in as the wrong IOU account gets a non-consuming mismatch,
+  so the user can sign out and into the matching account without leaking or burning the link.
+- Only a successful redemption creates a caller-private pending route with
+  `claim_version = 1`. Card attestation and private-context requests never create one: proposing
+  or viewing a card is not routing consent. Stable rows from the superseded card-derived design
+  decode without that version and are hidden and non-actionable. Settings exposes only a
+  principal-scoped SHA-256 pending id—not the app-scoped handle—under **Chat routing**.
+  The user selects one of their own active account/sheets, and can later reassign or remove the
+  saved route—even if its former sheet was later closed or access was revoked. Pending rows expire
+  after 24 hours, are capped at 32 per principal and 4096 globally, and stale rows are reclaimed.
+  Every authenticated token has its own pending id, so two chats can independently route to two
+  different sheets; a newer launch does not invalidate an older live row.
+- A grant must match the exact app subject and subject version, `app_user_key_version`, app id,
+  manifest revision, app canister, and v1 handle version. IOU rechecks the complete binding,
+  consumer-key trust, and active-sheet access after the await. OpenChat keeps a digest-only
+  successful-redemption receipt for one hour, bound to the exact caller and subject; IOU uses a
+  30-second bounded call, and an ambiguous result can safely retry the exact token. The production
+  component also single-flights React StrictMode/remount claims and keeps the token for **Refresh**
+  after `RemoteError`; it clears the token only after the exact success row reloads and focuses.
 - The first verified v4 draft import can still store the same mapping through the default-on
   **Remember** checkbox.
 
-The raw-free OpenChat **Open setup** surface points only to
-`/settings#openchat-routing`. It carries no chat, user, message, handle, token, or pending id.
+The OpenChat **Open setup** surface carries only a short-lived one-time token in the fragment. It
+never carries a chat, user, message, app-scoped handle, or pending id, and the fragment is scrubbed
+before IOU makes a network call or renders routing state.
+
+[IOU #51](https://github.com/ktimam/IOU/issues/51) records why the entry-point ordering is part of
+the security contract: the former component scrub ran only after asynchronous authentication
+initialization. Its regression failed first **1/1**; synchronous main capture plus dynamic
+bootstrap now passes focused **5/5**. Final IOU gates pass Cargo **68/68**, frontend **846/846
+across 71 files**, typecheck, production Vite build, and routing Playwright **5/5** using the
+installed system Chrome. The initial Playwright invocation found no bundled browser binary; the
+supported `PLAYWRIGHT_EXECUTABLE_PATH` rerun passed with no code failure. The exact candidate
+hash, push, and deployment remain pending.
+
+OpenChat mints a token only for a current authorized chat member and repeats membership checks
+after awaits. Group invitees who have not joined and suspended/lapsed members fail closed.
+Community-channel minting also enforces current community membership and the target channel's
+visibility/membership rule, including exact private-channel membership. In this contract,
+\"verified member\" describes current membership state, not KYC or identity verification.
+
+The reviewed source status is exact as of 2026-08-07. PR 1's final pushed head is
+`f43d2a2d53f2c9f8a3086104a356d4d3a315858a`. OpenChat #92 is fixed and pushed. Five
+focused web/model/on-device files pass **145/145**, typecheck reports **0 errors**, and the exact
+WSL `prod_test` completed in **10m36s**. The emitted Wllama Wasm is byte-identical to its source
+at **7,656,521 bytes**, SHA-256
+`4197ce6d3dc9240c42ee52b4197dc99638875a06b0083901f8a57767338a0cfa`, and the production
+output has **zero unresolved Wllama references**. PR 1 deployment remains pending.
+
+PR 2's exact pushed post-rebase head is
+`16080b0780ed97c3cd63d4187188ac04b19b3769`. It includes the #81–#86 setup-token security
+fixes, #89/#90 clean-gate fixes, and #91's generic desktop bridge. At that pushed head the frontend
+suite passes **958/958**, Svelte typecheck reports **0 errors and 565 warnings**, the agent
+typecheck is green, and #90's root-command source-inspection proof passes **44/44**. Focused
+frontend evidence is #83 **3/3**, #84 **3/3**, the #85 surface resolver file **32/32**, and #86
+**3/3**.
+
+The final exact-blob Linux `prod_test` exited **0**: Rollup completed in **11m46.9s** and the
+wrapper completed in **716s**. The bundle emits and references a **7,656,521-byte** Wllama Wasm
+that is byte-identical to source at SHA-256
+`4197ce6d3dc9240c42ee52b4197dc99638875a06b0083901f8a57767338a0cfa`, with zero
+unresolved Wllama references. The successful retry used the exact Git blob to avoid an
+environment-only CRLF wrapper failure and supplied mandatory `OC_WEBSITE_VERSION=1.0.0`, the
+canonical CI value. Baseline unresolved `porto`/`accounts` notices and the known nonfatal
+public-key CRLF warning remain out of scope. PR 2 deployment remains pending.
+
+The post-rebase backend tree is exact to the previously green backend tree. Its recorded evidence is
+UserIndex **253/253**, token model **11/11**,
+LocalUserIndex **35/35**, Community **15/15**, Group **11/11**, User **19/19**, architecture
+**10/10**, and Candid golden **1/1**. The latest focused token runs are common admission **4/4**,
+GroupIndex exact cancellation **2/2**, Group **3/3**, and Community **3/3**; no aggregate
+GroupIndex total is claimed. Inherited wallet dependency issue #87 is unchanged by PR 1/PR 2 and
+requires a separate maintenance PR.
+
+OpenChat #91 records the generic desktop bridge gap. Its repair is committed in exact pushed PR 2
+head `16080b0780ed97c3cd63d4187188ac04b19b3769` and delegates the exact external URL to
+the operating-system opener. Before the rebase it
+passed focused **2/2**, full plugin **17/17**, and format/diff checks after failing first with Rust
+`E0425`; exact post-rebase tree equivalence preserves that evidence. It changes only
+`Cargo.lock`, `frontend/tauri-plugin-oc/Cargo.toml`, and
+`frontend/tauri-plugin-oc/src/desktop.rs` and contains no Father/profile override. Deployment and
+live acceptance remain release gates.
+
+The local-only Father **Open setup** → **Open in browser** handoff was also proved: it opened a
+distinct Father-profile window, scrubbed the opaque fragment, reached the exact
+`/settings#openchat-routing` route signed in, and left the default browser unchanged. The
+one-off debug profile override is excluded from PR 2. This is neither PR 2 nor deployment evidence
+and does not prove token redemption or sheet assignment.
+
+The checked-in IOU Candid service must include `claim_openchat_chat_route`. Repository-policy
+coverage compares `src/iou_backend.did`, the Rust export, and TypeScript declaration. Deploy the
+token-producing OpenChat backend before the IOU consumer because the successful grant includes the
+non-optional `app_user_key_version`. As of 2026-08-07, both matching preserved-state upgrades,
+IOU #51's exact hash/push/deployment, live redemption/pending-row assignment, and the two-chat/
+two-sheet acceptance remain pending.
 
 ## App surfaces: raw-free external and embedded pages
 
@@ -279,8 +368,9 @@ A **surface** is a page of the IOU app that OpenChat can open on the app's behal
 part of the registered manifest (`AiAppManifest.surfaces`); each one carries:
 
 - `kind` — what the surface is for. Kinds OpenChat does not recognise are ignored.
-- `url` — a credential-free HTTPS URL template. The only supported placeholder is the public
-  `{appId}`. Loopback HTTP is accepted only while OpenChat is explicitly in local test mode.
+- `url` — an HTTPS URL template. Generic public surfaces may use `{appId}`; `chat_link` may also
+  use the one-time `{chatLinkToken}`. Loopback HTTP is accepted only while OpenChat is explicitly
+  in local test mode.
 - `display` — `"sheet"` (embedded in OpenChat as an iframe inside a bottom sheet) or
   `"external"` (opened in the system browser / a new tab).
 
@@ -288,7 +378,7 @@ IOU registers four raw-free surfaces:
 
 ```
 kind: connect   url: <app origin>/settings#openchat-connect   display: external
-kind: chat_link url: <app origin>/settings#openchat-routing   display: external
+kind: chat_link url: <app origin>/settings#openchat-routing/{chatLinkToken} display: external
 kind: home      url: <app origin>/                             display: sheet
 kind: card      url: <app origin>/openchat/card                display: sheet
 ```

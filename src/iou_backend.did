@@ -378,6 +378,23 @@ type DisconnectOpenChatResult = variant {
     RemoteError : text;
 };
 
+type ClaimOpenChatChatRouteSuccess = record {
+    // Caller-scoped digest; the launch token and chat handle never cross this boundary.
+    pending_id : text;
+};
+
+type ClaimOpenChatChatRouteResult = variant {
+    Success : ClaimOpenChatChatRouteSuccess;
+    InvalidToken;
+    NotConfigured;
+    NotLinked;
+    TokenUnavailable;
+    WrongAccount;
+    InvalidBinding;
+    BindingChanged;
+    RemoteError;
+};
+
 type OpenChatCardContext = record {
     sheet_id : text;
     context_version : nat16;
@@ -497,5 +514,6 @@ service : {
     connect_openchat : (text, text) -> (ConnectOpenChatResult);
     get_openchat_binding : () -> (opt OpenChatBinding) query;
     disconnect_openchat : (text, vec nat8, nat64) -> (DisconnectOpenChatResult);
+    claim_openchat_chat_route : (text) -> (ClaimOpenChatChatRouteResult);
     openchat_card_context : (vec nat8, text, vec nat8) -> (OpenChatCardContextResult);
 }

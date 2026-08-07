@@ -3,7 +3,9 @@ import { describe, expect, it, vi } from "vitest";
 import {
   activeRouteSheets,
   buildChatRouteRows,
+  chatRouteClaimMessage,
   ChatRoutingView,
+  decodeChatRouteClaimOutcome,
   routableSheetIdSet,
   type PendingChatRoute,
 } from "./ChatRoutingSettings";
@@ -98,7 +100,7 @@ describe("Chat routing settings", () => {
     expect(onRemove).not.toHaveBeenCalled();
   });
 
-  it("allows only the newest of two anonymous requests to be routed", () => {
+  it("keeps two authenticated token requests independently routable", () => {
     const rows = buildChatRouteRows([
       { pendingId: OLDER_PENDING_ID, lastSeen: 10n, hasCurrentLink: false, currentSheetId: null },
       { pendingId: PENDING_ID, lastSeen: 20n, hasCurrentLink: false, currentSheetId: null },
@@ -119,11 +121,28 @@ describe("Chat routing settings", () => {
         selections={Object.fromEntries(rows.map((row) => [row.internalKey, HOUSE]))}
       />,
     );
-    expect(html).toContain("older anonymous requests cannot be reassigned");
-    expect(html.match(/<select[^>]*disabled=""/g)).toHaveLength(1);
-    expect(html.match(/<button[^>]*disabled=""[^>]*>Link chat<\/button>/g)).toHaveLength(1);
+    expect(html).not.toContain("older anonymous requests cannot be reassigned");
+    expect(html.match(/<select[^>]*disabled=""/g)).toBeNull();
+    expect(html.match(/>Link chat<\/button>/g)).toHaveLength(2);
     expect(html).not.toContain(PENDING_ID);
     expect(html).not.toContain(OLDER_PENDING_ID);
+  });
+
+  it("decodes only an opaque pending id and keeps account-mismatch messages token-free", () => {
+    expect(decodeChatRouteClaimOutcome({
+      Success: { pending_id: PENDING_ID },
+    })).toEqual({ kind: "success", pendingId: PENDING_ID });
+    expect(decodeChatRouteClaimOutcome({
+      Success: { pending_id: "group:raw" },
+    })).toEqual({ kind: "remote-error" });
+    expect(decodeChatRouteClaimOutcome({ WrongAccount: null })).toEqual({
+      kind: "wrong-account",
+    });
+    const message = chatRouteClaimMessage({ kind: "wrong-account" });
+    expect(message).toMatch(/different connected OpenChat account/i);
+    expect(message).toMatch(/has not been used/i);
+    expect(message).not.toContain(PENDING_ID);
+    expect(message).not.toMatch(/group:|channel:|direct:/i);
   });
 
   it("keeps a closed or inaccessible saved destination removable without rendering its id", () => {
@@ -157,7 +176,8 @@ describe("Chat routing settings", () => {
         selections={{}}
       />,
     );
-    expect(waiting).toMatch(/propose an IOU action/i);
+    expect(waiting).toMatch(/chat settings.*AI apps.*Open setup/i);
+    expect(waiting).toMatch(/card does not link a sheet/i);
     expect(waiting).not.toMatch(/connect again|reconnect/i);
   });
 });

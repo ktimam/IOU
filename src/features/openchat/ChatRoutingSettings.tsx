@@ -37,6 +37,61 @@ export type ChatRouteRow = {
   isMostRecent: boolean;
 };
 
+export type ChatRouteClaimOutcome =
+  | { kind: "success"; pendingId: string }
+  | { kind: "invalid-token" }
+  | { kind: "not-configured" }
+  | { kind: "not-linked" }
+  | { kind: "token-unavailable" }
+  | { kind: "wrong-account" }
+  | { kind: "invalid-binding" }
+  | { kind: "binding-changed" }
+  | { kind: "remote-error" };
+
+export function decodeChatRouteClaimOutcome(value: unknown): ChatRouteClaimOutcome {
+  if (!value || typeof value !== "object") return { kind: "remote-error" };
+  const variant = value as Record<string, unknown>;
+  const success = variant.Success;
+  if (success && typeof success === "object") {
+    const pendingId = (success as { pending_id?: unknown }).pending_id;
+    if (typeof pendingId === "string" && /^[0-9a-f]{64}$/.test(pendingId)) {
+      return { kind: "success", pendingId };
+    }
+    return { kind: "remote-error" };
+  }
+  if ("InvalidToken" in variant) return { kind: "invalid-token" };
+  if ("NotConfigured" in variant) return { kind: "not-configured" };
+  if ("NotLinked" in variant) return { kind: "not-linked" };
+  if ("TokenUnavailable" in variant) return { kind: "token-unavailable" };
+  if ("WrongAccount" in variant) return { kind: "wrong-account" };
+  if ("InvalidBinding" in variant) return { kind: "invalid-binding" };
+  if ("BindingChanged" in variant) return { kind: "binding-changed" };
+  return { kind: "remote-error" };
+}
+
+export function chatRouteClaimMessage(outcome: ChatRouteClaimOutcome): string {
+  switch (outcome.kind) {
+    case "success":
+      return "This chat is ready. Choose its account / sheet below.";
+    case "invalid-token":
+      return "This chat setup link is malformed. Open setup again from that chat.";
+    case "token-unavailable":
+      return "This chat setup link expired or was already used. Open setup again from that chat.";
+    case "wrong-account":
+      return "This link belongs to a different connected OpenChat account. Sign out and sign in to its IOU account; the link has not been used.";
+    case "not-linked":
+      return "This IOU account is not connected to OpenChat. Sign in to the matching IOU account or connect it, then retry.";
+    case "not-configured":
+      return "Chat setup is not configured for this IOU deployment.";
+    case "invalid-binding":
+      return "This IOU/OpenChat connection is stale. Reconnect the matching account, then open setup again from that chat.";
+    case "binding-changed":
+      return "The IOU/OpenChat connection changed during setup. Open setup again from that chat.";
+    case "remote-error":
+      return "Chat setup could not be verified. Retry without copying or sharing the setup link.";
+  }
+}
+
 type PairSummary = {
   id: string;
   active_sheet_id?: unknown;
@@ -129,12 +184,15 @@ type ViewProps = {
   rows: ChatRouteRow[];
   selections: Record<string, string>;
   loading?: boolean;
+  claiming?: boolean;
   busyKey?: string | null;
   status?: string | null;
+  focusedPendingId?: string | null;
   onSelect?: (internalKey: string, sheetId: string) => void;
   onSave?: (row: ChatRouteRow) => void;
   onRemove?: (row: ChatRouteRow) => void;
   onRefresh?: () => void;
+  onRouteFocused?: () => void;
 };
 
 /// Presentation-only export keeps the privacy boundary testable: route handles and pending ids may
@@ -145,13 +203,31 @@ export function ChatRoutingView({
   rows,
   selections,
   loading = false,
+  claiming = false,
   busyKey = null,
   status = null,
+  focusedPendingId = null,
   onSelect = () => undefined,
   onSave = () => undefined,
   onRemove = () => undefined,
   onRefresh = () => undefined,
+  onRouteFocused = () => undefined,
 }: ViewProps) {
+  const routeElements = useRef(new Map<string, HTMLDivElement>());
+
+  useEffect(() => {
+    if (!focusedPendingId) return;
+    const row = rows.find((candidate) => candidate.pendingId === focusedPendingId);
+    if (!row) return;
+    if ((selections[row.internalKey] ?? "") === "" && sheets.length === 1) {
+      onSelect(row.internalKey, sheets[0].sheetId);
+    }
+    const element = routeElements.current.get(row.internalKey);
+    element?.scrollIntoView({ block: "center" });
+    element?.querySelector<HTMLSelectElement>("select")?.focus();
+    onRouteFocused();
+  }, [focusedPendingId, onRouteFocused, onSelect, rows, selections, sheets]);
+
   return (
     <section className="card" id="openchat-routing" ref={sectionRef}>
       <div className="row" style={{ justifyContent: "space-between", gap: 12 }}>
@@ -162,7 +238,11 @@ export function ChatRoutingView({
             private: they are never placed in this page&apos;s URL or shown here.
           </p>
         </div>
-        <button className="secondary" disabled={loading || busyKey !== null} onClick={onRefresh}>
+        <button
+          className="secondary"
+          disabled={loading || claiming || busyKey !== null}
+          onClick={onRefresh}
+        >
           Refresh
         </button>
       </div>
@@ -175,36 +255,37 @@ export function ChatRoutingView({
       )}
       {!loading && sheets.length > 0 && rows.length === 0 && (
         <p className="muted">
-          No chat is waiting for setup. In OpenChat, propose an IOU action (or request private
-          context on its card), then return to Chat details → AI apps → Open setup.
+          No chat is waiting for setup. In that OpenChat chat, open its chat settings page, then use
+          AI apps → Open setup. Opening or proposing on a card does not link a sheet.
         </p>
       )}
 
       {rows.map((row) => {
         const selected = selections[row.internalKey] ?? "";
         const busy = busyKey === row.internalKey;
-        const canRoute = row.isMostRecent;
         return (
-          <div className="card" key={row.internalKey} style={{ marginTop: 12 }}>
+          <div
+            className="card"
+            key={row.internalKey}
+            ref={(element) => {
+              if (element) routeElements.current.set(row.internalKey, element);
+              else routeElements.current.delete(row.internalKey);
+            }}
+            style={{ marginTop: 12 }}
+          >
             <h3 style={{ marginTop: 0 }}>{row.label}</h3>
             <p className="muted small">
-              Requested {requestedAt(row.lastSeen)} from an authenticated IOU card.
+              Requested {requestedAt(row.lastSeen)} through authenticated OpenChat context.
               {row.hasCurrentLink
                 ? " It already has a saved destination; you can reassign or remove it."
                 : " Pick its destination."}
             </p>
-            {!canRoute && (
-              <p className="muted small">
-                For safety, older anonymous requests cannot be reassigned here. Return to that
-                chat and retry/open its IOU card so it becomes the most recent request.
-              </p>
-            )}
             <label>
               Account / sheet
               <select
                 aria-label={`${row.label} account or sheet`}
                 value={selected}
-                disabled={busy || sheets.length === 0 || !canRoute}
+                disabled={busy || sheets.length === 0}
                 onChange={(event) => onSelect(row.internalKey, event.target.value)}
               >
                 <option value="">Choose an account / sheet</option>
@@ -216,11 +297,11 @@ export function ChatRoutingView({
               </select>
             </label>
             <div className="row" style={{ marginTop: 10, gap: 8 }}>
-              <button disabled={busy || selected === "" || !canRoute} onClick={() => onSave(row)}>
+              <button disabled={busy || selected === ""} onClick={() => onSave(row)}>
                 {busy ? "Saving…" : row.hasCurrentLink ? "Save destination" : "Link chat"}
               </button>
               <button className="secondary" disabled={busy} onClick={() => onRemove(row)}>
-                {row.hasCurrentLink && canRoute ? "Remove link" : "Dismiss"}
+                {row.hasCurrentLink ? "Remove link" : "Dismiss"}
               </button>
             </div>
           </div>
@@ -231,17 +312,41 @@ export function ChatRoutingView({
   );
 }
 
-export function ChatRoutingSettings({ principal }: { principal: string }) {
-  const { actor } = useActor();
-  const { prefs } = usePreferences();
+type ChatRoutingSettingsProps = {
+  principal: string;
+  launchToken?: string | null;
+  onLaunchTokenFinished?: (token: string) => void;
+};
+
+type ChatRoutingSettingsContentProps = ChatRoutingSettingsProps & {
+  actor: ReturnType<typeof useActor>["actor"];
+  prefs: Preferences;
+};
+
+/** Production routing logic, exported so the browser regression can mount this exact component. */
+export function ChatRoutingSettingsContent({
+  actor,
+  prefs,
+  principal,
+  launchToken = null,
+  onLaunchTokenFinished = () => undefined,
+}: ChatRoutingSettingsContentProps) {
   const sectionRef = useRef<HTMLElement>(null);
   const [sheets, setSheets] = useState<ActiveRouteSheet[]>([]);
   const [pending, setPending] = useState<PendingChatRoute[]>([]);
   const [selections, setSelections] = useState<Record<string, string>>({});
   const [loading, setLoading] = useState(false);
   const [busyKey, setBusyKey] = useState<string | null>(null);
+  const [claiming, setClaiming] = useState(false);
   const [status, setStatus] = useState<string | null>(null);
+  const [focusedPendingId, setFocusedPendingId] = useState<string | null>(null);
   const reloadGeneration = useRef(0);
+  const claimGeneration = useRef(0);
+  const attemptedClaim = useRef<string | null>(null);
+  const inFlightClaim = useRef<{ key: string; promise: Promise<void> } | null>(null);
+  const claimScope = actor && launchToken ? `${principal}\0${launchToken}` : null;
+  const currentClaimScope = useRef<string | null>(claimScope);
+  currentClaimScope.current = claimScope;
 
   const rows = useMemo(() => buildChatRouteRows(pending), [pending]);
 
@@ -255,7 +360,6 @@ export function ChatRoutingSettings({ principal }: { principal: string }) {
       return;
     }
     setLoading(true);
-    setStatus(null);
     try {
       const [pairWire, routableWire, pendingWire] = await Promise.all([
         actor.get_my_pairs(),
@@ -327,10 +431,74 @@ export function ChatRoutingSettings({ principal }: { principal: string }) {
     };
   }, [reload]);
 
+  const claimLaunch = useCallback((force = false): Promise<void> => {
+    if (!actor || !launchToken) return Promise.resolve();
+    const attemptKey = `${principal}\0${launchToken}`;
+    const existing = inFlightClaim.current;
+    if (existing?.key === attemptKey) return existing.promise;
+    if (!force && attemptedClaim.current === attemptKey) return Promise.resolve();
+    attemptedClaim.current = attemptKey;
+    const generation = ++claimGeneration.current;
+    setClaiming(true);
+    setStatus("Verifying this chat setup link...");
+
+    let task!: Promise<void>;
+    task = (async () => {
+      try {
+        const outcome = decodeChatRouteClaimOutcome(
+          await actor.claim_openchat_chat_route(launchToken),
+        );
+        if (
+          generation !== claimGeneration.current ||
+          currentClaimScope.current !== attemptKey
+        ) return;
+        if (outcome.kind === "success") {
+          // Reload and select the exact redeemed row before clearing the parent token. Clearing
+          // first changes this component's props and used to cancel its own continuation.
+          await reload();
+          if (
+            generation !== claimGeneration.current ||
+            currentClaimScope.current !== attemptKey
+          ) return;
+          setFocusedPendingId(outcome.pendingId);
+          setStatus(chatRouteClaimMessage(outcome));
+          onLaunchTokenFinished(launchToken);
+          return;
+        }
+        setStatus(chatRouteClaimMessage(outcome));
+        if (outcome.kind === "invalid-token" || outcome.kind === "token-unavailable") {
+          onLaunchTokenFinished(launchToken);
+        }
+      } catch {
+        if (
+          generation === claimGeneration.current &&
+          currentClaimScope.current === attemptKey
+        ) {
+          // Deliberately generic: agent/reject messages are not rendered because they must never
+          // echo the launch argument into the DOM.
+          setStatus(chatRouteClaimMessage({ kind: "remote-error" }));
+        }
+      }
+    })().finally(() => {
+      if (inFlightClaim.current?.promise === task) {
+        inFlightClaim.current = null;
+        setClaiming(false);
+      }
+    });
+    inFlightClaim.current = { key: attemptKey, promise: task };
+    return task;
+  }, [actor, launchToken, onLaunchTokenFinished, principal, reload]);
+
+  useEffect(() => {
+    void claimLaunch();
+  }, [claimLaunch]);
+
   useEffect(() => {
     if (globalThis.location?.hash !== "#openchat-routing") return;
+    // The child view focuses the exact row returned by token redemption. Do not overwrite that
+    // privacy-critical target with the first (most recent) row after the same reload.
+    if (focusedPendingId) return;
     sectionRef.current?.scrollIntoView({ block: "start" });
-    sectionRef.current?.querySelector<HTMLSelectElement>("select")?.focus();
   }, [rows.length, loading]);
 
   async function save(row: ChatRouteRow) {
@@ -360,7 +528,7 @@ export function ChatRoutingSettings({ principal }: { principal: string }) {
     setBusyKey(row.internalKey);
     setStatus(null);
     try {
-      if (row.hasCurrentLink && row.isMostRecent) {
+      if (row.hasCurrentLink) {
         await actor.remove_pending_chat_route_link(row.pendingId);
         try {
           await fetchChatSheetLinks(actor, principal);
@@ -372,9 +540,9 @@ export function ChatRoutingSettings({ principal }: { principal: string }) {
       }
       await reload();
       setStatus(
-        row.hasCurrentLink && row.isMostRecent
+        row.hasCurrentLink
           ? "Chat link removed."
-          : "Recent chat request dismissed.",
+          : "Chat request dismissed.",
       );
     } catch (error) {
       setStatus(`Could not update chat routing: ${String((error as Error)?.message ?? error)}`);
@@ -390,13 +558,28 @@ export function ChatRoutingSettings({ principal }: { principal: string }) {
       rows={rows}
       selections={selections}
       loading={loading}
+      claiming={claiming}
       busyKey={busyKey}
       status={status}
+      focusedPendingId={focusedPendingId}
       onSelect={(internalKey, sheetId) =>
         setSelections((current) => ({ ...current, [internalKey]: sheetId }))}
       onSave={(row) => void save(row)}
       onRemove={(row) => void remove(row)}
-      onRefresh={() => void reload()}
+      onRefresh={() => {
+        if (launchToken) void claimLaunch(true);
+        else {
+          setStatus(null);
+          void reload();
+        }
+      }}
+      onRouteFocused={() => setFocusedPendingId(null)}
     />
   );
+}
+
+export function ChatRoutingSettings(props: ChatRoutingSettingsProps) {
+  const { actor } = useActor();
+  const { prefs } = usePreferences();
+  return <ChatRoutingSettingsContent {...props} actor={actor} prefs={prefs} />;
 }

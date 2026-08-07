@@ -155,7 +155,9 @@ describe("buildManifestWire", () => {
     expect(surfaces).toHaveLength(4);
     const routing = surfaces.find((s) => s.kind === "chat_link");
     expect(routing).toBeDefined();
-    expect(routing!.url).toMatch(/\/settings#openchat-routing$/);
+    expect(routing!.url).toMatch(
+      /\/settings#openchat-routing\/\{chatLinkToken\}$/,
+    );
     expect(routing!.display).toEqual({ external: null });
     expect(surfaces.every((s) => !/[?&](?:chat|message|user)=/i.test(s.url))).toBe(true);
     const connect = surfaces.find((s) => s.kind === "connect")!;

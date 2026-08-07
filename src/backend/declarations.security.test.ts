@@ -177,6 +177,39 @@ describe("security-sensitive Candid bindings", () => {
     expect(decoded[0][0]).not.toHaveProperty("chat_key");
     expect(decoded[0][0]).not.toHaveProperty("chat_handle");
 
+    const claim = method("claim_openchat_chat_route");
+    const launchToken = "CAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAg";
+    expect(
+      IDL.decode(
+        claim.argTypes,
+        IDL.encode(claim.argTypes, [launchToken]),
+      )[0],
+    ).toBe(launchToken);
+    const claimed = IDL.decode(
+      claim.retTypes,
+      IDL.encode(claim.retTypes, [{ Success: { pending_id: "ef".repeat(32) } }]),
+    )[0] as any;
+    expect(claimed).toEqual({ Success: { pending_id: "ef".repeat(32) } });
+    expect(claimed.Success).not.toHaveProperty("token");
+    expect(claimed.Success).not.toHaveProperty("chat_handle");
+    for (const variant of [
+      "InvalidToken",
+      "NotConfigured",
+      "NotLinked",
+      "TokenUnavailable",
+      "WrongAccount",
+      "InvalidBinding",
+      "BindingChanged",
+      "RemoteError",
+    ]) {
+      expect(
+        IDL.decode(
+          claim.retTypes,
+          IDL.encode(claim.retTypes, [{ [variant]: null }]),
+        )[0],
+      ).toEqual({ [variant]: null });
+    }
+
     const routable = method("chat_routable_sheet_ids");
     expect(
       Array.from(

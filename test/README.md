@@ -22,8 +22,10 @@ Layers 1–2 live in **this** repo and are green here. Layers 3–4 live in thei
 > The counts below are a dated snapshot, not a substitute for the current release run. In
 > particular, the old `openchat.ui.spec.ts` chat-link/unlink claim became stale when the raw
 > `/openchat/link-chat?chat=...` route was retired. Current routing coverage lives in
-> `openchatChatRouting.ui.spec.ts`: the raw-free settings surface, first-use pending-row UI,
-> saved-route assignment/reassignment/removal, caller isolation, and URL/visible-DOM privacy.
+> `openchatChatRouting.ui.spec.ts`: the one-time setup-token surface, immediate fragment scrub,
+> token-claimed pending-row UI, saved-route assignment/reassignment/removal, caller isolation,
+> StrictMode/ambiguous retry, and URL/visible-DOM privacy. Legacy card-derived pending rows are
+> intentionally hidden and non-actionable.
 
 | Layer | Result |
 |---|---|
@@ -33,6 +35,14 @@ Layers 1–2 live in **this** repo and are green here. Layers 3–4 live in thei
 | 3a — TS facade (open-chat) | **25 pass / 2 files** (vitest, jsdom); + **38 pass** `aiAction.test.ts` (open-chat-cycle, incl. fan-out card fields) |
 | 3b — tauri-plugin-oc (Rust) | **7 hermetic pass** on the default build; real-model smoke gated |
 | 4 — OpenChat canisters | **20 pass** — compile-clean on Windows + run green under WSL pocket-ic (~95s); incl. **fan-out delivery** (`fan_out_delivery_tests.rs`: partner-confirm deposits to BOTH members' buckets with cross-key isolation; repeated-key dedupe; `ai_app_user_keys` lookup scoping) |
+
+### Current setup-token verification — 2026-08-07
+
+The current IOU combined head passes `cargo test --lib` **68/68**, full `pnpm test`
+**844/844**, TypeScript typecheck, production build, and
+`test/ui/openchatChatRouting.ui.spec.ts` **5/5**. Final OpenChat totals and the preserved-state
+token-backend deployment/live acceptance are still pending; do not combine them with the historical
+Layer 4 count above.
 
 ---
 
@@ -154,7 +164,7 @@ via in-app clicks).
 
 | Test | Proves (real clicks against the live app) |
 |---|---|
-| `openchatChatRouting.ui.spec.ts` | The restored raw-free routing journey: `/settings#openchat-routing` is discoverable; a first-use pending chat can select an active account/sheet and be dismissed; a saved route can be reassigned and removed through real clicks; a second principal cannot read the first principal's route; pending ids, app-scoped handles, and raw chat coordinates never enter the visible DOM or navigation URL. The saved-route/isolation half uses the live caller-keyed canister map; the pending-row UI uses a browser fixture because only a valid OpenChat card capability may create a real pending row. Rust production-path tests separately prove exact vouched attestation creates the row, a later request invalidates the older id inside the backend, stale manifest coordinates fail closed, and global/per-principal bounds hold. The combined live OpenChat card → pending row → Settings save → card retry is still a required local release gate, not claimed by the fixture. |
+| `openchatChatRouting.ui.spec.ts` | The per-chat routing journey: exact `/settings#openchat-routing/{chatLinkToken}` fragments are scrubbed (including malformed values) and focus only their returned pending row; two pending ids can be routed independently to two different sheets, reassigned, unlinked, and dismissed; a second principal cannot read the first principal's routes; tokens, pending ids, app-scoped handles, and raw chat coordinates never enter visible DOM or retained navigation. It mounts the production component under React StrictMode to prove one in-flight claim and proves an ambiguous `RemoteError` retains the exact token for **Refresh**, yielding one row and one completion. The saved-route/isolation half uses the live caller-keyed canister map; token redemption/pending rows use a browser fixture because only the pinned OpenChat UserIndex may mint/redeem real tokens. Rust tests separately prove canonical decoding, exact subject/subject-version/`app_user_key_version`/app/revision/handle validation, key trust, caller isolation, token-only `claim_version = 1` rows, legacy-row rejection, TTL, and caps. Repository policy checks the checked-in DID/Rust/TypeScript claim-method parity. The combined live OpenChat token → IOU C2C redemption → Settings save → card retry remains a deployment release gate. |
 | `multiUser.ui.spec.ts` | 3 users sign in; **3 pairs/sheets** created + partner joins via **invite LINK → Accept (no grant step)** (Alice↔Bob, Alice↔Carol, Bob↔Carol; each user in 2); entries added through the real `EntryForm` (settlement + IOU, multiple currencies); the creator's balance reflects them; **cross-user shared view** — the accepted partner opens the SAME sheet and decrypts the same net, and sees the **per-viewer mirror** (Alice "…owes you", Bob "you owe…" — fix #2); a fresh **deep-link/refresh** of a guarded page renders instead of bouncing (fix #1). |
 | `membership.ui.spec.ts` | The v1.10.0 membership lifecycle end-to-end (2 users): the creator hits **🔗 Invite** on the sheet, the invitee opens the LINK and clicks **Accept** → lands on the SAME shared sheet **immediately, no grant**; both read/write (invitee writes, creator decrypts); **Archive** moves the account to the "📦 Archived" section, **Unarchive** brings it back; the partner **Leaves** → is locked out while the creator keeps the account solo; the creator **Archives** then **Deletes forever** (typed `DELETE` confirm) the solo account → it's gone |
 | `openchat.ui.spec.ts` | The IOU-app side of the OpenChat confirmable-action feature: the **action-inbox settings card** (per-user consumer key + distinct fingerprints, auto-derived inbox `<id> @ <host>`, connect-code validation incl. a live-`user_index` `CodeNotFound`); the **✨ Import** chat-draft flow (paste JSON → parseDraft → EntryForm → written); and signed-in connect-surface focus. Chat routing is covered separately by `openchatChatRouting.ui.spec.ts`. SAFE-BY-DESIGN: never clicks "Link to OpenChat" (that upsert would clobber the shared live "iou" registration — the full loop is the api-e2e + Rust integration tests). |

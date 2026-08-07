@@ -11,8 +11,9 @@ The review found critical key-lifecycle defects, authorization and storage-exhau
 risks, browser-session data separation defects, relay and mobile trust-boundary issues,
 and test gates that could report false success. Every directly remediable IOU source
 finding listed below has a fix and failing-first plus adjacent regression coverage. The
-reviewed IOU changes are committed and pushed on `main`; cross-process consumer-key
-mutation ordering is guarded by a canister-owned stable epoch/tombstone (#39). Issues
+reviewed IOU changes through #49 are committed and pushed on `main`; #50 and #51 remain
+source candidates pending their exact commit and push. Cross-process consumer-key mutation
+ordering is guarded by a canister-owned stable epoch/tombstone (#39). Issues
 remain open where hosted CI, production rollout, upgrade/recovery drills, or cross-project
 acceptance evidence is still required.
 
@@ -22,19 +23,30 @@ OpenChat must be upstreamed as exactly two independent, generic pull requests:
 2. generic in-chat cards and the interface between chats and external applications.
 
 PR 1 is the clean generic draft [upstream PR #9132](https://github.com/open-chat-labs/open-chat/pull/9132)
-at `f7825b347b5f8449053778450b934110e0ee3537`; it has passed its isolated local security
-gates, including the content-addressed bounded replacement for the path-only native model
-cache (#71). PR 2 is the clean generic stacked draft [fork PR #73](https://github.com/ktimam/open-chat/pull/73)
-at `68aadfd35d93b3bbb25d352edb81c83790160c0c`, based on that exact PR 1 head. Its
-dependency-compatible source checkpoint is
-`790bb76d00240ca5a8a4c124db4535dd7795f96b`. The lifecycle findings #51, #72, #74,
-#75, and #76 are resolved and closed. The three index canisters remain on their tested
-`7c997f4b1ef10f8217d526e82f8016b7e05d0486` artifacts, while Group and Community child
-Wasm version `0.0.2` was built from `8ae34cf38` and published through GroupIndex. This is an
-intentional source/artifact split: the later checkpoint commits for #78 and #79 are frontend-only,
-and neither the indexes nor the child Wasms were rebuilt from `790bb76d0`.
+at final pushed head `f43d2a2d53f2c9f8a3086104a356d4d3a315858a`.
+[OpenChat #92](https://github.com/ktimam/open-chat/issues/92) is fixed and pushed. Five focused
+web/model/on-device files pass **145/145**, typecheck reports **0 errors**, and exact WSL
+`prod_test` completed in **10m36s**. Its emitted **7,656,521-byte** Wllama Wasm is byte-identical
+to source at SHA-256
+`4197ce6d3dc9240c42ee52b4197dc99638875a06b0083901f8a57767338a0cfa`, with zero
+unresolved Wllama references. PR 1 deployment remains pending.
 
-The local backend paths approved for PR 2 are enabled only when the persisted child-canister
+PR 2 remains the single generic stacked draft
+[fork PR #73](https://github.com/ktimam/open-chat/pull/73), based on the final PR 1 head. Its final
+post-rebase pushed head is `16080b0780ed97c3cd63d4187188ac04b19b3769`. Its final
+exact-blob Linux `prod_test` exited **0**: Rollup completed in **11m46.9s** and the wrapper in
+**716s**. The bundle emits and references a byte-identical **7,656,521-byte** Wllama Wasm at
+SHA-256 `4197ce6d3dc9240c42ee52b4197dc99638875a06b0083901f8a57767338a0cfa`,
+with zero unresolved Wllama references. The successful retry used the exact Git blob after an
+environment-only CRLF wrapper failure and supplied mandatory `OC_WEBSITE_VERSION=1.0.0`, the
+canonical CI value. Baseline unresolved `porto`/`accounts` notices and the known nonfatal
+public-key CRLF warning remain out of scope. PR 2 deployment remains pending. Older PR 2 hashes and
+deployed-Wasm provenance later in this dated report are
+historical evidence only; they do not include the current setup-token backend.
+
+The following local deployment paragraph describes the earlier private-card checkpoint, not the
+2026-08-07 setup-token backend. Those backend paths approved for PR 2 are enabled only when the
+persisted child-canister
 `test_mode` flag is true (#77); production and non-test children fail closed. All four frontend
 development switches are enabled. Generic issue #78's bounded bootstrap retry and #79's
 structured-clone-safe private-context handoff are committed and pushed in both PR 2 source lines.
@@ -67,12 +79,12 @@ canister WASM, or documentation.
 This is a source and local-verification review, not a proof that no other vulnerability
 exists.
 
-## Routing and link-consent correction — 2026-08-06 (latest)
+## Per-chat token routing and local-profile correction — 2026-08-07 (current)
 
-This correction supersedes the older first-use routing, QC, and PR 2 head statements
-elsewhere in this dated report. The latest clean PR 2 head is `dda2833d6`; references to
-`68aadfd35` remain useful only as the earlier #79 verification checkpoint. PR 1/local-model
-scope is unchanged.
+This correction supersedes every older first-use routing, QC, PR 2 head, token-test-count,
+and token-deployment statement elsewhere in this dated report. PR 1/local-model scope is
+unchanged. PR 2 is still exactly the generic cards/external-app/chat-interface PR; the
+current setup-token changes are not a third PR and contain no IOU-specific runtime behavior.
 
 [IOU #50](https://github.com/ktimam/IOU/issues/50) records a regression introduced when
 `/openchat/link-chat?chat=...` was removed to close a raw chat-coordinate URL leak: the raw
@@ -84,43 +96,150 @@ so it never tested an unmapped chat opened through OpenChat. That was the QC gap
 coverage claim was too broad.
 
 The failing-first IOU regression was concrete: `actionManifest.test.ts` ran **22 tests with
-1 failure** because the `chat_link` surface was absent. The IOU remediation restores only a
-raw-free `chat_link` URL, `/settings#openchat-routing`. IOU learns a pending route exclusively
-from an authenticated OpenChat card-attestation/private-context call, exposes a
-principal-scoped opaque digest rather than a chat handle, and permits assignment only to an
-active sheet the caller can explicitly read. Pending rows have a 24-hour lifetime and a
-per-principal and global caps, are cleared on disconnect/rebinding or trust-configuration changes,
-and are revalidated against the exact current manifest coordinates and consumer key before
-assignment. The canister—not only the page—permits assignment/unlink of the deterministically newest
-live request, closing the arrival-after-page-load race. A saved link remains removable when its
-old sheet is closed or no longer readable. Raw chat/user/message coordinates, the
-app-scoped handle, and the pending id do not enter the navigation URL or visible UI. The newest
-authenticated request is the only actionable row; older ambiguous requests are dismiss-only.
+1 failure** because the `chat_link` surface was absent. The first static raw-free remediation was
+still insufficient because every chat opened the same default-browser page. The revised generic
+surface is `/settings#openchat-routing/{chatLinkToken}`. Each invocation from the individual
+chat's settings page creates a different canonical 43-character unpadded base64url encoding of a
+one-time 32-byte token.
+
+[IOU #51](https://github.com/ktimam/IOU/issues/51) found that the component-level scrub still ran
+after asynchronous authentication initialization, leaving the bearer in browser history longer
+than the security contract allowed. Its failing-first regression was **1/1 red**. The fix moves
+capture and scrub into the synchronous main entry point, then dynamically bootstraps the
+authentication/application modules; the exact token remains only in the current page instance's
+module memory. The focused correction passes **5/5**, and IOU typecheck plus production build are
+green. The final source gate now also passes Cargo **68/68**, frontend **846/846 across 71 files**,
+and routing Playwright **5/5** using the installed system Chrome. The first Playwright invocation
+failed only because its bundled browser binary was absent; the supported
+`PLAYWRIGHT_EXECUTABLE_PATH` rerun passed with no code failure. The exact candidate hash,
+push, and deployment remain pending.
+
+The signed-in IOU backend redeems that token through its pinned UserIndex with the caller's exact
+app subject. A successful grant must match the subject and subject version, the exact
+`app_user_key_version` stored in the IOU binding, app id, manifest revision, app canister,
+and v1 chat-handle version. IOU rechecks its pin, complete binding, key trust, and sheet access
+after the cross-canister await. OpenChat retains only a digest-bound successful-redemption receipt
+for one hour, scoped to the exact caller and subject, so an ambiguous response can be retried with
+the same token without minting a second route. IOU uses a 30-second bounded wait for that call.
+
+Only a successful setup-token redemption writes a pending row with `claim_version = 1`.
+Historical rows created by card attestation/private-context activity decode with no claim version
+and are deliberately hidden by `pending_chat_routes` and rejected by assignment, unlink, and
+dismiss operations. Merely viewing or proposing a card is not consent to route a private sheet.
+Every authenticated token has an independent caller-scoped opaque pending id, so different chats
+can route to different active sheets without a newest-only race. Rows expire after 24 hours, are
+bounded per principal and globally, are cleared by disconnect/rebinding or trust changes, and never
+expose the app-scoped chat handle.
+
+The production routing component coalesces React StrictMode/remount duplication into one in-flight
+claim. A wrong-account result does not consume the token, and an ambiguous `RemoteError` leaves
+the exact in-memory token available to **Refresh**. A successful retry reloads and focuses the exact
+returned row before clearing the token. Unmount cleanup does not cancel or burn it. The checked-in
+`src/iou_backend.did` now publishes `claim_openchat_chat_route`, and the repository-policy
+regression compares that service surface with the Rust export and TypeScript declaration so a
+shadow/stale DID cannot silently omit the method again.
+
+OpenChat issues #81 through #86 record the authorization, lifecycle, diagnostic, pre-consent,
+async-snapshot, and navigation-binding defects found in the setup-token revision. The exact pushed
+PR 2 commit closes each source defect. Group minting requires a current joined member and
+repeats that check after awaits.
+Community-channel minting requires a current community member plus the target channel's visibility/
+membership authorization, including exact private-channel membership; invited-but-not-joined,
+suspended, and lapsed users fail closed even if they know the group or channel id. Here
+\"verified member\" means present and not suspended/lapsed, not KYC or identity verification.
+Admission limits run before consuming the one-time GroupIndex authority and again before insertion.
+If a child or LocalUserIndex post-await revalidation fails after issuance, an exact issuer/user/
+chat/app/revision/token cancellation is attempted; cleanup failure never exposes the bearer, which
+still expires under its existing ten-minute TTL. The affected Group, Community, User,
+LocalUserIndex, UserIndex token-model, architecture, and Candid-golden backend gates plus focused
+format/check are green. Exact recorded backend results are UserIndex **253/253** plus token model
+**11/11**, LocalUserIndex **35/35**, Community **15/15**, Group **11/11**, User **19/19**,
+architecture **10/10**, and Candid golden **1/1**. The latest narrower admission/cancellation
+rerun is common admission **4/4**, GroupIndex cancellation **2/2**, Group **3/3**, and Community
+**3/3**; no aggregate GroupIndex count is claimed. The exact head is pushed; deployment remains
+pending. Its final exact-blob Linux `prod_test` exited **0** (Rollup **11m46.9s**, wrapper
+**716s**) and emitted and referenced the byte-identical **7,656,521-byte** Wllama Wasm at SHA-256
+`4197ce6d3dc9240c42ee52b4197dc99638875a06b0083901f8a57767338a0cfa`, with zero
+unresolved Wllama references. The environment-only retry used the exact Git blob plus canonical CI
+`OC_WEBSITE_VERSION=1.0.0`; baseline `porto`/`accounts` notices and the known nonfatal
+public-key CRLF warning remain out of scope.
+
+The local-only preserved Windows Father handoff was proved without claiming token redemption. The
+actual current-chat settings chain **Open setup** → **Open in browser** opened a distinct
+Father-profile window, scrubbed the opaque fragment, reached the exact
+`/settings#openchat-routing` route signed in, and left the default browser unchanged. The
+temporary profile override remains debug-only and excluded from PR 2. This is neither PR 2 nor
+deployment evidence and does **not** prove backend redemption or sheet assignment.
+
+[OpenChat #91](https://github.com/ktimam/open-chat/issues/91) records the separate generic desktop
+bridge gap, which is fixed and committed in exact pushed PR 2 head
+`16080b0780ed97c3cd63d4187188ac04b19b3769`: desktop
+`open_url` now delegates the exact URL to the operating-system opener instead of being
+unimplemented. Its failing compile evidence was Rust `E0425`; before the rebase the focused bridge
+tests passed **2/2**, the full plugin suite passed **17/17**, and formatting/diff checks passed.
+Exact post-rebase tree equivalence preserves that evidence. The change touches only `Cargo.lock`,
+`frontend/tauri-plugin-oc/Cargo.toml`, and `frontend/tauri-plugin-oc/src/desktop.rs`, and
+contains no Father/profile override. Deployment and live acceptance remain pending.
 
 [OpenChat #80](https://github.com/ktimam/open-chat/issues/80) is the separate generic PR 2
 consent-lifecycle defect. Closing or backing out of the link-consent sheet called the installed-
 key removal path, so a normal dismissal disconnected an already connected external app and the
 next proposal asked the user to connect again. Its failing-first frontend regression was **3/3
-failed**: no exact pending-token cancellation was sent and the installed key was removed. At
-clean PR 2 head `dda2833d6`, UserIndex exposes caller-bound, exact-token, idempotent cancellation
-for an unclaimed link code; the desktop/mobile consent UI best-effort cancels only that returned
-token and always dismisses, while explicit **Disconnect** remains the sole installed-key removal
-action. This is reusable external-app/card interface code. It does not change inherited OpenChat
-features, contain IOU-specific behavior, or belong to the local-model PR.
+failed**: no exact pending-token cancellation was sent and the installed key was removed. The
+generic PR 2 candidate exposes caller-bound, exact-token, idempotent cancellation for an unclaimed
+link code; the desktop/mobile consent UI best-effort cancels only that returned token and always
+dismisses, while explicit **Disconnect** remains the sole installed-key removal action. This is
+reusable external-app/card interface code. It does not change inherited OpenChat features, contain
+IOU-specific behavior, or belong to the local-model PR.
 
-Current source verification after the remediation is green: IOU Rust **63/63**, full frontend
-**837/837**, TypeScript typecheck, production build, and the focused raw-free browser journey **1/1**;
-OpenChat endpoint **4/4**, model **12/12**, API contract **6/6**, consent/security frontend
-**14/14**, and shared-worker **1/1**. The preserved-state local canister upgrade/live first-use
-journey is the remaining release gate; these source results must not be described as a completed
-deployment.
+Final IOU source verification after #51 is green: Cargo **68/68**, full frontend **846/846 across
+71 files**, TypeScript typecheck, production Vite build, and the full routing Playwright file
+**5/5** using the installed system Chrome. The first Playwright invocation failed only because the
+bundled browser binary was absent; rerunning through the supported `PLAYWRIGHT_EXECUTABLE_PATH`
+passed **5/5**, so no code failure is attributed to that environment miss. The browser file includes
+the production StrictMode single-flight, ambiguous-result exact-token retry, two independent routes,
+exact scrub/focus, and live caller-isolation cases. #51's narrower regression is **5/5**. The exact
+IOU candidate hash, push, and deployment remain pending.
 
-## Final readiness and preserved local deployment update — 2026-08-06
+At exact pushed post-rebase PR 2 head
+`16080b0780ed97c3cd63d4187188ac04b19b3769`, the full frontend suite passes **958/958**,
+Svelte typecheck reports **0 errors and 565 warnings**, and the agent typecheck is green. This
+includes #90's root-command source-inspection correction (targeted proof **44/44**) and #89's
+removal of stale flattened-package imports. #83's sensitive-transport regression passes **3/3**,
+#84's mounted redaction/sink regression **3/3**, #85's full surface resolver file **32/32**, and
+#86's canonical pending-chat state regression **3/3**. The post-rebase backend tree is exact to the
+previously green backend tree and therefore retains the recorded backend evidence above. The final
+exact-blob Linux `prod_test` exited **0**: Rollup completed in **11m46.9s**, the wrapper in
+**716s**, and the bundle emitted and referenced a source-identical **7,656,521-byte** Wllama Wasm
+at SHA-256 `4197ce6d3dc9240c42ee52b4197dc99638875a06b0083901f8a57767338a0cfa`
+with zero unresolved Wllama references. The environment-only retry used the exact Git blob and
+canonical CI `OC_WEBSITE_VERSION=1.0.0`; inherited unresolved `porto`/`accounts` notices and
+the known nonfatal public-key CRLF warning remain out of scope. PR 2 deployment remains pending.
 
-This section is the current handoff and supersedes every older statement later in this
-report about PR 2 lifecycle blockers, disabled local switches, deployment readiness,
-snapshot-test failures, commit ids, and test counts. The security boundary remains exactly
-two generic OpenChat pull requests:
+PR 1 final pushed head `f43d2a2d53f2c9f8a3086104a356d4d3a315858a` fixes #92. Five
+focused web/model/on-device files pass **145/145**, typecheck reports **0 errors**, and exact WSL
+`prod_test` completed in **10m36s** with a byte-identical **7,656,521-byte** Wllama Wasm at
+SHA-256 `4197ce6d3dc9240c42ee52b4197dc99638875a06b0083901f8a57767338a0cfa`
+and zero unresolved Wllama references. PR 1 deployment remains pending.
+
+Issue #87 remains an inherited, separate maintenance baseline rather than either feature PR's
+debt: a clean production install reports one high and one moderate advisory, with
+`@coinbase/cdp-sdk@1.52.0` pinning vulnerable `axios@1.16.0`, while
+`@base-org/account@2.4.0` is invalid against `@wagmi/connectors@8.0.22`'s `^2.5.1` request. No
+dependency override or wallet behavior change belongs in PR 1 or PR 2; remediation and wallet
+reachability tests require a separate upstream-maintenance PR.
+
+The token-enabled OpenChat producer and matching IOU consumer backend have not yet been deployed
+to the preserved replica. The older local private-Type/card smoke and the Father handoff proof are
+useful evidence, but neither proves setup-token redemption, sheet assignment, or the complete
+two-chat/two-sheet journey.
+
+## Historical readiness and preserved local deployment snapshot — 2026-08-06
+
+This section records the state before the 2026-08-07 setup-token revision. The current section
+above supersedes its PR 2 head, routing, test-count, and deployment-readiness statements. Its
+preserved-state, lifecycle, private-card, and historical artifact evidence remains valid. The
+security boundary was and remains exactly two generic OpenChat pull requests:
 
 1. **PR 1 — local models:** optional on-device inference and reusable local-model
    management only. The upstream draft is
@@ -844,6 +963,12 @@ browser profiles, and replica/canister state were preserved. This was an interme
 target cleanup, not a final cleanup claim: the reusable checkpoint target was subsequently used
 for exact Wasm builds, deployment, and PocketIC compilation.
 
+After later validation recreated output in that submission worktree, a new bounded cleanup removed
+only `C:\tmp\openchat-pr2-submit\target\debug`, measured at exactly
+**17,297,571,964 bytes**. The exact directory was removed rather than a broader target path; free
+space after deletion was exactly **42,176,458,752 bytes**. This is another rebuildable-debug-output
+cleanup record, not a final-candidate or broader-worktree cleanup claim.
+
 After the later child-Wasm work completed, the exact rebuildable directory
 `C:\tmp\openchat-checkpoint-entropy-target\debug` had grown to approximately **57.04 GiB**.
 It was resolved and removed without touching the measured ~**0.71 GiB** release output, source,
@@ -851,6 +976,14 @@ untracked PR work, `.dfx` replica state, or browser profiles. Free space rose to
 **57.46 GiB** before subsequent release builds consumed part of it (approximately **50 GiB** free
 afterward). No broader target or replica cleanup was performed; the debug output is reproducible
 and was not moved to the recycle bin.
+
+The most recent focused cleanup removed only the two exact incremental compiler-cache
+directories `C:\Kiko\MyProjects\IOU\target\debug\incremental` (**0.67 GiB**) and
+`C:\Kiko\MyProjects\Blockchain\ICP\open-chat-cycle\target\debug\incremental`
+(**3.52 GiB**). Both paths were confirmed absent afterward, and free space rose from
+**10.41 GiB** to **14.03 GiB**. Cargo can regenerate them. Executables, release/Wasm output,
+dependencies, source and untracked PR material, `.dfx` state, the replica, and all four
+browser profiles were preserved.
 
 The IOU and OpenChat Vite processes run on ports 3000 and 5003, and the
 preserved local replica remains healthy on port 8080. Browser profiles, local storage,
@@ -1202,12 +1335,23 @@ now hold the corresponding issues; labels `pr-1-local-models`, `pr-2-app-cards`,
 separate scope from status. Issue #3 is the non-secret inventory. A local path being
 listed in #3 does not authorize adding it to either PR.
 
+The Windows debug external-browser **profile-selection override** is one such local item: record
+its local launch settings in #3 with disposition **debug-only / excluded from PR 2**. Do not record
+the contents of browser profiles. Do not conflate that override with #91's generic desktop
+`open_url` repair, which delegates to the operating-system handler, contains no profile
+selection, and is committed in exact pushed PR 2 head
+`16080b0780ed97c3cd63d4187188ac04b19b3769`.
+If a generally useful
+profile-selection feature is ever proposed, give it its own issue and security review; it does not
+become a third PR or part of the current card/model submissions merely because the fixture needs it.
+
 Keep #3 as the safe inventory rather than committing helpers just to remember them. Its next
-checkpoint should record the clean PR 2 head `68aadfd35`, checkpoint `790bb76d0`, pushed generic
-#77/#78/#79 paths, index-Wasm provenance `7c997f4b1`, child-Wasm provenance `8ae34cf38`, and the
-existing entropy (#51), outbox (#49/#69), and scoped-identity (#58)
-categories. Do not include keys, selectors, canister credentials, browser state, or private fixture
-contents in the issue.
+checkpoint should distinguish the historical pushed/checkpoint/Wasm provenance from the current
+exact pushed setup-token head `16080b0780ed97c3cd63d4187188ac04b19b3769`, including the
+committed #91 bridge and its passed exact-blob Linux production gate. Keep the entropy (#51),
+outbox (#49/#69), scoped-identity (#58), and debug
+browser-override categories separate. Do not include keys, selectors, canister credentials,
+browser state, or private fixture contents in the issue.
 
 ## GitHub issue index
 
@@ -1265,6 +1409,7 @@ have their implementation and validation evidence recorded in the linked issue.
 | [#48](https://github.com/ktimam/IOU/issues/48) | Closed; actor dependency fix, policy 12/12, and fresh-reload polling passed | Sheet poll captures an undefined actor after reload |
 | [#49](https://github.com/ktimam/IOU/issues/49) | Closed; key/binding invariant, legacy fail-closed migration, 53/53 Rust, 830/830 frontend, in-place backend upgrade, four relinks, and post-upgrade card context passed | OpenChat binding can drift from the authoritative consumer key |
 | [#50](https://github.com/ktimam/IOU/issues/50) | Open; failing-first regression and source fix pass, preserved-state deployment/live first-use proof pending | Raw-route hardening removed the discoverable chat-to-sheet setup journey |
+| [#51](https://github.com/ktimam/IOU/issues/51) | Open; synchronous main capture/dynamic-bootstrap fix passes focused **5/5**, Cargo **68/68**, frontend **846/846** (71 files), typecheck/build, and routing Playwright **5/5**; exact hash/push/deploy pending | Routing bearer scrub ran after asynchronous authentication initialization |
 
 Earlier #1–#7 are closed historical issues; current work did not reopen them.
 
@@ -1351,8 +1496,46 @@ Earlier #1–#7 are closed historical issues; current work did not reopen them.
 | [#78](https://github.com/ktimam/open-chat/issues/78) | Closed; generic retry fix/tests pushed in clean `f93bffe0a` and checkpoint `4eed022b8`; delayed-listener and live flows passed | One-shot card bootstrap races external-app listener startup |
 | [#79](https://github.com/ktimam/open-chat/issues/79) | Closed; clone-safe bridge fix/tests pushed in clean `68aadfd35` and checkpoint `790bb76d0`; capability-bearing live flow passed | Svelte capability proxy crashes private-context `postMessage` |
 | [#80](https://github.com/ktimam/open-chat/issues/80) | Open; generic exact-token cancellation fix/tests pushed at `dda2833d6`, live proof pending | Closing link consent removes an installed app key and forces repeated Connect |
+| [#81](https://github.com/ktimam/open-chat/issues/81) | Open; authorization fix and focused Group **3/3** plus Community **3/3** are green in exact pushed PR 2 head `16080b078`; deployment pending | Setup-token mint bypasses private-channel and verified-member authorization |
+| [#82](https://github.com/ktimam/open-chat/issues/82) | Open; early admission, bounded reservation, and exact cancellation are green in exact pushed PR 2 head `16080b078`; deployment pending | Rejected mint calls amplify work and post-await failures orphan tokens |
+| [#83](https://github.com/ktimam/open-chat/issues/83) | Open; sensitive-transport redaction is green (**3/3**, included in final frontend **958/958**) at exact pushed PR 2 head `16080b078`; deployment pending | Chat-link bearer leaks through frontend transport diagnostics |
+| [#84](https://github.com/ktimam/open-chat/issues/84) | Open; pre-consent redaction and actual-URL sink separation are green (**3/3**) at exact pushed PR 2 head `16080b078`; live backend redemption/deployment pending | Consent UI renders the live bearer before handoff |
+| [#85](https://github.com/ktimam/open-chat/issues/85) | Open; immutable validated surface snapshot is green in the full resolver file (**32/32**) at exact pushed PR 2 head `16080b078`; deployment pending | Async manifest mutation can redirect a minted bearer |
+| [#86](https://github.com/ktimam/open-chat/issues/86) | Open; initiating app/canonical-chat binding is green (**3/3**) at exact pushed PR 2 head `16080b078`; deployment pending | Pair-first setup can mint for the wrong chat after navigation |
+| [#87](https://github.com/ktimam/open-chat/issues/87) | Open; inherited dependency baseline, unchanged by PR 1/PR 2, requires a separate maintenance PR and clean-install reachability gates | Wallet dependency pins vulnerable Axios and an invalid Base account version |
+| [#88](https://github.com/ktimam/open-chat/issues/88) | Open; alias fix remains in final pushed PR 1 head `f43d2a2d5`; five focused web/model/on-device files pass **145/145** and typecheck reports **0 errors** | Clean agent typecheck depends on a removed package artifact |
+| [#89](https://github.com/ktimam/open-chat/issues/89) | Open; 19 source aliases fixed at exact pushed PR 2 head `16080b078`; frontend **958/958**, Svelte **0 errors/565 warnings**, agent typecheck green, and Linux production gate exit **0**; deployment pending | Clean frontend gates resolve card code through removed package artifacts |
+| [#90](https://github.com/ktimam/open-chat/issues/90) | Open; six suites use source-relative paths at exact pushed PR 2 head `16080b078`; root-command proof **44/44**, included in **958/958**, and Linux production gate exit **0**; deployment pending | Source-inspection tests fail under the documented root command |
+| [#91](https://github.com/ktimam/open-chat/issues/91) | Open; generic desktop `open_url` fix is committed in exact pushed PR 2 head `16080b078`; pre-rebase plugin **17/17** remains applicable by exact tree equivalence and Linux production gate exits **0**; deployment pending | Desktop external-app bridge is unimplemented |
+| [#92](https://github.com/ktimam/open-chat/issues/92) | Open; fixed and pushed in final PR 1 head `f43d2a2d5`; exact WSL `prod_test` passed in **10m36s** with byte-identical **7,656,521-byte** Wasm SHA-256 `4197ce6d…a0cfa` and zero unresolved Wllama references; deployment pending | Production build cannot resolve Wllama `?url` asset import |
 
 ## Release recommendation
+
+The 2026-08-07 setup-token revision is not represented by the older preserved deployment below.
+PR 2's exact pushed post-rebase head is
+`16080b0780ed97c3cd63d4187188ac04b19b3769` and includes #91's committed generic desktop
+bridge. Its exact-blob Linux `prod_test` exits **0** (Rollup **11m46.9s**, wrapper **716s**);
+the emitted **7,656,521-byte** Wasm is byte-identical, referenced, and SHA-256
+`4197ce6d3dc9240c42ee52b4197dc99638875a06b0083901f8a57767338a0cfa`, with zero
+unresolved Wllama references. The exact-Git-blob plus canonical
+`OC_WEBSITE_VERSION=1.0.0` retry addresses only the CRLF/environment wrapper; baseline
+`porto`/`accounts` notices and the nonfatal public-key CRLF warning remain out of scope. Next,
+upgrade the OpenChat token producer before the IOU consumer, upgrade IOU without resetting state,
+and run live redemption through pending-row assignment plus the Father two-chat/two-sheet journey.
+The successful local-only Father **Open setup** → **Open in browser** handoff opened a distinct
+Father-profile window, reached the exact `/settings#openchat-routing` route after fragment scrub,
+rendered signed in, and left the default browser unchanged. The excluded debug profile override is
+neither PR 2 nor deployment, redemption, or assignment evidence.
+
+PR 1's #92 source/build blocker is resolved and pushed at exact head
+`f43d2a2d53f2c9f8a3086104a356d4d3a315858a`. Five focused web/model/on-device files pass
+**145/145**, typecheck reports **0 errors**, and exact WSL `prod_test` completed in **10m36s**
+with a byte-identical **7,656,521-byte** Wasm at SHA-256
+`4197ce6d3dc9240c42ee52b4197dc99638875a06b0083901f8a57767338a0cfa` and zero
+unresolved Wllama references. PR 1 deployment remains pending.
+IOU #51's final source gates pass, but it still requires an exact hash/push and preserved-state
+deployment before the synchronous scrub can be called shipped. Do not infer either final head from
+the earlier recorded hashes.
 
 Do not promote to production solely because local checks and the preserved checkpoint/child
 deployment pass. The local real-card `Rent` smoke against generic PR 2 #77/#78/#79 passed through
@@ -1364,6 +1547,7 @@ all four durable named profiles across restarts and same-profile principal switc
 production key/Android drills.
 
 Submit only the two clean OpenChat candidates, never either broad preservation worktree. Draft PR 1
-#9132 and stacked draft PR 2 #73 are open. PR 1 remains frozen. Generic #77/#78/#79 are contained
-in PR 2; keep IOU #45–#49 in IOU. Rerun the final exact-head gates and four-profile browser flow and obtain
-hosted CI before presenting PR 2 as production-ready.
+#9132 and stacked draft PR 2 #73 are open. PR 1's final source head is recorded and pushed at
+`f43d2a2d5`; deployment remains. Generic #77/#78/#79 are contained in PR 2; keep IOU #45–#51
+in IOU. PR 2's exact final head is pushed and its Linux production gate passes; rerun the
+four-profile browser flow and obtain hosted CI before presenting either PR as production-ready.

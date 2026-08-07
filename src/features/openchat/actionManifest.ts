@@ -266,13 +266,13 @@ export const iouActionManifest: IouActionManifest = {
       url: `${resolvePublicOrigin()}/settings#openchat-connect`,
       display: "external",
     },
-    // "chat_link": the signed-in, caller-private routing manager. No chat/user/message coordinate
-    // or app-scoped handle enters this URL. IOU learns a pending chat only from OpenChat's
-    // authenticated card attestation/private-context capability, then exposes an opaque digest to
-    // the linked IOU principal so they can choose an active account/sheet.
+    // "chat_link": each invocation receives a different one-time opaque token. It is neither a
+    // chat coordinate nor a stable handle: IOU immediately scrubs it from the browser URL, then
+    // its canister redeems it through the pinned UserIndex using the signed-in caller's exact
+    // app-subject binding. This is what lets several chats independently choose different sheets.
     {
       kind: "chat_link",
-      url: `${resolvePublicOrigin()}/settings#openchat-routing`,
+      url: `${resolvePublicOrigin()}/settings#openchat-routing/{chatLinkToken}`,
       display: "external",
     },
     // "home": the app's own webpage, offered from OpenChat's app-directory detail sheet.

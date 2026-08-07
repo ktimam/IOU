@@ -3,7 +3,7 @@
 Known-but-unfixed things, so they stop living in chat history. Each entry says what it is, how to
 see it, and what "done" means — enough to pick up cold.
 
-Last updated: 2026-08-05.
+Last updated: 2026-08-07.
 
 ---
 
@@ -14,7 +14,7 @@ registration. The public rules, response schema, and card rows contain no privat
 matching now happens locally after import against only the linked account. Unit coverage and the
 live registry E2E assert that even a deliberately supplied private roster is absent on read-back.
 
-**Private display follow-up (implemented and tested in IOU; OpenChat activation pending).** IOU now
+**Private display follow-up (implemented and tested locally; production activation pending).** IOU now
 supports the missing R1 path without reopening R2: after authorized private hydration, its
 credentialless card iframe displays an `Account type` selector and the read-only card displays the
 selected saved Type. It decrypts only the linked sheet's type roster in iframe memory and returns
@@ -30,12 +30,13 @@ sandboxed iframe. IOU now implements both exact app-canister attesters, independ
 the portable card hash, rejects unknown/duplicate/plaintext Type fields, and accepts a Type only
 as a structurally valid opaque encrypted `template_ref` tied to the current linked active sheet.
 The OpenChat backend/frontend candidate implements the generic transport, final grant and click-only
-capability bridge, but every runtime activation switch remains false. Activation still requires the
-non-empty legacy-inbox drain/export/reinstall decision, durable confirmation-saga recovery,
-snapshot-rollback key reseed, a retired-key erasure threat model, strict generated-contract parity,
-Linux PocketIC coverage, a disposable live backend upgrade, and the four-profile isolation matrix.
-The public leak is fixed, but the running card
-cannot yet receive the private roster. This is not a reason to republish the roster.
+capability bridge. The preserved local test-mode child and frontend switches were enabled and the
+authorized House card displayed `Rent` without exposing it in other accounts or public state.
+Production remains disabled. Activation still requires the non-empty legacy-inbox
+drain/export/reinstall decision, durable confirmation-saga recovery, snapshot-rollback key reseed,
+a retired-key erasure threat model, strict generated-contract parity, Linux PocketIC coverage, a
+disposable live backend upgrade, and the four-profile isolation matrix. The local card result is
+not a reason to republish the roster.
 
 The cross-repo ActionInbox wire is synchronized at the source level: authoritative UserIndex signs
 the complete domain-separated v4 record with a dedicated staged/active/verify-only keyring, and
@@ -178,8 +179,63 @@ runs proposing on "hi".
 
 > Superseded 2026-08-06: the raw `/openchat/link-chat?chat=...` surface remains removed
 > and must not be restored. A raw-free **Open setup** surface now opens
-> `/settings#openchat-routing`; an authenticated card request creates a caller-private,
-> expiring pending route and the page never receives or renders the app-scoped handle.
+> `/settings#openchat-routing/{chatLinkToken}`. IOU #51 now captures and scrubs the one-time
+> token synchronously in the main entry point before dynamically loading authentication/bootstrap.
+> It is then redeemed by the authenticated IOU backend against the caller's exact OpenChat app subject and
+> creates a caller-private expiring pending route only after exact subject, subject-version,
+> `app_user_key_version`, app/revision/canister, and handle checks. Legacy card-derived rows have
+> no claim version and are hidden/non-actionable. Each successful token claim has an independently
+> routable pending id; the page never receives or renders the app-scoped handle. The OpenChat
+> one-hour digest receipt plus IOU's 30-second bounded call make exact-token retry safe after an
+> ambiguous result, and the production page single-flights React StrictMode/remount claims.
+>
+> Final IOU gates after #51 are Cargo **68/68**, frontend **846/846 across 71 files**, typecheck,
+> production Vite build, and routing Playwright **5/5** using the installed system Chrome. #51's
+> after-async-auth scrub ordering failed first **1/1** and its focused correction passes **5/5**.
+> The first Playwright invocation failed only because its bundled browser binary was absent; the
+> supported `PLAYWRIGHT_EXECUTABLE_PATH` rerun passed **5/5**, with no code failure. The
+> exact IOU hash, push, and deployment remain pending. Keep those IOU results distinct from
+> OpenChat's gates. PR 1's final pushed head is
+> `f43d2a2d53f2c9f8a3086104a356d4d3a315858a`, with #92 fixed and pushed. Five focused
+> web/model/on-device files pass **145/145**, typecheck reports **0 errors**, and exact WSL
+> `prod_test` completed in **10m36s**. Its emitted **7,656,521-byte** Wllama Wasm is
+> byte-identical to source at SHA-256
+> `4197ce6d3dc9240c42ee52b4197dc99638875a06b0083901f8a57767338a0cfa`, with zero
+> unresolved Wllama references. PR 1 deployment remains pending.
+>
+> PR 2's exact pushed post-rebase head is
+> `16080b0780ed97c3cd63d4187188ac04b19b3769`. At that head the frontend suite passes
+> **958/958**, Svelte typecheck reports
+> **0 errors and 565 warnings**, the agent typecheck is green, and #90's root-command proof passes
+> **44/44**. The post-rebase backend tree is exact to the previously green tree. Recorded backend
+> evidence is UserIndex **253/253**, token model
+> **11/11**, LocalUserIndex **35/35**, Community **15/15**, Group **11/11**, User **19/19**,
+> architecture **10/10**, and Candid golden **1/1**. Latest focused setup-token evidence is common
+> admission **4/4**, GroupIndex cancellation **2/2**, Group **3/3**, and Community **3/3**; no
+> aggregate GroupIndex total is claimed.
+>
+> The final exact-blob Linux `prod_test` exited **0**: Rollup completed in **11m46.9s** and the
+> wrapper in **716s**. The bundle emits and references a byte-identical **7,656,521-byte** Wllama
+> Wasm at SHA-256
+> `4197ce6d3dc9240c42ee52b4197dc99638875a06b0083901f8a57767338a0cfa`, with zero
+> unresolved Wllama references. The successful retry used the exact Git blob after an
+> environment-only CRLF wrapper failure and supplied mandatory `OC_WEBSITE_VERSION=1.0.0`, the
+> canonical CI value. Baseline unresolved `porto`/`accounts` notices and the known nonfatal
+> public-key CRLF warning remain out of scope. PR 2 deployment remains pending.
+>
+> OpenChat #81–#86 record the fixed authorization, admission/lifecycle, diagnostic, pre-consent,
+> async-snapshot, and navigation-binding defects; #89/#90 record the clean-gate fixes. Inherited
+> wallet dependency issue #87 remains a separate maintenance item, unchanged by either PR. #91's
+> generic desktop `open_url` fix is committed in the exact pushed PR 2 head, contains no
+> Father/profile override, and retains its pre-rebase focused **2/2** plus plugin **17/17** evidence
+> through exact tree equivalence. OpenChat #92 is fixed and pushed in the final PR 1 head.
+>
+> The local-only Father **Open setup** → **Open in browser** proof opened a distinct Father-profile
+> window, scrubbed the fragment, reached the exact `/settings#openchat-routing` route signed in,
+> and left the default browser unchanged. It is neither PR 2 nor deployment evidence and does not
+> prove redemption or assignment. Deploy the pushed OpenChat producer before the IOU consumer.
+> Preserved-state live redemption and the
+> two-chat/two-sheet acceptance remain pending.
 
 Kept as a historical note because the *mistake* is reusable, not because the retired
 surface remains supported.

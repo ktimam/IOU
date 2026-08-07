@@ -26,12 +26,34 @@ There are two intentionally different workflows:
    GroupIndex are controlled by `openchat_installer`; LocalUserIndex is controlled by
    UserIndex; and the installer is controlled by the selected local dfx identity. A mismatch
    is a stop condition.
-3. Identify which source or artifact layer you are changing. The current clean PR 2 source head is
-   `dda2833d6545c68599feccdd90f4faac86197717`; the dependency-compatible checkpoint source
-   head is `790bb76d00240ca5a8a4c124db4535dd7795f96b`. They include generic #77's test-mode
-   backend gate, #78's bounded bootstrap retry, and #79's structured-clone-safe private-context
-   handoff, plus #80's exact pending-link-token cancellation. #78/#79 are frontend-only; #80
-   requires a UserIndex-only upgrade and does not change LocalUserIndex, GroupIndex, or child Wasms.
+3. Identify which source or artifact layer you are changing. PR 1's final pushed head is
+   `f43d2a2d53f2c9f8a3086104a356d4d3a315858a`; it includes #88's clean-install alias fix
+   and #92's pushed Wllama production-bundle fix. Five focused web/model/on-device files pass
+   **145/145**, typecheck reports **0 errors**, and exact WSL `prod_test` completed in
+   **10m36s**. The emitted **7,656,521-byte** Wllama Wasm is byte-identical to source at SHA-256
+   `4197ce6d3dc9240c42ee52b4197dc99638875a06b0083901f8a57767338a0cfa`, with zero
+   unresolved Wllama references. PR 1 deployment remains pending.
+
+   PR 2's exact pushed post-rebase setup-token head is
+   `16080b0780ed97c3cd63d4187188ac04b19b3769`. It includes the #81–#86 security
+   remediations, #89/#90 clean-gate fixes, and #91's committed generic desktop bridge. Its final
+   exact-blob Linux `prod_test` exited **0**: Rollup completed in **11m46.9s** and the wrapper in
+   **716s**. The bundle emits and references a byte-identical **7,656,521-byte** Wllama Wasm at
+   SHA-256 `4197ce6d3dc9240c42ee52b4197dc99638875a06b0083901f8a57767338a0cfa`,
+   with zero unresolved Wllama references. The successful retry used the exact Git blob after an
+   environment-only CRLF wrapper failure and supplied mandatory
+   `OC_WEBSITE_VERSION=1.0.0`, the canonical CI value. Baseline unresolved
+   `porto`/`accounts` notices and the known nonfatal public-key CRLF warning remain out of scope.
+   PR 2 deployment remains pending.
+
+   The following hashes remain the historical 2026-08-06 baseline, not the current setup-token
+   candidate: clean PR 2 source `dda2833d6545c68599feccdd90f4faac86197717` and
+   dependency-compatible checkpoint `790bb76d00240ca5a8a4c124db4535dd7795f96b`. They include
+   #77's test-mode backend gate, #78's bounded bootstrap retry, #79's clone-safe private-context
+   handoff, and #80's exact pending-link-token cancellation. #78/#79 are frontend-only; #80
+   requires a UserIndex-only upgrade. The current per-chat setup-token work changes additional
+   producers/relays. Never use the historical #80-only topology as its rollout plan; follow the
+   reviewed token preflight and install the OpenChat producer before IOU.
 
    The current index canisters still run the tested artifacts built from embedded git SHA
    `7c997f4b1ef10f8217d526e82f8016b7e05d0486`:
@@ -95,9 +117,9 @@ There are two intentionally different workflows:
    It must also use the local canister ids; a stale Vite process that contacts mainnet ids is not
    valid local evidence. Verify that an IOU module response to `Origin: null` carries
    `Access-Control-Allow-Origin: *` (#45) while the HTML `frame-ancestors` policy still permits
-   only the approved OpenChat origins. For current PR 2 acceptance, serve clean
-   `dda2833d6` (or a deployment checkpoint proven to contain it); `8ae34cf38` is the deployed
-   child-Wasm provenance, not the final frontend source head.
+   only the approved OpenChat origins. For current token PR 2 acceptance, serve the final clean
+   candidate only after its exact commit is recorded and pushed; `dda2833d6` is historical and
+   `8ae34cf38` is old deployed child-Wasm provenance, not the token frontend source head.
 9. Recheck zero upgrade failures, six global/four local users (for this fixture), the
    published app revision/inbox/app-canister binding, exact active key pin, frontend HTTP
    health, and all four signed-in profiles. Father, mother, child, and property manager must all
@@ -107,9 +129,9 @@ There are two intentionally different workflows:
     only House has `Rent`: father sees `Rent`, property manager sees `Rent · partner`, and the
     FatherMother/FatherChild accounts show no Type to their members. The card may show `Rent` only
     after explicit load and its one-time encrypted private context. Generic OpenChat #78/#79 are
-    present in the source heads above. IOU #47/#48 are also fixed in the current IOU main changes:
+    present in the historical source heads above. IOU #47/#48 are also fixed in IOU:
     the crypto/poll suites pass **42/42** and repository-policy tests pass **12/12**. The exact
-    earlier PR 2 card-focused rerun at `68aadfd35` passed **68/68**; #80's endpoint/model/API/
+    historical PR 2 card-focused rerun at `68aadfd35` passed **68/68**; #80's endpoint/model/API/
     consent/worker suites at `dda2833d6` pass **37/37**. A fresh reload imported the
     already-stored setup action without reconfirming it. The separate local `Rent` smoke then passed:
     the card options were exactly `[None, Rent]`, `Rent` was selected through its private account-local
@@ -117,10 +139,31 @@ There are two intentionally different workflows:
     only to House. Leave that draft `Pending` for user review; this recorded smoke did not import or
     acknowledge it. This is a local acceptance pass, not a production-release authorization.
 
-    Do not treat the current whole-workspace `svelte-check` as authoritative or green: its
-    `node_modules` is linked to the deployment repository, `marked` and `svelte-easy-crop` are
-    missing, and inherited `VideoCallsReleased` parser errors remain. Use the isolated focused
-    suites above, including #80's **37/37**, until that workspace baseline is repaired.
+    The exact pushed post-rebase PR 2 head
+    `16080b0780ed97c3cd63d4187188ac04b19b3769` passes the full frontend suite
+    **958/958**. Svelte typecheck reports **0 errors and 565 warnings**, and the agent typecheck is
+    green. #90's root-command source-inspection proof passes **44/44**; focused frontend evidence is
+    #83 **3/3**, #84 **3/3**, the #85 surface resolver file **32/32**, and #86 **3/3**. The
+    post-rebase backend tree is exact to the previously green tree, whose recorded evidence is
+    UserIndex **253/253**, token model **11/11**, LocalUserIndex **35/35**, Community **15/15**,
+    Group **11/11**, User **19/19**, architecture **10/10**, and Candid golden **1/1**. The latest
+    setup-token focused runs are common admission **4/4**, GroupIndex cancellation **2/2**, Group
+    **3/3**, and Community **3/3**; no aggregate GroupIndex total is claimed. #91's generic desktop
+    bridge is committed at that exact pushed head; its pre-rebase focused **2/2**, full plugin
+    **17/17**, and format/diff evidence remain applicable through exact tree equivalence. The final
+    exact-blob Linux `prod_test` exited **0** (Rollup **11m46.9s**, wrapper **716s**) and emitted
+    and referenced the byte-identical **7,656,521-byte** Wllama Wasm at SHA-256
+    `4197ce6d3dc9240c42ee52b4197dc99638875a06b0083901f8a57767338a0cfa`, with zero
+    unresolved Wllama references. Its environment-only retry used the exact Git blob plus canonical
+    CI `OC_WEBSITE_VERSION=1.0.0`; inherited `porto`/`accounts` notices and the known
+    nonfatal public-key CRLF warning remain out of scope. PR 2 deployment remains pending.
+
+    PR 1's final pushed head is `f43d2a2d53f2c9f8a3086104a356d4d3a315858a`. #92 is fixed
+    and pushed; five focused web/model/on-device files pass **145/145**, typecheck reports
+    **0 errors**, and exact WSL `prod_test` completed in **10m36s** with a byte-identical
+    **7,656,521-byte** Wllama Wasm at SHA-256
+    `4197ce6d3dc9240c42ee52b4197dc99638875a06b0083901f8a57767338a0cfa` and zero
+    unresolved Wllama references. PR 1 deployment remains pending.
 
 Snapshot restoration has an additional mandatory transition. Use **stop → load snapshot →
 upgrade the same tested Wasm while the canister remains stopped → start**. Loading a
@@ -258,19 +301,63 @@ discard an existing canister identity automatically.
   - **Connect** pairs THIS user's delivery key (64-character claim token → IOU backend →
     app-authenticated `c2c_claim_ai_app_link_code`). This is the
     "connected/disconnected" status and lets OpenChat encrypt confirmed deposits for that user.
-  - Propose/open an IOU card once in an unmapped chat. Its authenticated private-context request
-    creates a caller-private pending route in IOU. Then use Chat details → AI apps → **Open setup**,
-    or open IOU **Settings → Chat routing**, and choose the destination account/sheet. Retry the
-    card after saving.
-  - Open setup is a static external URL ending in `/settings#openchat-routing`. It contains no raw
-    chat coordinates, app-scoped handle, user/message id, token, or pending id. IOU lists only
-    expiring principal-scoped digests and enforces ownership of the selected active sheet. Only
-    the canister-selected newest live request can be assigned or unlinked; equal timestamps use the
-    same deterministic digest ordering in UI and backend. Rows are capped per principal and
-    globally, and exact manifest revision/UserIndex/app/key trust is rechecked at save time.
+  - In each chat open its chat settings page, then use AI apps → **Open setup**. OpenChat creates a
+    different one-time URL ending in `/settings#openchat-routing/{chatLinkToken}` for every
+    invocation. IOU's synchronous main entry captures and scrubs the fragment before dynamically
+    loading authentication/application bootstrap, then redeems it server-to-server, focuses that
+    exact pending row, and lets the user choose its destination account/sheet. Retry the card after
+    saving. Only successful token redemption creates an actionable `claim_version = 1` row. Old
+    card/private-context-derived rows are hidden and cannot be assigned, unlinked, or dismissed.
+    IOU #51 caught the prior after-async-auth ordering with a failing-first **1/1**; the correction
+    passes focused **5/5**. The final IOU gate passes Cargo **68/68**, frontend **846/846 across
+    71 files**, typecheck, production Vite build, and routing Playwright **5/5** using the installed
+    system Chrome. The first Playwright invocation failed only because its bundled browser binary
+    was absent; the supported `PLAYWRIGHT_EXECUTABLE_PATH` rerun passed with no code failure.
+    The exact IOU hash, push, and deployment remain pending.
+  - The token is not a chat coordinate or stable handle. If Windows opens a default browser signed
+    in as a different IOU account, the mismatch does not consume it: sign out and into the matching
+    IOU account, then press **Refresh** to retry. The token stays only in that page instance's
+    module memory.
+    React StrictMode/remounts share one in-flight claim; a remote/ambiguous result retains that same
+    token for retry. UserIndex keeps a digest-only exact-caller/subject success receipt for one hour,
+    while IOU bounds each redemption call to 30 seconds.
+  - A one-off preserved Father desktop proof used an excluded debug build. After fully exiting the
+    desktop app, the shell that launched it supplied:
+
+    ```powershell
+    $env:OC_DEV_EXTERNAL_BROWSER_EXE = 'C:\Program Files\Google\Chrome\Application\chrome.exe'
+    $env:OC_DEV_EXTERNAL_BROWSER_USER_DATA_DIR = '<durable-father-iou-profile-directory>'
+    $env:OC_DEV_EXTERNAL_BROWSER_PROFILE = 'Default'
+    ```
+
+    The variables are read at process startup; setting them after the app is running has no effect.
+    This debug-only override targets the dedicated durable Father IOU profile. Keep it outside both
+    OpenChat PRs and inventory it in OpenChat issue #3 as local/debug-only material; never put
+    browser-profile contents in an issue.
+  - The local-only live proof used a desktop-only restart. The actual current-chat
+    **Open setup** → **Open in browser** chain opened a distinct Father-profile window, scrubbed
+    the opaque fragment, reached the exact
+    `http://127.0.0.1:3000/settings#openchat-routing` route signed in, and left the default
+    browser unchanged. This is neither PR 2 nor deployment evidence and does not prove token
+    redemption or sheet assignment.
+  - Release builds use the operating-system handler. OpenChat #91's generic desktop
+    `open_url` implementation is committed in exact pushed PR 2 head
+    `16080b0780ed97c3cd63d4187188ac04b19b3769`. Its pre-rebase focused **2/2** and full
+    plugin **17/17** results remain applicable through exact tree equivalence. It contains no
+    Father/profile override; deployment and live acceptance remain pending.
+  - IOU lists only expiring principal-scoped digests and enforces ownership of the selected active
+    sheet. Multiple live pending rows are independently assignable/unlinkable, so each chat can
+    route to a different sheet. Rows are capped per principal and globally, and exact manifest
+    revision/UserIndex/app/subject/subject-version/`app_user_key_version`/key trust is rechecked
+    before and after redemption and at save.
   - The verified-v4 import screen's default-on **Remember** checkbox remains a second way to store
     the same caller-private mapping. Each of the four local accounts connects and routes separately.
   - The old `/openchat/link-chat?chat=...` route remains retired and must not be restored.
+  - As of 2026-08-07, this is the intended source flow, not the currently deployed backend result.
+    After #51's exact IOU hash/push are recorded, the token-producing OpenChat upgrade must land
+    before the matching IOU consumer upgrade; then run the preserved Father two-chat/two-sheet
+    acceptance without cleaning the replica. Until those upgrades complete, **Open setup** can open
+    the right profile but cannot finish redemption.
 - **IOU #49 is a backend-plus-assets rollout and requires one relink per account.** Upgrade
   `iou_backend`, rebuild/deploy the matching IOU frontend assets, then hard-reload the four
   father/mother/child/property-manager IOU profiles. No OpenChat canister or frontend upgrade is

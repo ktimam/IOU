@@ -8,7 +8,7 @@
 // Reached from the username badge in the top-right of every page. Transaction
 // types/templates are managed from the "Add type" button on a sheet, not here.
 
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { Link } from "react-router-dom";
 import { usePreferences } from "./usePreferences";
 import { orderedCurrencies } from "./currencies";
@@ -22,8 +22,25 @@ import { RelaySettings } from "../relay/RelaySettings";
 import { RelayPairingCard } from "../openchat/OpenChatSettings";
 import { ActionInboxSettings } from "../openchat/ActionInboxSettings";
 import { ChatRoutingSettings } from "../openchat/ChatRoutingSettings";
+import {
+  captureOpenChatRoutingLaunch,
+  clearOpenChatRoutingLaunch,
+} from "../openchat/chatLinkLaunch";
 
 export function SettingsPage() {
+  // Capture before the auth branch: the OS default browser may be signed out or signed in as a
+  // different IOU user. The fragment is scrubbed immediately and retained only in process memory
+  // while the user switches to the account whose OpenChat binding matches it.
+  const [chatLinkToken, setChatLinkToken] = useState(captureOpenChatRoutingLaunch);
+  useEffect(() => {
+    const captureLaunch = () => setChatLinkToken(captureOpenChatRoutingLaunch());
+    window.addEventListener("hashchange", captureLaunch);
+    return () => window.removeEventListener("hashchange", captureLaunch);
+  }, []);
+  const finishChatLinkToken = useCallback((token: string) => {
+    clearOpenChatRoutingLaunch(token);
+    setChatLinkToken((current) => (current === token ? null : current));
+  }, []);
   const { state, signOut } = useAuth();
   const { prefs, setDefaultCurrency, setProfileName } = usePreferences();
   const { actor } = useActor();
@@ -241,7 +258,11 @@ export function SettingsPage() {
         <RelayPairingCard />
       </ActionInboxSettings>
 
-      <ChatRoutingSettings principal={state.principal} />
+      <ChatRoutingSettings
+        principal={state.principal}
+        launchToken={chatLinkToken}
+        onLaunchTokenFinished={finishChatLinkToken}
+      />
     </div>
   );
 }

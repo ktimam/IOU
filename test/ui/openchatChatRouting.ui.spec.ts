@@ -4,6 +4,8 @@ import { createAccount, signInDev } from "./flows";
 const HANDLE = "CAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAg";
 const PENDING_ID = "ab".repeat(32);
 const OLDER_PENDING_ID = "cd".repeat(32);
+const TOKEN_FOR_RECENT = "CAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAg";
+const TOKEN_FOR_OLDER = "CQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQk";
 const RAW_COORDINATE = /(?:group|channel|direct):/i;
 
 async function withDevActor<T>(
@@ -49,7 +51,7 @@ function expectRawFreeUrl(page: Page): void {
   expect(page.url()).not.toMatch(RAW_COORDINATE);
 }
 
-test("only the newest pending chat can be assigned, changed, and dismissed without exposing identifiers", async ({
+test("two token-created pending chats route independently without exposing identifiers", async ({
   browser,
 }) => {
   const fatherContext = await browser.newContext();
@@ -69,11 +71,10 @@ test("only the newest pending chat can be assigned, changed, and dismissed witho
     const olderCard = routing.getByRole("heading", { name: "Earlier chat request 1" }).locator("..");
     await expect(recentCard).toBeVisible();
     await expect(olderCard).toBeVisible();
-    await expect(olderCard.getByRole("combobox")).toBeDisabled();
-    await expect(olderCard.getByRole("button", { name: "Link chat" })).toBeDisabled();
-    await expect(olderCard.getByText(/older anonymous requests cannot be reassigned/i)).toBeVisible();
-    await olderCard.getByRole("button", { name: "Dismiss" }).click();
-    await expect(routing.getByRole("heading", { name: "Earlier chat request 1" })).toHaveCount(0);
+    await expect(olderCard.getByRole("combobox")).toBeEnabled();
+    await olderCard.getByRole("combobox").selectOption({ label: "Child" });
+    await olderCard.getByRole("button", { name: "Link chat" }).click();
+    await expect(routing.getByText("Pending chat linked: Child")).toBeVisible();
 
     const pending = recentCard.getByLabel("Most recent chat request account or sheet");
     await pending.selectOption({ label: "House" });
@@ -82,6 +83,7 @@ test("only the newest pending chat can be assigned, changed, and dismissed witho
 
     const saved = recentCard.getByLabel("Most recent chat request account or sheet");
     await expect(saved).toHaveValue("1111111111111111");
+    await expect(olderCard.getByRole("combobox")).toHaveValue("2222222222222222");
     await saved.selectOption({ label: "Child" });
     await recentCard.getByRole("button", { name: "Save destination" }).click();
     await expect(routing.getByText("Destination saved: Child")).toBeVisible();
@@ -96,10 +98,17 @@ test("only the newest pending chat can be assigned, changed, and dismissed witho
     expect(father.url()).not.toContain(OLDER_PENDING_ID);
     expect(father.url()).not.toMatch(RAW_COORDINATE);
 
+    await olderCard.getByRole("button", { name: "Remove link" }).click();
+    await expect(routing.getByText("Chat link removed.")).toBeVisible();
+    await expect(recentCard.getByRole("combobox")).toHaveValue("2222222222222222");
+    await olderCard.getByRole("button", { name: "Dismiss" }).click();
+    await expect(routing.getByText("Chat request dismissed.")).toBeVisible();
+    await expect(routing.getByRole("heading", { name: "Earlier chat request 1" })).toHaveCount(0);
+
     await recentCard.getByRole("button", { name: "Remove link" }).click();
     await expect(routing.getByText("Chat link removed.")).toBeVisible();
     await recentCard.getByRole("button", { name: "Dismiss" }).click();
-    await expect(routing.getByText("Recent chat request dismissed.")).toBeVisible();
+    await expect(routing.getByText("Chat request dismissed.")).toBeVisible();
     await expect(routing.getByRole("heading", { name: "Most recent chat request" })).toHaveCount(0);
 
     await mother.goto("/test/ui/chatRoutingHarness.html#openchat-routing");
@@ -115,6 +124,103 @@ test("only the newest pending chat can be assigned, changed, and dismissed witho
     await fatherContext.close();
     await motherContext.close();
   }
+});
+
+test("per-chat fragments are scrubbed and focus the exact claimed pending row", async ({ page }) => {
+  await page.goto(`/test/ui/chatRoutingHarness.html#openchat-routing/${TOKEN_FOR_OLDER}`);
+  await expect(page.locator("#openchat-routing")).toBeVisible();
+  expectRawFreeUrl(page);
+  await expect(page.getByLabel("Earlier chat request 1 account or sheet")).toBeFocused();
+  expect(await page.locator("body").innerText()).not.toContain(TOKEN_FOR_OLDER);
+
+  await page.goto(`/test/ui/chatRoutingHarness.html#openchat-routing/${TOKEN_FOR_RECENT}`);
+  await expect(page.locator("#openchat-routing")).toBeVisible();
+  expectRawFreeUrl(page);
+  await expect(page.getByLabel("Most recent chat request account or sheet")).toBeFocused();
+  expect(await page.locator("body").innerText()).not.toContain(TOKEN_FOR_RECENT);
+
+  await page.goto("/test/ui/chatRoutingHarness.html#openchat-routing/not-a-token");
+  await expect(page.locator("#openchat-routing")).toBeVisible();
+  expectRawFreeUrl(page);
+  expect(await page.locator("body").innerText()).not.toContain("not-a-token");
+});
+
+test("production claim is single-flight and keeps exact focus under React StrictMode", async ({
+  page,
+}) => {
+  await page.addInitScript(() =>
+    sessionStorage.setItem("iou.test.chatRouting.productionClaim", "1"));
+  await page.goto(`/test/ui/chatRoutingHarness.html#openchat-routing/${TOKEN_FOR_OLDER}`);
+
+  const routing = page.locator("#openchat-routing");
+  const refresh = routing.getByRole("button", { name: "Refresh" });
+  await expect(routing.getByText("Verifying this chat setup link...")).toBeVisible();
+  await expect(refresh).toBeDisabled();
+  await refresh.evaluate((button: HTMLButtonElement) => button.click());
+  await expect.poll(() => page.evaluate(() =>
+    (window as typeof window & {
+      __iouChatRoutingStats?: { claimCalls: number };
+    }).__iouChatRoutingStats?.claimCalls,
+  )).toBe(1);
+  await page.evaluate(() =>
+    (window as typeof window & { __iouReleaseChatRoutingClaim?: () => void })
+      .__iouReleaseChatRoutingClaim?.());
+
+  await expect(
+    routing.getByText("This chat is ready. Choose its account / sheet below."),
+  ).toBeVisible();
+  const exactClaimedRow = routing.getByLabel("Earlier chat request 1 account or sheet");
+  await expect(exactClaimedRow).toBeFocused();
+  await expect(exactClaimedRow).toHaveValue("1111111111111111");
+  expectRawFreeUrl(page);
+  expect(await routing.innerText()).not.toContain(TOKEN_FOR_OLDER);
+  expect(await page.evaluate(() =>
+    (window as typeof window & {
+      __iouChatRoutingStats?: { claimCalls: number; finishedCalls: number };
+    }).__iouChatRoutingStats,
+  )).toEqual({ claimCalls: 1, finishedCalls: 1 });
+});
+
+test("ambiguous claim retains the exact launch token until an idempotent manual retry succeeds", async ({
+  page,
+}) => {
+  await page.addInitScript(() =>
+    sessionStorage.setItem("iou.test.chatRouting.ambiguousClaim", "1"));
+  await page.goto(`/test/ui/chatRoutingHarness.html#openchat-routing/${TOKEN_FOR_OLDER}`);
+
+  const routing = page.locator("#openchat-routing");
+  await expect(
+    routing.getByText("Chat setup could not be verified. Retry without copying or sharing the setup link."),
+  ).toBeVisible();
+  await expect.poll(() => page.evaluate(() =>
+    (window as typeof window & {
+      __iouAmbiguousChatRoutingStats?: {
+        claimTokens: string[];
+        finishedTokens: string[];
+      };
+    }).__iouAmbiguousChatRoutingStats,
+  )).toEqual({ claimTokens: [TOKEN_FOR_OLDER], finishedTokens: [] });
+
+  await routing.getByRole("button", { name: "Refresh" }).click();
+  await expect(
+    routing.getByText("This chat is ready. Choose its account / sheet below."),
+  ).toBeVisible();
+  await expect(
+    routing.getByRole("heading", { name: "Most recent chat request" }),
+  ).toHaveCount(1);
+  await expect.poll(() => page.evaluate(() =>
+    (window as typeof window & {
+      __iouAmbiguousChatRoutingStats?: {
+        claimTokens: string[];
+        finishedTokens: string[];
+      };
+    }).__iouAmbiguousChatRoutingStats,
+  )).toEqual({
+    claimTokens: [TOKEN_FOR_OLDER, TOKEN_FOR_OLDER],
+    finishedTokens: [TOKEN_FOR_OLDER],
+  });
+  expectRawFreeUrl(page);
+  expect(await routing.innerText()).not.toContain(TOKEN_FOR_OLDER);
 });
 
 test("settings route is discoverable and caller-isolated while saved handles stay anonymous", async ({

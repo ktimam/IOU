@@ -14,20 +14,83 @@
 > discarded, and that chat-to-sheet storage accepts only canonical app-scoped 32-byte
 > base64url handles while malformed or legacy raw values fail closed.
 >
-> Routing-remediation supersession (2026-08-06): retiring the raw route also removed the
-> only first-use picker, which was a regression. The generic public `chat_link` surface is
-> now restored as the raw-free `/settings#openchat-routing` URL. IOU learns a pending chat
-> only from an authenticated OpenChat card capability and exposes only a caller-scoped opaque
-> pending id; neither the raw coordinate nor app-scoped handle enters the URL or visible UI.
-> `ChatRoutingSettings.test.tsx`, the new Candid/privacy assertions, Rust attestation/newest/
+> Routing-remediation supersession (updated 2026-08-07): retiring the raw route also removed the
+> only first-use picker, which was a regression. The generic `chat_link` surface is now
+> `/settings#openchat-routing/{chatLinkToken}`. IOU #51 moves canonical one-time-token capture
+> and history scrub into the synchronous main entry point before dynamic authentication/application
+> bootstrap, then redeems it server-to-server against the signed-in caller's exact bound OpenChat
+> app subject. Success must also match subject version, exact
+> `app_user_key_version`, app/revision/canister, and v1 handle version. IOU exposes only a
+> caller-scoped opaque pending id; neither the raw coordinate nor app-scoped handle enters the URL
+> or visible UI. Only successful token claims produce actionable `claim_version = 1` rows.
+> Legacy card/private-context-derived rows decode without that marker and remain hidden and
+> non-actionable.
+> `chatLinkLaunch.test.ts`, `ChatRoutingSettings.test.tsx`, the Candid/privacy assertions, Rust token/
 > stale-trust/authorization/quota/cleanup tests, and `openchatChatRouting.ui.spec.ts` cover
-> assignment, reassignment, removal,
-> active-sheet eligibility, caller isolation, first-use UI, and URL/DOM privacy. Historical
+> exact parsing/scrubbing, wrong-account non-consumption contract, two pending ids routed to two
+> sheets independently, assignment, reassignment, removal, active-sheet eligibility, caller
+> isolation, first-use UI, and URL/DOM privacy. Production-component tests cover React StrictMode
+> single-flight and an ambiguous `RemoteError` followed by exact-token **Refresh**. The OpenChat
+> one-hour digest-only success receipt and IOU 30-second bounded call are covered at their respective
+> source boundaries. Repository policy now fails when `src/iou_backend.did`, the Rust export, and
+> TypeScript declaration disagree about `claim_openchat_chat_route`. Historical
 > green rows and proposed gaps below that exercise `/openchat/link-chat?chat=...` describe the
 > retired design and must not be treated as current coverage or reimplemented.
-> The browser pending-row half is deliberately a fixture; the combined live OpenChat
-> attestation → pending row → Settings save → card retry remains a deployment release gate and
-> must be recorded separately rather than inferred from the fixture.
+> Final IOU gates after #51 are Cargo **68/68**, frontend **846/846 across 71 files**, typecheck,
+> production Vite build, and the full routing browser file **5/5** using the installed system
+> Chrome. #51's former after-async-auth ordering failed first **1/1** and its focused correction
+> passes **5/5**. The initial Playwright invocation failed only because its bundled browser binary
+> was absent; the supported `PLAYWRIGHT_EXECUTABLE_PATH` rerun passed **5/5**, with no code
+> failure. The exact IOU hash, push, and deployment remain pending.
+> Token redemption/pending rows in the browser file are deliberately
+> fixtures, while caller-isolated saved mappings use the live IOU canister. The combined live OpenChat
+> one-time setup-token redemption → pending row → Settings save → card retry remains a deployment
+> release gate and must be recorded separately rather than inferred from the fixture.
+>
+> OpenChat's implementation now rechecks current group/community/channel membership before and
+> after awaits, including exact private-channel membership and suspended/lapsed/non-joined
+> rejection; admission also runs before authority consumption and exact cleanup handles
+> post-issuance revalidation failure. OpenChat PR 2's exact pushed post-rebase head is
+> `16080b0780ed97c3cd63d4187188ac04b19b3769`; it contains #81–#86, #89/#90, and #91's
+> committed generic desktop bridge. It is not yet deployed. At that head the frontend suite passes
+> **958/958**, Svelte typecheck
+> reports **0 errors and 565 warnings**, the agent typecheck is green, and #90's root-command
+> source-inspection proof passes **44/44**. Focused frontend evidence is #83 **3/3**, #84 **3/3**,
+> #85's surface resolver file **32/32**, and #86 **3/3**.
+>
+> The final exact-blob Linux `prod_test` exited **0**: Rollup completed in **11m46.9s** and the
+> wrapper in **716s**. The bundle emits and references a byte-identical **7,656,521-byte** Wllama
+> Wasm at SHA-256
+> `4197ce6d3dc9240c42ee52b4197dc99638875a06b0083901f8a57767338a0cfa`, with zero
+> unresolved Wllama references. The successful retry used the exact Git blob after an
+> environment-only CRLF wrapper failure and supplied mandatory `OC_WEBSITE_VERSION=1.0.0`, the
+> canonical CI value. Baseline unresolved `porto`/`accounts` notices and the known nonfatal
+> public-key CRLF warning remain out of scope. PR 2 deployment remains pending.
+>
+> The post-rebase backend tree is exact to the previously green tree. Its recorded evidence is
+> UserIndex **253/253**, token model **11/11**,
+> LocalUserIndex **35/35**, Community **15/15**, Group **11/11**, User **19/19**,
+> architecture **10/10**, and Candid golden **1/1**. Latest focused token runs are common admission
+> **4/4**, GroupIndex exact cancellation **2/2**, Group **3/3**, and Community **3/3**; no aggregate
+> GroupIndex total is claimed. PR 1's final pushed head is
+> `f43d2a2d53f2c9f8a3086104a356d4d3a315858a`, with #92 fixed and pushed. Five focused
+> web/model/on-device files pass **145/145**, typecheck reports **0 errors**, and exact WSL
+> `prod_test` completed in **10m36s**. The emitted **7,656,521-byte** Wllama Wasm is
+> byte-identical to source at SHA-256
+> `4197ce6d3dc9240c42ee52b4197dc99638875a06b0083901f8a57767338a0cfa`, with zero
+> unresolved Wllama references. PR 1 deployment remains pending.
+>
+> #91's generic desktop `open_url` repair is committed in the exact pushed PR 2 head. Its
+> failing-first Rust `E0425`, focused **2/2**, full plugin **17/17**, and format/diff evidence
+> remain applicable through exact post-rebase tree equivalence. It contains no Father/profile
+> override. Deployment and live acceptance remain release gates. Inherited dependency issue #87 is
+> unchanged by either PR and requires a separate maintenance PR.
+>
+> The local-only Father **Open setup** → **Open in browser** check opened a distinct Father-profile
+> window, scrubbed the fragment, reached the exact `/settings#openchat-routing` route signed in,
+> and left the default browser unchanged. It is neither PR 2 nor deployment evidence and did not
+> exercise token redemption or sheet assignment. Preserved-state producer-then-consumer deployment,
+> live redemption/pending-row assignment, and two-chat/two-sheet acceptance are still pending.
 
 ## Progress log (test + fix, P0 first)
 

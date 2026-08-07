@@ -143,14 +143,20 @@ describe("iouActionManifest", () => {
     expect(IOU_EXTRACTION_PROMPT).toMatch(/single/i);
   });
 
-  it("publishes a raw-coordinate-free chat-routing surface", () => {
+  it("publishes a per-invocation opaque-token chat-routing surface", () => {
     const routing = iouActionManifest.surfaces.find((x) => x.kind === "chat_link");
     expect(routing).toBeDefined();
     expect(routing!.display).toBe("external");
-    expect(routing!.url).toMatch(/^https?:\/\/[^/]+\/settings#openchat-routing$/);
+    expect(routing!.url).toMatch(
+      /^https?:\/\/[^/]+\/settings#openchat-routing\/\{chatLinkToken\}$/,
+    );
     for (const surface of iouActionManifest.surfaces) {
       expect(surface.url).not.toMatch(/\{(?:chatKey|messageId|userId)\}/);
-      expect(surface.url.replaceAll("{appId}", "1")).not.toMatch(/[{}]/);
+      expect(
+        surface.url
+          .replaceAll("{appId}", "1")
+          .replaceAll("{chatLinkToken}", "CAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAg"),
+      ).not.toMatch(/[{}]/);
     }
   });
 
