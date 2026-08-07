@@ -547,12 +547,10 @@ export async function acknowledgeActionInbox(opts: {
  * Poll the inbox once from zero and return deduplicated, provenance-verified drafts. Envelopes that
  * fail signature, recipient decryption, or any inner/outer commitment check are dropped.
  *
- * Shared-account visibility note (v1.11.0): each member polls with ONLY their own
- * key. Both members see a draft because OpenChat FANS OUT each confirmed action —
- * one envelope per chat member with a registered key — at deposit time (delivery-
- * side change in the OpenChat fork). Never poll with another member's key: sharing
- * the user-global consumer key was reviewed and rejected (it leaks the sharer's
- * OTHER accounts' drafts to a co-member).
+ * Account visibility note: each member polls with ONLY their own key, and a per-user-key app
+ * delivers the confirmed action only to the authoritative confirmer. Never poll with another
+ * member's key: sharing the user-global consumer key was reviewed and rejected because it leaks
+ * that member's OTHER accounts' drafts.
  */
 export async function pollActionInbox(opts: {
   config: ActionInboxConfig;
