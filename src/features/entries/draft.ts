@@ -80,18 +80,27 @@ export function baseWithDefaultCurrency(
 }
 
 /** Parse a major-unit amount ("25", "25.00", 25) to integer minor units. */
-function toMinor(v: unknown): number | null {
+function toMinor(v: unknown, allowZero = false): number | null {
   const n =
     typeof v === "string" ? Number(v.trim()) : typeof v === "number" ? v : NaN;
   if (!Number.isFinite(n)) return null;
-  return Math.round(n * 100);
+  const minor = Math.round(n * 100);
+  if (
+    !Number.isFinite(minor) ||
+    !Number.isSafeInteger(minor) ||
+    minor < (allowZero ? 0 : 1)
+  ) {
+    return null;
+  }
+  return minor;
 }
 
 /** YYYY-MM-DD → ms epoch at UTC midnight (matching EntryForm), or null. */
 function dateToTs(d: string): number | null {
-  if (!DATE_RE.test(d)) return null;
+  if (!DATE_RE.test(d) || d.startsWith("0000-")) return null;
   const ts = Date.parse(d + "T00:00:00Z");
-  return Number.isFinite(ts) ? ts : null;
+  if (!Number.isFinite(ts)) return null;
+  return new Date(ts).toISOString().slice(0, 10) === d ? ts : null;
 }
 
 const MONTHS: Record<string, number> = {
@@ -105,7 +114,11 @@ const MONTH_RE =
 function mkUtcDate(y: number, mo: number, day: number): number | null {
   if (mo < 0 || mo > 11 || day < 1 || day > 31) return null;
   const ts = Date.UTC(y, mo, day);
-  return Number.isFinite(ts) ? ts : null;
+  if (!Number.isFinite(ts)) return null;
+  const date = new Date(ts);
+  return date.getUTCFullYear() === y && date.getUTCMonth() === mo && date.getUTCDate() === day
+    ? ts
+    : null;
 }
 
 /**
@@ -277,7 +290,7 @@ export function parseDraft(input: unknown, base?: Partial<EntryPayload>): ParseR
       else feePercent = fp;
     }
     if (d.fee_fixed != null) {
-      const ff = toMinor(d.fee_fixed);
+      const ff = toMinor(d.fee_fixed, true);
       if (ff == null || ff < 0) errors.push("fee_fixed must be a non-negative number");
       else feeFixedMinor = ff;
     }

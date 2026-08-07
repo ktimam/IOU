@@ -4,6 +4,7 @@
 
 import { describe, it, expect } from "vitest";
 import { parseDraft } from "./draft";
+import { IOU_MAX_MAJOR_AMOUNT } from "../openchat/actionManifest";
 import type { EntryPayload } from "./types";
 
 function ok(input: unknown, base?: Partial<EntryPayload>) {
@@ -106,6 +107,10 @@ describe("parseDraft — loose date recovery from the note / date field", () => 
 
   it("surfaces a malformed date only when the note carried no date", () => {
     expect(errs({ amount: 5, currency: "USD", date: "whenever" })).toContain("date must be YYYY-MM-DD");
+    expect(errs({ amount: 5, currency: "USD", date: "0000-01-01" })).toContain("date must be YYYY-MM-DD");
+    expect(errs({ amount: 5, currency: "USD", date: "2026-02-29" })).toContain("date must be YYYY-MM-DD");
+    expect(errs({ amount: 5, currency: "USD", date: "2026-04-31" })).toContain("date must be YYYY-MM-DD");
+    expect(iso(ok({ amount: 5, currency: "USD", date: "2024-02-29" }).initial.ts)).toBe("2024-02-29");
     // Note carries the real date → the model's junk date field is not surfaced as an error.
     const v = ok({ amount: 5, currency: "USD", date: "whenever", note: "reservation 3 April" });
     expect(iso(v.initial.ts)).toMatch(/-04-03$/);
@@ -163,6 +168,23 @@ describe("parseDraft — amount forms (string, decimal, k-suffix boundary)", () 
   it("parses numeric strings and decimals to minor units", () => {
     expect(ok({ amount: "26.50", currency: "USD" }).initial.amount_minor).toBe(2650);
     expect(ok({ amount: 0.1, currency: "USD" }).initial.amount_minor).toBe(10);
+    expect(ok({ amount: 0.005, currency: "USD" }).initial.amount_minor).toBe(1);
+    expect(errs({ amount: 0.0049, currency: "USD" })).toContain("amount must be a positive number");
+  });
+
+  it("keeps rounded minor units inside JavaScript's exact integer range", () => {
+    expect(ok({ amount: IOU_MAX_MAJOR_AMOUNT, currency: "USD" }).initial.amount_minor).toBe(
+      Number.MAX_SAFE_INTEGER,
+    );
+    expect(errs({ amount: IOU_MAX_MAJOR_AMOUNT + 0.01, currency: "USD" })).toContain(
+      "amount must be a positive number",
+    );
+    expect(errs({ amount: 1e308, currency: "USD" })).toContain(
+      "amount must be a positive number",
+    );
+    expect(errs({ kind: "iou", amount: 1, currency: "USD", fee_fixed: 1e308 })).toContain(
+      "fee_fixed must be a non-negative number",
+    );
   });
 
   it("does NOT parse a 'k' suffix — IOU relies on OpenChat's normalize pass for that", () => {

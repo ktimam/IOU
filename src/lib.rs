@@ -1702,20 +1702,36 @@ impl<'de> Deserialize<'de> for AttestedEntryDrafts {
 
 fn is_ascii_date(value: &str) -> bool {
     let bytes = value.as_bytes();
-    bytes.len() == 10
-        && bytes[4] == b'-'
-        && bytes[7] == b'-'
-        && bytes
+    if bytes.len() != 10
+        || bytes[4] != b'-'
+        || bytes[7] != b'-'
+        || !bytes
             .iter()
             .enumerate()
             .all(|(i, byte)| i == 4 || i == 7 || byte.is_ascii_digit())
-        && value[0..4].parse::<u16>().is_ok_and(|year| year > 0)
-        && value[5..7]
-            .parse::<u8>()
-            .is_ok_and(|month| (1..=12).contains(&month))
-        && value[8..10]
-            .parse::<u8>()
-            .is_ok_and(|day| (1..=31).contains(&day))
+    {
+        return false;
+    }
+    let Ok(year) = value[0..4].parse::<u16>() else {
+        return false;
+    };
+    let Ok(month) = value[5..7].parse::<u8>() else {
+        return false;
+    };
+    let Ok(day) = value[8..10].parse::<u8>() else {
+        return false;
+    };
+    if year == 0 || !(1..=12).contains(&month) || day == 0 {
+        return false;
+    }
+    let leap_year = year % 4 == 0 && (year % 100 != 0 || year % 400 == 0);
+    let days_in_month = match month {
+        2 if leap_year => 29,
+        2 => 28,
+        4 | 6 | 9 | 11 => 30,
+        _ => 31,
+    };
+    day <= days_in_month
 }
 
 fn is_structural_encrypted_template_ref(value: &str) -> bool {
@@ -6466,6 +6482,43 @@ mod tests {
         ] {
             assert!(parse_attested_entry_drafts(payload, false).is_none());
         }
+    }
+
+    #[test]
+    fn app_attester_rejects_unsanitized_image_style_optional_fields() {
+        for payload in [
+            br#"{"amount":25,"currency":"$"}"#.as_slice(),
+            br#"{"amount":25,"currency":"$$$"}"#.as_slice(),
+            br#"{"amount":25,"currency":"egp"}"#.as_slice(),
+            br#"{"amount":25,"currency":"\uFF25\uFF27\uFF30"}"#.as_slice(),
+            br#"{"amount":25,"date":"08/07/2026"}"#.as_slice(),
+            br#"{"amount":25,"date":"0000-01-01"}"#.as_slice(),
+            br#"{"amount":25,"date":"2026-13-40"}"#.as_slice(),
+            br#"{"amount":25,"date":"2026-02-29"}"#.as_slice(),
+            br#"{"amount":25,"date":"2026-04-31"}"#.as_slice(),
+            br#"{"amount":25,"note":"receipt\u0000hidden"}"#.as_slice(),
+            br#"{"amount":25,"message":"message\u0000hidden"}"#.as_slice(),
+            br#"{"amount":25,"note":"\uD800"}"#.as_slice(),
+            br#"{"amount":25,"message":"\uDC00"}"#.as_slice(),
+            br#"{"amount":0.0049}"#.as_slice(),
+            br#"{"amount":90071992547410}"#.as_slice(),
+        ] {
+            assert!(parse_attested_entry_drafts(payload, false).is_none());
+        }
+
+        let overlong_note = format!(r#"{{"amount":25,"note":"{}"}}"#, "n".repeat(4_097));
+        assert!(parse_attested_entry_drafts(overlong_note.as_bytes(), false).is_none());
+        let overlong_message = format!(r#"{{"amount":25,"message":"{}"}}"#, "m".repeat(201));
+        assert!(parse_attested_entry_drafts(overlong_message.as_bytes(), false).is_none());
+
+        // Every rejected model field above is optional. Dropping it produces exact bytes the app
+        // can safely attest; IOU fills account defaults only after the user's final confirmation.
+        assert!(parse_attested_entry_drafts(br#"{"amount":25}"#, false).is_some());
+        assert!(parse_attested_entry_drafts(br#"{"amount":0.005}"#, false).is_some());
+        assert!(
+            parse_attested_entry_drafts(br#"{"amount":25,"date":"2024-02-29"}"#, false).is_some()
+        );
+        assert!(parse_attested_entry_drafts(br#"{"amount":90071992547409.9}"#, false).is_some());
     }
 
     #[test]

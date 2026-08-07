@@ -5,6 +5,7 @@ import {
   IOU_EXTRACTION_PROMPT,
   buildIouRules,
   buildIouOutputSchema,
+  IOU_MIN_MAJOR_AMOUNT,
 } from "./actionManifest";
 import { parseDraft } from "../entries/draft";
 import registration from "../../../docs/openchat-registration.json";
@@ -70,15 +71,17 @@ describe("invalid-draft guardrails (schema ↔ parseDraft lock-step)", () => {
     expect(buildIouOutputSchema([]).required as string[]).not.toContain("currency");
   });
 
-  it("schema declares amount > 0 via draft-07 numeric exclusiveMinimum", () => {
+  it("schema starts at the exact value that rounds to one minor unit", () => {
     const amount = (iouActionManifest.outputSchema.properties as Record<string, unknown>)
       .amount as Record<string, unknown>;
     expect(amount.type).toBe("number");
-    expect(amount.exclusiveMinimum).toBe(0);
+    expect(amount.minimum).toBe(IOU_MIN_MAJOR_AMOUNT);
+    expect(amount.exclusiveMinimum).toBeUndefined();
     // Survives the deep clone into the registered (template-enriched) schema too.
     const enriched = (buildIouOutputSchema([]).properties as Record<string, unknown>)
       .amount as Record<string, unknown>;
-    expect(enriched.exclusiveMinimum).toBe(0);
+    expect(enriched.minimum).toBe(IOU_MIN_MAJOR_AMOUNT);
+    expect(enriched.exclusiveMinimum).toBeUndefined();
   });
 
   it("parseDraft rejects a draft missing amount or with amount 0 (the manifest constraints are real)", () => {
@@ -90,8 +93,10 @@ describe("invalid-draft guardrails (schema ↔ parseDraft lock-step)", () => {
     const missing = parseDraft({ kind: "settlement", currency: "USD", note: "hi" });
     expect(missing.ok).toBe(false);
     if (!missing.ok) expect(missing.errors.join(" ")).toMatch(/amount/i);
-    // Negative amounts are equally out (exclusiveMinimum, not minimum).
+    // Negative amounts and positive values that still round to zero minor units are equally out.
     expect(parseDraft({ amount: -5, currency: "USD" }).ok).toBe(false);
+    expect(parseDraft({ amount: 0.0049, currency: "USD" }).ok).toBe(false);
+    expect(parseDraft({ amount: IOU_MIN_MAJOR_AMOUNT, currency: "USD" }).ok).toBe(true);
   });
 });
 

@@ -146,6 +146,12 @@ Each object may contain these fields:
 Include a field only when the input supports it; omit any field you are unsure of. Never invent
 an amount, a counterparty, or any other value that is not present in the input.`;
 
+// The canister attester rounds major units to integer minor units. Half a minor unit is the exact
+// smallest positive major-unit value that rounds to one; the maximum remains within JavaScript's
+// exact integer range after multiplying by 100.
+export const IOU_MIN_MAJOR_AMOUNT = 0.005;
+export const IOU_MAX_MAJOR_AMOUNT = Number.MAX_SAFE_INTEGER / 100;
+
 // Extraction rules registered alongside the prompt (OpenChat's generic rules engine executes
 // them; the keywords/values here are IOU's data). "override" keyword_map + normalize run in the
 // deterministic post-pass, so IOU's own type vocabulary and numeric forms like "26k" are policy,
@@ -214,18 +220,32 @@ export const iouActionManifest: IouActionManifest = {
       kind: { enum: ["settlement", "iou"] },
       // number ONLY: string amounts like "26k" are handled by the k_m_suffix normalize rule
       // before schema conformance, so anything still non-numeric here is dropped, not forwarded.
-      // exclusiveMinimum (draft-07 numeric form) declares amount > 0 so OpenChat's post-generation
-      // schema check drops zero/negative extractions (e.g. "hi" → amount 0, live 2026-07-22) as
-      // no_extraction instead of posting a card parseDraft would reject anyway.
-      amount: { type: "number", exclusiveMinimum: 0 },
+      // minimum mirrors the attester's round-to-minor boundary, so positive values that still round
+      // to zero are dropped before provenance instead of producing an app-rejected card.
+      amount: {
+        type: "number",
+        minimum: IOU_MIN_MAJOR_AMOUNT,
+        maximum: IOU_MAX_MAJOR_AMOUNT,
+      },
       // OpenChat deliberately rejects JSON Schema `pattern`: app-supplied regex execution is
-      // unbounded. These are hints only; IOU's authenticated import path remains authoritative.
-      currency: { type: "string" },
+      // unbounded. These bounded declarative constraints are deterministic; IOU's authenticated
+      // attester remains authoritative.
+      currency: {
+        type: "string",
+        minLength: 3,
+        maxLength: 3,
+        format: "ascii-uppercase",
+      },
       direction: { enum: ["credit", "debt"] },
-      date: { type: "string" },
-      note: { type: "string" },
+      date: {
+        type: "string",
+        minLength: 10,
+        maxLength: 10,
+        format: "date",
+      },
+      note: { type: "string", maxLength: 4_096, format: "utf8-no-nul" },
       // Declared so conformToSchema keeps it — an undeclared key is dropped before the card is built.
-      message: { type: "string" },
+      message: { type: "string", maxLength: 200, format: "utf8-no-nul" },
     },
     // Only `amount` is required — it can't be recovered if absent. `currency` is intentionally NOT
     // required: IOU fills a missing currency from the user's default (prefs.defaultCurrency) on
