@@ -4,7 +4,7 @@ import {
   classifySentImageResource,
   journeySourceText,
   matchesExactImageContentEvidence,
-  matchesExactMessageInventory,
+  matchesStableDraftMessageBoundary,
   matchesRunCardCandidate,
   retainsNonceBoundCardEvidence,
   selectFreshOwnedSourceCandidate,
@@ -19,46 +19,170 @@ const source: StableMessageRef = {
 };
 
 describe('live journey source policy', () => {
-  it('requires both the exact message-id set and DOM digest at a draft boundary', () => {
+  it('allows mounted-message virtualization while preserving stable draft-only boundaries', () => {
+    const expected = {
+      maxMessageIndex: 10,
+      maxEventIndex: 11,
+      records: [
+        {
+          messageId: '3',
+          messageIndex: 8,
+          eventIndex: 9,
+          evidenceDigest: 'a'.repeat(64),
+        },
+        {
+          messageId: '9',
+          messageIndex: 10,
+          eventIndex: 11,
+          evidenceDigest: 'b'.repeat(64),
+        },
+      ],
+    };
+
     expect(
-      matchesExactMessageInventory({
-        expectedMessageIds: ['9', '3'],
-        observedMessageIds: new Set(['3', '9']),
-        expectedDigest: 'a'.repeat(64),
-        observedDigest: 'a'.repeat(64),
+      matchesStableDraftMessageBoundary(expected, {
+        maxMessageIndex: 10,
+        maxEventIndex: 11,
+        records: [expected.records[1]],
       }),
     ).toBe(true);
 
-    for (const mismatch of [
+    expect(
+      matchesStableDraftMessageBoundary(expected, {
+        maxMessageIndex: 10,
+        maxEventIndex: 11,
+        records: [
+          {
+            messageId: '2',
+            messageIndex: 7,
+            eventIndex: 8,
+            evidenceDigest: 'c'.repeat(64),
+          },
+          expected.records[1],
+        ],
+      }),
+    ).toBe(true);
+  });
+
+  it('rejects fresh, changed, ambiguous, or uncorrelated draft-boundary observations', () => {
+    const expected = {
+      maxMessageIndex: 10,
+      maxEventIndex: 11,
+      records: [
+        {
+          messageId: '9',
+          messageIndex: 10,
+          eventIndex: 11,
+          evidenceDigest: 'a'.repeat(64),
+        },
+      ],
+    };
+    const mismatches = [
       {
-        observedMessageIds: new Set(['3', '10']),
-        observedDigest: 'a'.repeat(64),
+        maxMessageIndex: 12,
+        maxEventIndex: 11,
+        records: [
+          expected.records[0],
+          {
+            messageId: '10',
+            messageIndex: 12,
+            eventIndex: 11,
+            evidenceDigest: 'b'.repeat(64),
+          },
+        ],
       },
       {
-        observedMessageIds: new Set(['3', '9']),
-        observedDigest: 'b'.repeat(64),
+        maxMessageIndex: 10,
+        maxEventIndex: 12,
+        records: [
+          expected.records[0],
+          {
+            messageId: '10',
+            messageIndex: 9,
+            eventIndex: 12,
+            evidenceDigest: 'b'.repeat(64),
+          },
+        ],
       },
       {
-        observedMessageIds: new Set(['3']),
-        observedDigest: 'a'.repeat(64),
+        maxMessageIndex: 10,
+        maxEventIndex: 11,
+        records: [{ ...expected.records[0], evidenceDigest: 'b'.repeat(64) }],
       },
-    ]) {
+      {
+        maxMessageIndex: 9,
+        maxEventIndex: 10,
+        records: [
+          {
+            ...expected.records[0],
+            messageIndex: 9,
+            eventIndex: 10,
+          },
+        ],
+      },
+      {
+        maxMessageIndex: 10,
+        maxEventIndex: 11,
+        records: [
+          {
+            messageId: '9',
+            messageIndex: 9,
+            eventIndex: 10,
+            evidenceDigest: 'a'.repeat(64),
+          },
+          {
+            messageId: '8',
+            messageIndex: 10,
+            eventIndex: 11,
+            evidenceDigest: 'b'.repeat(64),
+          },
+        ],
+      },
+      {
+        maxMessageIndex: -1,
+        maxEventIndex: -1,
+        records: [],
+      },
+      {
+        maxMessageIndex: 9,
+        maxEventIndex: 10,
+        records: [
+          {
+            messageId: '8',
+            messageIndex: 9,
+            eventIndex: 10,
+            evidenceDigest: 'b'.repeat(64),
+          },
+        ],
+      },
+    ];
+
+    for (const observed of mismatches) {
       expect(
-        matchesExactMessageInventory({
-          expectedMessageIds: ['9', '3'],
-          expectedDigest: 'a'.repeat(64),
-          ...mismatch,
-        }),
+        matchesStableDraftMessageBoundary(expected, observed),
       ).toBe(false);
     }
+
     expect(
-      matchesExactMessageInventory({
-        expectedMessageIds: ['9', '9'],
-        observedMessageIds: new Set(['9']),
-        expectedDigest: 'a'.repeat(64),
-        observedDigest: 'a'.repeat(64),
+      matchesStableDraftMessageBoundary(expected, {
+        maxMessageIndex: 10,
+        maxEventIndex: 11,
+        records: [expected.records[0], expected.records[0]],
       }),
     ).toBe(false);
+    expect(
+      matchesStableDraftMessageBoundary(expected, {
+        maxMessageIndex: 10,
+        maxEventIndex: 11,
+        records: [{ ...expected.records[0], evidenceDigest: 'not-a-digest' }],
+      }),
+    ).toBe(false);
+    expect(
+      matchesStableDraftMessageBoundary(
+        { maxMessageIndex: -1, maxEventIndex: -1, records: [] },
+        { maxMessageIndex: -1, maxEventIndex: -1, records: [] },
+      ),
+    ).toBe(true);
   });
 
   it('waits through OpenChat blob and thumbnail fallbacks until the exact HTTP upload is rendered', () => {

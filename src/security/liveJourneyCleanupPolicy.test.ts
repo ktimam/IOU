@@ -74,7 +74,7 @@ describe("live OpenChat journey cleanup policy", () => {
   it("carries the pre-send stable-coordinate floor through image capture and recovery", () => {
     const baseline = between(
       "async function captureStableMessageBaseline(",
-      "async function captureExactMessageInventoryDigest(",
+      "async function captureStableDraftMessageBoundary(",
     );
     expect(baseline).toContain("maxMessageIndex");
     expect(baseline).toContain("maxEventIndex");
@@ -415,6 +415,33 @@ describe("live OpenChat journey cleanup policy", () => {
   });
 
   it("retains an exact partial draft binding before byte hashing can fail", () => {
+    const stableBoundary = between(
+      "async function captureStableDraftMessageBoundary(",
+      "async function assertStableDraftMessageBoundary(",
+    );
+    expect(stableBoundary.match(/evaluateAll\(/g) ?? []).toHaveLength(1);
+    expectOrdered(stableBoundary, [
+      "const records:",
+      "stableEvidence: JSON.stringify({",
+      "attachmentImageCount",
+      "evidenceDigest:",
+      "maxMessageIndex:",
+      "maxEventIndex:",
+      "matchesStableDraftMessageBoundary(boundary, boundary)",
+    ]);
+    expect(stableBoundary).not.toContain("attachmentUrls");
+    expect(stableBoundary).not.toContain("image.src");
+
+    const assertion = between(
+      "async function assertStableDraftMessageBoundary(",
+      "async function digestImageResource(",
+    );
+    expectOrdered(assertion, [
+      "captureStableDraftMessageBoundary(page)",
+      "matchesStableDraftMessageBoundary(expected, observed)",
+      "throw new Error(label)",
+    ]);
+
     const boundary = between(
       "async function prepareExactDraftAttachmentSelection(",
       "async function installExactDraftBlobCapture(",
@@ -423,8 +450,7 @@ describe("live OpenChat journey cleanup policy", () => {
       "assertNoPreexistingDraftAttachment(page, composer)",
       'ancestor::*[contains(concat(" ", normalize-space(@class), " "), " footer ")][1]',
       'footer.locator(".ProseMirror")',
-      "captureMessageIdBaseline(page)",
-      "captureExactMessageInventoryDigest(page)",
+      "captureStableDraftMessageBoundary(page)",
       "node.setAttribute(attribute, footerMarker)",
     ]);
 
@@ -440,10 +466,10 @@ describe("live OpenChat journey cleanup policy", () => {
       "selected image draft has",
       "const footer = exactDraft.locator(",
       'footer.locator(".ProseMirror")',
-      "matchesExactMessageInventory({",
-      "throw new Error(\"message inventory changed while binding the selected image draft\")",
       "return { ...binding, draftUrl }",
     ]);
+    expect(binding).not.toContain("assertStableDraftMessageBoundary(");
+    expect(binding).not.toContain("matchesStableDraftMessageBoundary(");
 
     const sourceSend = between(
       "sourceBaseline = await captureStableMessageBaseline(proposerOC)",
@@ -453,6 +479,7 @@ describe("live OpenChat journey cleanup policy", () => {
       "exactDraftSelectionBoundary = await prepareExactDraftAttachmentSelection(",
       "await exactFileInput.setInputFiles(SOURCE_IMAGE_PATH)",
       "exactPartialDraftBinding = await retainExactPartialDraftBinding(",
+      "await assertStableDraftMessageBoundary(",
       "exactDraftImageBinding = await captureExactDraftImageContent(",
     ]);
     expect(sourceSend).toContain("exactPartialDraftBinding");
@@ -584,8 +611,7 @@ describe("live OpenChat journey cleanup policy", () => {
       "binding.footerMarker",
       'footer.locator(".ProseMirror")',
       "image draft composer is not empty",
-      "captureMessageIdBaseline(page)",
-      "captureExactMessageInventoryDigest(page)",
+      "await assertStableDraftMessageBoundary(",
       "const mobileContainer = exactDraft.locator(",
       '" message_entry_wrapper "',
       'visibleMobileContainers[0].locator(".close > button.icon_button[type=button]")',
@@ -594,18 +620,14 @@ describe("live OpenChat journey cleanup policy", () => {
       "CLOSE_ICON_PATH",
       "await controls[0].click",
       "unsent draft attachment remained visible",
-      "captureMessageIdBaseline(page)",
-      "captureExactMessageInventoryDigest(page)",
-      "message inventory changed while removing an unsent draft",
+      "await assertStableDraftMessageBoundary(",
     ]);
     expect(cleanup).toContain("same exact footer");
-    expect(cleanup).toContain("expectedMessageIds: binding.messageIds");
-    expect(cleanup).toContain("expectedDigest: binding.messageInventoryDigest");
     expect(cleanup).toContain("binding.draftUrl");
-    expect(cleanup).toContain("matchesExactMessageInventory({");
-    expect(cleanup).toContain("binding.messageInventoryDigest");
-    expect(cleanup).toContain("binding.messageIds");
+    expect(cleanup).toContain("binding.messageBoundary");
     expect(cleanup).toContain("binding.footerMarker");
+    expect(cleanup).not.toContain("captureExactMessageInventoryDigest");
+    expect(cleanup).not.toContain("matchesExactMessageInventory");
     expect(cleanup).not.toContain('page.locator(".footer .open-draw")');
     expect(cleanup).toContain("expected one exact draft-removal control");
     expect(cleanup).not.toContain(".last()");

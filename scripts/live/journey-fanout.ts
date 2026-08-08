@@ -42,14 +42,15 @@ import {
   isImmediateStableSuccessor,
   journeySourceText,
   matchesExactImageContentEvidence,
-  matchesExactMessageInventory,
   matchesRunCardCandidate,
+  matchesStableDraftMessageBoundary,
   retainsNonceBoundCardEvidence,
   sameStableMessage,
   selectFreshOwnedSourceCandidate,
   shouldRetryExactMessageDeletion,
   type ExactImageContentEvidence,
   type FreshSourceCandidate,
+  type StableDraftMessageBoundary,
   type StableMessageRef,
 } from "./journeySafety";
 import { OPENCHAT_MESSAGE_TEXT_SELECTOR } from "./openChatArtifactCleanup";
@@ -356,8 +357,7 @@ type SourceMessageEvidence =
 
 type ExactDraftSelectionBoundary = Readonly<{
   footerMarker: string;
-  messageIds: readonly string[];
-  messageInventoryDigest: string;
+  messageBoundary: StableDraftMessageBoundary;
 }>;
 
 type ExactPartialDraftBinding = ExactDraftSelectionBoundary &
@@ -473,15 +473,32 @@ async function captureStableMessageBaseline(page: Page): Promise<StableMessageBa
   };
 }
 
-async function captureMessageIdBaseline(page: Page): Promise<Set<string>> {
-  return new Set((await captureStableMessageBaseline(page)).messageIds);
-}
-
-async function captureExactMessageInventoryDigest(page: Page): Promise<string> {
-  const records = await page.locator(MESSAGE_WRAPPER_SELECTOR).evaluateAll(
+async function captureStableDraftMessageBoundary(
+  page: Page,
+): Promise<StableDraftMessageBoundary> {
+  const observed = await page.locator(MESSAGE_WRAPPER_SELECTOR).evaluateAll(
     (wrappers, { textSelector, attachmentSelector }) => {
-      const result: string[] = [];
+      const records: Array<{
+        messageId: string;
+        messageIndex: number;
+        eventIndex: number;
+        stableEvidence: string;
+      }> = [];
+      let invalid = 0;
       for (const wrapper of wrappers as HTMLElement[]) {
+        const messageId = wrapper.dataset.id ?? "";
+        const rawMessageIndex = wrapper.dataset.index ?? "";
+        const event = /^event-(\d+)$/.exec(wrapper.id);
+        if (!/^\d+$/.test(messageId) || !/^\d+$/.test(rawMessageIndex) || event === null) {
+          invalid++;
+          continue;
+        }
+        const messageIndex = Number(rawMessageIndex);
+        const eventIndex = Number(event[1]);
+        if (!Number.isSafeInteger(messageIndex) || !Number.isSafeInteger(eventIndex)) {
+          invalid++;
+          continue;
+        }
         const texts: string[] = [];
         for (const node of wrapper.querySelectorAll<HTMLElement>(textSelector)) {
           const normalized = node.innerText.replace(/\s+/g, " ").trim();
@@ -489,11 +506,7 @@ async function captureExactMessageInventoryDigest(page: Page): Promise<string> {
         }
         texts.sort();
 
-        const attachmentUrls: string[] = [];
-        for (const image of wrapper.querySelectorAll<HTMLImageElement>(attachmentSelector)) {
-          attachmentUrls.push(image.src);
-        }
-        attachmentUrls.sort();
+        const attachmentImageCount = wrapper.querySelectorAll(attachmentSelector).length;
 
         const cardIdentities: string[] = [];
         for (const card of wrapper.querySelectorAll<HTMLElement>(".action-card")) {
@@ -504,32 +517,73 @@ async function captureExactMessageInventoryDigest(page: Page): Promise<string> {
         }
         cardIdentities.sort();
 
-        result.push(
-          JSON.stringify({
-            messageId: wrapper.dataset.id ?? "",
-            messageIndex: wrapper.dataset.index ?? "",
-            eventId: wrapper.id,
+        records.push({
+          messageId,
+          messageIndex,
+          eventIndex,
+          stableEvidence: JSON.stringify({
             senderOwned:
               wrapper.classList.contains("me") ||
               (wrapper.classList.contains("container") &&
                 getComputedStyle(wrapper).justifyContent === "flex-end"),
             texts,
-            attachmentUrls,
+            attachmentImageCount,
             cardIdentities,
           }),
-        );
+        });
       }
-      result.sort();
-      return result;
+      records.sort(
+        (left, right) =>
+          left.messageIndex - right.messageIndex || left.eventIndex - right.eventIndex,
+      );
+      return { records, invalid };
     },
     {
       textSelector: OPENCHAT_MESSAGE_TEXT_SELECTOR,
       attachmentSelector: ATTACHMENT_IMAGE_SELECTOR,
     },
   );
-  const bytes = new TextEncoder().encode(JSON.stringify(records));
-  const hash = new Uint8Array(await webcrypto.subtle.digest("SHA-256", bytes));
-  return [...hash].map((byte) => byte.toString(16).padStart(2, "0")).join("");
+  if (observed.invalid !== 0) {
+    throw new Error(`draft boundary contains ${observed.invalid} invalid stable wrapper(s)`);
+  }
+  const records = await Promise.all(
+    observed.records.map(async ({ stableEvidence, ...message }) => {
+      const bytes = new TextEncoder().encode(stableEvidence);
+      const hash = new Uint8Array(await webcrypto.subtle.digest("SHA-256", bytes));
+      return {
+        ...message,
+        evidenceDigest: [...hash]
+          .map((byte) => byte.toString(16).padStart(2, "0"))
+          .join(""),
+      };
+    }),
+  );
+  const boundary: StableDraftMessageBoundary = {
+    maxMessageIndex: records.reduce(
+      (maximum, record) => Math.max(maximum, record.messageIndex),
+      -1,
+    ),
+    maxEventIndex: records.reduce(
+      (maximum, record) => Math.max(maximum, record.eventIndex),
+      -1,
+    ),
+    records,
+  };
+  if (!matchesStableDraftMessageBoundary(boundary, boundary)) {
+    throw new Error("draft boundary contains ambiguous stable message coordinates");
+  }
+  return boundary;
+}
+
+async function assertStableDraftMessageBoundary(
+  page: Page,
+  expected: StableDraftMessageBoundary,
+  label: string,
+): Promise<void> {
+  const observed = await captureStableDraftMessageBoundary(page);
+  if (!matchesStableDraftMessageBoundary(expected, observed)) {
+    throw new Error(label);
+  }
 }
 
 async function digestImageResource(
@@ -640,8 +694,7 @@ async function prepareExactDraftAttachmentSelection(
   }
   if (!sameComposer) throw new Error("image journey selected composer changed exact footer identity");
 
-  const messageIds = [...(await captureMessageIdBaseline(page))].sort();
-  const messageInventoryDigest = await captureExactMessageInventoryDigest(page);
+  const messageBoundary = await captureStableDraftMessageBoundary(page);
   await footer.evaluate(
     (node, { attribute, footerMarker }) => {
       if (node.hasAttribute(attribute)) throw new Error("draft footer marker already exists");
@@ -649,7 +702,7 @@ async function prepareExactDraftAttachmentSelection(
     },
     { attribute: DRAFT_FOOTER_MARKER_ATTRIBUTE, footerMarker },
   );
-  return { footerMarker, messageIds, messageInventoryDigest };
+  return { footerMarker, messageBoundary };
 }
 
 async function installExactDraftBlobCapture(page: Page): Promise<void> {
@@ -717,18 +770,6 @@ async function retainExactPartialDraftBinding(
     (await composers[0].innerText()).replace(/\s+/g, " ").trim() !== ""
   ) {
     throw new Error("selected image draft does not share one empty composer in its exact footer");
-  }
-  const observedMessageIds = await captureMessageIdBaseline(page);
-  const observedDigest = await captureExactMessageInventoryDigest(page);
-  if (
-    !matchesExactMessageInventory({
-      expectedMessageIds: binding.messageIds,
-      observedMessageIds,
-      expectedDigest: binding.messageInventoryDigest,
-      observedDigest,
-    })
-  ) {
-    throw new Error("message inventory changed while binding the selected image draft");
   }
   return { ...binding, draftUrl };
 }
@@ -798,8 +839,7 @@ async function clearExactUnsentDraftAttachment(
   if (
     !/^blob:/.test(binding.draftUrl) ||
     !/^[a-z0-9-]+$/i.test(binding.footerMarker) ||
-    binding.messageIds.length !== new Set(binding.messageIds).size ||
-    !/^[0-9a-f]{64}$/.test(binding.messageInventoryDigest)
+    !matchesStableDraftMessageBoundary(binding.messageBoundary, binding.messageBoundary)
   ) {
     throw new Error("exact unsent draft binding is invalid");
   }
@@ -843,18 +883,11 @@ async function clearExactUnsentDraftAttachment(
     throw new Error("image draft composer is not empty; refusing attachment-only cleanup");
   }
 
-  const currentMessageIds = await captureMessageIdBaseline(page);
-  const currentMessageDigest = await captureExactMessageInventoryDigest(page);
-  if (
-    !matchesExactMessageInventory({
-      expectedMessageIds: binding.messageIds,
-      observedMessageIds: currentMessageIds,
-      expectedDigest: binding.messageInventoryDigest,
-      observedDigest: currentMessageDigest,
-    })
-  ) {
-    throw new Error("message inventory changed after the exact image draft was bound");
-  }
+  await assertStableDraftMessageBoundary(
+    page,
+    binding.messageBoundary,
+    "stable message boundary changed after the exact image draft was bound",
+  );
   if (drafts.length === 0) return false;
 
   const exactDraft = drafts[0];
@@ -919,18 +952,11 @@ async function clearExactUnsentDraftAttachment(
   ) {
     throw new Error("same-footer composer changed while removing an unsent draft");
   }
-  const afterMessageIds = await captureMessageIdBaseline(page);
-  const afterMessageDigest = await captureExactMessageInventoryDigest(page);
-  if (
-    !matchesExactMessageInventory({
-      expectedMessageIds: binding.messageIds,
-      observedMessageIds: afterMessageIds,
-      expectedDigest: binding.messageInventoryDigest,
-      observedDigest: afterMessageDigest,
-    })
-  ) {
-    throw new Error("message inventory changed while removing an unsent draft");
-  }
+  await assertStableDraftMessageBoundary(
+    page,
+    binding.messageBoundary,
+    "stable message boundary changed while removing an unsent draft",
+  );
   return true;
 }
 
@@ -2676,6 +2702,11 @@ async function main() {
       exactPartialDraftBinding = await retainExactPartialDraftBinding(
         proposerOC,
         exactDraftSelectionBoundary,
+      );
+      await assertStableDraftMessageBoundary(
+        proposerOC,
+        exactPartialDraftBinding.messageBoundary,
+        "stable message boundary changed while binding the selected image draft",
       );
       exactDraftImageBinding = await captureExactDraftImageContent(
         proposerOC,

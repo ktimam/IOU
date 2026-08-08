@@ -10,6 +10,17 @@ export type ExactImageContentEvidence = Readonly<{
   mimeType: string;
 }>;
 
+export type StableDraftMessageRecord = StableMessageRef &
+  Readonly<{
+    evidenceDigest: string;
+  }>;
+
+export type StableDraftMessageBoundary = Readonly<{
+  maxMessageIndex: number;
+  maxEventIndex: number;
+  records: readonly StableDraftMessageRecord[];
+}>;
+
 export type SentImageResourceState = Readonly<{
   attributeSrc: string;
   src: string;
@@ -99,28 +110,90 @@ export function matchesExactImageContentEvidence(
   );
 }
 
-/** Preserve a fail-closed DOM boundary around a draft-only UI mutation. */
-export function matchesExactMessageInventory(input: Readonly<{
-  expectedMessageIds: readonly string[];
-  observedMessageIds: ReadonlySet<string>;
-  expectedDigest: string;
-  observedDigest: string;
-}>): boolean {
+function validStableDraftMessageBoundary(boundary: StableDraftMessageBoundary): boolean {
   if (
-    !/^[0-9a-f]{64}$/.test(input.expectedDigest) ||
-    !/^[0-9a-f]{64}$/.test(input.observedDigest) ||
-    input.expectedDigest !== input.observedDigest
+    !Number.isSafeInteger(boundary.maxMessageIndex) ||
+    boundary.maxMessageIndex < -1 ||
+    !Number.isSafeInteger(boundary.maxEventIndex) ||
+    boundary.maxEventIndex < -1
   ) {
     return false;
   }
-  const expectedIds = new Set(input.expectedMessageIds);
+  const messageIds = new Set<string>();
+  const coordinateKeys = new Set<string>();
+  let maxMessageIndex = -1;
+  let maxEventIndex = -1;
+  for (const record of boundary.records) {
+    if (
+      !/^\d+$/.test(record.messageId) ||
+      !Number.isSafeInteger(record.messageIndex) ||
+      record.messageIndex < 0 ||
+      !Number.isSafeInteger(record.eventIndex) ||
+      record.eventIndex < 0 ||
+      !/^[0-9a-f]{64}$/.test(record.evidenceDigest)
+    ) {
+      return false;
+    }
+    const coordinateKey = `${record.messageIndex}:${record.eventIndex}`;
+    if (messageIds.has(record.messageId) || coordinateKeys.has(coordinateKey)) return false;
+    messageIds.add(record.messageId);
+    coordinateKeys.add(coordinateKey);
+    maxMessageIndex = Math.max(maxMessageIndex, record.messageIndex);
+    maxEventIndex = Math.max(maxEventIndex, record.eventIndex);
+  }
+  return (
+    boundary.maxMessageIndex === maxMessageIndex && boundary.maxEventIndex === maxEventIndex
+  );
+}
+
+/**
+ * Preserve a fail-closed stable-coordinate boundary around a draft-only UI mutation. OpenChat may
+ * unmount old wrappers when a large attachment preview changes the viewport, so exact mounted-set
+ * equality is neither stable nor useful. Previously hidden historical wrappers may appear, and
+ * baseline wrappers may disappear, but no fresh coordinate or changed overlapping record may pass.
+ */
+export function matchesStableDraftMessageBoundary(
+  expected: StableDraftMessageBoundary,
+  observed: StableDraftMessageBoundary,
+): boolean {
   if (
-    expectedIds.size !== input.expectedMessageIds.length ||
-    expectedIds.size !== input.observedMessageIds.size
+    !validStableDraftMessageBoundary(expected) ||
+    !validStableDraftMessageBoundary(observed) ||
+    observed.maxMessageIndex !== expected.maxMessageIndex ||
+    observed.maxEventIndex !== expected.maxEventIndex
   ) {
     return false;
   }
-  return [...expectedIds].every((messageId) => input.observedMessageIds.has(messageId));
+  if (expected.records.length === 0) return observed.records.length === 0;
+
+  const expectedByMessageId = new Map(
+    expected.records.map((record) => [record.messageId, record] as const),
+  );
+  const expectedByCoordinates = new Map(
+    expected.records.map(
+      (record) => [`${record.messageIndex}:${record.eventIndex}`, record] as const,
+    ),
+  );
+  let intersections = 0;
+  for (const record of observed.records) {
+    const byMessageId = expectedByMessageId.get(record.messageId);
+    const byCoordinates = expectedByCoordinates.get(
+      `${record.messageIndex}:${record.eventIndex}`,
+    );
+    if (byMessageId === undefined && byCoordinates === undefined) continue;
+    if (
+      byMessageId === undefined ||
+      byCoordinates === undefined ||
+      byMessageId !== byCoordinates ||
+      byMessageId.messageIndex !== record.messageIndex ||
+      byMessageId.eventIndex !== record.eventIndex ||
+      byMessageId.evidenceDigest !== record.evidenceDigest
+    ) {
+      return false;
+    }
+    intersections++;
+  }
+  return intersections > 0;
 }
 
 export type FreshSourceCandidate = StableMessageRef &
