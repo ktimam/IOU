@@ -797,7 +797,11 @@ describe("live OpenChat journey cleanup policy", () => {
       "entryCount,",
       "kind: await transaction.inputValue()",
       "date: await date.inputValue()",
+      "await Promise.all([",
+      "waitForHostAddEnabled(senderCard!",
+      "waitForHostAddEnabled(confirmerCard!",
       "await noteControl.fill(note)",
+      "await senderNoteControl.fill(note)",
     ]);
     expect(acceptance).not.toContain('transaction.selectOption("iou")');
     expect(acceptance).not.toContain("date.fill(");

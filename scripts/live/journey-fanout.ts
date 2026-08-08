@@ -2990,6 +2990,18 @@ async function main() {
       "the image-only model produced one IOU/350 EGP/credit/no-date entry before card editing",
     );
 
+    const senderHostAdd = senderCard!.card.getByRole("button", {
+      name: "Add to IOU",
+      exact: true,
+    });
+    const confirmerHostAdd = confirmerCard!.card.getByRole("button", {
+      name: "Add to IOU",
+      exact: true,
+    });
+    await Promise.all([
+      waitForHostAddEnabled(senderCard!, senderHostAdd),
+      waitForHostAddEnabled(confirmerCard!, confirmerHostAdd),
+    ]);
     await noteControl.fill(note);
     const senderNoteControl = await requireExactlyOneCardControl(senderCard!.frame, "Note");
     await senderNoteControl.fill(note);
