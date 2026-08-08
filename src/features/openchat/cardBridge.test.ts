@@ -5,6 +5,7 @@ import {
   CARD_RECIPIENT_KEY_SCHEME,
   MAX_CARD_ENTRIES,
   buildCancel,
+  buildCollectedConfirm,
   buildConfirm,
   buildConfirmPayload,
   buildMultiConfirmPayload,
@@ -17,6 +18,7 @@ import {
   parseBootstrap,
   cardParentTargetOrigin,
   parseBusy,
+  parseCollectConfirm,
   parseInit,
   parsePrivateContextRequest,
   type CardFormState,
@@ -421,6 +423,31 @@ describe("outbound bridge messages", () => {
     ];
     expect(buildConfirm(FRAME_NONCE, payload).payload).toEqual(payload);
   });
+
+  it("replies to an exact host collection challenge with the current payload", () => {
+    const requestNonce = base64Url(new Uint8Array(32).fill(8));
+    const request = {
+      type: CARD_MSG.collectConfirm,
+      version: CARD_INIT_VERSION,
+      frameNonce: FRAME_NONCE,
+      requestNonce,
+    };
+    expect(parseCollectConfirm(request, FRAME_NONCE)).toEqual({ requestNonce });
+    expect(parseCollectConfirm({ ...request, frameNonce: OTHER_NONCE }, FRAME_NONCE)).toBeNull();
+    expect(parseCollectConfirm({ ...request, requestNonce: "short" }, FRAME_NONCE)).toBeNull();
+    expect(parseCollectConfirm({ ...request, version: 1 }, FRAME_NONCE)).toBeNull();
+    expect(parseCollectConfirm({ ...request, type: CARD_MSG.confirm }, FRAME_NONCE)).toBeNull();
+
+    const payload = { amount: 1, currency: "USD", direction: "credit" as const };
+    expect(buildCollectedConfirm(FRAME_NONCE, requestNonce, payload)).toEqual({
+      type: CARD_MSG.confirmCollected,
+      version: CARD_INIT_VERSION,
+      frameNonce: FRAME_NONCE,
+      requestNonce,
+      payload,
+    });
+    expect(() => buildCollectedConfirm(FRAME_NONCE, "bad", payload)).toThrow();
+  });
 });
 
 describe("host busy signal", () => {
@@ -513,6 +540,17 @@ describe("registered card fields survive init to confirm", () => {
     }
     expect("template" in payload).toBe(false);
     expect("template_ref" in payload).toBe(false);
+  });
+
+  it("round-trips independent edited dates for single and multi cards", () => {
+    const single = initToFormState({ amount: 25, date: "2026-08-08" });
+    expect(buildConfirmPayload({ ...single, date: "2026-08-09" }).date).toBe("2026-08-09");
+
+    const multi = buildMultiConfirmPayload([
+      { ...single, date: "2026-08-10" },
+      { ...single, amount: "50", date: "2026-08-11" },
+    ]);
+    expect(multi.map((row) => row.date)).toEqual(["2026-08-10", "2026-08-11"]);
   });
 });
 

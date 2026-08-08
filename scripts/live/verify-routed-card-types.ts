@@ -7,9 +7,9 @@
 // The test proposes one fresh card in a disposable tab using OpenChat's explicit URL-only manual
 // extraction seam, then deletes only that nonce-bound source/card and closes the disposable tab
 // without changing Father's signed-in tab or installed model.
-// It proves that the same sender card reconciles optimistic→verified/actionable in place (including
-// the explicit Load app card gate), then that the public card starts with no private types, explicit
-// host consent hydrates only the routed account, and the unrelated Family type never reaches it.
+// It proves that the same sender card reconciles optimistic→verified/actionable in place, the
+// trusted app UI loads automatically, durable host pairing hydrates only the routed account, and the
+// unrelated Family type never reaches it.
 import {
   chromium,
   type Dialog,
@@ -19,6 +19,7 @@ import {
   type Page,
 } from "@playwright/test";
 import { webcrypto } from "node:crypto";
+import { CDP_PORTS } from "./cdpPorts";
 import {
   exactOpenChatMessageWrapper,
   finalizeOpenChatArtifactCleanup,
@@ -30,7 +31,9 @@ import {
   TemporaryTabScope,
 } from "./temporaryBrowserTab";
 
-const FATHER_OPENCHAT_PORT = Number(process.env.FATHER_OPENCHAT_PORT || 9222);
+const FATHER_OPENCHAT_PORT = Number(
+  process.env.FATHER_OPENCHAT_PORT || CDP_PORTS.fatherOpenChat,
+);
 const OPENCHAT_URL = process.env.OPENCHAT_URL || "http://localhost:5003";
 
 function check(condition: boolean, label: string): void {
@@ -42,7 +45,7 @@ type LoadedRunCard = {
   card: Locator;
   frame: FrameLocator;
   observerId: string;
-  loadedFromGate: boolean;
+  loadedAutomatically: boolean;
 };
 
 async function installNewCardObserver(page: Page, tag: string): Promise<void> {
@@ -112,8 +115,7 @@ async function removeNewCardObserver(page: Page): Promise<void> {
   }).catch(() => {});
 }
 
-async function findAndLoadRunCard(page: Page, note: string): Promise<LoadedRunCard | null> {
-  const loadedIds = new Set<string>();
+async function findAutoLoadedRunCard(page: Page, note: string): Promise<LoadedRunCard | null> {
   const deadline = Date.now() + 45_000;
   while (Date.now() < deadline) {
     const cards = page.locator(".action-card[data-iou-routed-card-id]");
@@ -121,7 +123,11 @@ async function findAndLoadRunCard(page: Page, note: string): Promise<LoadedRunCa
       const card = cards.nth(index);
       const observerId = await card.getAttribute("data-iou-routed-card-id");
       if (!observerId || !(await card.isVisible().catch(() => false))) continue;
-      const isIou = await card.getByText(/Directory entry:\s*iou/i).first().isVisible().catch(() => false);
+      const isIou =
+        (await card.locator(".app-name").count().catch(() => 0)) === 1 &&
+        (await card.locator(".app-name").innerText().catch(() => ""))
+          .trim()
+          .toLocaleLowerCase("en-US") === "iou";
       if (!isIou) continue;
       const untrusted = await card
         .getByText(/card content is untrusted|Untrusted card text/i)
@@ -130,11 +136,9 @@ async function findAndLoadRunCard(page: Page, note: string): Promise<LoadedRunCa
         .catch(() => false);
       if (untrusted) continue;
       if ((await card.locator("iframe").count()) === 0) {
-        const load = card.getByRole("button", { name: /^(Load app card|Retry app card)$/ });
-        if (await load.isVisible().catch(() => false)) {
-          if (!(await load.isEnabled())) throw new Error("the verified Load app card gate is disabled");
-          await load.click({ timeout: 10_000 });
-          loadedIds.add(observerId);
+        const obsoleteLoad = card.getByRole("button", { name: "Load app card", exact: true });
+        if (await obsoleteLoad.isVisible().catch(() => false)) {
+          throw new Error("manual Load app card gate is a regression");
         }
       }
       if ((await card.locator("iframe").count()) === 0) continue;
@@ -146,7 +150,7 @@ async function findAndLoadRunCard(page: Page, note: string): Promise<LoadedRunCa
         values.push(await inputs.nth(input).inputValue().catch(() => ""));
       }
       if (values.includes(note)) {
-        return { card, frame, observerId, loadedFromGate: loadedIds.has(observerId) };
+        return { card, frame, observerId, loadedAutomatically: true };
       }
     }
     await page.waitForTimeout(400);
@@ -290,46 +294,51 @@ async function main(): Promise<void> {
     navigationListenerInstalled = true;
 
     // A reused committed card cannot prove sender reconciliation. Always create one fresh card and
-    // retain the same tagged DOM node from its optimistic state through verification and loading.
+    // retain the same tagged DOM node from its optimistic state through verification and automatic loading.
     await proposeFreshRentCard(page, message, note, artifactScope);
-    const loaded = await findAndLoadRunCard(page, note);
-    check(loaded !== null, "the nonce-scoped sender card became directory-bound and loadable");
+    const loaded = await findAutoLoadedRunCard(page, note);
+    check(loaded !== null, "the nonce-scoped sender card became directory-bound and loaded automatically");
     if (!loaded) throw new Error("this run's exact sender card never became actionable");
     await artifactScope.trackExactCard(loaded.card, [note]);
 
     const transitions = await observedTransitions(page, loaded.observerId);
     const sawOptimistic = transitions.some((value) => value.includes("Unverified card binding"));
-    const sawVerified = transitions.some((value) => /Directory entry:\s*iou/i.test(value));
+    const sawVerified = transitions.some((value) => /^iou\s+Add to IOU\b/i.test(value));
     const markerSurvived = await page.evaluate((value) =>
       (globalThis as typeof globalThis & { __iouRoutedDocumentMarker?: string })
         .__iouRoutedDocumentMarker === value, marker);
     check(sawOptimistic, "the sender card was observed in its optimistic/unverified state");
     check(sawVerified, "the same sender card became directory-bound");
-    check(loaded.loadedFromGate, "that exact card was opened through Load app card");
+    check(loaded.loadedAutomatically, "that exact trusted card loaded without a manual gate");
     check(
       markerSurvived && mainFrameNavigations === 0,
       "sender optimistic-to-verified reconciliation completed in-place without navigation",
     );
-    if (!sawOptimistic || !sawVerified || !loaded.loadedFromGate || !markerSurvived || mainFrameNavigations !== 0) {
+    if (!sawOptimistic || !sawVerified || !loaded.loadedAutomatically || !markerSurvived || mainFrameNavigations !== 0) {
       throw new Error("sender card did not reconcile from optimistic to actionable in place");
     }
 
-    const add = loaded.frame.getByRole("button", { name: "Add to IOU", exact: true });
+    const add = loaded.card.getByRole("button", { name: "Add to IOU", exact: true });
     await add.waitFor({ state: "visible", timeout: 20_000 });
-    check(await add.isEnabled(), "the verified sender card is actionable without reload");
-    const accountType = loaded.frame.getByLabel("Account type", { exact: true });
-    await accountType.waitFor({ timeout: 10_000 });
-    const before = await optionLabels(accountType);
+    check(await add.isEnabled(), "the verified sender card has one host-owned action without reload");
     check(
-      before.length === 1 && before[0] === "None",
-      "card exposes no account Type before private-context consent",
+      (await loaded.frame.getByRole("button").count()) === 0,
+      "the private card iframe exposes values but owns no confirmation button",
     );
-
-    const share = loaded.card.getByRole("button", { name: "Share private context", exact: true });
-    await share.waitFor({ timeout: 15_000 });
-    check(await share.isEnabled(), "host offers the explicit private-context grant");
-    await share.click();
-
+    const logo = loaded.card.locator("img.app-icon");
+    await logo.waitFor({ state: "visible", timeout: 10_000 });
+    check(
+      (await logo.getAttribute("src")) === "http://127.0.0.1:3000/favicon.svg",
+      "trusted card renders the authoritative IOU logo",
+    );
+    const typeControl = loaded.frame.getByLabel("Type", { exact: true });
+    const dateControl = loaded.frame.getByLabel("Date", { exact: true });
+    await typeControl.waitFor({ timeout: 10_000 });
+    await dateControl.waitFor({ timeout: 10_000 });
+    check((await typeControl.inputValue()) === "iou", "the app card exposes its IOU Type from first render");
+    check(/^\d{4}-\d{2}-\d{2}$/.test(await dateControl.inputValue()), "the app card exposes an editable Date");
+    const accountType = loaded.frame.getByLabel("Saved type", { exact: true });
+    await accountType.waitFor({ timeout: 10_000 });
     await accountType
       .locator("option", { hasText: "Rent" })
       .waitFor({ state: "attached", timeout: 30_000 });
@@ -341,6 +350,26 @@ async function main(): Promise<void> {
     );
     const selected = await accountType.locator("option:checked").textContent();
     check(selected?.trim() === "Rent", "the rent message auto-selects the routed Rent Type");
+    check(
+      !(await loaded.card.getByRole("button", { name: "Share app context", exact: true }).isVisible().catch(() => false)),
+      "durable pairing hydrates routed private context without another consent click",
+    );
+    check(
+      !(await loaded.card.getByRole("button", { name: "Load app card", exact: true }).isVisible().catch(() => false)),
+      "trusted card does not show the obsolete manual load gate",
+    );
+    check(
+      !(await loaded.card
+        .getByText(/Loading contacts this external origin|If you separately grant private context|Capabilities never enter this URL/i)
+        .first()
+        .isVisible()
+        .catch(() => false)),
+      "trusted card hides protocol explanation text",
+    );
+    check(
+      (await loaded.card.locator(".card-url").textContent().catch(() => ""))?.includes("/openchat/card") === true,
+      "trusted card keeps the exact app URL visible",
+    );
     check(
       !(await loaded.card.getByRole("button", { name: "Connect", exact: true }).isVisible().catch(() => false)),
       "loading private Type context does not ask Father to connect again",

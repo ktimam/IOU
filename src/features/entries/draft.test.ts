@@ -360,6 +360,30 @@ describe("parseDraftBatch", () => {
     expect(drafts[1].initial.currency).toBe("GBP");
     expect(drafts[1].initial.txn_type).toBe("settlement");
   });
+
+  it("tells a per-element resolver whether it is resolving a real multi-entry payload", () => {
+    const contexts: unknown[] = [];
+    const resolver = (_raw: unknown, ...rest: unknown[]) => {
+      contexts.push(rest[0]);
+      return undefined;
+    };
+
+    parseDraftBatch(
+      [
+        { amount: 10, currency: "USD", note: "a" },
+        { amount: 20, currency: "USD", note: "b" },
+      ],
+      resolver,
+    );
+    expect(contexts).toEqual([
+      { index: 0, total: 2, multiEntry: true },
+      { index: 1, total: 2, multiEntry: true },
+    ]);
+
+    contexts.length = 0;
+    parseDraftBatch({ amount: 10, currency: "USD", note: "single" }, resolver);
+    expect(contexts).toEqual([{ index: 0, total: 1, multiEntry: false }]);
+  });
 });
 
 // ── parsedToPayload: complete a ParsedDraft.initial into a full EntryPayload (batch write path) ──

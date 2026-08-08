@@ -1,10 +1,10 @@
 // /openchat/card — IOU's OWN app-rendered confirmable card.
 //
 // OpenChat embeds this page as an opaque, credentialless sandboxed iframe.
-// The page has no IOU browser session or user identity. After an explicit
-// host-side load gesture, it redeems a short-lived capability bound to this
-// viewer, card, app revision, and iframe recipient key. Only the linked
-// account's encrypted type roster is released and decrypted in iframe memory.
+// The page has no IOU browser session or user identity. For an already-linked
+// viewer, OpenChat redeems a short-lived capability bound to this viewer, card,
+// app revision, and iframe recipient key. Only that linked account's encrypted
+// type roster is released and decrypted in iframe memory.
 //
 // Every bridge message uses protocol v2 and a fresh per-document nonce. A
 // selected private type leaves the iframe only as an encrypted template_ref
@@ -15,13 +15,13 @@ import type { Direction } from "../entries/types";
 import { matchTemplateForDraft } from "../entries/resolveTemplateBase";
 import { orderedCurrencies } from "../settings/currencies";
 import type { TxnTemplate } from "../templates/TemplatesContext";
-import { IOU_ICON_DATA_URI } from "./actionManifest";
 import { fetchCardCurrency } from "./cardCurrency";
 import {
   parseBootstrap,
   cardParentTargetOrigin,
   parseInit,
   parseBusy,
+  parseCollectConfirm,
   parsePrivateContextRequest,
   initToFormState,
   initEntries,
@@ -30,8 +30,7 @@ import {
   buildReady,
   buildPrivateContextReady,
   buildResize,
-  buildConfirm,
-  buildCancel,
+  buildCollectedConfirm,
   type CardFormState,
   type CardInitContext,
   type CardTheme,
@@ -80,14 +79,74 @@ export function templateRefContextForCard(
   };
 }
 
-function withAutoType(
+/**
+ * Apply a privately hydrated saved Type to one card row.
+ *
+ * `templates` must be the roster decrypted for this card's authoritative
+ * linked sheet. A selection is retained only while it is still present in
+ * that exact roster; a stale/foreign id is cleared before local evidence is
+ * matched. Ambiguous keyword matches deliberately remain unselected.
+ */
+export function hydrateSavedTypeForCard(
   state: CardFormState,
   raw: unknown,
   templates: TxnTemplate[],
+  options: { evidence?: "full" | "row-local" } = { evidence: "row-local" },
 ): CardFormState {
-  if (state.templateId) return state;
-  const matched = matchTemplateForDraft(templates, raw);
-  return matched ? { ...state, templateId: matched.id } : state;
+  if (state.templateId && templates.some((template) => template.id === state.templateId)) {
+    return state;
+  }
+  const containedState = state.templateId === undefined
+    ? state
+    : { ...state, templateId: undefined };
+  const matched = matchTemplateForDraft(templates, raw, {
+    evidence: options.evidence ?? "row-local",
+  });
+  return matched ? { ...containedState, templateId: matched.id } : containedState;
+}
+
+/** Remove an account-scoped selection whenever its authoritative private grant is no longer live. */
+export function clearSavedTypeSelection(state: CardFormState): CardFormState {
+  if (state.templateId === undefined) return state;
+  const { templateId: _discarded, ...publicState } = state;
+  return publicState;
+}
+
+/**
+ * A private-context response may update UI state only for the exact iframe document, transport
+ * session, and one-time capability that started it. This keeps a late response from an old grant
+ * from repopulating Types after nonce/session/account rotation.
+ */
+export function privateLoadMatchesCurrent(
+  capturedNonce: string,
+  capturedSession: CardTransportSession,
+  capturedCapability: string,
+  currentNonce: string | null,
+  currentSession: CardTransportSession | undefined,
+  currentCapability: string | undefined,
+): boolean {
+  return (
+    currentNonce === capturedNonce &&
+    currentSession === capturedSession &&
+    currentCapability === capturedCapability
+  );
+}
+
+async function encryptedTypeRef(
+  state: CardFormState,
+  entryIndex: number,
+  captured: LoadedCardPrivateContext,
+): Promise<string | undefined> {
+  const templateId = state.templateId;
+  if (!templateId) return undefined;
+  if (!captured.templates.some((template) => template.id === templateId)) {
+    throw new Error("The selected account type is no longer available.");
+  }
+  return encryptTemplateRef(
+    templateId,
+    captured.sheetKey,
+    templateRefContextForCard(captured.authoritative, entryIndex),
+  );
 }
 
 
@@ -134,10 +193,9 @@ export function OpenChatCardPage() {
   // MULTI mode: a non-null list of per-entry form states (initEntries detected data.entries).
   // null → SINGLE mode, which renders exactly today's one-entry UI from `form`.
   const [multi, setMulti] = useState<CardFormState[] | null>(null);
-  // "confirm"/"cancel" while that action round-trips through the host (deposit + fan-out); "idle"
-  // otherwise. Drives the button lock + spinner so a press is acknowledged and can't be double-fired.
-  const [phase, setPhase] = useState<"idle" | "confirm" | "cancel">("idle");
-  const submitting = phase !== "idle";
+  // The host owns the only action buttons. Its busy signal freezes the editable values after that
+  // click while it collects, grants, and submits the exact snapshot.
+  const [submitting, setSubmitting] = useState(false);
   // The DEPLOYMENT's card currency (Config.card_currency), fetched anonymously once on mount. Undefined
   // until it resolves — and it may never (unset, offline, older canister), in which case the card keeps
   // deferring the currency to whoever imports, exactly as before. See cardCurrency.ts for why this is
@@ -148,6 +206,8 @@ export function OpenChatCardPage() {
   const frameNonceRef = useRef<string | null>(null);
   const parentTargetOriginRef = useRef<string | null>(null);
   const initializedNonceRef = useRef<string | null>(null);
+  const collectionRequestRef = useRef<string>();
+  const collectionInFlightRef = useRef(false);
   const transportRef = useRef<CardTransportSession>();
   const privateContextRef = useRef<LoadedCardPrivateContext>();
   const privateCapabilityRef = useRef<string>();
@@ -156,6 +216,12 @@ export function OpenChatCardPage() {
   const [typesState, setTypesState] = useState<
     { kind: "waiting" | "loading" | "ready" } | { kind: "error"; message: string }
   >({ kind: "waiting" });
+  const formRef = useRef(form);
+  const multiRef = useRef(multi);
+  const ctxRef = useRef(ctx);
+  formRef.current = form;
+  multiRef.current = multi;
+  ctxRef.current = ctx;
 
   useEffect(() => {
     let cancelled = false;
@@ -188,6 +254,13 @@ export function OpenChatCardPage() {
   useEffect(() => {
     let disposed = false;
 
+    const clearPrivateSelections = () => {
+      setForm((current) => clearSavedTypeSelection(current));
+      setMulti((current) =>
+        current ? current.map((entry) => clearSavedTypeSelection(entry)) : current,
+      );
+    };
+
     const resetPrivateState = () => {
       destroyLoadedCardContext(privateContextRef.current);
       privateContextRef.current = undefined;
@@ -195,6 +268,7 @@ export function OpenChatCardPage() {
       privateInitContextRef.current = undefined;
       setTemplates([]);
       setTypesState({ kind: "waiting" });
+      clearPrivateSelections();
     };
 
     function onMessage(event: MessageEvent) {
@@ -217,7 +291,9 @@ export function OpenChatCardPage() {
           transportRef.current = undefined;
           resetPrivateState();
           setCtx(null);
-          setPhase("idle");
+          setSubmitting(false);
+          collectionRequestRef.current = undefined;
+          collectionInFlightRef.current = false;
         }
         post(buildReady(bootstrap.frameNonce));
         return;
@@ -234,12 +310,83 @@ export function OpenChatCardPage() {
         }
         return;
       }
-      // Progress signal: the host is (or finished) round-tripping our confirm/cancel. Drives the
-      // in-frame button lock + spinner. busy=false clears the phase; busy=true keeps it (the click
-      // already set which action), defaulting to "confirm" if somehow unset.
+      const collect = parseCollectConfirm(event.data, frameNonce);
+      if (collect) {
+        // This page has no action button of its own. Only the exact parent WindowProxy can deliver a
+        // fresh host-click challenge, and an exact request nonce is answered at most once per frame.
+        if (collectionInFlightRef.current || collectionRequestRef.current === collect.requestNonce) return;
+        const capturedContext = ctxRef.current;
+        const capturedForm = { ...formRef.current };
+        const capturedMulti = multiRef.current?.map((entry) => ({ ...entry })) ?? null;
+        if (
+          !capturedContext ||
+          capturedContext.readonly ||
+          (capturedMulti
+            ? capturedMulti.length === 0 || !capturedMulti.every(isAmountValid)
+            : !isAmountValid(capturedForm))
+        ) {
+          return;
+        }
+        const capturedPrivate = privateContextRef.current;
+        if (
+          (capturedMulti
+            ? capturedMulti.some((entry) => entry.templateId)
+            : capturedForm.templateId !== undefined) &&
+          !capturedPrivate
+        ) {
+          setTypesState({ kind: "error", message: "Account types are not ready." });
+          return;
+        }
+        collectionRequestRef.current = collect.requestNonce;
+        collectionInFlightRef.current = true;
+        setSubmitting(true);
+        void (async () => {
+          try {
+            const refs = capturedPrivate
+              ? await Promise.all(
+                  (capturedMulti ?? [capturedForm]).map((entry, index) =>
+                    encryptedTypeRef(entry, index, capturedPrivate),
+                  ),
+                )
+              : [];
+            const currentContext = ctxRef.current;
+            if (
+              disposed ||
+              frameNonceRef.current !== frameNonce ||
+              (capturedPrivate && privateContextRef.current !== capturedPrivate) ||
+              !currentContext ||
+              currentContext.readonly ||
+              currentContext.appId !== capturedContext.appId ||
+              currentContext.appRevision !== capturedContext.appRevision ||
+              currentContext.actionId !== capturedContext.actionId
+            ) {
+              return;
+            }
+            const payload = capturedMulti
+              ? buildMultiConfirmPayload(capturedMulti, refs)
+              : buildConfirmPayload(capturedForm, refs[0]);
+            post(buildCollectedConfirm(frameNonce, collect.requestNonce, payload));
+          } catch (error) {
+            setTypesState({
+              kind: "error",
+              message:
+                error instanceof Error
+                  ? error.message
+                  : "Could not protect the selected account type.",
+            });
+          } finally {
+            if (collectionRequestRef.current === collect.requestNonce) {
+              collectionInFlightRef.current = false;
+            }
+          }
+        })();
+        return;
+      }
+      // Progress signal from the host freezes/unfreezes the fields while it performs the exact-byte
+      // grant and final submission. It carries no data or authority by itself.
       const busyMsg = parseBusy(event.data, frameNonce);
       if (busyMsg) {
-        setPhase((p) => (busyMsg.busy ? (p === "idle" ? "confirm" : p) : "idle"));
+        setSubmitting(busyMsg.busy);
         return;
       }
       const parsed = parseInit(event.data, frameNonce);
@@ -286,28 +433,29 @@ export function OpenChatCardPage() {
       privateContextRef.current = undefined;
       privateCapabilityRef.current = capability;
       setTemplates([]);
+      clearPrivateSelections();
       setTypesState({ kind: "loading" });
       const capturedNonce = frameNonce;
       void loadCardPrivateContext(capability, session)
         .then((loaded) => {
-          if (
-            disposed ||
-            frameNonceRef.current !== capturedNonce ||
-            transportRef.current !== session ||
-            privateCapabilityRef.current !== capability ||
-            !cardContextMatchesInit(
-              loaded.authoritative,
-              privateInitContextRef.current ?? parsed.context,
-            )
-          ) {
+          const loadIsCurrent = privateLoadMatchesCurrent(
+            capturedNonce,
+            session,
+            capability,
+            frameNonceRef.current,
+            transportRef.current,
+            privateCapabilityRef.current,
+          );
+          const contextMatches = cardContextMatchesInit(
+            loaded.authoritative,
+            privateInitContextRef.current ?? parsed.context,
+          );
+          if (disposed || !loadIsCurrent || !contextMatches) {
             destroyLoadedCardContext(loaded);
-            if (
-              !disposed &&
-              frameNonceRef.current === capturedNonce &&
-              privateCapabilityRef.current === capability
-            ) {
+            if (!disposed && loadIsCurrent && !contextMatches) {
               privateCapabilityRef.current = undefined;
               privateInitContextRef.current = undefined;
+              clearPrivateSelections();
               setTypesState({ kind: "error", message: "Private card context did not match this card." });
             }
             return;
@@ -319,25 +467,41 @@ export function OpenChatCardPage() {
 
           const rawEntries = Array.isArray(parsed.data.entries) ? parsed.data.entries : null;
           if (rawEntries && rawEntries.length > 0) {
+            // OpenChat may filter a model-produced array down to one surviving
+            // row. The shared full message can still name a dropped sibling,
+            // so even a one-row array uses only its row-local note evidence.
+            const evidence = "row-local" as const;
             setMulti((current) =>
               current
                 ? current.map((state, index) =>
-                    withAutoType(state, rawEntries[index] ?? {}, loaded.templates),
+                    hydrateSavedTypeForCard(
+                      state,
+                      rawEntries[index] ?? {},
+                      loaded.templates,
+                      { evidence },
+                    ),
                   )
                 : current,
             );
           } else {
-            setForm((current) => withAutoType(current, parsed.data, loaded.templates));
+            setForm((current) => hydrateSavedTypeForCard(current, parsed.data, loaded.templates));
           }
         })
         .catch((error) => {
           if (
             disposed ||
-            frameNonceRef.current !== capturedNonce ||
-            privateCapabilityRef.current !== capability
+            !privateLoadMatchesCurrent(
+              capturedNonce,
+              session,
+              capability,
+              frameNonceRef.current,
+              transportRef.current,
+              privateCapabilityRef.current,
+            )
           ) return;
           privateCapabilityRef.current = undefined;
           privateInitContextRef.current = undefined;
+          clearPrivateSelections();
           setTypesState({
             kind: "error",
             message: error instanceof Error ? error.message : "Account types are unavailable.",
@@ -357,6 +521,8 @@ export function OpenChatCardPage() {
       frameNonceRef.current = null;
       parentTargetOriginRef.current = null;
       initializedNonceRef.current = null;
+      collectionRequestRef.current = undefined;
+      collectionInFlightRef.current = false;
     };
   }, [post]);
 
@@ -403,104 +569,18 @@ export function OpenChatCardPage() {
     setForm((f) => ({ ...f, [key]: value }));
 
 
-  const encryptedTypeRef = async (
-    state: CardFormState,
-    entryIndex: number,
-    captured: LoadedCardPrivateContext,
-  ): Promise<string | undefined> => {
-    const templateId = state.templateId;
-    if (!templateId) return undefined;
-    if (!captured.templates.some((template) => template.id === templateId)) {
-      throw new Error("The selected account type is no longer available.");
-    }
-    return encryptTemplateRef(
-      templateId,
-      captured.sheetKey,
-      templateRefContextForCard(captured.authoritative, entryIndex),
-    );
-  };
-
-  const onConfirm = async () => {
-    const frameNonce = frameNonceRef.current;
-    if (!amountValid || submitting || !frameNonce || !ctx) return;
-    setPhase("confirm"); // instant feedback; the host's busy signal keeps/clears it
-    const captured = privateContextRef.current;
-    try {
-      const typeRef = form.templateId
-        ? captured
-          ? await encryptedTypeRef(form, 0, captured)
-          : (() => { throw new Error("Account types are not ready."); })()
-        : undefined;
-      if (
-        frameNonceRef.current !== frameNonce ||
-        (captured && privateContextRef.current !== captured)
-      ) {
-        setPhase("idle");
-        return;
-      }
-      post(buildConfirm(frameNonce, buildConfirmPayload(form, typeRef)));
-    } catch (error) {
-      setPhase("idle");
-      setTypesState({
-        kind: "error",
-        message: error instanceof Error ? error.message : "Could not protect the selected account type.",
-      });
-    }
-  };
-  const onCancel = () => {
-    const frameNonce = frameNonceRef.current;
-    if (submitting || !frameNonce) return;
-    setPhase("cancel");
-    post(buildCancel(frameNonce));
-  };
-
-  // MULTI-mode edit + confirm. Edits patch one entry in the list; the single "Add all" button gates
-  // on every entry having a valid (>0) amount and hands back the UNWRAPPED array (parseDraftBatch).
+  // MULTI-mode edits patch one entry in the list. The host-owned button later requests one exact
+  // unwrapped array snapshot (parseDraftBatch), so there is no action control inside this iframe.
   const setEntry = useCallback(
     <K extends keyof CardFormState>(idx: number, key: K, value: CardFormState[K]) =>
       setMulti((m) => (m ? m.map((e, i) => (i === idx ? { ...e, [key]: value } : e)) : m)),
     [],
   );
   const multiAllValid = !!multi && multi.length > 0 && multi.every(isAmountValid);
-  const onConfirmAll = async () => {
-    const frameNonce = frameNonceRef.current;
-    if (!multi || !multiAllValid || submitting || !frameNonce || !ctx) return;
-    setPhase("confirm");
-    const captured = privateContextRef.current;
-    try {
-      if (multi.some((entry) => entry.templateId) && !captured) {
-        throw new Error("Account types are not ready.");
-      }
-      const refs = captured
-        ? await Promise.all(multi.map((entry, index) => encryptedTypeRef(entry, index, captured)))
-        : [];
-      if (
-        frameNonceRef.current !== frameNonce ||
-        (captured && privateContextRef.current !== captured)
-      ) {
-        setPhase("idle");
-        return;
-      }
-      post(buildConfirm(frameNonce, buildMultiConfirmPayload(multi, refs)));
-    } catch (error) {
-      setPhase("idle");
-      setTypesState({
-        kind: "error",
-        message: error instanceof Error ? error.message : "Could not protect the selected account types.",
-      });
-    }
-  };
 
   const readonly = ctx?.readonly ?? true;
   const theme = ctx?.theme ?? "dark";
   const themeVars = THEME_VARS[theme] as CSSProperties;
-
-  // Header subtitle. SINGLE mode keeps today's exact copy; MULTI mode names the entry count.
-  const subtitle = readonly
-    ? "View only"
-    : multi
-      ? `Review and edit ${multi.length} ${multi.length === 1 ? "entry" : "entries"} before adding to your ledger`
-      : "Review and edit before adding to your ledger";
 
   // NOTE: no `minHeight: "100vh"` here. This element is the one the ResizeObserver measures, and
   // inside the iframe `100vh` IS the height the host most recently applied — so the measurement was
@@ -549,15 +629,6 @@ export function OpenChatCardPage() {
           boxShadow: "0 1px 3px rgba(0,0,0,0.35)",
         }}
       >
-        {/* IOU brand header — this card is IOU's, not OpenChat's. */}
-        <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 4 }}>
-          <img src={IOU_ICON_DATA_URI} alt="" width={28} height={28} style={{ borderRadius: 7 }} />
-          <div style={{ display: "flex", flexDirection: "column" }}>
-            <strong style={{ fontSize: "1.05rem", letterSpacing: 0.2 }}>Add to IOU</strong>
-            <span style={{ fontSize: "0.75rem", color: "var(--text-dim)" }}>{subtitle}</span>
-          </div>
-        </div>
-
         {typesState.kind === "loading" && (
           <div style={{ fontSize: "0.75rem", color: "var(--text-dim)", marginTop: 8 }}>
             Loading this account's saved types…
@@ -575,7 +646,7 @@ export function OpenChatCardPage() {
         {multi ? (
           readonly ? (
             // MULTI + readonly: every entry rendered read-only, numbered, no buttons.
-            <div style={{ display: "flex", flexDirection: "column", gap: 8, marginTop: 10 }}>
+            <div style={{ display: "flex", flexDirection: "column", gap: 6, marginTop: 6 }}>
               {multi.map((entry, i) => (
                 <div key={i} style={entryBlockStyle}>
                   <EntryHeading index={i} total={multi.length} />
@@ -585,7 +656,7 @@ export function OpenChatCardPage() {
             </div>
           ) : (
             // MULTI + editable: N compact entry blocks + a single "Add all N entries" confirm.
-            <div style={{ display: "flex", flexDirection: "column", gap: 8, marginTop: 10 }}>
+            <div style={{ display: "flex", flexDirection: "column", gap: 6, marginTop: 6 }}>
               {multi.map((entry, i) => (
                 <EntryRow
                   key={i}
@@ -594,42 +665,9 @@ export function OpenChatCardPage() {
                   entry={entry}
                   onChange={(k, v) => setEntry(i, k, v)}
                   templates={templates}
+                  disabled={submitting}
                 />
               ))}
-              {/* WRAP is load-bearing, not cosmetic. The host sizes this frame with `max-width: 100%`, so in a
-                  narrow bubble it is far below its 420px preference, while a flex row cannot shrink a
-                  button below its text. With justify-content: flex-end the excess overflows the START
-                  edge — the buttons slide out of the card to the LEFT, where scrollWidth cannot even
-                  see them. Worst while cancelling, because that label GROWS ("Cancel" -> spinner +
-                  "Cancelling…") whereas confirm shrinks: measured 69px outside at a 240px frame. */}
-              <div style={{ display: "flex", gap: 8, justifyContent: "flex-end", marginTop: 4, minWidth: 0 }}>
-                <button
-                  type="button"
-                  onClick={onCancel}
-                  disabled={submitting}
-                  style={{ ...btnStyle, background: "transparent", color: "var(--text)", border: "1px solid var(--border)", cursor: submitting ? "not-allowed" : "pointer", opacity: submitting && phase !== "cancel" ? 0.5 : 1 }}
-                >
-                  {phase === "cancel" ? <><Spinner /> Cancelling…</> : "Cancel"}
-                </button>
-                {/* Hidden once Cancel is pressed: the action is already decided, so still offering
-                    "Add" is misleading — and dropping it leaves a single button, which is what keeps
-                    the widest state (spinner + "Cancelling…") inside a narrow frame. */}
-                {phase !== "cancel" && (
-                <button
-                  type="button"
-                  onClick={onConfirmAll}
-                  disabled={!multiAllValid || submitting}
-                  style={{
-                    ...btnStyle,
-                    background: (multiAllValid && !submitting) || phase === "confirm" ? "var(--accent)" : "#2a3038",
-                    color: (multiAllValid && !submitting) || phase === "confirm" ? "var(--on-accent)" : "#5b646e",
-                    cursor: multiAllValid && !submitting ? "pointer" : "not-allowed",
-                  }}
-                >
-                  {phase === "confirm" ? <><Spinner /> Adding…</> : `Add all ${multi.length} entries`}
-                </button>
-                )}
-              </div>
               {!multiAllValid && (
                 <span style={{ fontSize: "0.75rem", color: "var(--text-dim)", textAlign: "right" }}>
                   Each entry needs an amount greater than 0 to add.
@@ -652,6 +690,7 @@ export function OpenChatCardPage() {
                   step="0.01"
                   min="0"
                   aria-label="Amount"
+                  disabled={submitting}
                   value={form.amount}
                   onChange={(e) => set("amount", e.target.value)}
                   placeholder="0.00"
@@ -661,6 +700,7 @@ export function OpenChatCardPage() {
               <Field label="Currency" style={{ flex: "1 1 96px" }}>
                 <select
                   aria-label="Currency"
+                  disabled={submitting}
                   value={form.currency}
                   onChange={(e) => set("currency", e.target.value)}
                   style={inputStyle}
@@ -680,6 +720,7 @@ export function OpenChatCardPage() {
               <Field label="Direction" style={{ flex: "1 1 124px" }}>
                 <select
                   aria-label="Direction"
+                  disabled={submitting}
                   value={form.direction}
                   onChange={(e) => set("direction", e.target.value as Direction)}
                   style={inputStyle}
@@ -691,47 +732,21 @@ export function OpenChatCardPage() {
             </div>
 
             <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
-              <TypeFields form={form} onChange={set} templates={templates} />
+              <TypeFields form={form} onChange={set} templates={templates} disabled={submitting} />
+              <DateField form={form} onChange={set} disabled={submitting} />
             </div>
 
             <Field label="Note">
               <input
                 type="text"
                 aria-label="Note"
+                disabled={submitting}
                 value={form.note}
                 onChange={(e) => set("note", e.target.value)}
                 placeholder="lunch, taxi, reservation…"
                 style={inputStyle}
               />
             </Field>
-
-
-            <div style={{ display: "flex", gap: 8, justifyContent: "flex-end", marginTop: 4, minWidth: 0 }}>
-              <button
-                type="button"
-                onClick={onCancel}
-                disabled={submitting}
-                style={{ ...btnStyle, background: "transparent", color: "var(--text)", border: "1px solid var(--border)", cursor: submitting ? "not-allowed" : "pointer", opacity: submitting && phase !== "cancel" ? 0.5 : 1 }}
-              >
-                {phase === "cancel" ? <><Spinner /> Cancelling…</> : "Cancel"}
-              </button>
-              {/* Hidden once Cancel is pressed — see the multi-entry row. */}
-              {phase !== "cancel" && (
-              <button
-                type="button"
-                onClick={onConfirm}
-                disabled={!amountValid || submitting}
-                style={{
-                  ...btnStyle,
-                  background: (amountValid && !submitting) || phase === "confirm" ? "var(--accent)" : "#2a3038",
-                  color: (amountValid && !submitting) || phase === "confirm" ? "var(--on-accent)" : "#5b646e",
-                  cursor: amountValid && !submitting ? "pointer" : "not-allowed",
-                }}
-              >
-                {phase === "confirm" ? <><Spinner /> Adding…</> : "Add to IOU"}
-              </button>
-              )}
-            </div>
             {!amountValid && (
               <span style={{ fontSize: "0.75rem", color: "var(--text-dim)", textAlign: "right" }}>
                 Enter an amount greater than 0 to add.
@@ -769,31 +784,6 @@ const inputStyle: CSSProperties = {
   boxSizing: "border-box",
 };
 
-const btnStyle: CSSProperties = {
-  fontFamily: "inherit",
-  fontSize: "0.9375rem",
-  fontWeight: 600,
-  minHeight: TOUCH_TARGET,
-  border: 0,
-  // Horizontal padding is the FLOOR a button can shrink to (measured: at a 79px row the pair bottomed
-  // out at 37+36+8 = 81px, 2px over, with the labels already ellipsized to nothing). vw inside the
-  // frame is the FRAME's width, so this keeps the roomy 18px at normal sizes and tightens to 8px in a
-  // narrow bubble — which is what lets Cancel and Add stay SIDE BY SIDE instead of wrapping.
-  padding: "7px clamp(8px, 4vw, 16px)",
-  borderRadius: 10,
-  // A flex item will not shrink below its text, so in a narrow frame a button pushes the row past the
-  // card's edge (and with justify-content: flex-end it escapes to the LEFT, where scrollWidth cannot
-  // see it). minWidth 0 lets it shrink and the label ellipsize instead — the last line of defence
-  // after the row's flex-wrap, for frames too narrow to fit even ONE button.
-  minWidth: 0,
-  whiteSpace: "nowrap",
-  overflow: "hidden",
-  textOverflow: "ellipsis",
-  // Cancel carries a 1px border while btnStyle sets none, and under content-box that border is added
-  // ON TOP of the shrunk width — measured as exactly 2px outside the card at a 160px frame.
-  boxSizing: "border-box",
-};
-
 function Field({
   label,
   children,
@@ -822,8 +812,8 @@ function isAmountValid(s: CardFormState): boolean {
 const entryBlockStyle: CSSProperties = {
   display: "flex",
   flexDirection: "column",
-  gap: 6,
-  padding: 10,
+  gap: 4,
+  padding: 8,
   borderRadius: 10,
   border: "1px solid var(--border)",
   background: "var(--surface-2)",
@@ -854,17 +844,20 @@ export function TypeFields({
   form,
   onChange,
   templates,
+  disabled = false,
 }: {
   form: CardFormState;
   onChange: <K extends keyof CardFormState>(key: K, value: CardFormState[K]) => void;
   templates: TxnTemplate[];
+  disabled?: boolean;
 }) {
   return (
     <>
-      <Field label="Transaction" style={{ flex: "1 1 108px" }}>
-        <select
-          aria-label="Transaction"
-          value={form.kind}
+      <Field label="Type" style={{ flex: "1 1 108px" }}>
+         <select
+           aria-label="Type"
+           disabled={disabled}
+           value={form.kind}
           onChange={(e) => onChange("kind", e.target.value as CardFormState["kind"])}
           style={inputStyle}
         >
@@ -873,10 +866,11 @@ export function TypeFields({
           <option value="settlement">{KIND_LABELS.settlement}</option>
         </select>
       </Field>
-      <Field label="Account type" style={{ flex: "1 1 128px" }}>
-        <select
-          aria-label="Account type"
-          value={form.templateId ?? ""}
+      <Field label="Saved type" style={{ flex: "1 1 128px" }}>
+         <select
+           aria-label="Saved type"
+           disabled={disabled}
+           value={form.templateId ?? ""}
           onChange={(e) => onChange("templateId", e.target.value || undefined)}
           style={inputStyle}
         >
@@ -892,6 +886,30 @@ export function TypeFields({
   );
 }
 
+/** Public transaction date, shown and editable before either single or batch confirmation. */
+export function DateField({
+  form,
+  onChange,
+  disabled = false,
+}: {
+  form: CardFormState;
+  onChange: <K extends keyof CardFormState>(key: K, value: CardFormState[K]) => void;
+  disabled?: boolean;
+}) {
+  return (
+    <Field label="Date" style={{ flex: "1 1 112px" }}>
+       <input
+         type="date"
+         aria-label="Date"
+         disabled={disabled}
+         value={form.date}
+        onChange={(event) => onChange("date", event.target.value)}
+        style={inputStyle}
+      />
+    </Field>
+  );
+}
+
 /** Every saved-type name this card carries, deduped — the only suggestions it can offer (see TypeFields). */
 // One editable entry in MULTI mode: amount / currency / direction on one wrapping line, note below.
 // Reuses the single card's Field + inputStyle + DIRECTION_LABELS so styling and theming match
@@ -902,6 +920,7 @@ function EntryRow({
   entry,
   onChange,
   templates,
+  disabled,
 }: {
   index: number;
   total: number;
@@ -910,6 +929,7 @@ function EntryRow({
   // Pooled across ALL rows, not just this one: a message that routed one entry to a type usually
   // wants its siblings on the same one, and copying it should not mean retyping it.
   templates: TxnTemplate[];
+  disabled: boolean;
 }) {
   const currencyOptions = useMemo(
     () => orderedCurrencies(entry.currency, [entry.currency]),
@@ -925,18 +945,20 @@ function EntryRow({
             type="number"
             inputMode="decimal"
             step="0.01"
-            min="0"
-            aria-label="Amount"
-            value={entry.amount}
+           min="0"
+           aria-label="Amount"
+           disabled={disabled}
+           value={entry.amount}
             onChange={(e) => onChange("amount", e.target.value)}
             placeholder="0.00"
             style={inputStyle}
           />
         </Field>
         <Field label="Currency" style={{ flex: "1 1 84px" }}>
-          <select
-            aria-label="Currency"
-            value={entry.currency}
+         <select
+           aria-label="Currency"
+           disabled={disabled}
+           value={entry.currency}
             onChange={(e) => onChange("currency", e.target.value)}
             style={inputStyle}
           >
@@ -950,9 +972,10 @@ function EntryRow({
           </select>
         </Field>
         <Field label="Direction" style={{ flex: "1 1 118px" }}>
-          <select
-            aria-label="Direction"
-            value={entry.direction}
+         <select
+           aria-label="Direction"
+           disabled={disabled}
+           value={entry.direction}
             onChange={(e) => onChange("direction", e.target.value as Direction)}
             style={inputStyle}
           >
@@ -962,13 +985,15 @@ function EntryRow({
         </Field>
       </div>
       <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
-        <TypeFields form={entry} onChange={onChange} templates={templates} />
+        <TypeFields form={entry} onChange={onChange} templates={templates} disabled={disabled} />
+        <DateField form={entry} onChange={onChange} disabled={disabled} />
       </div>
       <Field label="Note">
-        <input
-          type="text"
-          aria-label="Note"
-          value={entry.note}
+         <input
+           type="text"
+           aria-label="Note"
+           disabled={disabled}
+           value={entry.note}
           onChange={(e) => onChange("note", e.target.value)}
           placeholder="lunch, taxi, reservation…"
           style={inputStyle}
@@ -980,19 +1005,6 @@ function EntryRow({
         </span>
       )}
     </div>
-  );
-}
-
-// Inline processing spinner shown on the button that is round-tripping (self-contained SMIL
-// animation → no CSS keyframes needed). `currentColor` inherits the button's text color.
-function Spinner() {
-  return (
-    <svg width="13" height="13" viewBox="0 0 24 24" style={{ verticalAlign: "-2px", marginRight: 6 }} aria-hidden="true">
-      <circle cx="12" cy="12" r="9" fill="none" stroke="currentColor" strokeOpacity="0.3" strokeWidth="3" />
-      <path d="M12 3a9 9 0 0 1 9 9" fill="none" stroke="currentColor" strokeWidth="3" strokeLinecap="round">
-        <animateTransform attributeName="transform" type="rotate" from="0 12 12" to="360 12 12" dur="0.7s" repeatCount="indefinite" />
-      </path>
-    </svg>
   );
 }
 
@@ -1010,9 +1022,9 @@ export function ReadonlyView({
   ];
   // Between Currency and Direction, which is where the classic OC-rendered table put them — and, like
   // that renderer, only when they carry a value.
-  if (form.kind !== "") rows.push({ label: "Transaction", value: KIND_LABELS[form.kind] });
+  if (form.kind !== "") rows.push({ label: "Type", value: KIND_LABELS[form.kind] });
   const template = templates.find((candidate) => candidate.id === form.templateId);
-  if (template) rows.push({ label: "Account type", value: template.name });
+  if (template) rows.push({ label: "Saved type", value: template.name });
   rows.push({ label: "Direction", value: DIRECTION_LABELS[form.direction] });
   rows.push({ label: "Note", value: form.note || "—" });
   if (form.date) rows.push({ label: "Date", value: form.date });

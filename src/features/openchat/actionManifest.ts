@@ -262,7 +262,11 @@ export const iouActionManifest: IouActionManifest = {
     fields: [
       { key: "amount", label: "Amount" },
       { key: "currency", label: "Currency" },
+      // Public closed enum only ("iou" | "settlement"). This is deliberately
+      // distinct from a private saved account type such as "Rent".
+      { key: "kind", label: "Type" },
       { key: "direction", label: "Direction" },
+      { key: "date", label: "Date" },
       { key: "note", label: "Note" },
       { key: "message", label: "Message" },
     ],

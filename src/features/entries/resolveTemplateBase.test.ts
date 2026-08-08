@@ -10,7 +10,11 @@
 // are matched locally from message evidence.
 
 import { describe, it, expect } from "vitest";
-import { matchTemplateForDraft, resolveTemplateBase } from "./resolveTemplateBase";
+import {
+  matchTemplateForDraft,
+  resolveTemplateBase,
+  templateEvidenceForImport,
+} from "./resolveTemplateBase";
 import { templateToInitial } from "../templates/templateBase";
 import { extractTs } from "./draft";
 import type { TxnTemplate } from "../templates/TemplatesContext";
@@ -97,6 +101,24 @@ describe("resolveTemplateBase — a type this account DOES own still applies", (
     expect(r.base?.currency).toBe("EGP");
     expect(r.unknownTemplate).toBeUndefined();
   });
+
+  it("fails closed when an explicit encrypted id is another saved type's display name", () => {
+    const idOwner = { ...HOUSE_RESERVATION, id: "collision", name: "Reservation" };
+    const nameOwner = { ...CHILD_ALLOWANCE, id: "other", name: "collision" };
+    const result = resolveTemplateBase([nameOwner, idOwner], {
+      amount: 1000,
+      template: "collision",
+    });
+    expect(result.base).toBeUndefined();
+    expect(result.unknownTemplate).toBe("collision");
+  });
+
+  it("fails closed when two account-local types have the same display name", () => {
+    const first = { ...HOUSE_RESERVATION, id: "first", name: "Rent" };
+    const second = { ...CHILD_ALLOWANCE, id: "second", name: " rent " };
+    const result = resolveTemplateBase([first, second], { amount: 1000, template: "RENT" });
+    expect(result).toEqual({ unknownTemplate: "RENT" });
+  });
 });
 
 describe("resolveTemplateBase — no template asked for", () => {
@@ -158,6 +180,14 @@ describe("resolveTemplateBase — the same-name collision the shared roster make
 });
 
 describe("resolveTemplateBase private local keyword matching", () => {
+  it("uses row-local evidence for every OpenChat import, including one surviving row", () => {
+    expect(templateEvidenceForImport("openchat", false)).toBe("row-local");
+    expect(templateEvidenceForImport("openchat", true)).toBe("row-local");
+    expect(templateEvidenceForImport("connector", true)).toBe("row-local");
+    expect(templateEvidenceForImport("connector", false)).toBe("full");
+    expect(templateEvidenceForImport(undefined, false)).toBe("full");
+  });
+
   it("matches message evidence against this account without a manifest template field", () => {
     const raw = { amount: 1000, message: "Booked a reservation for 3 July" };
     expect(resolveTemplateBase([HOUSE_RESERVATION], raw).base).toEqual(
@@ -201,5 +231,76 @@ describe("resolveTemplateBase private local keyword matching", () => {
         { message: "rent paid" },
       ),
     ).toBeUndefined();
+  });
+
+  it("uses row-local note evidence for multi-entry import fallback", () => {
+    const rent = { ...HOUSE_RESERVATION, id: "rent", name: "Rent", keywords: ["rent"] };
+    const allowance = {
+      ...HOUSE_RESERVATION,
+      id: "allowance",
+      name: "Allowance",
+      keywords: ["allowance"],
+    };
+    const resolveRow = resolveTemplateBase as unknown as (
+      templates: TxnTemplate[],
+      raw: unknown,
+      options: { evidence: "row-local" },
+    ) => ReturnType<typeof resolveTemplateBase>;
+    const sharedMessage = "rent 100 and allowance 50";
+
+    expect(
+      resolveRow(
+        [rent, allowance],
+        { message: sharedMessage, note: "rent" },
+        { evidence: "row-local" },
+      ).base?.currency,
+    ).toBe(rent.currency);
+    expect(
+      resolveRow(
+        [rent, allowance],
+        { message: sharedMessage, note: "groceries" },
+        { evidence: "row-local" },
+      ),
+    ).toEqual({});
+    expect(
+      resolveRow(
+        [rent, allowance],
+        { message: sharedMessage, note: "allowance" },
+        { evidence: "row-local" },
+      ).base?.currency,
+    ).toBe(allowance.currency);
+  });
+
+  it("fails closed only for the multi row whose local evidence collides", () => {
+    const bookingA = { ...HOUSE_RESERVATION, id: "a", name: "A", keywords: ["booking"] };
+    const bookingB = { ...HOUSE_RESERVATION, id: "b", name: "B", keywords: ["booking"] };
+    const allowance = {
+      ...HOUSE_RESERVATION,
+      id: "allowance",
+      name: "Allowance",
+      keywords: ["allowance"],
+    };
+    const resolveRow = resolveTemplateBase as unknown as (
+      templates: TxnTemplate[],
+      raw: unknown,
+      options: { evidence: "row-local" },
+    ) => ReturnType<typeof resolveTemplateBase>;
+    const templates = [bookingA, bookingB, allowance];
+    const sharedMessage = "booking deposit and allowance";
+
+    expect(
+      resolveRow(
+        templates,
+        { message: sharedMessage, note: "booking deposit" },
+        { evidence: "row-local" },
+      ),
+    ).toEqual({});
+    expect(
+      resolveRow(
+        templates,
+        { message: sharedMessage, note: "allowance" },
+        { evidence: "row-local" },
+      ).base,
+    ).toBeDefined();
   });
 });

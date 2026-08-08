@@ -26,10 +26,12 @@ export const CARD_MSG = {
   privateContextReady: "oc:card:private-context-ready",
   resize: "oc:card:resize",
   confirm: "oc:card:confirm",
+  confirmCollected: "oc:card:confirm-collected",
   cancel: "oc:card:cancel",
   // host → iframe (app)
   init: "oc:card:init",
   busy: "oc:card:busy",
+  collectConfirm: "oc:card:collect-confirm",
   privateContextRequest: "oc:card:private-context-request",
 } as const;
 
@@ -85,8 +87,8 @@ export type CardInit = {
   context: CardInitContext;
 };
 
-// The editable form the page collects. Every field is a plain string. `kind` is a passthrough
-// (not edited by the card UI):
+// The editable form the page collects. Every public field is a plain string.
+// `kind` is the public IOU/Settlement choice:
 // "" means the extraction carried no kind, so buildConfirmPayload omits it and
 // parseDraft re-infers it. `date` is likewise a passthrough of the prefill date.
 export type CardFormState = {
@@ -96,20 +98,9 @@ export type CardFormState = {
   // a hand-built state (tests, the standalone page) stays valid without it.
   message?: string;
   kind: "iou" | "settlement" | "";
-  // The SAVED TYPE this message routed to, by NAME (the manifest's keyword_map / the model sets it —
-  // see buildTemplateRules). A passthrough like `kind`: shown, never edited here, and handed straight
-  // back on confirm.
-  //
-  // Handing it back is the load-bearing part. The confirm payload REPLACES the stored extraction
-  // rather than merging with it (respond_to_action_card.rs `resolve_confirm_payload`), so a field this
-  // card drops is gone for good — and dropping this one cost the import its type defaults: SheetPage's
-  // resolveTemplateBase looks up `template` by name to seed the fee %, due schedule, and default
-  // currency/note/direction, and silently gets `undefined` when it is absent.
-  //
-  // Not editable, and cannot be: the frame is storage-partitioned and cannot read the account's saved
-  // types, so it has no roster to offer. It can only carry what the extraction chose.
-  // Selected account-scoped type id. It exists only in iframe memory;
-  // confirmation carries an encrypted template_ref, never this id or name.
+  // Selected account-scoped saved-Type id. It is populated only from the privately hydrated roster
+  // for this card's exact linked sheet and exists only in iframe memory. Confirmation carries an
+  // encrypted template_ref, never this id or its display name.
   templateId?: string;
   amount: string;
   currency: string;
@@ -324,6 +315,27 @@ export function parsePrivateContextRequest(msg: unknown, expectedFrameNonce: str
   );
 }
 
+// A payload may leave this iframe only in direct response to the host-owned confirmation button.
+// The fresh request nonce is generated after that click and is single-use on the host; accepting an
+// exact canonical nonce here keeps malformed or legacy unsolicited confirm messages out of the new
+// collection path.
+export function parseCollectConfirm(
+  msg: unknown,
+  expectedFrameNonce: string,
+): { requestNonce: string } | null {
+  if (!isPlainObject(msg)) return null;
+  if (
+    msg.type !== CARD_MSG.collectConfirm ||
+    msg.version !== CARD_INIT_VERSION ||
+    !isCanonicalFrameNonce(expectedFrameNonce) ||
+    msg.frameNonce !== expectedFrameNonce ||
+    !isCanonicalFrameNonce(msg.requestNonce)
+  ) {
+    return null;
+  }
+  return { requestNonce: msg.requestNonce };
+}
+
 /** Seed the editable form from the (loose, untrusted) extraction object. */
 // Currency symbols worth honouring when a message writes the symbol instead of the ISO code.
 const CURRENCY_SYMBOLS: Record<string, string> = {
@@ -445,10 +457,9 @@ export function buildConfirmPayload(
   // date; omitted when absent so nothing new appears on a card that never carried it.
   if ((state.message ?? "").trim() !== "") payload.message = state.message;
   if (state.kind !== "") payload.kind = state.kind;
-  // Hand the routed type back by name. Without this the import cannot resolve the type's defaults
-  // (fee %, due schedule, currency/note/direction) — the payload REPLACES the stored extraction, so
-  // anything the card omits is lost, not inherited. parseDraft itself ignores the field; SheetPage's
-  // resolveTemplateBase is what consumes it.
+  // Return only the encrypted, row-bound saved-type reference. The plaintext id/name and roster
+  // never enter OpenChat; IOU resolves the reference after the confirmed payload reaches the exact
+  // linked sheet.
   if (isEncryptedTemplateRef(templateRef)) {
     payload.template_ref = templateRef;
   }
@@ -508,6 +519,23 @@ export function buildConfirm(
   payload: CardConfirmPayload | CardConfirmPayload[],
 ) {
   return { type: CARD_MSG.confirm, version: CARD_INIT_VERSION, frameNonce, payload } as const;
+}
+
+export function buildCollectedConfirm(
+  frameNonce: string,
+  requestNonce: string,
+  payload: CardConfirmPayload | CardConfirmPayload[],
+) {
+  if (!isCanonicalFrameNonce(frameNonce) || !isCanonicalFrameNonce(requestNonce)) {
+    throw new Error("invalid card collection nonce");
+  }
+  return {
+    type: CARD_MSG.confirmCollected,
+    version: CARD_INIT_VERSION,
+    frameNonce,
+    requestNonce,
+    payload,
+  } as const;
 }
 
 export function buildCancel(frameNonce: string) {

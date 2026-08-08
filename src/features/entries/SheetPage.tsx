@@ -37,7 +37,10 @@ import { usePreferences } from "../settings/usePreferences";
 import { usePairTemplates } from "../templates/PairTemplatesContext";
 import { TemplatesManager } from "../templates/TemplatesManager";
 import { templateToInitial } from "../templates/templateBase";
-import { resolveTemplateBase as resolveTemplateBaseFor } from "./resolveTemplateBase";
+import {
+  resolveTemplateBase as resolveTemplateBaseFor,
+  templateEvidenceForImport,
+} from "./resolveTemplateBase";
 import {
   parseDraft,
   isDuplicateDraft,
@@ -46,8 +49,15 @@ import {
   parsedToPayload,
   batchSummary,
   type ParsedDraft,
+  type DraftBaseResolverContext,
 } from "./draft";
 import { BatchConfirmModal } from "./BatchConfirmModal";
+import {
+  addEntryBatch,
+  batchImportContextMatches,
+  finalizeAcceptedChatImport,
+  type BatchImportContext,
+} from "./batchImport";
 import {
   getRelayConfig,
   fetchPending,
@@ -311,8 +321,13 @@ export function SheetPage() {
   // the extraction left. Unknown/deleted/renamed — and any name that only exists on ANOTHER of the
   // user's accounts, which the single per-user manifest roster makes routable here — resolves to no
   // base, so no foreign fee/schedule/currency can reach this sheet. See resolveTemplateBase.ts.
-  const resolveTemplateBase = (raw: unknown): Partial<EntryPayload> | undefined =>
-    resolveTemplateBaseFor(allTemplates, raw).base;
+  const resolveTemplateBase = (
+    raw: unknown,
+    context?: DraftBaseResolverContext,
+  ): Partial<EntryPayload> | undefined =>
+    resolveTemplateBaseFor(allTemplates, raw, {
+      evidence: context?.multiEntry ? "row-local" : "full",
+    }).base;
 
   const openFromDraft = () => {
     setDraftErrors([]);
@@ -348,6 +363,7 @@ export function SheetPage() {
   const [pending, setPending] = useState<PendingDraft[]>([]);
   const [inboxPending, setInboxPending] = useState<PendingDraft[]>([]);
   const [pendingRelayId, setPendingRelayId] = useState<string | null>(null);
+  const [pendingImportContext, setPendingImportContext] = useState<BatchImportContext | null>(null);
   // messageId of the draft under review (OpenChat v4 wrapper only) — recorded on
   // a successful write so a sibling double-confirm card can't be imported twice.
   const [pendingMessageId, setPendingMessageId] = useState<string | null>(null);
@@ -366,6 +382,7 @@ export function SheetPage() {
     messageId: string | null;
     relayId: string;
     chatKey: string | null;
+    context: BatchImportContext;
   }>(null);
   const [batchBusy, setBatchBusy] = useState(false);
   const reloadPending = async () => {
@@ -426,10 +443,15 @@ export function SheetPage() {
   const closeEntryModal = () => {
     setModal(null);
     setPendingRelayId(null);
+    setPendingImportContext(null);
     setPendingChatKey(null);
     setPendingMessageId(null);
   };
   const importFromRelay = async (p: PendingDraft) => {
+    if (!principal) {
+      toasts.show({ kind: "error", text: "Sign in before importing this chat card" });
+      return;
+    }
     let inboundDraft = p.draft;
     if (p.source === "openchat") {
       try {
@@ -464,7 +486,15 @@ export function SheetPage() {
     // different template) and the IOU default currency is injected per element.
     const { drafts, errors } = parseDraftBatch(
       inboundDraft,
-      resolveTemplateBase,
+      (raw, context) =>
+        resolveTemplateBaseFor(allTemplates, raw, {
+          // Every OpenChat row is model-produced, including an array that the
+          // model filtered down to one survivor. Its repeated full `message`
+          // may mention a dropped sibling, so only row-local note evidence may
+          // select account-private money defaults. Local/non-OpenChat singles
+          // retain the existing full-message convenience matching.
+          evidence: templateEvidenceForImport(p.source, context?.multiEntry ?? false),
+        }).base,
       prefs.defaultCurrency,
     );
     if (drafts.length === 0) {
@@ -495,6 +525,7 @@ export function SheetPage() {
         messageId: mid ?? null,
         relayId: p.id,
         chatKey: p.context?.chatHandle ?? null,
+        context: { sheetId, principal },
       });
       setRememberChat(true);
       return;
@@ -505,23 +536,47 @@ export function SheetPage() {
     // partner too (their local handled/imported sets never see it).
     if (mid) drafts[0].initial.import_message_id = mid;
     setPendingRelayId(p.id);
+    setPendingImportContext({ sheetId, principal });
     // Track the source chat so confirming can remember chat → sheet.
     setPendingChatKey(p.context?.chatHandle ?? null);
     setPendingMessageId(mid ?? null);
     setRememberChat(true);
     openAdd(drafts[0].initial);
   };
+  const activeImportContextRef = useRef<{ sheetId: string; principal: string | null }>({
+    sheetId,
+    principal,
+  });
+  activeImportContextRef.current = { sheetId, principal };
+  useEffect(() => {
+    if (batch && !batchImportContextMatches(batch.context, sheetId, principal)) {
+      setBatch(null);
+      setBatchBusy(false);
+    }
+    if (
+      pendingImportContext &&
+      !batchImportContextMatches(pendingImportContext, sheetId, principal)
+    ) {
+      closeEntryModal();
+    }
+    // Route/account changes invalidate a captured import. Pending state itself
+    // is intentionally not a dependency: it is captured under the current
+    // route/account and only a later route/account change can make it stale.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [sheetId, principal]);
   // Persist a chat → sheet mapping: optimistic (state + cache first), then the
   // canister call; on failure roll back and let the next fetch re-sync.
-  const rememberChatMapping = (chatKey: string) => {
+  const rememberChatMapping = (chatKey: string, target: BatchImportContext) => {
+    const current = activeImportContextRef.current;
+    if (!batchImportContextMatches(target, current.sheetId, current.principal)) return;
     const prev = chatLinks;
-    const next = { ...prev, [chatKey]: sheetId };
+    const next = { ...prev, [chatKey]: target.sheetId };
     setChatLinks(next);
-    writeCachedLinks(principal, next);
+    writeCachedLinks(target.principal, next);
     if (!actor) return;
-    void storeChatSheetLink(actor, chatKey, sheetId).catch(() => {
+    void storeChatSheetLink(actor, chatKey, target.sheetId).catch(() => {
       setChatLinks(prev);
-      writeCachedLinks(principal, prev);
+      writeCachedLinks(target.principal, prev);
       toasts.show({ kind: "error", text: "Could not save the chat → sheet mapping" });
     });
   };
@@ -811,11 +866,11 @@ export function SheetPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [inboxPending, entries, pairTemplates.dismissed, importedMessageIds, handledInboxIds]);
 
-  // Headless encrypt-under-K_sheet + add_entry. No toast/modal/reload side effects — the caller
-  // orchestrates those. Used by both onSubmit's single-add path and the batch confirm-all path so
-  // the write seam is identical for one entry or N.
+  // Headless encrypt-under-K_sheet + add_entry for the unchanged single-entry
+  // path. Multi-entry confirmation uses addEntryBatch below so one message can
+  // never leave a partially appended prefix.
   async function writeEntry(payload: EntryPayload): Promise<void> {
-    if (!actor) return;
+    if (!actor) throw new Error("IOU backend is unavailable; no entry was added");
     const K_sheet = get(sheetId) ?? (await unwrapFor(sheetId));
     const enc = await encryptEntryPayload(
       new TextEncoder().encode(JSON.stringify(payload)),
@@ -830,7 +885,10 @@ export function SheetPage() {
   }
 
   async function onSubmit(p: EntryPayload) {
-    if (!actor) return;
+    if (!actor) {
+      toasts.show({ kind: "error", text: "IOU backend is unavailable; no entry was added" });
+      return;
+    }
     // Direction is stored in the entry author's frame. The form works in the viewer's frame, so when
     // editing a PARTNER's entry (createdByMe === false), orient back before storing. Adds are always
     // authored by me → my frame IS the author frame → no change.
@@ -850,20 +908,60 @@ export function SheetPage() {
         iv: Array.from(enc.iv),
       });
       toasts.show({ kind: "success", text: "Entry updated" });
-    } else {
-      await writeEntry(toStore);
-      toasts.show({ kind: "success", text: "Entry added" });
-      if (pendingRelayId) await clearRelay(pendingRelayId);
+    } else if (pendingRelayId) {
+      if (
+        !pendingImportContext ||
+        !batchImportContextMatches(pendingImportContext, sheetId, principal)
+      ) {
+        closeEntryModal();
+        throw new Error("The sheet or signed-in account changed; the chat card was not imported");
+      }
+      const K_sheet = get(pendingImportContext.sheetId) ??
+        (await unwrapFor(pendingImportContext.sheetId));
+      const acknowledgement = await addEntryBatch({
+        actor: actor as any,
+        sheetId: pendingImportContext.sheetId,
+        payloads: [toStore],
+        messageHandle: pendingMessageId,
+        relayId: pendingRelayId,
+        sheetKey: K_sheet,
+        beforeMutate: () => {
+          const current = activeImportContextRef.current;
+          if (!batchImportContextMatches(pendingImportContext, current.sheetId, current.principal)) {
+            throw new Error("The sheet or signed-in account changed; the chat card was not imported");
+          }
+        },
+      });
+      const current = activeImportContextRef.current;
+      if (!batchImportContextMatches(pendingImportContext, current.sheetId, current.principal)) {
+        throw new Error("The sheet or signed-in account changed; the chat card remains pending");
+      }
+      toasts.show({
+        kind: "success",
+        text: acknowledgement.accepted_count === 1
+          ? "Entry added"
+          : `Added ${acknowledgement.accepted_count} entries`,
+      });
+      const stillCurrent = await finalizeAcceptedChatImport({
+        captured: pendingImportContext,
+        clear: () => clearRelay(pendingRelayId),
+        current: () => activeImportContextRef.current,
+      });
+      if (!stillCurrent) return;
       // Remember this messageId so a sibling double-confirm card is caught by
       // the accept-path guard even before the new entry is re-fetched.
       if (pendingMessageId) markScopedMessageImported(inboxDedupe, pendingMessageId);
       // First import from a chat that isn't mapped yet: honour the
       // "remember" checkbox (default on) by pinning chat → this sheet.
       if (pendingRelayId && pendingChatKey && rememberChat && !chatLinks[pendingChatKey]) {
-        rememberChatMapping(pendingChatKey);
+        rememberChatMapping(pendingChatKey, pendingImportContext);
       }
+    } else {
+      await writeEntry(toStore);
+      toasts.show({ kind: "success", text: "Entry added" });
     }
     setPendingRelayId(null);
+    setPendingImportContext(null);
     setPendingChatKey(null);
     setPendingMessageId(null);
     setModal(null);
@@ -875,18 +973,56 @@ export function SheetPage() {
   // chat mapping ONCE. One human confirm → N entries → one deposit consumed.
   async function confirmBatch() {
     if (!batch || batchBusy) return;
+    if (!actor) {
+      toasts.show({ kind: "error", text: "IOU backend is unavailable; no entries were added" });
+      return;
+    }
+    if (!batchImportContextMatches(batch.context, sheetId, principal)) {
+      setBatch(null);
+      toasts.show({
+        kind: "error",
+        text: "The sheet or signed-in account changed; the chat card was not imported",
+      });
+      return;
+    }
     setBatchBusy(true);
     try {
-      for (const d of batch.drafts) {
-        if (batch.messageId) d.initial.import_message_id = batch.messageId;
-        await writeEntry(parsedToPayload(d.initial));
+      const payloads = batch.drafts.map((draft) =>
+        parsedToPayload({
+          ...draft.initial,
+          ...(batch.messageId ? { import_message_id: batch.messageId } : {}),
+        }),
+      );
+      const K_sheet = get(batch.context.sheetId) ?? (await unwrapFor(batch.context.sheetId));
+      const acknowledgement = await addEntryBatch({
+        actor: actor as any,
+        sheetId: batch.context.sheetId,
+        payloads,
+        messageHandle: batch.messageId,
+        relayId: batch.relayId,
+        sheetKey: K_sheet,
+        beforeMutate: () => {
+          const current = activeImportContextRef.current;
+          if (!batchImportContextMatches(batch.context, current.sheetId, current.principal)) {
+            throw new Error("The sheet or signed-in account changed; the chat card was not imported");
+          }
+        },
+      });
+      const current = activeImportContextRef.current;
+      if (!batchImportContextMatches(batch.context, current.sheetId, current.principal)) {
+        throw new Error("The sheet or signed-in account changed; the chat card remains pending");
       }
-      await clearRelay(batch.relayId);
+      const stillCurrent = await finalizeAcceptedChatImport({
+        captured: batch.context,
+        clear: () => clearRelay(batch.relayId),
+        current: () => activeImportContextRef.current,
+      });
+      if (!stillCurrent) return;
       if (batch.messageId) markScopedMessageImported(inboxDedupe, batch.messageId);
       if (batch.chatKey && rememberChat && !chatLinks[batch.chatKey]) {
-        rememberChatMapping(batch.chatKey);
+        rememberChatMapping(batch.chatKey, batch.context);
       }
-      toasts.show({ kind: "success", text: `Added ${batch.drafts.length} entries` });
+      toasts.show({ kind: "success", text: `Added ${acknowledgement.accepted_count} entries` });
       setBatch(null);
       await reload();
     } catch (e) {

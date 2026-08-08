@@ -33,6 +33,13 @@ describe("buildManifestWire", () => {
     expect(manifest.icon_url[0]?.startsWith("data:")).toBe(false);
   });
 
+  it("does not add a redundant disclosure acknowledgement to the explicit Add to IOU action", () => {
+    const manifest = buildManifestWire("", undefined, () => {}) as {
+      actions: { card: { disclosure: string[] } }[];
+    };
+    expect(manifest.actions[0]?.card.disclosure).toEqual([]);
+  });
+
   it("sends app_canister_id as an opt principal when a valid one is supplied, [] otherwise", () => {
     const withId = buildManifestWire("", "aaaaa-aa", () => {});
     expect(withId.app_canister_id).toHaveLength(1);

@@ -39,6 +39,8 @@ type Memory = VirtualMemory<DefaultMemoryImpl>;
 const MAX_PAIRS_PER_PRINCIPAL: usize = 512;
 const MAX_SHEETS_PER_PAIR: usize = 512;
 const MAX_ENTRIES_PER_SHEET: u64 = 10_000;
+const MAX_ENTRIES_PER_BATCH: usize = 32;
+const MAX_BATCH_ENCRYPTED_BYTES: u64 = 256 * 1024;
 const MAX_ENTRY_CIPHERTEXT_BYTES: usize = 64_000;
 const MAX_ENTRY_HISTORY_VERSIONS: usize = 100;
 const MAX_SHEET_ENCRYPTED_BYTES: u64 = 32 * 1024 * 1024;
@@ -450,10 +452,15 @@ impl Storable for RecoveryKey {
 //     redeeming an authenticated, one-time OpenChat chat-link token against
 //     the caller's exact current binding. Public APIs expose only a
 //     domain-separated digest, never the handle.
+//   MemoryId 29: ENTRY_BATCH_RECEIPTS
+//     Sheet-scoped exact OpenChat message identity -> committed entry ids. This
+//     makes an outcome-unknown batch retry return the original rows instead of
+//     adding duplicates even if client-side parsing or encryption later drifts.
+//     Additive fresh region.
 //
 //   DO NOT re-use these orphaned MemoryIds for a new structure
 //   with a different key/value type — see issue #7. If you need
-//   a new region, use the next free number (currently 29+).
+//   a new region, use the next free number (currently 30+).
 
 // v1.5.0 (schema v3 -> v4): added optional encrypted name fields to Pair,
 // Sheet, PairSummary, CreateSheetReq.
@@ -500,7 +507,10 @@ impl Storable for RecoveryKey {
 // bindings decode with None and deliberately fail key-bound authorization until the owner relinks.
 // v1.19.0 (schema v16 -> v17): added MemoryId 28 PENDING_CHAT_ROUTES. Rows are
 // bounded, expiring and caller-scoped; no existing chat-link migration is needed.
-const SCHEMA_VERSION: u32 = 17;
+// v1.20.0 (schema v17 -> v18): added MemoryId 29 ENTRY_BATCH_RECEIPTS. Existing
+// entries require no migration; receipts are written only by the new atomic
+// batch endpoint and survive state-preserving upgrades.
+const SCHEMA_VERSION: u32 = 18;
 
 thread_local! {
     static MEMORY_MANAGER: RefCell<MemoryManager<DefaultMemoryImpl>> =
@@ -676,6 +686,13 @@ thread_local! {
     static SHEET_ENTRY_BYTES: RefCell<StableBTreeMap<String, u64, Memory>> =
         RefCell::new(StableBTreeMap::init(
             MEMORY_MANAGER.with(|m| m.borrow().get(MemoryId::new(24)))
+        ));
+
+    // v1.20.0: atomic/idempotent multi-entry imports. Fresh MemoryId 29;
+    // never reuse an orphaned region because stable-map headers are typed.
+    static ENTRY_BATCH_RECEIPTS: RefCell<StableBTreeMap<String, EntryBatchReceipt, Memory>> =
+        RefCell::new(StableBTreeMap::init(
+            MEMORY_MANAGER.with(|m| m.borrow().get(MemoryId::new(29)))
         ));
 }
 
@@ -1178,6 +1195,7 @@ fn inspect_message() {
         "set_pair_templates",
         // Phase 4: entries
         "add_entry",
+        "add_entry_batch",
         "edit_entry",
         "delete_entry",
         "restore_entry",
@@ -1252,6 +1270,7 @@ fn inspect_message() {
         "close_sheet_encrypted",
         "start_new_sheet",
         "add_entry",
+        "add_entry_batch",
         "edit_entry",
         "delete_entry",
         "restore_entry",
@@ -1570,8 +1589,6 @@ const IOU_CARD_ACTION_ID: &str = "iou.entry.import";
 const IOU_CARD_TITLE: &str = "Add to IOU";
 const IOU_CARD_CONFIRM_LABEL: &str = "Add to IOU";
 const IOU_CARD_CANCEL_LABEL: &str = "Cancel";
-const IOU_CARD_DISCLOSURE: &str =
-    "On confirm, an encrypted draft is delivered to your IOU app.";
 const MAX_CARD_CONFIRM_PAYLOAD_BYTES: usize = 16_384;
 const MAX_CARD_DRAFTS: usize = 32;
 const TEMPLATE_REF_PREFIX: &str = "ioutr1.";
@@ -1842,7 +1859,9 @@ fn exact_iou_card_content_is_valid(content: &AiAppCardContentV1) -> bool {
     if content.confirm_label != IOU_CARD_CONFIRM_LABEL
         || content.cancel_label != IOU_CARD_CANCEL_LABEL
         || content.action_id != IOU_CARD_ACTION_ID
-        || content.disclosure.as_deref() != Some(IOU_CARD_DISCLOSURE)
+        // The explicit app identity, title, and "Add to IOU" action already state the destination.
+        // Requiring a second informational acknowledgement only adds a redundant click.
+        || content.disclosure.is_some()
         || content.expires_at.is_some()
     {
         return false;
@@ -1869,9 +1888,9 @@ fn exact_iou_card_content_is_valid(content: &AiAppCardContentV1) -> bool {
                 label: format!("Entry {}", index + 1),
                 value: draft_public_values(draft)
                     .into_iter()
-                    .map(|(_, value)| value)
+                    .map(|(label, value)| format!("{label}: {value}"))
                     .collect::<Vec<_>>()
-                    .join(" "),
+                    .join(" · "),
             })
             .collect::<Vec<_>>()
     };
@@ -2928,6 +2947,54 @@ pub struct AddEntryReq {
     pub iv: Vec<u8>,
 }
 
+/// One ciphertext-only row in an atomic entry batch. The sheet id and
+/// idempotency coordinates live once on `AddEntryBatchReq` so they cannot
+/// disagree between rows.
+#[derive(Clone, CandidType, Deserialize)]
+pub struct EncryptedEntryInput {
+    pub entry_key: Vec<u8>,
+    pub ciphertext: Vec<u8>,
+    pub iv: Vec<u8>,
+}
+
+/// Atomically import one OpenChat message containing 1..=32 ledger rows.
+///
+/// `import_id` is the exact 32-byte app-scoped OpenChat message handle (or a
+/// domain-separated 32-byte digest for the legacy relay). The receipt is
+/// authoritative for that sheet/message identity: a retry returns the original
+/// ids even if the client re-parses or re-encrypts the message differently.
+#[derive(Clone, CandidType, Deserialize)]
+pub struct AddEntryBatchReq {
+    pub sheet_id: String,
+    pub import_id: Vec<u8>,
+    pub entries: Vec<EncryptedEntryInput>,
+}
+
+#[derive(Clone, CandidType, Deserialize)]
+pub struct AddEntryBatchResult {
+    pub entry_ids: Vec<u64>,
+    pub replayed: bool,
+}
+
+/// Upgrade-stable receipt for an atomic import. Keyed by sheet + import id,
+/// deliberately not by caller: both sheet members receive the same OpenChat
+/// message handle, so simultaneous imports converge on one set of entries.
+#[derive(Clone, CandidType, Deserialize, Debug, PartialEq, Eq)]
+struct EntryBatchReceipt {
+    entry_ids: Vec<u64>,
+    created_at: u64,
+}
+
+impl Storable for EntryBatchReceipt {
+    fn to_bytes(&self) -> Cow<'_, [u8]> {
+        Cow::Owned(Encode!(self).unwrap())
+    }
+    fn from_bytes(bytes: Cow<[u8]>) -> Self {
+        Decode!(bytes.as_ref(), Self).unwrap()
+    }
+    const BOUND: Bound = Bound::Unbounded;
+}
+
 #[derive(Clone, CandidType, Deserialize)]
 pub struct ListEntriesResult {
     pub entries: Vec<Entry>,
@@ -2947,6 +3014,173 @@ fn next_entry_id(sheet_id: &str) -> u64 {
         map.insert(sheet_id.to_string(), next);
         next
     })
+}
+
+fn entry_batch_receipt_key(sheet_id: &str, import_id: &[u8]) -> String {
+    let encoded: String = import_id.iter().map(|byte| format!("{byte:02x}")).collect();
+    format!("{sheet_id}\0{encoded}")
+}
+
+fn entry_batch_receipt_bounds(sheet_id: &str) -> (String, String) {
+    (format!("{sheet_id}\0"), format!("{sheet_id}\u{1}"))
+}
+
+fn clear_entry_batch_receipts_for_sheet(sheet_id: &str) {
+    let (start, end) = entry_batch_receipt_bounds(sheet_id);
+    let keys: Vec<String> = ENTRY_BATCH_RECEIPTS.with(|receipts| {
+        receipts
+            .borrow()
+            .range(start..end)
+            .map(|(key, _)| key)
+            .collect()
+    });
+    ENTRY_BATCH_RECEIPTS.with(|receipts| {
+        let mut map = receipts.borrow_mut();
+        for key in keys {
+            map.remove(&key);
+        }
+    });
+}
+
+#[derive(Debug)]
+struct ValidatedEntryBatch {
+    entry_ids: Vec<u64>,
+    next_sheet_bytes: u64,
+    #[cfg(test)]
+    replay: bool,
+}
+
+impl ValidatedEntryBatch {
+    fn entry_ids(&self) -> &[u64] {
+        &self.entry_ids
+    }
+
+    fn next_sheet_bytes(&self) -> u64 {
+        self.next_sheet_bytes
+    }
+
+    #[cfg(test)]
+    fn is_replay(&self) -> bool {
+        self.replay
+    }
+
+    #[cfg(test)]
+    fn receipt(&self) -> EntryBatchReceipt {
+        EntryBatchReceipt {
+            entry_ids: self.entry_ids.clone(),
+            created_at: 0,
+        }
+    }
+}
+
+/// Validate the complete request and calculate every id/quota counter before
+/// any stable write. A synchronous canister update is transactional, so an
+/// unexpected trap during the subsequent commit also rolls every stable-map
+/// write back; the explicit preflight keeps all expected failures before that
+/// commit begins.
+fn validate_add_entry_batch<F>(
+    req: &AddEntryBatchReq,
+    current_counter: u64,
+    existing: Option<&EntryBatchReceipt>,
+    current_sheet_bytes: F,
+) -> Result<ValidatedEntryBatch, &'static str>
+where
+    F: FnOnce() -> u64,
+{
+    validate_entry_batch_import_id(&req.import_id)?;
+
+    // The receipt is the authoritative outcome for (sheet, exact import id).
+    // Deliberately do not inspect row count or ciphertext first: an
+    // outcome-unknown retry may have been re-parsed, filtered, or encrypted
+    // differently after the original commit.
+    if let Some(receipt) = existing {
+        validate_entry_batch_receipt(receipt)?;
+        return Ok(ValidatedEntryBatch {
+            entry_ids: receipt.entry_ids.clone(),
+            next_sheet_bytes: 0,
+            #[cfg(test)]
+            replay: true,
+        });
+    }
+
+    validate_new_entry_batch_shape(req)?;
+
+    let mut additional_bytes = 0u64;
+    for row in &req.entries {
+        validate_entry_blob(&row.entry_key, &row.ciphertext, &row.iv)?;
+        additional_bytes = additional_bytes
+            .checked_add(entry_blob_bytes(&row.entry_key, &row.ciphertext, &row.iv))
+            .ok_or("batch encrypted-byte counter overflow")?;
+    }
+    if additional_bytes > MAX_BATCH_ENCRYPTED_BYTES {
+        return Err("entry batch encrypted payload exceeds the 262144-byte limit");
+    }
+
+    let count = u64::try_from(req.entries.len()).map_err(|_| "entry batch is too large")?;
+    let last_id = current_counter
+        .checked_add(count)
+        .ok_or("entry id counter overflow")?;
+    if last_id > MAX_ENTRIES_PER_SHEET {
+        return Err("entry quota reached for this sheet");
+    }
+    // This lazy stable-map scan is intentionally after every cheap row and
+    // aggregate check above, and is never evaluated on receipt replay.
+    let next_sheet_bytes = current_sheet_bytes()
+        .checked_add(additional_bytes)
+        .ok_or("sheet encrypted-byte counter overflow")?;
+    if next_sheet_bytes > MAX_SHEET_ENCRYPTED_BYTES {
+        return Err("sheet encrypted payload quota exceeded");
+    }
+    let entry_ids = ((current_counter + 1)..=last_id).collect();
+    Ok(ValidatedEntryBatch {
+        entry_ids,
+        next_sheet_bytes,
+        #[cfg(test)]
+        replay: false,
+    })
+}
+
+fn validate_entry_batch_import_id(import_id: &[u8]) -> Result<(), &'static str> {
+    if import_id.len() != 32 {
+        return Err("batch import id must be 32 bytes");
+    }
+    Ok(())
+}
+
+fn validate_new_entry_batch_shape(req: &AddEntryBatchReq) -> Result<(), &'static str> {
+    if !(1..=MAX_ENTRIES_PER_BATCH).contains(&req.entries.len()) {
+        return Err("entry batch must contain 1..=32 rows");
+    }
+    Ok(())
+}
+
+fn validate_entry_batch_receipt(receipt: &EntryBatchReceipt) -> Result<(), &'static str> {
+    if !(1..=MAX_ENTRIES_PER_BATCH).contains(&receipt.entry_ids.len()) {
+        return Err("invalid stored batch receipt");
+    }
+    let mut ids = receipt.entry_ids.clone();
+    if ids.iter().any(|id| *id == 0) {
+        return Err("invalid stored batch receipt");
+    }
+    ids.sort_unstable();
+    if ids.windows(2).any(|pair| pair[0] == pair[1]) {
+        return Err("invalid stored batch receipt");
+    }
+    Ok(())
+}
+
+fn validate_entry_batch_sheet_access(
+    sheet: Option<Sheet>,
+    caller: Principal,
+) -> Result<Sheet, &'static str> {
+    let sheet = sheet.ok_or("caller does not have access to this sheet")?;
+    if !principal_can_read_sheet(&sheet, caller) {
+        return Err("caller does not have access to this sheet");
+    }
+    if !matches!(sheet.state, SheetState::Active) {
+        return Err("sheet is not active");
+    }
+    Ok(sheet)
 }
 
 /// caller_owns_sheet: true iff the authenticated caller is member_a or
@@ -3045,6 +3279,101 @@ fn add_entry(req: AddEntryReq) -> Entry {
     sheet_entries_insert(&req.sheet_id, entry.id, entry.clone());
     record_entry_timestamp(&req.sheet_id, now_nanos());
     entry
+}
+
+/// Store a complete 1..=32-row import in one update and make retry after an
+/// outcome-unknown response exactly-once for the sheet/message identity.
+/// Ordinary local single-entry writes continue to use `add_entry` unchanged;
+/// chat/relay singles use this receipt endpoint as well.
+#[ic_cdk::update]
+fn add_entry_batch(req: AddEntryBatchReq) -> AddEntryBatchResult {
+    let caller = ic_cdk::api::msg_caller();
+    require_authed();
+    let sheet = SHEETS.with(|s| s.borrow().get(&req.sheet_id));
+    // Authenticate against the current sheet membership/state before the
+    // first receipt lookup. A removed member cannot probe old import ids.
+    let sheet = validate_entry_batch_sheet_access(sheet, caller)
+        .unwrap_or_else(|message| ic_cdk::trap(message));
+    // Reject an oversized attacker-controlled identity before using it to
+    // allocate a stable-map lookup key. Row validation deliberately follows a
+    // receipt lookup so response-loss retries remain authoritative.
+    validate_entry_batch_import_id(&req.import_id)
+        .unwrap_or_else(|message| ic_cdk::trap(message));
+    let receipt_key = entry_batch_receipt_key(&req.sheet_id, &req.import_id);
+    let existing = ENTRY_BATCH_RECEIPTS.with(|receipts| receipts.borrow().get(&receipt_key));
+    if let Some(receipt) = existing.as_ref() {
+        validate_entry_batch_receipt(receipt)
+            .unwrap_or_else(|message| ic_cdk::trap(message));
+        return AddEntryBatchResult {
+            entry_ids: receipt.entry_ids.clone(),
+            replayed: true,
+        };
+    }
+
+    let current_counter = ENTRY_COUNTERS.with(|counters| {
+        counters.borrow().get(&req.sheet_id).unwrap_or(0)
+    });
+    let validated = validate_add_entry_batch(
+        &req,
+        current_counter,
+        None,
+        || sheet_entry_bytes(&req.sheet_id),
+    )
+    .unwrap_or_else(|message| ic_cdk::trap(message));
+
+    let now = ic_cdk::api::time();
+    let entries: Vec<Entry> = req
+        .entries
+        .into_iter()
+        .zip(validated.entry_ids().iter().copied())
+        .map(|(row, id)| Entry {
+            id,
+            pair_id: sheet.pair_id.clone(),
+            sheet_id: sheet.id.clone(),
+            created_by: caller,
+            created_at_server: now,
+            updated_at_server: None,
+            entry_key: row.entry_key,
+            ciphertext: row.ciphertext,
+            iv: row.iv,
+            history: None,
+            deleted_at: None,
+        })
+        .collect();
+
+    // No await/inter-canister call occurs from preflight through the final
+    // receipt write. IC message execution rolls all stable-memory mutations
+    // back together if an unexpected trap occurs anywhere in this block.
+    for entry in &entries {
+        sheet_entries_insert(&req.sheet_id, entry.id, entry.clone());
+    }
+    let last_id = *validated
+        .entry_ids()
+        .last()
+        .unwrap_or_else(|| ic_cdk::trap("validated batch has no entry ids"));
+    ENTRY_COUNTERS.with(|counters| {
+        counters.borrow_mut().insert(req.sheet_id.clone(), last_id);
+    });
+    SHEET_ENTRY_BYTES.with(|bytes| {
+        bytes
+            .borrow_mut()
+            .insert(req.sheet_id.clone(), validated.next_sheet_bytes());
+    });
+    ENTRY_BATCH_RECEIPTS.with(|receipts| {
+        receipts.borrow_mut().insert(
+            receipt_key,
+            EntryBatchReceipt {
+                entry_ids: validated.entry_ids().to_vec(),
+                created_at: now,
+            },
+        );
+    });
+    record_entry_timestamp(&req.sheet_id, now);
+
+    AddEntryBatchResult {
+        entry_ids: validated.entry_ids().to_vec(),
+        replayed: false,
+    }
 }
 
 /// edit_entry: replace the ciphertext + iv of an existing entry.
@@ -5634,6 +5963,7 @@ fn delete_pair(pair_id: String) {
         for e in sheet_entries_iter(sid) {
             sheet_entries_remove(sid, e.id);
         }
+        clear_entry_batch_receipts_for_sheet(sid);
         ENTRY_COUNTERS.with(|m| m.borrow_mut().remove(sid));
         SHEET_ENTRY_BYTES.with(|m| m.borrow_mut().remove(sid));
         SHEETS.with(|s| s.borrow_mut().remove(sid));
@@ -5880,6 +6210,268 @@ mod tests {
         let k_b_1 = entry_key("b", 1);
         assert!(k_a_2 < k_a_10, "lexicographic: a\\0...02 < a\\0...10");
         assert!(k_a_10 < k_b_1, "lexicographic: a* < b*");
+    }
+
+    #[test]
+    fn batch_validation_rejects_a_bad_middle_row_before_any_entry_is_planned() {
+        let mut request = test_add_entry_batch_req(3);
+        request.entries[1].iv = vec![0; 11];
+        let result = validate_add_entry_batch(&request, 40, None, || {
+            panic!("the lazy sheet-byte scan must follow cheap row validation")
+        });
+        assert_eq!(result.unwrap_err(), "iv length must be 12..=16 bytes");
+    }
+
+    #[test]
+    fn batch_retry_reuses_the_same_ids_without_planning_duplicate_entries() {
+        let request = test_add_entry_batch_req(3);
+        let first = validate_add_entry_batch(&request, 40, None, || 1_000).unwrap();
+        let receipt = first.receipt();
+        assert_eq!(first.entry_ids(), &[41, 42, 43]);
+
+        // A browser encrypts with fresh salts/IVs on an outcome-unknown retry.
+        // Idempotency is bound to sheet + exact import identity, not random
+        // ciphertext bytes, so this must still resolve to the original ids.
+        let mut reencrypted = request.clone();
+        for row in &mut reencrypted.entries {
+            row.entry_key = vec![91; 32];
+            row.ciphertext = vec![92; 48];
+            row.iv = vec![93; 16];
+        }
+        let retry = validate_add_entry_batch(
+            &reencrypted,
+            43,
+            Some(&receipt),
+            || panic!("receipt replay must not scan sheet entries"),
+        )
+        .unwrap();
+        assert!(retry.is_replay());
+        assert_eq!(retry.entry_ids(), &[41, 42, 43]);
+    }
+
+    #[test]
+    fn batch_receipt_is_shared_by_both_current_sheet_members_but_not_other_sheets() {
+        let import_id = vec![8; 32];
+        let first_member_key = entry_batch_receipt_key("0123456789abcdef", &import_id);
+        // There is deliberately no caller coordinate in the receipt key: two
+        // current members racing the same fanned-out OpenChat message converge.
+        let second_member_key = entry_batch_receipt_key("0123456789abcdef", &import_id);
+        assert_eq!(first_member_key, second_member_key);
+        assert_ne!(
+            first_member_key,
+            entry_batch_receipt_key("fedcba9876543210", &import_id)
+        );
+
+        let sheet = test_sheet(SheetState::Active);
+        assert!(validate_entry_batch_sheet_access(Some(sheet.clone()), p(1)).is_ok());
+        assert!(validate_entry_batch_sheet_access(Some(sheet.clone()), p(2)).is_ok());
+        // `add_entry_batch` calls this exact helper before its first
+        // ENTRY_BATCH_RECEIPTS lookup, so a removed/non-member principal cannot
+        // use an old receipt as an entry-existence oracle.
+        assert_eq!(
+            validate_entry_batch_sheet_access(Some(sheet.clone()), p(3)).err(),
+            Some("caller does not have access to this sheet")
+        );
+        assert_eq!(
+            validate_entry_batch_sheet_access(Some(sheet), Principal::anonymous()).err(),
+            Some("caller does not have access to this sheet")
+        );
+        assert_eq!(
+            validate_entry_batch_sheet_access(Some(test_sheet(SheetState::Closed)), p(1))
+                .err(),
+            Some("sheet is not active")
+        );
+        assert_eq!(
+            validate_entry_batch_sheet_access(None, p(1)).err(),
+            Some("caller does not have access to this sheet")
+        );
+    }
+
+    #[test]
+    fn batch_retry_ignores_payload_and_count_drift_after_the_authoritative_receipt() {
+        let request = test_add_entry_batch_req(3);
+        let first = validate_add_entry_batch(&request, 0, None, || 0).unwrap();
+        let receipt = first.receipt();
+        let mut changed = request.clone();
+        changed.entries[0].ciphertext = vec![9; 47];
+        let changed_retry = validate_add_entry_batch(
+            &changed,
+            3,
+            Some(&receipt),
+            || panic!("receipt replay must not scan after payload drift"),
+        )
+        .unwrap();
+        assert!(changed_retry.is_replay());
+        assert_eq!(changed_retry.entry_ids(), &[1, 2, 3]);
+
+        let mut shortened = request;
+        shortened.entries.clear();
+        let count_drift = validate_add_entry_batch(
+            &shortened,
+            3,
+            Some(&receipt),
+            || panic!("receipt replay must not validate count or scan entries"),
+        )
+        .unwrap();
+        assert!(count_drift.is_replay());
+        assert_eq!(count_drift.entry_ids(), &[1, 2, 3]);
+    }
+
+    #[test]
+    fn batch_preflight_enforces_count_entry_and_aggregate_sheet_quotas() {
+        let two = test_add_entry_batch_req(2);
+        assert_eq!(
+            validate_add_entry_batch(&two, MAX_ENTRIES_PER_SHEET - 1, None, || 0)
+                .unwrap_err(),
+            "entry quota reached for this sheet"
+        );
+        assert_eq!(
+            validate_add_entry_batch(
+                &two,
+                0,
+                None,
+                || MAX_SHEET_ENCRYPTED_BYTES - 1,
+            )
+            .unwrap_err(),
+            "sheet encrypted payload quota exceeded"
+        );
+
+        let mut oversized_wire = test_add_entry_batch_req(5);
+        for row in &mut oversized_wire.entries {
+            row.ciphertext = vec![0; MAX_ENTRY_CIPHERTEXT_BYTES];
+        }
+        assert_eq!(
+            validate_add_entry_batch(&oversized_wire, 0, None, || {
+                panic!("aggregate rejection must happen before the stable scan")
+            })
+            .unwrap_err(),
+            "entry batch encrypted payload exceeds the 262144-byte limit"
+        );
+
+        let mut too_many = test_add_entry_batch_req(MAX_ENTRIES_PER_BATCH + 1);
+        assert_eq!(
+            validate_add_entry_batch(&too_many, 0, None, || {
+                panic!("row-count rejection must happen before the stable scan")
+            })
+            .unwrap_err(),
+            "entry batch must contain 1..=32 rows"
+        );
+        too_many.entries.truncate(1);
+        assert!(validate_add_entry_batch(&too_many, 0, None, || 0).is_ok());
+        too_many.entries = test_add_entry_batch_req(2).entries;
+        too_many.import_id.pop();
+        assert_eq!(
+            validate_add_entry_batch(&too_many, 0, None, || {
+                panic!("identity rejection must happen before the stable scan")
+            })
+            .unwrap_err(),
+            "batch import id must be 32 bytes"
+        );
+    }
+
+    #[test]
+    fn batch_receipt_rejects_empty_zero_and_duplicate_ids() {
+        for entry_ids in [vec![], vec![0], vec![7, 7]] {
+            let receipt = EntryBatchReceipt {
+                entry_ids,
+                created_at: 0,
+            };
+            assert_eq!(
+                validate_entry_batch_receipt(&receipt),
+                Err("invalid stored batch receipt")
+            );
+        }
+    }
+
+    #[test]
+    fn batch_endpoint_source_authenticates_before_receipt_and_validates_rows_before_scan() {
+        let source = include_str!("lib.rs");
+        let start = source.find("fn add_entry_batch(req:").unwrap();
+        let end = source[start..].find("fn edit_entry(req:").unwrap() + start;
+        let endpoint = &source[start..end];
+        let access = endpoint.find("validate_entry_batch_sheet_access").unwrap();
+        let lookup = endpoint.find("ENTRY_BATCH_RECEIPTS.with").unwrap();
+        let validate = endpoint.find("validate_add_entry_batch(").unwrap();
+        let scan = endpoint.find("sheet_entry_bytes(&req.sheet_id)").unwrap();
+        assert!(access < lookup, "current membership/state must gate receipt lookup");
+        assert!(lookup < validate, "receipt replay must precede new-row validation");
+        assert!(validate < scan, "cheap new-row validation owns the lazy scan closure");
+    }
+
+    #[test]
+    fn batch_endpoint_is_pinned_in_both_inspect_message_security_lists() {
+        let source = include_str!("lib.rs");
+        let inspect_start = source.find("fn inspect_message()").unwrap();
+        let endpoint_start = source[inspect_start..]
+            .find("fn whoami()")
+            .unwrap()
+            + inspect_start;
+        let inspect = &source[inspect_start..endpoint_start];
+        let auth_start = inspect.find("let require_auth_methods").unwrap();
+        let allowed = &inspect[..auth_start];
+        let require_auth = &inspect[auth_start..];
+        assert_eq!(allowed.matches("\"add_entry_batch\"").count(), 1);
+        assert_eq!(require_auth.matches("\"add_entry_batch\"").count(), 1);
+    }
+
+    #[test]
+    fn batch_receipts_round_trip_in_a_fresh_stable_map_region() {
+        let memory = VectorMemory::default();
+        let mut receipts = StableBTreeMap::<String, EntryBatchReceipt, _>::init(memory.clone());
+        let receipt = EntryBatchReceipt {
+            entry_ids: vec![9, 10],
+            created_at: 123,
+        };
+        receipts.insert("sheet\0message".into(), receipt.clone());
+        assert_eq!(receipts.get(&"sheet\0message".to_string()), Some(receipt));
+        const { assert!(SCHEMA_VERSION >= 18, "MemoryId 29 batch receipts require schema v18") };
+    }
+
+    #[test]
+    fn clearing_batch_receipts_removes_only_the_exact_sheet_range() {
+        let receipt = EntryBatchReceipt {
+            entry_ids: vec![41, 42],
+            created_at: 123,
+        };
+        let sheet_a = "batch-cleanup-sheet-a";
+        let sheet_b = "batch-cleanup-sheet-b";
+        let a_first = entry_batch_receipt_key(sheet_a, &[1; 32]);
+        let a_second = entry_batch_receipt_key(sheet_a, &[2; 32]);
+        let b_first = entry_batch_receipt_key(sheet_b, &[1; 32]);
+        ENTRY_BATCH_RECEIPTS.with(|receipts| {
+            let mut receipts = receipts.borrow_mut();
+            receipts.insert(a_first.clone(), receipt.clone());
+            receipts.insert(a_second.clone(), receipt.clone());
+            receipts.insert(b_first.clone(), receipt.clone());
+        });
+
+        clear_entry_batch_receipts_for_sheet(sheet_a);
+
+        ENTRY_BATCH_RECEIPTS.with(|receipts| {
+            let receipts = receipts.borrow();
+            assert_eq!(receipts.get(&a_first), None);
+            assert_eq!(receipts.get(&a_second), None);
+            assert_eq!(receipts.get(&b_first), Some(receipt));
+        });
+        clear_entry_batch_receipts_for_sheet(sheet_b);
+    }
+
+    #[test]
+    fn batch_receipt_decodes_the_pre_release_payload_hash_shape() {
+        #[derive(CandidType, Deserialize)]
+        struct LegacyEntryBatchReceipt {
+            payload_hash: Vec<u8>,
+            entry_ids: Vec<u64>,
+            created_at: u64,
+        }
+        let legacy = LegacyEntryBatchReceipt {
+            payload_hash: vec![8; 32],
+            entry_ids: vec![4, 5],
+            created_at: 77,
+        };
+        let decoded = EntryBatchReceipt::from_bytes(Cow::Owned(Encode!(&legacy).unwrap()));
+        assert_eq!(decoded.entry_ids, vec![4, 5]);
+        assert_eq!(decoded.created_at, 77);
     }
 
     #[test]
@@ -6247,6 +6839,20 @@ mod tests {
         Principal::from_slice(&[byte])
     }
 
+    fn test_add_entry_batch_req(count: usize) -> AddEntryBatchReq {
+        AddEntryBatchReq {
+            sheet_id: "0123456789abcdef".into(),
+            import_id: vec![5; 32],
+            entries: (0..count)
+                .map(|index| EncryptedEntryInput {
+                    entry_key: vec![index as u8; 32],
+                    ciphertext: vec![index as u8 + 1; 32],
+                    iv: vec![index as u8 + 2; 12],
+                })
+                .collect(),
+        }
+    }
+
     fn test_sheet(state: SheetState) -> Sheet {
         Sheet {
             id: "0123456789abcdef".into(),
@@ -6346,7 +6952,7 @@ mod tests {
             confirm_label: IOU_CARD_CONFIRM_LABEL.into(),
             cancel_label: IOU_CARD_CANCEL_LABEL.into(),
             action_id: IOU_CARD_ACTION_ID.into(),
-            disclosure: Some(IOU_CARD_DISCLOSURE.into()),
+            disclosure: None,
             expires_at: None,
             confirm_payload: Some(
                 br#"{"kind":"iou","amount":25,"currency":"USD","direction":"debt","date":"2026-08-05","note":"rent","message":"I owe 25 USD rent"}"#.to_vec(),
@@ -6430,6 +7036,10 @@ mod tests {
         assert!(!attests_exact_iou_card(&changed, Some(&configured), Some(&link), p(3), p(1)));
 
         let mut changed = binding.clone();
+        changed.commitment.content.disclosure = Some("Redundant acknowledgement".into());
+        assert!(!attests_exact_iou_card(&changed, Some(&configured), Some(&link), p(3), p(1)));
+
+        let mut changed = binding.clone();
         changed.commitment.context.context_version = 2;
         assert!(!attests_exact_iou_card(&changed, Some(&configured), Some(&link), p(3), p(1)));
 
@@ -6438,6 +7048,44 @@ mod tests {
         let mut wrong_link = link.clone();
         wrong_link.app_subject = Some(vec![11; 32]);
         assert!(!attests_exact_iou_card(&binding, Some(&configured), Some(&wrong_link), p(3), p(1)));
+    }
+
+    #[test]
+    fn multi_card_attestation_requires_labeled_manifest_order_summaries() {
+        let configured = test_ai_app_v2_binding();
+        let link = test_card_link();
+        let mut binding = test_card_attestation_binding();
+        binding.commitment.content.title = "Add to IOU (2 entries)".into();
+        binding.commitment.content.confirm_payload = Some(
+            br#"[{"kind":"iou","amount":20,"currency":"USD","direction":"debt","date":"2026-08-08","note":"rent","message":"rent 20"},{"kind":"settlement","amount":30,"currency":"EGP","direction":"credit","note":"paid"}]"#.to_vec(),
+        );
+        binding.commitment.content.rows = vec![
+            AttestedActionCardRow {
+                label: "Entry 1".into(),
+                value: "Amount: 20 · Currency: USD · Type: iou · Direction: debt · Date: 2026-08-08 · Note: rent · Message: rent 20".into(),
+            },
+            AttestedActionCardRow {
+                label: "Entry 2".into(),
+                value: "Amount: 30 · Currency: EGP · Type: settlement · Direction: credit · Note: paid".into(),
+            },
+        ];
+        assert!(attests_exact_iou_card(
+            &binding,
+            Some(&configured),
+            Some(&link),
+            p(3),
+            p(1),
+        ));
+
+        binding.commitment.content.rows[0].value =
+            "20 USD iou debt 2026-08-08 rent rent 20".into();
+        assert!(!attests_exact_iou_card(
+            &binding,
+            Some(&configured),
+            Some(&link),
+            p(3),
+            p(1),
+        ));
     }
 
     #[test]

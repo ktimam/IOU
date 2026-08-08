@@ -218,6 +218,20 @@ export const idlFactory = ({ IDL: idl }: { IDL: IDL }) => {
     ciphertext: idl.Vec(idl.Nat8),
     iv: idl.Vec(idl.Nat8),
   });
+  const EncryptedEntryInput = idl.Record({
+    entry_key: idl.Vec(idl.Nat8),
+    ciphertext: idl.Vec(idl.Nat8),
+    iv: idl.Vec(idl.Nat8),
+  });
+  const AddEntryBatchReq = idl.Record({
+    sheet_id: idl.Text,
+    import_id: idl.Vec(idl.Nat8),
+    entries: idl.Vec(EncryptedEntryInput),
+  });
+  const AddEntryBatchResult = idl.Record({
+    entry_ids: idl.Vec(idl.Nat64),
+    replayed: idl.Bool,
+  });
   const EditEntryReq = idl.Record({
     sheet_id: idl.Text,
     entry_id: idl.Nat64,
@@ -425,6 +439,7 @@ export const idlFactory = ({ IDL: idl }: { IDL: IDL }) => {
     ),
     // Phase 3
     add_entry: idl.Func([AddEntryReq], [Entry], []),
+    add_entry_batch: idl.Func([AddEntryBatchReq], [AddEntryBatchResult], []),
     edit_entry: idl.Func([EditEntryReq], [Entry], []),
     delete_entry: idl.Func([idl.Text, idl.Nat64], [], []),
     restore_entry: idl.Func([idl.Text, idl.Nat64], [], []),

@@ -9,7 +9,7 @@
 // Modeled on journey-fanout.ts (same env/attach/propose/confirm scaffolding). The run uses the
 // verified envelope's opaque chat handle and authenticated canister-backed route; it never guesses
 // from raw OpenChat ids or legacy localStorage. Requires replica :8080, OC :5003, IOU :3000, CDP
-// 9241/9222/9231. Prereq: the manager↔father DM exists, both members are paired to IOU, and the
+// ports from cdp-ports.json. Prereq: the manager↔father DM exists, both members are paired to IOU, and the
 // chat is linked to a sheet (journey-fanout.ts establishes pairing; link the chat once via the IOU
 // "Pending from chat" first-import "remember" checkbox or /openchat/link-chat). Both nonce-scoped
 // entries are soft-deleted after the History assertions so they do not affect later balances.
@@ -18,19 +18,19 @@
 import {
   chromium,
   type Dialog,
-  type FrameLocator,
   type Locator,
   type Page,
 } from "@playwright/test";
 import { Actor, HttpAgent } from "@dfinity/agent";
 import { webcrypto } from "node:crypto";
+import { CDP_PORTS } from "./cdpPorts";
+import { isImmediateStableSuccessor, sameStableMessage } from "./journeySafety";
 import {
-  ActionInboxArtifactScope,
-  finalizeActionInboxArtifactCleanup,
-} from "./actionInboxArtifactCleanup";
-import {
+  exactOpenChatMessageWrapper,
   finalizeOpenChatArtifactCleanup,
   OpenChatArtifactScope,
+  type OpenChatCardRowEvidence,
+  type OpenChatMessageRef,
 } from "./openChatArtifactCleanup";
 import {
   armManualExtractForCurrentUrl,
@@ -143,16 +143,18 @@ async function attach(port: number, urlPart: string): Promise<Page> {
 }
 
 type ExpectedEntry = {
-  kind: "iou";
+  kind: "iou" | "settlement";
   amount: number;
-  currency: "EGP";
-  direction: "credit";
+  currency: "EGP" | "USD";
+  direction: "credit" | "debt";
+  date: string;
   note: string;
+  message: string;
 };
 
 type LoadedMultiCard = {
   card: Locator;
-  frame: FrameLocator;
+  message: OpenChatMessageRef;
 };
 
 type InboxBatchLookup = {
@@ -162,151 +164,195 @@ type InboxBatchLookup = {
   acknowledged: number;
 };
 
-function matchesExpectedBatch(value: unknown, expected: ExpectedEntry[]): boolean {
-  if (!Array.isArray(value) || value.length !== expected.length) return false;
-  return value.every((candidate, index) => {
-    if (typeof candidate !== "object" || candidate === null || Array.isArray(candidate)) return false;
-    const row = candidate as Record<string, unknown>;
-    const wanted = expected[index];
-    return (
-      row.kind === wanted.kind &&
-      row.amount === wanted.amount &&
-      row.currency === wanted.currency &&
-      row.direction === wanted.direction &&
-      row.note === wanted.note
-    );
-  });
+function expectedPublicRows(expected: ExpectedEntry[]): OpenChatCardRowEvidence[] {
+  return expected.map((entry, index) => ({
+    label: `Entry ${index + 1}`,
+    value: [
+      `Amount: ${entry.amount}`,
+      `Currency: ${entry.currency}`,
+      `Type: ${entry.kind}`,
+      `Direction: ${entry.direction}`,
+      `Date: ${entry.date}`,
+      `Note: ${entry.note}`,
+      `Message: ${entry.message}`,
+    ].join(" · "),
+  }));
 }
 
-async function installNewCardObserver(page: Page, tag: string): Promise<void> {
-  await page.evaluate(`((observerTag) => {
-    const root = globalThis;
-    root.__iouMultiCardObserver?.observer.disconnect();
-    const state = {
-      tag: observerTag,
-      nextId: 0,
-      baseline: new Set(document.querySelectorAll(".action-card")),
-    };
-    const tagCards = () => {
-      for (const card of document.querySelectorAll(".action-card")) {
-        if (state.baseline.has(card) || card.dataset.iouMultiCardId) continue;
-        card.dataset.iouMultiCardId = observerTag + "-" + state.nextId++;
-      }
-    };
-    const observer = new MutationObserver(tagCards);
-    state.observer = observer;
-    root.__iouMultiCardObserver = state;
-    observer.observe(document.body, { childList: true, subtree: true });
-    tagCards();
-  })(${JSON.stringify(tag)})`);
+function normalized(value: string): string {
+  return value.replace(/\s+/g, " ").trim();
 }
 
-async function removeNewCardObserver(page: Page): Promise<void> {
-  await page.evaluate(`(() => {
-    const root = globalThis;
-    const state = root.__iouMultiCardObserver;
-    state?.observer.disconnect();
-    if (state) {
-      for (const card of document.querySelectorAll(".action-card[data-iou-multi-card-id]")) {
-        if (card.dataset.iouMultiCardId?.startsWith(state.tag + "-")) {
-          delete card.dataset.iouMultiCardId;
-        }
-      }
-    }
-    delete root.__iouMultiCardObserver;
-  })()`).catch(() => {});
+async function exactlyOneVisible(locator: Locator, label: string): Promise<Locator> {
+  const visible: Locator[] = [];
+  for (let index = 0; index < await locator.count(); index++) {
+    const candidate = locator.nth(index);
+    if (await candidate.isVisible().catch(() => false)) visible.push(candidate);
+  }
+  if (visible.length !== 1) {
+    throw new Error(`${label}: expected one visible control, found ${visible.length}`);
+  }
+  return visible[0];
 }
 
-async function findAndLoadMultiCard(
+async function cardRows(card: Locator): Promise<OpenChatCardRowEvidence[]> {
+  const rows = card.locator("table.rows tbody tr");
+  const result: OpenChatCardRowEvidence[] = [];
+  for (let index = 0; index < await rows.count().catch(() => 0); index++) {
+    result.push({
+      label: await rows.nth(index).locator("td.label").innerText().catch(() => ""),
+      value: await rows.nth(index).locator("td.value").innerText().catch(() => ""),
+    });
+  }
+  return result;
+}
+
+function sameRows(
+  observed: OpenChatCardRowEvidence[],
+  expected: OpenChatCardRowEvidence[],
+): boolean {
+  return (
+    observed.length === expected.length &&
+    observed.every(
+      (row, index) =>
+        normalized(row.label) === normalized(expected[index].label) &&
+        normalized(row.value) === normalized(expected[index].value),
+    )
+  );
+}
+
+async function messageFromCard(card: Locator): Promise<OpenChatMessageRef> {
+  const wrapper = card.locator(
+    'xpath=ancestor::*[@data-id and @data-index and starts-with(@id,"event-")][1]',
+  );
+  if ((await wrapper.count()) !== 1) throw new Error("multi card message wrapper is not unique");
+  const [messageId, rawIndex, rawEvent] = await Promise.all([
+    wrapper.getAttribute("data-id"),
+    wrapper.getAttribute("data-index"),
+    wrapper.getAttribute("id"),
+  ]);
+  const event = /^event-(\d+)$/.exec(rawEvent ?? "");
+  if (!/^\d+$/.test(messageId ?? "") || !/^\d+$/.test(rawIndex ?? "") || !event) {
+    throw new Error("multi card has invalid stable message coordinates");
+  }
+  return {
+    messageId: messageId!,
+    messageIndex: Number(rawIndex),
+    eventIndex: Number(event[1]),
+  };
+}
+
+async function findClassicMultiCard(
   page: Page,
-  expected: ExpectedEntry[],
+  expectedRows: OpenChatCardRowEvidence[],
+  expectedMessage?: OpenChatMessageRef,
   timeoutMs = 40_000,
 ): Promise<LoadedMultiCard | null> {
   const deadline = Date.now() + timeoutMs;
+  let firstFoundAt: number | undefined;
+  let found: LoadedMultiCard | null = null;
   while (Date.now() < deadline) {
-    const cards = page.locator(".action-card[data-iou-multi-card-id]");
+    const cards = expectedMessage
+      ? exactOpenChatMessageWrapper(page, expectedMessage).locator(".action-card")
+      : page.locator(".action-card");
+    const matches: LoadedMultiCard[] = [];
     for (let index = 0; index < await cards.count().catch(() => 0); index++) {
       const card = cards.nth(index);
       if (!(await card.isVisible().catch(() => false))) continue;
-      const isIou = await card.getByText(/Directory entry:\s*iou/i).first().isVisible().catch(() => false);
-      if (!isIou) continue;
-      const untrusted = await card
-        .getByText(/card content is untrusted|Untrusted card text/i)
-        .first()
-        .isVisible()
-        .catch(() => false);
-      if (untrusted) continue;
-      if ((await card.locator("iframe").count()) === 0) {
-        const load = card.getByRole("button", { name: "Load app card", exact: true });
-        if (await load.isVisible().catch(() => false)) {
-          if (!(await load.isEnabled())) throw new Error("the verified Load app card gate is disabled");
-          await load.click({ timeout: 10_000 });
-        }
+      const appName = normalized(await card.locator(".app-name").innerText().catch(() => ""));
+      if (appName.toLocaleLowerCase("en-US") !== "iou") continue;
+      if (
+        await card
+          .getByText(/card content is untrusted|Untrusted card text/i)
+          .first()
+          .isVisible()
+          .catch(() => false)
+      ) {
+        continue;
       }
-      if ((await card.locator("iframe").count()) === 0) continue;
-      const frame = card.frameLocator("iframe");
-      await frame.locator("input").first().waitFor({ timeout: 4_000 }).catch(() => {});
-      const inputs = frame.locator("input");
-      const values: string[] = [];
-      for (let input = 0; input < await inputs.count().catch(() => 0); input++) {
-        values.push(await inputs.nth(input).inputValue().catch(() => ""));
+      if (!sameRows(await cardRows(card), expectedRows)) continue;
+      if ((await card.locator("iframe").count()) !== 0) {
+        throw new Error("multi-entry summary unexpectedly opened an app iframe");
       }
-      if (expected.every((entry) => values.includes(entry.note))) return { card, frame };
+      matches.push({ card, message: await messageFromCard(card) });
+    }
+    if (matches.length > 1) {
+      throw new Error("multiple exact two-entry cards were found; refusing ambiguous confirmation");
+    }
+    if (matches.length === 1) {
+      found = matches[0];
+      firstFoundAt ??= Date.now();
+      if (Date.now() - firstFoundAt >= 800) return found;
     }
     await page.waitForTimeout(400);
   }
-  return null;
+  return found;
 }
 
-async function approveMultiCard(card: LoadedMultiCard, expected: ExpectedEntry[]): Promise<void> {
-  const add = card.frame.getByRole("button", { name: `Add all ${expected.length} entries`, exact: true });
-  await add.waitFor({ state: "visible", timeout: 10_000 });
-  if (!(await add.isEnabled())) throw new Error("the nonce-scoped Add all button is disabled");
-  await add.click();
-
-  const approval = card.card.getByRole("group", { name: "Approve app card request" });
-  await approval.waitFor({ state: "visible", timeout: 10_000 });
-  const summaryText = await approval.locator(".approval-summary").innerText();
-  let payload: unknown;
-  try {
-    payload = JSON.parse(summaryText);
-  } catch {
-    throw new Error("OpenChat host approval did not expose a canonical JSON payload");
+async function assertClassicMultiCard(
+  loaded: LoadedMultiCard,
+  expectedRows: OpenChatCardRowEvidence[],
+): Promise<Locator> {
+  const title = normalized(await loaded.card.locator(".title").innerText());
+  if (title !== `Add to IOU (${expectedRows.length} entries)`) {
+    throw new Error(`unexpected multi-card title: ${title}`);
   }
-  if (!matchesExpectedBatch(payload, expected)) {
-    throw new Error("OpenChat host approval is not bound to this run's exact two-entry payload");
+  const logo = loaded.card.locator("img.app-icon");
+  await logo.waitFor({ state: "visible", timeout: 10_000 });
+  if ((await logo.getAttribute("src")) !== `${IOU_BASE}/favicon.svg`) {
+    throw new Error("multi card did not render the authoritative IOU logo");
   }
-  const disclosure = approval.getByRole("checkbox");
-  if (await disclosure.isVisible().catch(() => false)) await disclosure.check();
-  const confirm = approval.getByRole("button", { name: "Confirm request", exact: true });
-  if (!(await confirm.isEnabled())) throw new Error("OpenChat host approval is not actionable");
-  await confirm.click({ timeout: 10_000 });
+  const visibleUrl = loaded.card.locator(".card-url");
+  if (
+    (await visibleUrl.count()) !== 1 ||
+    normalized(await visibleUrl.innerText()) !== `${IOU_BASE}/openchat/card`
+  ) {
+    throw new Error("multi card did not keep its exact registered card URL visible");
+  }
+  if ((await loaded.card.locator("iframe").count()) !== 0) {
+    throw new Error("multi card must stay in the host-owned classic renderer");
+  }
+  if (!sameRows(await cardRows(loaded.card), expectedRows)) {
+    throw new Error("multi card public rows do not exactly match the stored payload summary");
+  }
+  for (const obsolete of ["Load app card", "Share app context"] as const) {
+    if (
+      await loaded.card
+        .getByRole("button", { name: obsolete, exact: true })
+        .isVisible()
+        .catch(() => false)
+    ) {
+      throw new Error(`classic multi card unexpectedly requires ${obsolete}`);
+    }
+  }
+  if (
+    await loaded.card
+      .getByText(
+        /Loading contacts this external origin|If you separately grant private context|Capabilities never enter this URL/i,
+      )
+      .first()
+      .isVisible()
+      .catch(() => false)
+  ) {
+    throw new Error("classic multi card still renders obsolete protocol explanation text");
+  }
+  if ((await loaded.card.getByRole("checkbox").count()) !== 0) {
+    throw new Error("classic IOU multi card unexpectedly requires a disclosure checkbox");
+  }
+  if ((await loaded.card.getByRole("group", { name: "Approve app card request" }).count()) !== 0) {
+    throw new Error("classic stored-payload card unexpectedly added a second approval step");
+  }
+  const confirm = loaded.card.getByRole("button", { name: "Add to IOU", exact: true });
+  if ((await confirm.count()) !== 1 || !(await confirm.isEnabled())) {
+    throw new Error("classic stored-payload Add to IOU action is unavailable");
+  }
+  return confirm;
 }
 
 async function cancelMultiCard(card: LoadedMultiCard): Promise<boolean> {
-  const pendingApproval = card.card.getByRole("group", { name: "Approve app card request" });
-  if (await pendingApproval.isVisible().catch(() => false)) {
-    await pendingApproval.getByRole("button", { name: "Dismiss", exact: true }).click().catch(() => {});
-    // Dismiss is deliberately host-local; the iframe still shows its in-flight state. Reload only
-    // this already nonce-identified iframe so it establishes a fresh bridge session and exposes
-    // Cancel again. This never navigates the chat or selects another card.
-    const iframe = card.card.locator("iframe");
-    await iframe.evaluate((element) => {
-      const src = element.getAttribute("src");
-      if (src) element.setAttribute("src", src);
-    });
-  }
-  const cancel = card.frame.getByRole("button", { name: "Cancel", exact: true });
-  if (!(await cancel.waitFor({ state: "visible", timeout: 10_000 }).then(() => true).catch(() => false))) {
-    return false;
-  }
-  if (!(await cancel.isEnabled())) return false;
+  const cancel = card.card.getByRole("button", { name: "Cancel", exact: true });
+  if (!(await cancel.isVisible().catch(() => false)) || !(await cancel.isEnabled())) return false;
   await cancel.click({ timeout: 8_000 });
-  const approval = card.card.getByRole("group", { name: "Approve app card request" });
-  if (!(await approval.waitFor({ state: "visible", timeout: 8_000 }).then(() => true).catch(() => false))) {
-    return false;
-  }
-  await approval.getByRole("button", { name: "Cancel card", exact: true }).click({ timeout: 8_000 });
   return true;
 }
 
@@ -337,7 +383,9 @@ async function lookupInboxBatch(
             row.amount === wanted.amount &&
             row.currency === wanted.currency &&
             row.direction === wanted.direction &&
-            row.note === wanted.note
+            row.date === wanted.date &&
+            row.note === wanted.note &&
+            row.message === wanted.message
           );
         });
       };
@@ -441,22 +489,25 @@ async function cleanupIouBatch(
   return { deletedEntries, acknowledged: acknowledged.acknowledged };
 }
 
-// Roles: proposer = manager (v1, :9241), confirmer = father (:9222 OC / :9231 IOU). The confirmer's
+// Roles: proposer = manager (v1), confirmer = father (desktop OpenChat + separate IOU profile). The confirmer's
 // IOU tab is where we drive the multi-entry import (its fan-out envelope carries the same messageId).
-const PROPOSER = { user: "manager", ocPort: 9241 };
-const CONFIRMER = { user: "father", ocPort: 9222, iouPort: 9231 };
+const PROPOSER = { user: "manager", ocPort: CDP_PORTS.manager, iouPort: CDP_PORTS.manager };
+const CONFIRMER = {
+  user: "father",
+  ocPort: CDP_PORTS.fatherOpenChat,
+  iouPort: CDP_PORTS.fatherIou,
+};
 
 async function main() {
   const a = await agent();
 
   const proposerSource = await attach(PROPOSER.ocPort, "localhost:5003");
-  const proposerIouSource = await attach(PROPOSER.ocPort, "127.0.0.1:3000");
+  const proposerIouSource = await attach(PROPOSER.iouPort, "127.0.0.1:3000");
   const confirmerSource = await attach(CONFIRMER.ocPort, "localhost:5003");
   const confirmerIouSource = await attach(CONFIRMER.iouPort, "127.0.0.1:3000");
   const tabs = new TemporaryTabScope();
   const failuresBefore = failures;
   let artifactScope: OpenChatArtifactScope | undefined;
-  let inboxScope: ActionInboxArtifactScope | undefined;
   let primaryFailed = false;
   try {
   const proposerOC = await tabs.open(proposerSource, "http://localhost:5003/chats", {
@@ -481,56 +532,66 @@ async function main() {
   check(!!proposerId, `${PROPOSER.user} user id resolved (${proposerId})`);
   if (!confirmerId || !proposerId) throw new Error("could not resolve both user ids");
 
-  // The selector is caller-private LocalUserIndex state. Resolve it only through Father's signed-in
-  // IOU actor; never query another user's key through the public/global UserIndex surface.
+  // Each selector is caller-private LocalUserIndex state. Resolve it only through that user's
+  // signed-in IOU actor; never query another user's key through the public/global UserIndex surface.
+  const proposerBucket = await authenticatedInboxBucket(proposerIOU);
   const confirmerBucket = await authenticatedInboxBucket(confirmerIOU);
-  console.log(`[env] authenticated confirmer inbox=${confirmerBucket.canisterId}`);
-  const beforeBucket = await bucketCount(a, confirmerBucket);
-  console.log(`[inbox] confirmer bucket before: ${beforeBucket}`);
+  const before = {
+    proposer: await bucketCount(a, proposerBucket),
+    confirmer: await bucketCount(a, confirmerBucket),
+  };
+  console.log(`[env] authenticated inbox=${confirmerBucket.canisterId}`);
+  console.log("[inbox] before:", before);
 
   const nonce = `${Date.now()}-${webcrypto.getRandomValues(new Uint32Array(1))[0].toString(36)}`;
   const text = `Multi ${nonce}: two fees`;
   const expected: ExpectedEntry[] = [
-    { kind: "iou", amount: 350, currency: "EGP", direction: "credit", note: `multi-a ${nonce}` },
-    { kind: "iou", amount: 500, currency: "EGP", direction: "credit", note: `multi-b ${nonce}` },
+    {
+      kind: "iou",
+      amount: 350,
+      currency: "EGP",
+      direction: "credit",
+      date: "2026-08-08",
+      note: `multi-a ${nonce}`,
+      message: text,
+    },
+    {
+      kind: "settlement",
+      amount: 500,
+      currency: "USD",
+      direction: "debt",
+      date: "2026-08-09",
+      note: `multi-b ${nonce}`,
+      message: text,
+    },
   ];
-  const extraction = JSON.stringify(expected);
+  const extraction = JSON.stringify(
+    expected.map(({ message: _message, ...entry }) => entry),
+  );
+  const publicRows = expectedPublicRows(expected);
   artifactScope = new OpenChatArtifactScope(proposerOC, "multi-entry end-to-end live proof");
   await artifactScope.begin();
   artifactScope.expectExactText(text);
-  artifactScope.expectCardInputs(expected.map((entry) => entry.note));
-  inboxScope = new ActionInboxArtifactScope(
-    [{ label: PROPOSER.user, page: proposerIOU }],
-    {
-      shape: "batch",
-      entries: expected.map((entry) => ({
-        kind: entry.kind,
-        amount: entry.amount,
-        currency: entry.currency,
-        direction: entry.direction,
-        note: entry.note,
-      })),
-    },
-    "multi-entry end-to-end live proof",
-  );
-  await inboxScope.begin();
+  artifactScope.expectCardRows(publicRows);
   let dialogInstalled = false;
-  let observerInstalled = false;
+  let senderCard: LoadedMultiCard | null = null;
   let runCard: LoadedMultiCard | null = null;
   let confirmationAttempted = false;
   let deliveryObserved = false;
   let linkedSheet: string | null = null;
   let importAttempted = false;
   let bodyCompleted = false;
+  let extractionPromptCalls = 0;
   const onDialog = (dialog: Dialog) => {
-    const reply = /JSON/i.test(dialog.message()) ? extraction : "1";
+    const isExtraction = /JSON/i.test(dialog.message());
+    if (isExtraction) extractionPromptCalls++;
+    const reply = isExtraction ? extraction : "1";
     dialog.accept(reply).catch(() => {});
   };
 
   try {
-    // 2. Propose with the deterministic two-element array seam.
-    await installNewCardObserver(confirmerOC, `multi-${nonce}`);
-    observerInstalled = true;
+    // 2. Propose exactly once from the fresh, sender-owned source message. A slow backend extends
+    // observation; it never causes another mutating click or a duplicate card.
     proposerOC.on("dialog", onDialog);
     dialogInstalled = true;
     const composer = proposerOC.locator(".ProseMirror").first();
@@ -538,40 +599,57 @@ async function main() {
     await composer.click();
     await proposerOC.keyboard.type(text);
     await proposerOC.keyboard.press("Enter");
-    await proposerOC.waitForTimeout(2_500);
+    const sourceMessage = await artifactScope.waitForExactTextMessage(text);
+    const sourceWrapper = exactOpenChatMessageWrapper(proposerOC, sourceMessage);
+    const senderOwned = await sourceWrapper.evaluate(
+      (node) => node.classList.contains("message") && node.classList.contains("me"),
+    );
+    if (!senderOwned) throw new Error("multi source is not a sender-owned classic message");
+    const bubble = sourceWrapper.locator(".bubble-wrapper");
+    if ((await bubble.count()) !== 1) throw new Error("multi source bubble is not unique");
+    await bubble.scrollIntoViewIfNeeded();
+    await bubble.hover();
+    const menu = bubble.locator(".menu-icon");
+    if ((await menu.count()) !== 1) throw new Error("multi source menu is not unique");
+    await menu.click({ timeout: 12_000 });
+    const propose = await exactlyOneVisible(
+      proposerOC.getByText("Propose action", { exact: true }),
+      "multi Propose action",
+    );
+    await propose.click({ timeout: 12_000 });
 
-    // The recipient's new card must first become directory-bound, then pass the explicit Load app
-    // card gate. Its isolated inputs identify this exact nonce before any action is requested.
-    for (let attempt = 1; attempt <= 3 && !runCard; attempt++) {
-      try {
-        const bubble = proposerOC.locator(".bubble-wrapper").filter({ hasText: text }).last();
-        await bubble.scrollIntoViewIfNeeded().catch(() => {});
-        await bubble.hover();
-        await proposerOC.waitForTimeout(500);
-        await bubble.locator(".menu-icon").first().click({ timeout: 12_000 });
-        await proposerOC.getByText("Propose action", { exact: true }).click({ timeout: 12_000 });
-        runCard = await findAndLoadMultiCard(confirmerOC, expected, 35_000);
-      } catch (error) {
-        console.log(`propose attempt ${attempt} failed: ${(error as Error).message.slice(0, 90)}`);
-      }
-      if (!runCard) {
-        await proposerOC.keyboard.press("Escape").catch(() => {});
-        await proposerOC.waitForTimeout(1_000);
-      }
+    senderCard = await findClassicMultiCard(proposerOC, publicRows, undefined, 60_000);
+    if (!senderCard) throw new Error("sender's exact classic multi card never posted");
+    await artifactScope.trackExactCardRows(senderCard.card, publicRows);
+    if (!isImmediateStableSuccessor(sourceMessage, senderCard.message)) {
+      throw new Error("multi card is not the immediate stable successor of this run's source");
     }
-    check(runCard !== null, "the exact multi-entry card loaded through OpenChat's app-card gate");
-    if (!runCard) throw new Error("this run's card never posted");
 
-    // 3. The iframe request is not the confirmation. Parse the host-owned canonical summary and
-    // require both exact nonce-scoped rows before clicking OpenChat's final Confirm request button.
+    runCard = await findClassicMultiCard(confirmerOC, publicRows, senderCard.message, 35_000);
+    if (!runCard || !sameStableMessage(senderCard.message, runCard.message)) {
+      throw new Error("recipient did not resolve the sender's exact stable multi card");
+    }
+    check(extractionPromptCalls === 1, "multi propose requested deterministic JSON exactly once");
+    check(true, "one exact two-entry classic card reached both participants");
+
+    // 3. This is the immutable, backend-attested stored-payload path: OpenChat owns the visible rows
+    // and its single Add to IOU button is the final confirmation. No iframe or second approval exists.
+    const confirm = await assertClassicMultiCard(runCard, publicRows);
     confirmationAttempted = true;
-    inboxScope.arm();
-    await approveMultiCard(runCard, expected);
+    await confirm.click({ timeout: 10_000 });
+    check(true, "ONE host-owned confirmation submitted the stored batch");
     await confirmerOC.waitForTimeout(6_000);
-    const afterBucket = await bucketCount(a, confirmerBucket);
-    deliveryObserved = afterBucket > beforeBucket;
-    const oneDelivery = afterBucket === beforeBucket + 1;
-    check(oneDelivery, `ONE deposit for the whole batch (${beforeBucket} -> ${afterBucket})`);
+    const after = {
+      proposer: await bucketCount(a, proposerBucket),
+      confirmer: await bucketCount(a, confirmerBucket),
+    };
+    deliveryObserved = after.confirmer > before.confirmer;
+    const oneDelivery =
+      after.proposer === before.proposer && after.confirmer === before.confirmer + 1;
+    check(
+      oneDelivery,
+      `ONE confirmer-only deposit for the whole batch (${JSON.stringify(before)} -> ${JSON.stringify(after)})`,
+    );
     if (!oneDelivery) throw new Error("host approval did not produce exactly one batch delivery");
 
   // 4. IOU side: the "Pending from chat" card shows "2 entries"; Review & add → Add all → 2 land.
@@ -656,32 +734,54 @@ async function main() {
         failures++;
         console.error(`[cleanup] exact IOU batch cleanup failed: ${(error as Error).message}`);
       }
+      try {
+        const proposerCleanup = await cleanupIouBatch(proposerIOU, expected, null, false);
+        console.log(
+          `[cleanup] proposer deleted=${proposerCleanup.deletedEntries}, acknowledged=${proposerCleanup.acknowledged}`,
+        );
+      } catch (error) {
+        failures++;
+        console.error(`[cleanup] proposer leak cleanup failed: ${(error as Error).message}`);
+      }
     }
     if (bodyCompleted) {
       check(cleanup?.deletedEntries === 2, "cleanup soft-deleted exactly this run's two History entries");
     }
     if (confirmationAttempted) {
       try {
-        let finalBucket = await bucketCount(a, confirmerBucket);
-        for (let attempt = 0; attempt < 8 && finalBucket !== beforeBucket; attempt++) {
+        let final = {
+          proposer: await bucketCount(a, proposerBucket),
+          confirmer: await bucketCount(a, confirmerBucket),
+        };
+        for (
+          let attempt = 0;
+          attempt < 8 &&
+          (final.proposer !== before.proposer || final.confirmer !== before.confirmer);
+          attempt++
+        ) {
           await confirmerIOU.waitForTimeout(1_000);
-          finalBucket = await bucketCount(a, confirmerBucket);
+          final = {
+            proposer: await bucketCount(a, proposerBucket),
+            confirmer: await bucketCount(a, confirmerBucket),
+          };
         }
-        check(finalBucket === beforeBucket, "cleanup returned the confirmer inbox to its pre-run count");
+        check(
+          final.proposer === before.proposer && final.confirmer === before.confirmer,
+          "cleanup returned both inbox buckets to their pre-run counts",
+        );
       } catch (error) {
         failures++;
         console.error(
-          `[cleanup] confirmer inbox count verification failed: ${(error as Error).message}`,
+          `[cleanup] inbox count verification failed: ${(error as Error).message}`,
         );
       }
     }
-    if (observerInstalled) await removeNewCardObserver(confirmerOC);
   }
 
   if (failures > 0) {
     throw new Error(`MULTI-ENTRY VERIFY FAILED — ${failures} assertion(s)`);
   }
-  console.log("\n🏁 MULTI-ENTRY LIVE VERIFY PASSED: array → 1 card '2 entries' → Add all → 2 entries, 1 messageId");
+  console.log("\n🏁 MULTI-ENTRY LIVE VERIFY PASSED: exact array → 1 classic card → 1 Add to IOU → 2 History entries");
   } catch (error) {
     primaryFailed = true;
     throw error;
@@ -689,18 +789,9 @@ async function main() {
     const primaryInFlight = primaryFailed || failures > failuresBefore;
     let cleanupFailure: unknown;
     try {
-      await finalizeActionInboxArtifactCleanup(
-        inboxScope,
-        primaryInFlight,
-        "multi-entry end-to-end live proof",
-      );
-    } catch (error) {
-      cleanupFailure = error;
-    }
-    try {
       await finalizeOpenChatArtifactCleanup(
         artifactScope,
-        primaryInFlight || cleanupFailure !== undefined,
+        primaryInFlight,
         "multi-entry end-to-end live proof",
       );
     } catch (error) {

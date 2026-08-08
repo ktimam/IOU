@@ -234,6 +234,23 @@ type AddEntryReq = record {
     iv : vec nat8;
 };
 
+type EncryptedEntryInput = record {
+    entry_key : vec nat8;
+    ciphertext : vec nat8;
+    iv : vec nat8;
+};
+
+type AddEntryBatchReq = record {
+    sheet_id : text;
+    import_id : vec nat8;
+    entries : vec EncryptedEntryInput;
+};
+
+type AddEntryBatchResult = record {
+    entry_ids : vec nat64;
+    replayed : bool;
+};
+
 type EditEntryReq = record {
     sheet_id : text;
     entry_id : nat64;
@@ -467,6 +484,7 @@ service : {
 
     // Phase 3
     add_entry : (AddEntryReq) -> (Entry);
+    add_entry_batch : (AddEntryBatchReq) -> (AddEntryBatchResult);
     edit_entry : (EditEntryReq) -> (Entry);
     delete_entry : (text, nat64) -> ();
     restore_entry : (text, nat64) -> ();

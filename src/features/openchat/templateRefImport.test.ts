@@ -4,6 +4,8 @@ import {
   restoreOpenChatTemplateRefs,
   type OpenChatTemplateRefContext,
 } from "./templateRefImport";
+import { resolveTemplateBase } from "../entries/resolveTemplateBase";
+import type { TxnTemplate } from "../templates/TemplatesContext";
 
 const KEY = new Uint8Array(32).map((_, index) => index + 1);
 const OTHER_KEY = new Uint8Array(32).fill(99);
@@ -93,6 +95,34 @@ describe("restoreOpenChatTemplateRefs", () => {
       new Set(["deleted-private-id"]),
     )) as Record<string, unknown>;
     expect(restored.template).toBe("deleted-private-id");
+  });
+
+  it("fails closed when an authenticated id collides with another current type's name", async () => {
+    const idOwner: TxnTemplate = {
+      id: "collision",
+      name: "Reservation",
+      direction: "credit",
+      txn_type: "iou",
+      currency: "EGP",
+      fee_percent: 20,
+    };
+    const nameOwner: TxnTemplate = {
+      id: "other",
+      name: "collision",
+      direction: "debt",
+      txn_type: "iou",
+      currency: "USD",
+      fee_percent: 0,
+    };
+    const restored = await restoreOpenChatTemplateRefs(
+      { amount: 100, template_ref: await reference(idOwner.id) },
+      KEY,
+      CONTEXT,
+      new Set([idOwner.id, nameOwner.id]),
+    );
+    expect(resolveTemplateBase([nameOwner, idOwner], restored)).toEqual({
+      unknownTemplate: idOwner.id,
+    });
   });
 
   it("fails closed for the wrong sheet key or card coordinates", async () => {

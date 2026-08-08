@@ -39,9 +39,14 @@ import { CDP_PORTS } from "./cdpPorts";
 import {
   assertAcceptedVisionExtraction,
   isImmediateStableSuccessor,
+  journeySourceText,
+  matchesExactImageContentEvidence,
   matchesRunCardCandidate,
   sameStableMessage,
+  selectFreshOwnedSourceCandidate,
   shouldRetryExactMessageDeletion,
+  type ExactImageContentEvidence,
+  type FreshSourceCandidate,
   type StableMessageRef,
 } from "./journeySafety";
 import { OPENCHAT_MESSAGE_TEXT_SELECTOR } from "./openChatArtifactCleanup";
@@ -179,9 +184,63 @@ async function requireExactlyOneCardControl(
   const control = frame.getByLabel(label, { exact: true });
   const count = await control.count();
   if (count !== 1) {
-    throw new Error(`real-model card expected exactly one ${label} control, found ${count}`);
+    throw new Error(`IOU card expected exactly one ${label} control, found ${count}`);
   }
   return control;
+}
+
+async function hasAuthoritativeIouIdentity(card: Locator): Promise<boolean> {
+  const appName = card.locator(".app-name");
+  return (
+    (await appName.count().catch(() => 0)) === 1 &&
+    (await appName.innerText().catch(() => "")).trim().toLocaleLowerCase("en-US") === "iou"
+  );
+}
+
+async function assertTrustedIouCardChrome(loaded: LoadedRunCard): Promise<void> {
+  if (!(await hasAuthoritativeIouIdentity(loaded.card))) {
+    throw new Error("trusted card did not render the authoritative IOU app name");
+  }
+
+  const logo = loaded.card.locator("img.app-icon");
+  await logo.waitFor({ state: "visible", timeout: 10_000 });
+  const expectedLogo = `${IOU_BASE}/favicon.svg`;
+  const logoSource = await logo.getAttribute("src");
+  if (logoSource !== expectedLogo) {
+    throw new Error(`trusted card logo was ${logoSource ?? "missing"}; expected ${expectedLogo}`);
+  }
+
+  const exactUrl = `${IOU_BASE}/openchat/card`;
+  const url = loaded.card.locator(".card-url");
+  if ((await url.count()) !== 1 || (await url.innerText()).trim() !== exactUrl) {
+    throw new Error("trusted card did not keep its exact registered card URL visible");
+  }
+
+  for (const obsolete of ["Load app card", "Share app context"] as const) {
+    if (
+      await loaded.card
+        .getByRole("button", { name: obsolete, exact: true })
+        .isVisible()
+        .catch(() => false)
+    ) {
+      throw new Error(`trusted card unexpectedly requires ${obsolete}`);
+    }
+  }
+  const explanation = loaded.card
+    .getByText(
+      /Loading contacts this external origin|If you separately grant private context|Capabilities never enter this URL/i,
+    )
+    .first();
+  if (await explanation.isVisible().catch(() => false)) {
+    throw new Error("trusted card still renders obsolete protocol explanation text");
+  }
+
+  const type = await requireExactlyOneCardControl(loaded.frame, "Type");
+  await requireExactlyOneCardControl(loaded.frame, "Saved type");
+  await requireExactlyOneCardControl(loaded.frame, "Date");
+  if ((await type.inputValue()) !== "iou") {
+    throw new Error("trusted card did not expose the extracted public Type from first render");
+  }
 }
 
 async function agent(): Promise<HttpAgent> {
@@ -293,11 +352,9 @@ type LoadedRunCard = {
   card: Locator;
   frame: FrameLocator;
   observerId: string;
-  loadedFromCleanGate: boolean;
+  loadedAutomatically: boolean;
   message: ChatMessageRef;
 };
-
-type CardLoadExpectation = "auto" | "explicit" | "either";
 
 type ChatMessageRef = StableMessageRef;
 
@@ -307,11 +364,18 @@ type RunCardCorrelation = Readonly<{
   requireSenderOwned?: boolean;
 }>;
 
+type SourceMessageEvidence =
+  | { kind: "text"; exactText: string }
+  | { kind: "image"; exactContent: ExactImageContentEvidence };
+
 type ExactMessageEvidence =
-  | { kind: "source"; exactText: string }
-  | { kind: "card"; observerId: string };
+  | { kind: "source"; evidence: SourceMessageEvidence }
+  | { kind: "card"; observerId: string; exactNote: string };
 
 const MESSAGE_WRAPPER_SELECTOR = '[data-id][data-index][id^="event-"]';
+const ATTACHMENT_IMAGE_SELECTOR =
+  '.img-wrapper > img.unzoomed:not(.draft), .regular_image_content img.image:not(.draft)';
+const MESSAGE_DELETED_TEXT = /^Message deleted by .+ on .+$/i;
 
 function exactMessageWrapper(page: Page, message: ChatMessageRef): Locator {
   return page.locator(
@@ -350,73 +414,207 @@ async function captureMessageIdBaseline(page: Page): Promise<Set<string>> {
   return new Set(ids);
 }
 
+async function digestImageResource(
+  page: Page,
+  url: string,
+  requireUploaded: boolean,
+  label: string,
+): Promise<ExactImageContentEvidence> {
+  if (requireUploaded) {
+    if (url.startsWith("blob:")) {
+      throw new Error(`${label}: image is still using its draft blob URL`);
+    }
+    let parsed: URL;
+    try {
+      parsed = new URL(url);
+    } catch {
+      throw new Error(`${label}: uploaded image URL is invalid`);
+    }
+    if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
+      throw new Error(`${label}: uploaded image URL uses an unsupported protocol`);
+    }
+  } else if (!url.startsWith("blob:")) {
+    throw new Error(`${label}: draft image did not expose a blob URL`);
+  }
+
+  try {
+    return await page.evaluate(async (resourceUrl) => {
+      const response = await fetch(resourceUrl, {
+        credentials: "omit",
+        referrerPolicy: "no-referrer",
+      });
+      if (!response.ok) throw new Error(`HTTP ${response.status}`);
+      const bytes = await response.arrayBuffer();
+      if (bytes.byteLength === 0) throw new Error("empty image body");
+      const mimeType = (response.headers.get("content-type") ?? "")
+        .split(";", 1)[0]
+        .trim()
+        .toLocaleLowerCase("en-US");
+      if (!mimeType.startsWith("image/")) throw new Error("missing image MIME type");
+      const hash = new Uint8Array(await crypto.subtle.digest("SHA-256", bytes));
+      return {
+        sha256: [...hash].map((byte) => byte.toString(16).padStart(2, "0")).join(""),
+        byteLength: bytes.byteLength,
+        mimeType,
+      };
+    }, url);
+  } catch (error) {
+    throw new Error(`${label}: exact image bytes could not be verified: ${(error as Error).message}`);
+  }
+}
+
+async function digestUploadedAttachmentImage(
+  page: Page,
+  url: string,
+  label: string,
+): Promise<ExactImageContentEvidence> {
+  return digestImageResource(page, url, true, label);
+}
+
+async function captureExactDraftImageContent(page: Page): Promise<ExactImageContentEvidence> {
+  const image = await exactlyOneVisible(
+    page.locator('img.draft[src^="blob:"]'),
+    "image journey draft attachment",
+    15_000,
+  );
+  const draftUrl = await image.evaluate((node) => (node as HTMLImageElement).src);
+  return digestImageResource(page, draftUrl, false, "image journey draft attachment");
+}
+
+async function sendJourneySource(
+  page: Page,
+  composer: Locator,
+  sourceText: string | undefined,
+): Promise<void> {
+  await composer.click();
+  if (sourceText === undefined) {
+    const visibleComposerText = (await composer.innerText()).replace(/\s+/g, " ").trim();
+    if (visibleComposerText !== "") {
+      throw new Error("image journey refuses to send an attachment with visible caption text");
+    }
+  } else {
+    await page.keyboard.type(sourceText);
+  }
+  await page.keyboard.press("Enter");
+}
+
 async function freshSourceCandidates(
   page: Page,
-  exactText: string,
-  baselineIds: ReadonlySet<string>,
-): Promise<Array<ChatMessageRef & { owned: boolean }>> {
-  return page.locator(OPENCHAT_MESSAGE_TEXT_SELECTOR).evaluateAll(
-    (nodes, { expected, baseline }) => {
-      const normalizedExpected = expected.replace(/\s+/g, " ").trim();
-      const matches = new Map<string, ChatMessageRef & { owned: boolean }>();
-      for (const node of nodes as HTMLElement[]) {
-        if (
-          node.classList.contains("markdown-wrapper") &&
-          node.closest(".message_text") !== null
-        )
-          continue;
-        if (node.innerText.replace(/\s+/g, " ").trim() !== normalizedExpected) continue;
-        const wrapper = node.closest<HTMLElement>('[data-id][data-index][id^="event-"]');
-        const messageId = wrapper?.dataset.id ?? "";
-        const rawMessageIndex = wrapper?.dataset.index ?? "";
-        const eventMatch = /^event-(\d+)$/.exec(wrapper?.id ?? "");
-        if (
-          baseline.includes(messageId) ||
-          !/^\d+$/.test(messageId) ||
-          !/^\d+$/.test(rawMessageIndex) ||
-          !eventMatch
-        )
-          continue;
+  evidence: SourceMessageEvidence,
+  baselineMessageIds: ReadonlySet<string>,
+): Promise<FreshSourceCandidate[]> {
+  const domCandidates = await page.locator(MESSAGE_WRAPPER_SELECTOR).evaluateAll(
+    (wrappers, { evidence, textSelector, attachmentSelector }) => {
+      const candidates: Array<FreshSourceCandidate & { attachmentUrls: string[] }> = [];
+      for (const wrapper of wrappers as HTMLElement[]) {
+        const messageId = wrapper.dataset.id ?? "";
+        const rawMessageIndex = wrapper.dataset.index ?? "";
+        const eventMatch = /^event-(\d+)$/.exec(wrapper.id);
+        let exactEvidenceMatches = 0;
+        if (evidence.kind === "text") {
+          const normalizedExpected = evidence.exactText.replace(/\s+/g, " ").trim();
+          for (const node of wrapper.querySelectorAll<HTMLElement>(textSelector)) {
+            if (
+              node.classList.contains("markdown-wrapper") &&
+              node.closest(".message_text") !== null
+            )
+              continue;
+            if (node.innerText.replace(/\s+/g, " ").trim() === normalizedExpected) {
+              exactEvidenceMatches++;
+            }
+          }
+        }
         const classicOwned =
-          wrapper!.classList.contains("message") && wrapper!.classList.contains("me");
+          wrapper.classList.contains("message") && wrapper.classList.contains("me");
         const mobileOwned =
-          wrapper!.classList.contains("container") &&
-          getComputedStyle(wrapper!).justifyContent === "flex-end";
-        matches.set(messageId, {
+          wrapper.classList.contains("container") &&
+          getComputedStyle(wrapper).justifyContent === "flex-end";
+        candidates.push({
           messageId,
           messageIndex: Number(rawMessageIndex),
-          eventIndex: Number(eventMatch[1]),
-          owned: classicOwned || mobileOwned,
+          eventIndex: Number(eventMatch?.[1]),
+          senderOwned: classicOwned || mobileOwned,
+          attachmentUrls:
+            evidence.kind === "image"
+              ? [...wrapper.querySelectorAll<HTMLImageElement>(attachmentSelector)].map(
+                  (image) => image.src,
+                )
+              : [],
+          exactEvidenceMatches,
         });
       }
-      return [...matches.values()];
+      return candidates;
     },
-    { expected: exactText, baseline: [...baselineIds] },
+    {
+      evidence,
+      textSelector: OPENCHAT_MESSAGE_TEXT_SELECTOR,
+      attachmentSelector: ATTACHMENT_IMAGE_SELECTOR,
+    },
   );
+
+  const candidates: FreshSourceCandidate[] = [];
+  for (const candidate of domCandidates) {
+    if (baselineMessageIds.has(candidate.messageId)) continue;
+    if (!candidate.senderOwned) continue;
+    if (evidence.kind === "text") {
+      candidates.push({
+        messageId: candidate.messageId,
+        messageIndex: candidate.messageIndex,
+        eventIndex: candidate.eventIndex,
+        senderOwned: candidate.senderOwned,
+        exactEvidenceMatches: candidate.exactEvidenceMatches,
+      });
+      continue;
+    }
+    if (candidate.attachmentUrls.length > 1) {
+      throw new Error("fresh source has multiple attachment images; refusing ambiguity");
+    }
+    if (candidate.attachmentUrls.length === 0 || candidate.attachmentUrls[0].startsWith("blob:")) {
+      candidates.push({
+        messageId: candidate.messageId,
+        messageIndex: candidate.messageIndex,
+        eventIndex: candidate.eventIndex,
+        senderOwned: true,
+        exactEvidenceMatches: 0,
+      });
+      continue;
+    }
+    const observed = await digestUploadedAttachmentImage(
+      page,
+      candidate.attachmentUrls[0],
+      `fresh source ${candidate.messageId}`,
+    );
+    candidates.push({
+      messageId: candidate.messageId,
+      messageIndex: candidate.messageIndex,
+      eventIndex: candidate.eventIndex,
+      senderOwned: true,
+      exactEvidenceMatches: matchesExactImageContentEvidence(evidence.exactContent, observed) ? 1 : 0,
+    });
+  }
+  return candidates;
 }
 
 async function captureFreshSourceMessage(
   page: Page,
-  exactText: string,
+  evidence: SourceMessageEvidence,
   baselineIds: ReadonlySet<string>,
   who: string,
   timeoutMs = 15_000,
 ): Promise<ChatMessageRef> {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
-    const matches = await freshSourceCandidates(page, exactText, baselineIds);
-    if (matches.length > 1) {
-      throw new Error(`[${who}] multiple fresh messages exactly matched this run; refusing ambiguity`);
+    const candidates = await freshSourceCandidates(page, evidence, baselineIds);
+    let message: ChatMessageRef | null;
+    try {
+      message = selectFreshOwnedSourceCandidate({
+        candidates,
+        baselineMessageIds: baselineIds,
+      });
+    } catch (error) {
+      throw new Error(`[${who}] ${(error as Error).message}; refusing ambiguity`);
     }
-    if (matches.length === 1) {
-      if (!matches[0].owned) {
-        throw new Error(`[${who}] fresh Journey message is not rendered as the current user's message`);
-      }
-      const message: ChatMessageRef = {
-        messageId: matches[0].messageId,
-        messageIndex: matches[0].messageIndex,
-        eventIndex: matches[0].eventIndex,
-      };
+    if (message !== null) {
       if ((await exactMessageWrapper(page, message).count()) !== 1) {
         throw new Error(`[${who}] fresh Journey message coordinates are not unique`);
       }
@@ -482,6 +680,53 @@ function rememberRunCards(
       );
     }
     tracked.set(key, card);
+  }
+}
+
+async function cardLocatorHasExactRunNote(card: Locator, exactNote: string): Promise<boolean> {
+  const publicRows = card.locator("table.rows tr");
+  const publicRowCount = await publicRows.count();
+  let publicNoteRows = 0;
+  let publicMatches = 0;
+  for (let index = 0; index < publicRowCount; index++) {
+    const row = publicRows.nth(index);
+    const label = (await row.locator(".label").innerText().catch(() => "")).trim();
+    const value = (await row.locator(".value").innerText().catch(() => "")).trim();
+    if (label === "Note") {
+      publicNoteRows++;
+      if (value === exactNote) publicMatches++;
+    }
+  }
+  if (publicNoteRows > 0) {
+    if (publicNoteRows > 1) throw new Error("card has ambiguous public Note rows");
+    return publicMatches === 1;
+  }
+
+  const iframeCount = await card.locator("iframe").count();
+  if (iframeCount !== 1) return false;
+  const note = card.frameLocator("iframe").getByLabel("Note", { exact: true });
+  if ((await note.count().catch(() => 0)) !== 1) return false;
+  return (await note.inputValue().catch(() => "")) === exactNote;
+}
+
+async function cardHasExactRunNote(card: LoadedRunCard, exactNote: string): Promise<boolean> {
+  return cardLocatorHasExactRunNote(card.card, exactNote);
+}
+
+async function rememberNonceBoundRunCards(
+  tracked: Map<string, LoadedRunCard>,
+  cards: readonly LoadedRunCard[],
+  exactNote: string,
+  who: string,
+): Promise<void> {
+  for (const card of cards) {
+    if (!(await cardHasExactRunNote(card, exactNote))) {
+      console.warn(
+        `[${who}] card ${card.message.messageId} left untracked because its exact run note is unavailable`,
+      );
+      continue;
+    }
+    rememberRunCards(tracked, [card], who);
   }
 }
 
@@ -595,10 +840,8 @@ async function findAndLoadRunCards(
   page: Page,
   note: string,
   who: string,
-  cleanGateIds: Set<string>,
   timeoutMs = 35_000,
   failOnProposalToast = false,
-  loadExpectation: CardLoadExpectation = "either",
   correlation: RunCardCorrelation = {},
 ): Promise<LoadedRunCard[]> {
   const found = new Map<string, LoadedRunCard>();
@@ -613,13 +856,9 @@ async function findAndLoadRunCards(
       const observerId = await card.getAttribute("data-iou-journey-card-id");
       if (!observerId) continue;
 
-      // Do not contact an arbitrary external origin. Only a newly added card whose authoritative
-      // directory identity has resolved to IOU may have its explicit load gate opened.
-      const isIou = await card
-        .getByText(/Directory entry:\s*iou/i)
-        .first()
-        .isVisible()
-        .catch(() => false);
+      // Do not inspect an arbitrary external origin. Only a newly added card whose authoritative
+      // directory identity has resolved to IOU may expose an app iframe.
+      const isIou = await hasAuthoritativeIouIdentity(card);
       if (!isIou) continue;
       const hasUntrustedWarning = await card
         .getByText(/card content is untrusted|Untrusted card text/i)
@@ -630,28 +869,11 @@ async function findAndLoadRunCards(
 
       const message = await captureCardMessage(card, observerId, who);
       const senderOwned = await messageOwnedByCurrentUser(page, message);
-      const candidateBeforeLoad = matchesRunCardCandidate({
-        candidate: message,
-        senderOwned,
-        exactNoteMatch: false,
-        expectedSource: correlation.expectedSource,
-        expectedMessage: correlation.expectedMessage,
-        requireSenderOwned: correlation.requireSenderOwned ?? false,
-      });
 
       if ((await card.locator("iframe").count()) === 0) {
-        const load = card.getByRole("button", { name: "Load app card", exact: true });
-        if (await load.isVisible().catch(() => false)) {
-          // Never grant an external-card load merely to inspect an unknown candidate. The sender is
-          // bound to the unique immediate successor of the captured source; the recipient is bound
-          // to the exact three stable coordinates selected on the sender side.
-          if (!candidateBeforeLoad) continue;
-          if (loadExpectation === "auto") continue;
-          if (!(await load.isEnabled().catch(() => false))) {
-            throw new Error(`[${who}] this run's verified Load app card gate is disabled`);
-          }
-          await load.click({ timeout: 10_000 });
-          cleanGateIds.add(observerId);
+        const obsoleteLoad = card.getByRole("button", { name: "Load app card", exact: true });
+        if (await obsoleteLoad.isVisible().catch(() => false)) {
+          throw new Error(`[${who}] manual Load app card gate is a regression`);
         }
       }
 
@@ -676,7 +898,7 @@ async function findAndLoadRunCards(
           card,
           frame,
           observerId,
-          loadedFromCleanGate: cleanGateIds.has(observerId),
+          loadedAutomatically: true,
           message,
         };
         const key = messageRefKey(message);
@@ -707,39 +929,38 @@ async function approveRunCardConfirmation(
   note: string,
   currency: string,
 ): Promise<void> {
-  const add = loaded.frame.getByRole("button", { name: "Add to IOU", exact: true });
+  const add = loaded.card.getByRole("button", { name: "Add to IOU", exact: true });
   await add.waitFor({ state: "visible", timeout: 10_000 });
-  if (!(await add.isEnabled())) throw new Error("the nonce-scoped Add to IOU button is disabled");
-  await add.click();
-
-  const approval = loaded.card.getByRole("group", { name: "Approve app card request" });
-  await approval.waitFor({ state: "visible", timeout: 10_000 });
-  const summary = await approval.innerText();
-  if (
-    !summary.includes(note) ||
-    !summary.includes("350") ||
-    (currency !== "" && !summary.includes(currency))
-  ) {
-    throw new Error("host approval summary is not bound to this run's exact card values");
+  if (!(await add.isEnabled())) throw new Error("the nonce-scoped host Add to IOU button is disabled");
+  if ((await loaded.frame.getByRole("button").count()) !== 0) {
+    throw new Error("the external card iframe unexpectedly owns an action button");
   }
-  const disclosure = approval.getByRole("checkbox");
-  if (await disclosure.isVisible().catch(() => false)) await disclosure.check();
-  await approval.getByRole("button", { name: "Confirm request", exact: true }).click({
-    timeout: 10_000,
-  });
+  const noteControl = loaded.frame.getByLabel("Note", { exact: true });
+  const amountControl = loaded.frame.getByLabel("Amount", { exact: true });
+  const currencyControl = loaded.frame.getByLabel("Currency", { exact: true });
+  if (
+    (await noteControl.inputValue()) !== note ||
+    (await amountControl.inputValue()) !== "350" ||
+    (currency !== "" && (await currencyControl.inputValue()) !== currency)
+  ) {
+    throw new Error("host confirmation is not targeting this run's exact visible card values");
+  }
+  const disclosure = loaded.card.getByRole("checkbox");
+  const disclosureCount = await disclosure.count();
+  check(disclosureCount === 0, "IOU card has no redundant disclosure checkbox");
+  if (disclosureCount !== 0) {
+    throw new Error("IOU host action unexpectedly requires a redundant disclosure checkbox");
+  }
+  await add.click({ timeout: 10_000 });
+  if ((await loaded.card.getByRole("button", { name: "Confirm request", exact: true }).count()) !== 0) {
+    throw new Error("one host Add click unexpectedly opened a second approval step");
+  }
 }
 
 async function cancelRunCard(loaded: LoadedRunCard): Promise<boolean> {
-  const cancel = loaded.frame.getByRole("button", { name: "Cancel", exact: true });
+  const cancel = loaded.card.getByRole("button", { name: "Cancel", exact: true });
   if (!(await cancel.isVisible().catch(() => false))) return false;
   await cancel.click({ timeout: 8_000 });
-  const approval = loaded.card.getByRole("group", { name: "Approve app card request" });
-  if (!(await approval.waitFor({ state: "visible", timeout: 8_000 }).then(() => true).catch(() => false))) {
-    return false;
-  }
-  await approval.getByRole("button", { name: "Cancel card", exact: true }).click({
-    timeout: 8_000,
-  });
   return true;
 }
 
@@ -790,7 +1011,22 @@ async function exactMessageEvidencePresent(
   if (wrapperCount > 1) throw new Error(`message ${message.messageId}: stable coordinates are ambiguous`);
   if (wrapperCount === 0) return false;
   if (evidence.kind === "source") {
-    const expected = evidence.exactText.replace(/\s+/g, " ").trim();
+    if (evidence.evidence.kind === "image") {
+      const urls = await wrapper.locator(ATTACHMENT_IMAGE_SELECTOR).evaluateAll((nodes) =>
+        (nodes as HTMLImageElement[]).map((image) => image.src),
+      );
+      if (urls.length !== 1) {
+        throw new Error(
+          `message ${message.messageId}: expected one exact attachment image, found ${urls.length}`,
+        );
+      }
+      const observed = await digestUploadedAttachmentImage(
+        page,
+        urls[0],
+        `message ${message.messageId}`,
+      );
+      return matchesExactImageContentEvidence(evidence.evidence.exactContent, observed);
+    }
     const matches = await wrapper.locator(OPENCHAT_MESSAGE_TEXT_SELECTOR).evaluateAll(
       (nodes, exact) => {
         let count = 0;
@@ -804,7 +1040,7 @@ async function exactMessageEvidencePresent(
         }
         return count;
       },
-      expected,
+      evidence.evidence.exactText.replace(/\s+/g, " ").trim(),
     );
     if (matches > 1) throw new Error(`message ${message.messageId}: source evidence is ambiguous`);
     return matches === 1;
@@ -819,23 +1055,43 @@ async function exactMessageEvidencePresent(
   if (currentObserverId !== null && currentObserverId !== evidence.observerId) return false;
   const identity = await card.evaluate((node) => ({
     title: node.querySelector(".title")?.textContent?.replace(/\s+/g, " ").trim() ?? "",
-    text: node.textContent?.replace(/\s+/g, " ").trim() ?? "",
+    appName: node.querySelector(".app-name")?.textContent?.replace(/\s+/g, " ").trim() ?? "",
   }));
-  if (identity.title !== "Add to IOU" || !/Directory entry:\s*iou/i.test(identity.text)) return false;
-  return true;
+  if (identity.title !== "Add to IOU" || identity.appName.toLocaleLowerCase("en-US") !== "iou") {
+    return false;
+  }
+  return cardLocatorHasExactRunNote(card, evidence.exactNote);
 }
 
-async function waitForExactEvidenceAbsent(
+async function exactMessageDeletionProven(
   page: Page,
   message: ChatMessageRef,
-  evidence: ExactMessageEvidence,
+): Promise<boolean> {
+  const wrapper = exactMessageWrapper(page, message);
+  const wrapperCount = await wrapper.count();
+  if (wrapperCount > 1) {
+    throw new Error(`message ${message.messageId}: stable coordinates are ambiguous after deletion`);
+  }
+  if (wrapperCount === 0) return true;
+  const classicTombstones = await wrapper.locator(".deleted").count();
+  if (classicTombstones > 1) {
+    throw new Error(`message ${message.messageId}: deletion tombstone is ambiguous`);
+  }
+  if (classicTombstones === 1) return true;
+  const text = (await wrapper.innerText()).replace(/\s+/g, " ").trim();
+  return MESSAGE_DELETED_TEXT.test(text);
+}
+
+async function waitForExactDeletionProof(
+  page: Page,
+  message: ChatMessageRef,
 ): Promise<void> {
   const deadline = Date.now() + 20_000;
   while (Date.now() < deadline) {
-    if (!(await exactMessageEvidencePresent(page, message, evidence))) return;
+    if (await exactMessageDeletionProven(page, message)) return;
     await page.waitForTimeout(300);
   }
-  throw new Error(`message ${message.messageId}: original evidence remained after deletion`);
+  throw new Error(`message ${message.messageId}: wrapper or tombstone did not prove deletion`);
 }
 
 async function openOwnedMobileMessageMenu(page: Page, message: ChatMessageRef): Promise<Locator> {
@@ -958,17 +1214,17 @@ async function deleteExactMessageViaUi(
           await confirmations[0].click({ timeout: 10_000 });
           break;
         }
-        if (!(await exactMessageEvidencePresent(page, message, evidence))) return;
+        if (await exactMessageDeletionProven(page, message)) return;
         await page.waitForTimeout(100);
       }
-      await waitForExactEvidenceAbsent(page, message, evidence);
+      await waitForExactDeletionProof(page, message);
       return;
     } catch (error) {
       // A click may dispatch before Playwright reports that Svelte replaced the menu node. Absence of
       // this exact evidence means the requested deletion already completed; otherwise retry only if
       // the identical sender-owned target survived and the error is recognized DOM detach churn.
+      if (await exactMessageDeletionProven(page, message)) return;
       const evidencePresent = await exactMessageEvidencePresent(page, message, evidence);
-      if (!evidencePresent) return;
       const retryWrapper = exactMessageWrapper(page, message);
       const retryObserved = await messageRefFromWrapper(
         retryWrapper,
@@ -1005,13 +1261,13 @@ async function verifyDeletedAfterReload(
   while (Date.now() < deadline) {
     await page.reload({ waitUntil: "domcontentloaded" });
     await page.locator(".ProseMirror").first().waitFor({ state: "visible", timeout: 20_000 });
-    const stillPresent = [];
+    const notProvenDeleted = [];
     for (const item of remaining) {
-      if (await exactMessageEvidencePresent(page, item.message, item.evidence)) {
-        stillPresent.push(item);
+      if (!(await exactMessageDeletionProven(page, item.message))) {
+        notProvenDeleted.push(item);
       }
     }
-    remaining = stillPresent;
+    remaining = notProvenDeleted;
     if (remaining.length === 0) return;
     await page.waitForTimeout(1_000);
   }
@@ -1376,9 +1632,6 @@ async function main() {
   const nonce = `${Date.now()}-${webcrypto.getRandomValues(new Uint32Array(1))[0].toString(36)}`;
   const note = `journey ${nonce}`;
   const imageScenario = SOURCE_IMAGE_PATH !== undefined;
-  const text = REAL_MODEL
-    ? "Analyze the attached receipt for an IOU."
-    : `${imageScenario ? "Journey image" : "Journey"} ${nonce}: cleaning fee 350 EGP`;
   const extraction = JSON.stringify({
     kind: "iou",
     amount: 350,
@@ -1398,13 +1651,14 @@ async function main() {
   let senderMainFrameNavigations = 0;
   let sourceBaselineIds: Set<string> | null = null;
   let sourceSendSucceeded = false;
+  let sourceEvidence: SourceMessageEvidence | null = null;
   let sourceMessage: ChatMessageRef | null = null;
   let senderCard: LoadedRunCard | null = null;
   let confirmerCard: LoadedRunCard | null = null;
+  const senderCandidateCards = new Map<string, LoadedRunCard>();
+  const confirmerCandidateCards = new Map<string, LoadedRunCard>();
   const senderRunCards = new Map<string, LoadedRunCard>();
   const confirmerRunCards = new Map<string, LoadedRunCard>();
-  const senderCleanGateIds = new Set<string>();
-  const confirmerCleanGateIds = new Set<string>();
   let confirmerLinkedSheet: string | null = null;
   let confirmationAttempted = false;
   let entrySubmissionAttempted = false;
@@ -1471,23 +1725,41 @@ async function main() {
   sourceBaselineIds = await captureMessageIdBaseline(proposerOC);
   const composer = proposerOC.locator(".ProseMirror").first();
   await composer.waitFor({ timeout: 15000 });
+  let draftImageContent: ExactImageContentEvidence | undefined;
   if (SOURCE_IMAGE_PATH !== undefined) {
     const fileInputs = proposerOC.locator('input[type="file"]');
+    const imageFileInputs = proposerOC.locator('input[type="file"][accept*="image"]');
     const inputCount = await fileInputs.count();
-    if (inputCount !== 1) {
-      throw new Error(`image journey expected one chat file input, found ${inputCount}`);
+    const imageInputCount = await imageFileInputs.count();
+    const exactFileInput =
+      imageInputCount === 1
+        ? imageFileInputs.first()
+        : imageInputCount === 0 && inputCount === 1
+          ? fileInputs.first()
+          : null;
+    if (exactFileInput === null) {
+      throw new Error(
+        `image journey expected one exact image input, found ${imageInputCount} image/${inputCount} total`,
+      );
     }
-    await fileInputs.first().setInputFiles(SOURCE_IMAGE_PATH);
-    await proposerOC.locator(".draft-container").waitFor({ state: "visible", timeout: 15_000 });
+    await exactFileInput.setInputFiles(SOURCE_IMAGE_PATH);
+    draftImageContent = await captureExactDraftImageContent(proposerOC);
   }
-  await composer.click();
-  await proposerOC.keyboard.type(text);
-  await proposerOC.keyboard.press("Enter");
+  const sourceText = journeySourceText({ imagePath: SOURCE_IMAGE_PATH, nonce });
+  sourceEvidence =
+    draftImageContent === undefined
+      ? { kind: "text", exactText: sourceText! }
+      : { kind: "image", exactContent: draftImageContent };
+  await sendJourneySource(proposerOC, composer, sourceText);
   sourceSendSucceeded = true;
-  console.log(`[${PROPOSER.user}] sent ${imageScenario ? "image + caption" : "text"}: ${text}`);
+  console.log(
+    sourceText === undefined
+      ? `[${PROPOSER.user}] sent image-only attachment`
+      : `[${PROPOSER.user}] sent text: ${sourceText}`,
+  );
   sourceMessage = await captureFreshSourceMessage(
     proposerOC,
-    text,
+    sourceEvidence,
     sourceBaselineIds,
     PROPOSER.user,
   );
@@ -1505,8 +1777,8 @@ async function main() {
   // Confirm targeting is scoped to THIS RUN'S card, never the last card on the page. The sender-side
   // card must be sender-owned and the unique immediate stable successor of the captured source. The
   // recipient may load only the exact message id/index/event coordinates selected on the sender.
-  // Deterministic mode's nonce remains secondary evidence; real-model mode deliberately gives the
-  // model no amount/currency/direction in the caption and validates those iframe values pre-edit.
+  // Deterministic mode's nonce remains secondary evidence. Real-model mode sends only the image
+  // bytes and validates the model-owned iframe values before any downstream edit.
   // v1 vs v2 propose UI: the classic tree has .bubble-wrapper + a hover menu with a TEXT item; the
   // v2 (components_mobile) tree opens an icon-button sheet on LONG-PRESS, where the propose item is
   // the AutoFix (wand) ICON button — no text, so target its SVG path.
@@ -1522,6 +1794,15 @@ async function main() {
       proposalCardObserved ||= (await observedRunCardCount(proposerOC)) > 0;
       if (!proposalCardObserved) {
       await proposerOC.locator(".toast .close").last().click({ timeout: 1_000 }).catch(() => {});
+      if (
+        sourceEvidence === null ||
+        !(await exactMessageEvidencePresent(proposerOC, sourceMessage!, {
+          kind: "source",
+          evidence: sourceEvidence,
+        }))
+      ) {
+        throw new Error("Journey source evidence changed before Propose; refusing mutation");
+      }
       if (isV2) {
         const ownedMenu = await openOwnedMobileMessageMenu(proposerOC, sourceMessage!);
         const autoFix = await exactlyOneVisible(
@@ -1571,15 +1852,13 @@ async function main() {
         proposerOC,
         note,
         PROPOSER.user,
-        senderCleanGateIds,
         REAL_MODEL ? 300_000 : 60_000,
         true,
-        "auto",
         { expectedSource: sourceMessage!, requireSenderOwned: true },
       );
-      rememberRunCards(senderRunCards, foundSenderCards, PROPOSER.user);
+      rememberRunCards(senderCandidateCards, foundSenderCards, PROPOSER.user);
       proposalCardObserved ||= (await observedRunCardCount(proposerOC)) > 0;
-      senderCard = uniqueTrackedRunCard(senderRunCards, PROPOSER.user);
+      senderCard = uniqueTrackedRunCard(senderCandidateCards, PROPOSER.user);
       if (senderCard) {
         // A sender-side card proves the post succeeded. Do not post a duplicate merely because the
         // other browser is still catching up; wait for its authoritative hydration instead.
@@ -1587,14 +1866,12 @@ async function main() {
           confirmerOC,
           note,
           CONFIRMER.user,
-          confirmerCleanGateIds,
           35_000,
           false,
-          "explicit",
           { expectedMessage: senderCard.message },
         );
-        rememberRunCards(confirmerRunCards, foundConfirmerCards, CONFIRMER.user);
-        confirmerCard = uniqueTrackedRunCard(confirmerRunCards, CONFIRMER.user);
+        rememberRunCards(confirmerCandidateCards, foundConfirmerCards, CONFIRMER.user);
+        confirmerCard = uniqueTrackedRunCard(confirmerCandidateCards, CONFIRMER.user);
       }
       posted = senderCard !== null && confirmerCard !== null;
       if (!posted) {
@@ -1612,8 +1889,8 @@ async function main() {
       await proposerOC.waitForTimeout(1000);
     }
   }
-  senderCard = uniqueTrackedRunCard(senderRunCards, PROPOSER.user);
-  confirmerCard = uniqueTrackedRunCard(confirmerRunCards, CONFIRMER.user);
+  senderCard = uniqueTrackedRunCard(senderCandidateCards, PROPOSER.user);
+  confirmerCard = uniqueTrackedRunCard(confirmerCandidateCards, CONFIRMER.user);
   posted = senderCard !== null && confirmerCard !== null;
   const promptProbe = await readManualPromptProbe(proposerOC);
   const promptMessage = promptProbe.prompts[0] ?? "";
@@ -1633,7 +1910,7 @@ async function main() {
       throw new Error("manual extraction prompt count/message did not match this run");
     }
   }
-  check(posted, `the nonce-scoped action card auto-loaded for its proposer and loaded for its recipient`);
+  check(posted, `the nonce-scoped trusted action card auto-loaded for both participants`);
   if (!posted) throw new Error("card never posted");
 
   const sameCardMessage = sameStableMessage(senderCard!.message, confirmerCard!.message);
@@ -1647,13 +1924,13 @@ async function main() {
   }
 
   check(
-    !senderCard!.loadedFromCleanGate,
-    "sender's freshly proposed attested card loaded without a second Load app card click",
+    senderCard!.loadedAutomatically,
+    "sender's freshly proposed attested card loaded automatically",
   );
-  check(confirmerCard!.loadedFromCleanGate, "recipient opened this new card through Load app card");
+  check(confirmerCard!.loadedAutomatically, "recipient's trusted card loaded automatically");
   const senderTransitions = await observedCardTransitions(proposerOC, senderCard!.observerId);
   const sawOptimistic = senderTransitions.some((value) => value.includes("Unverified card binding"));
-  const sawVerified = senderTransitions.some((value) => /Directory entry:\s*iou/i.test(value));
+  const sawVerified = senderTransitions.some((value) => /^iou\s+Add to IOU\b/i.test(value));
   const markerSurvived = await proposerOC.evaluate(
     (marker) =>
       (globalThis as typeof globalThis & { __iouJourneyDocumentMarker?: string })
@@ -1670,12 +1947,14 @@ async function main() {
     throw new Error("sender card did not transition from optimistic to verified in place");
   }
 
-  // 5. The confirmer (the NON-proposer) confirms — on the nonce-scoped iframe card only (see above).
+  // 5. The confirmer (the NON-proposer) confirms through the nonce-scoped card's host-owned action.
   //    Belt-and-braces before clicking: the matched iframe must carry this run's amount 350 in one of
   //    its inputs (a mis-scoped or stale card fails here instead of getting confirmed). The app-owned
-  //    card has no OC disclosure checkbox — confirm is the iframe's "Add to IOU" button.
+  //    card has no redundant disclosure or iframe action: one OpenChat-owned "Add to IOU" click
+  //    challenges the frame for its exact current values, grants those bytes, and submits directly.
   const outerCard = confirmerCard!.card;
   const frame = confirmerCard!.frame;
+  await assertTrustedIouCardChrome(confirmerCard!);
   const outerText = await outerCard.innerText();
   const staleDirectoryWarning = outerText.includes("Directory binding only; card content is untrusted");
   const staleTextWarning = outerText.includes("Untrusted card text");
@@ -1685,15 +1964,16 @@ async function main() {
     throw new Error("backend-attested card still renders stale untrusted-content copy");
   }
   if (REAL_MODEL) {
-    // Validate the model-owned semantic fields before editing anything. The neutral caption does not
-    // contain these values, so a text-only path or wrong extraction fails here. Only downstream test
-    // correlation fields are normalized after acceptance; amount/currency/direction remain untouched.
-    const transaction = await requireExactlyOneCardControl(frame, "Transaction");
+    // Validate the model-owned semantic fields before editing anything. The source has no visible
+    // text, so a text-only path or wrong extraction fails here. Only downstream test correlation
+    // fields are normalized after acceptance; amount/currency/direction remain untouched.
+    const transaction = await requireExactlyOneCardControl(frame, "Type");
     const amount = await requireExactlyOneCardControl(frame, "Amount");
     const currency = await requireExactlyOneCardControl(frame, "Currency");
     const direction = await requireExactlyOneCardControl(frame, "Direction");
     const noteControl = await requireExactlyOneCardControl(frame, "Note");
-    const accountType = await requireExactlyOneCardControl(frame, "Account type");
+    const accountType = await requireExactlyOneCardControl(frame, "Saved type");
+    await requireExactlyOneCardControl(frame, "Date");
 
     const accepted = assertAcceptedVisionExtraction({
       amount: await amount.inputValue(),
@@ -1704,13 +1984,24 @@ async function main() {
       accepted.amount === 350 &&
         accepted.currency === "EGP" &&
         accepted.direction === "credit",
-      "the neutral-caption vision model extracted 350 EGP credit before card editing",
+      "the image-only vision model extracted 350 EGP credit before card editing",
     );
 
     await transaction.selectOption("iou");
     await noteControl.fill(note);
+    const senderNoteControl = await requireExactlyOneCardControl(senderCard!.frame, "Note");
+    await senderNoteControl.fill(note);
     await accountType.selectOption("");
   }
+  const [senderNonceBound, confirmerNonceBound] = await Promise.all([
+    cardHasExactRunNote(senderCard!, note),
+    cardHasExactRunNote(confirmerCard!, note),
+  ]);
+  if (!senderNonceBound || !confirmerNonceBound) {
+    throw new Error("card did not acquire exact run-note evidence; refusing confirmation and cleanup mutation");
+  }
+  await rememberNonceBoundRunCards(senderRunCards, [senderCard!], note, PROPOSER.user);
+  await rememberNonceBoundRunCards(confirmerRunCards, [confirmerCard!], note, CONFIRMER.user);
   const inputVals: string[] = [];
   const fin = frame.locator("input");
   const finCount = await fin.count().catch(() => 0);
@@ -1720,6 +2011,7 @@ async function main() {
   check(cardIsOurs, `the matched card carries this run's amount 350 (${JSON.stringify(inputVals)})`);
   if (!cardIsOurs) throw new Error("matched card is not this run's draft — refusing to confirm");
   const cardCurrency = await frame.getByLabel("Currency", { exact: true }).inputValue();
+  const invalidImageCurrencySurvived = cardCurrency === "$$$";
   const expectedCardCurrency = imageScenario && !REAL_MODEL ? "" : "EGP";
   check(
     cardCurrency === expectedCardCurrency,
@@ -1734,16 +2026,16 @@ async function main() {
   }
   if (imageScenario && !REAL_MODEL) {
     check(
-      !inputVals.includes("2026-02-30") && cardCurrency !== "$$$",
+      !inputVals.includes("2026-02-30") && !invalidImageCurrencySurvived,
       "invalid optional image extraction fields were stripped before exact app attestation",
     );
-    if (inputVals.includes("2026-02-30") || cardCurrency === "$$$") {
+    if (inputVals.includes("2026-02-30") || invalidImageCurrencySurvived) {
       throw new Error("image schema post-pass retained an invalid optional field");
     }
   }
   confirmationAttempted = true;
   await approveRunCardConfirmation(confirmerCard!, note, expectedCardCurrency);
-  console.log(`[${CONFIRMER.user}] approved the app request through the OpenChat host`);
+  console.log(`[${CONFIRMER.user}] confirmed with one host-owned Add to IOU click`);
   await confirmerOC.waitForTimeout(6000);
 
   // 6. Per-user delivery: ONE confirm → +1 envelope for the authoritative confirmer only. The
@@ -1849,13 +2141,18 @@ async function main() {
     }
 
     // Enter may have succeeded even if the immediate coordinate capture then failed. Recover only a
-    // unique sender-owned exact-text message that was absent from the pre-send baseline; ambiguity is
-    // reported and left untouched.
-    if (sourceSendSucceeded && sourceMessage === null && sourceBaselineIds !== null) {
+    // unique sender-owned message carrying this run's exact text/blob evidence and absent message id;
+    // ambiguity is reported and left untouched.
+    if (
+      sourceSendSucceeded &&
+      sourceMessage === null &&
+      sourceBaselineIds !== null &&
+      sourceEvidence !== null
+    ) {
       try {
         sourceMessage = await captureFreshSourceMessage(
           proposerOC,
-          text,
+          sourceEvidence,
           sourceBaselineIds,
           PROPOSER.user,
           3_000,
@@ -1872,18 +2169,17 @@ async function main() {
     // leave the chat untouched rather than weakening cleanup identity.
     if (proposerObserverInstalled && sourceMessage !== null) {
       try {
-        rememberRunCards(
+        await rememberNonceBoundRunCards(
           senderRunCards,
           await findAndLoadRunCards(
             proposerOC,
             note,
             PROPOSER.user,
-            senderCleanGateIds,
             5_000,
             false,
-            "either",
             { expectedSource: sourceMessage, requireSenderOwned: true },
           ),
+          note,
           PROPOSER.user,
         );
       } catch (error) {
@@ -1895,18 +2191,17 @@ async function main() {
       senderRunCards.size === 1 ? senderRunCards.values().next().value : undefined;
     if (confirmerObserverInstalled && cleanupSenderCard !== undefined) {
       try {
-        rememberRunCards(
+        await rememberNonceBoundRunCards(
           confirmerRunCards,
           await findAndLoadRunCards(
             confirmerOC,
             note,
             CONFIRMER.user,
-            confirmerCleanGateIds,
             5_000,
             false,
-            "either",
             { expectedMessage: cleanupSenderCard.message },
           ),
+          note,
           CONFIRMER.user,
         );
       } catch (error) {
@@ -2004,8 +2299,8 @@ async function main() {
       }
     }
 
-    // Remove every uniquely nonce-proven card message before the exact full-text source. Normal
-    // OpenChat sender UI is used so backend authorization remains identical to a real user deletion.
+    // Remove every uniquely nonce-proven card message before the exact source. Normal OpenChat sender
+    // UI is used so backend authorization remains identical to a real user deletion.
     const proposerDeleted: Array<{
       message: ChatMessageRef;
       evidence: ExactMessageEvidence;
@@ -2017,6 +2312,7 @@ async function main() {
       const evidence: ExactMessageEvidence = {
         kind: "card",
         observerId: trackedCard.observerId,
+        exactNote: note,
       };
       try {
         await deleteExactMessageViaUi(proposerOC, trackedCard.message, evidence);
@@ -2030,8 +2326,8 @@ async function main() {
         );
       }
     }
-    if (sourceMessage !== null) {
-      const evidence: ExactMessageEvidence = { kind: "source", exactText: text };
+    if (sourceMessage !== null && sourceEvidence !== null) {
+      const evidence: ExactMessageEvidence = { kind: "source", evidence: sourceEvidence };
       try {
         await deleteExactMessageViaUi(proposerOC, sourceMessage, evidence);
         proposerDeleted.push({ message: sourceMessage, evidence });
@@ -2057,7 +2353,7 @@ async function main() {
       .filter(([key]) => deletedCardKeys.has(key))
       .map(([, card]) => ({
         message: card.message,
-        evidence: { kind: "card", observerId: card.observerId } as ExactMessageEvidence,
+        evidence: { kind: "card", observerId: card.observerId, exactNote: note } as ExactMessageEvidence,
       }));
     if (confirmerDeleted.length > 0) {
       try {
@@ -2098,7 +2394,7 @@ async function main() {
     console.error(`\nJOURNEY FAILED — ${failures} assertion(s) failed`);
     process.exit(1);
   }
-  console.log("\n🏁 JOURNEY PASSED: chat send → card Add to IOU → confirmer delivery → Review & add → IOU History");
+  console.log("\n🏁 JOURNEY PASSED: chat send → one host Add to IOU → confirmer delivery → Review & add → IOU History");
   process.exit(0);
 }
 

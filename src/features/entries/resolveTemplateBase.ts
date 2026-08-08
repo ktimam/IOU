@@ -30,6 +30,27 @@ export type TemplateResolution = {
   unknownTemplate?: string;
 };
 
+export type TemplateMatchOptions = {
+  /**
+   * A multi-entry extraction repeats the full source `message` on every row.
+   * In that mode only the model's row-local `note` may select a saved Type;
+   * otherwise one transaction's keyword can apply money defaults to a sibling.
+   */
+  evidence?: "full" | "row-local";
+};
+
+/**
+ * OpenChat extraction is always row-local, even when a model array was
+ * filtered down to one surviving row. Local/legacy single imports retain the
+ * full-message convenience matcher; every true multi import is row-local.
+ */
+export function templateEvidenceForImport(
+  source: "openchat" | "connector" | undefined,
+  multiEntry: boolean,
+): "full" | "row-local" {
+  return source === "openchat" || multiEntry ? "row-local" : "full";
+}
+
 function escapeRegExp(value: string): string {
   return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
@@ -55,9 +76,13 @@ export function keywordMatches(text: string, keyword: string): boolean {
 export function matchTemplateForDraft(
   allTemplates: TxnTemplate[],
   raw: unknown,
+  options: TemplateMatchOptions = {},
 ): TxnTemplate | undefined {
   if (raw == null || typeof raw !== "object") return undefined;
-  const evidence = messageEvidence(raw as { message?: unknown; note?: unknown });
+  const draft = raw as { message?: unknown; note?: unknown };
+  const evidence = options.evidence === "row-local"
+    ? (typeof draft.note === "string" ? draft.note : "")
+    : messageEvidence(draft);
   if (!evidence.trim()) return undefined;
   const matches = allTemplates.filter((template) =>
     (template.keywords ?? []).some((keyword) => keywordMatches(evidence, keyword)),
@@ -73,21 +98,32 @@ export function matchTemplateForDraft(
  * template's relative due schedule is anchored at the DRAFT's transaction date (the same date the
  * entry gets), so a portion "due in 0 days" lands on the reservation date rather than today.
  */
-export function resolveTemplateBase(allTemplates: TxnTemplate[], raw: unknown): TemplateResolution {
+export function resolveTemplateBase(
+  allTemplates: TxnTemplate[],
+  raw: unknown,
+  options: TemplateMatchOptions = {},
+): TemplateResolution {
   if (raw == null || typeof raw !== "object") return {};
   const ref = (raw as { template?: unknown }).template;
   let t: TxnTemplate | undefined;
   if (typeof ref === "string" && ref.trim() !== "") {
     const name = ref.trim();
     const key = name.toLowerCase();
-    t =
-      allTemplates.find((x) => x.name.trim().toLowerCase() === key) ??
-      allTemplates.find((x) => x.id === ref);
-    if (!t) return { unknownTemplate: name };
+    // A restored encrypted template_ref carries an id, while older local
+    // drafts may carry a display name. If one value names one template but is
+    // another template's id, choosing either by lookup order silently applies
+    // the wrong private fee/schedule. Require one unique row across BOTH
+    // namespaces; duplicate names and id/name collisions fail closed.
+    const matches = allTemplates.filter(
+      (candidate) =>
+        candidate.name.trim().toLowerCase() === key || candidate.id === ref,
+    );
+    if (matches.length !== 1) return { unknownTemplate: name };
+    [t] = matches;
   } else {
     // The public OpenChat manifest intentionally contains no private template roster. Match only
     // after the draft reaches IOU, against the templates of this linked account.
-    t = matchTemplateForDraft(allTemplates, raw);
+    t = matchTemplateForDraft(allTemplates, raw, options);
     if (!t) return {};
   }
   return { base: templateToInitial(t, extractTs(raw as { note?: unknown; date?: unknown })) };

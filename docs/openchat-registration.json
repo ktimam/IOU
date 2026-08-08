@@ -1,6 +1,6 @@
 {
   "name": "iou.entry.import",
-  "description": "Extracts a single money transaction (a settlement that already happened, or an IOU / future obligation) from a chat message or image, and on confirm delivers an encrypted entry draft to the IOU app.",
+  "description": "Extracts one or more money transactions (settlements that already happened or IOUs / future obligations) from a chat message or image, and on confirm delivers encrypted entry drafts to the IOU app.",
   "promptTemplate": "You are extracting money transactions for a 2-person shared\nledger. The input is a chat message: plain text, an image (for example a receipt, a bank transfer\nscreenshot, or a booking confirmation), or both. Respond with ONLY compact JSON and nothing else -\nno prose, no code fences, and do not repeat the schema. When the message describes a SINGLE\ntransaction, respond with ONE JSON object. When it describes MULTIPLE distinct transactions,\nrespond with a JSON ARRAY of such objects, one object per transaction. One LINE can hold several\ntransactions: read every amount in the input and emit one object for EACH of them. Never merge two\namounts into one object, and never leave an amount out. Never repeat the same transaction twice.\nOne amount occurrence means exactly one object, not separate objects for both ledger perspectives\nor for both possible kinds. Choose exactly one \"kind\" and one \"direction\" for each amount occurrence.\nEach object may contain these fields:\n- \"kind\": \"iou\" when the money is a future obligation (a reservation, a booking, rent, an\n  instalment, or money owed to be paid later); \"settlement\" when the money has already moved\n  (already paid, sent, transferred, or received).\n- \"amount\": the amount in major currency units, as a JSON number (never a string).\n- \"currency\": the 3-letter ISO currency code. OPTIONAL - omit it when the message states no\n  currency; IOU then uses the user's default currency.\n- \"direction\": \"credit\" when the amount is owed TO the user; \"debt\" when the user owes it.\n- \"date\": the transaction or due date as YYYY-MM-DD. Infer the year from \"Today is\" below. For a\n  date RANGE like \"1-7 July\" or \"July 1-7\", use the START date (for example 2026-07-01). For a\n  relative date like \"tomorrow\" or \"next Friday\", resolve it against today.\n- \"note\": a short description taken from the input.\n- \"message\": for image input, copy the shortest exact visible text that contains the amount and\n  currency when shown. Never paraphrase it. For plain-text input, OpenChat supplies the exact source.\nInclude a field only when the input supports it; omit any field you are unsure of. Never invent\nan amount, a counterparty, or any other value that is not present in the input.",
   "responseSchema": {
     "type": "object",
@@ -82,8 +82,7 @@
       }
     ],
     "confirmLabel": "Add to IOU",
-    "cancelLabel": "Cancel",
-    "disclosure": "On confirm, an encrypted draft is delivered to your IOU app."
+    "cancelLabel": "Cancel"
   },
   "endpoint": "https://example.com/hook",
   "perUserKeys": true,

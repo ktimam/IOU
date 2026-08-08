@@ -22,6 +22,7 @@ function candidate(
     exactTexts: [],
     cardCount: 0,
     iframeInputValues: [],
+    cardRows: [],
     ...overrides,
   };
 }
@@ -60,6 +61,38 @@ describe("exact OpenChat artifact selection", () => {
       { kind: "card_inputs", exactInputValues: ["note-a", "note-b"] },
     );
     expect(result.matches.map((value) => value.message.messageId)).toEqual(["12", "14"]);
+  });
+
+  it("requires every exact labeled classic-card row and rejects partial or reordered batches", () => {
+    const exactRows = [
+      {
+        label: "Entry 1",
+        value:
+          "Amount: 350 · Currency: EGP · Type: iou · Direction: credit · Date: 2026-08-08 · Note: multi-a run-abc · Message: Multi run-abc: two fees",
+      },
+      {
+        label: "Entry 2",
+        value:
+          "Amount: 500 · Currency: USD · Type: settlement · Direction: debt · Date: 2026-08-09 · Note: multi-b run-abc · Message: Multi run-abc: two fees",
+      },
+    ];
+    const withRows = (
+      id: number,
+      rows: typeof exactRows,
+    ): OpenChatArtifactCandidate =>
+      candidate(id, { cardCount: 1, cardRows: rows } as Partial<OpenChatArtifactCandidate>);
+
+    const result = selectExactOpenChatArtifacts(
+      baseline,
+      [
+        withRows(12, exactRows),
+        withRows(13, exactRows.slice(0, 1)),
+        withRows(14, [...exactRows].reverse()),
+      ],
+      { kind: "card_rows", exactRows } as never,
+    );
+    expect(result.error).toBeUndefined();
+    expect(result.matches.map((value) => value.message.messageId)).toEqual(["12"]);
   });
 
   it("rejects the retired unbound-card fallback even when several fresh cards exist", () => {
@@ -114,6 +147,13 @@ describe("exact OpenChat artifact selection", () => {
         { kind: "card_inputs", exactInputValues: [] },
       ).error,
     ).toMatch(/empty iframe-input/);
+    expect(
+      selectExactOpenChatArtifacts(
+        baseline,
+        [candidate(12, { cardCount: 1 })],
+        { kind: "card_rows", exactRows: [] } as never,
+      ).error,
+    ).toMatch(/empty classic-card row/);
   });
 });
 

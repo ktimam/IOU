@@ -30,6 +30,45 @@ describe("security-sensitive Candid bindings", () => {
     expect(Array.from(decoded[1].iv)).toHaveLength(12);
   });
 
+  it("exposes one ciphertext-only atomic batch call with opaque idempotency coordinates", () => {
+    const service = idlFactory({ IDL }) as any;
+    const method = service._fields.find(
+      ([name]: [string]) => name === "add_entry_batch",
+    )[1];
+    const request = {
+      sheet_id: "0123456789abcdef",
+      import_id: new Uint8Array(32).fill(3),
+      entries: [5, 6].map((seed) => ({
+        entry_key: new Uint8Array(32).fill(seed),
+        ciphertext: new Uint8Array(32).fill(seed + 1),
+        iv: new Uint8Array(12).fill(seed + 2),
+      })),
+    };
+    const [decoded] = IDL.decode(
+      method.argTypes,
+      IDL.encode(method.argTypes, [request]),
+    ) as any[];
+    expect(decoded.sheet_id).toBe(request.sheet_id);
+    expect(Array.from(decoded.import_id)).toEqual(new Array(32).fill(3));
+    expect(decoded.entries).toHaveLength(2);
+    expect(decoded.entries[0]).toEqual({
+      entry_key: new Uint8Array(32).fill(5),
+      ciphertext: new Uint8Array(32).fill(6),
+      iv: new Uint8Array(12).fill(7),
+    });
+    expect(decoded).not.toHaveProperty("message_handle");
+    expect(decoded).not.toHaveProperty("payload_hash");
+    expect(decoded).not.toHaveProperty("payload");
+
+    const [result] = IDL.decode(
+      method.retTypes,
+      IDL.encode(method.retTypes, [{ entry_ids: [41n, 42n], replayed: true }]),
+    ) as any[];
+    expect(Array.from(result.entry_ids)).toEqual([41n, 42n]);
+    expect(result.replayed).toBe(true);
+    expect(result).not.toHaveProperty("entries");
+  });
+
   it("requires a nat64 epoch for every consumer-key mutation", () => {
     const service = idlFactory({ IDL }) as any;
     const setMethod = service._fields.find(
@@ -250,7 +289,7 @@ describe("security-sensitive Candid bindings", () => {
       confirm_label: "Add to IOU",
       cancel_label: "Cancel",
       action_id: "iou.entry.import",
-      disclosure: ["On confirm, an encrypted draft is delivered to your IOU app."],
+      disclosure: [],
       expires_at: [],
       confirm_payload: [new TextEncoder().encode('{"amount":25,"kind":"iou"}')],
     };

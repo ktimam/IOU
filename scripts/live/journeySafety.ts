@@ -4,6 +4,52 @@ export type StableMessageRef = Readonly<{
   eventIndex: number;
 }>;
 
+export type ExactImageContentEvidence = Readonly<{
+  sha256: string;
+  byteLength: number;
+  mimeType: string;
+}>;
+
+function hasValidImageContentEvidence(value: ExactImageContentEvidence): boolean {
+  return (
+    /^[0-9a-f]{64}$/.test(value.sha256) &&
+    Number.isSafeInteger(value.byteLength) &&
+    value.byteLength > 0 &&
+    /^image\/[a-z0-9][a-z0-9.+-]*$/.test(value.mimeType)
+  );
+}
+
+/** Compare the processed image bytes that OpenChat previews and then uploads, not their URL. */
+export function matchesExactImageContentEvidence(
+  expected: ExactImageContentEvidence,
+  observed: ExactImageContentEvidence,
+): boolean {
+  return (
+    hasValidImageContentEvidence(expected) &&
+    hasValidImageContentEvidence(observed) &&
+    expected.sha256 === observed.sha256 &&
+    expected.byteLength === observed.byteLength &&
+    expected.mimeType === observed.mimeType
+  );
+}
+
+export type FreshSourceCandidate = StableMessageRef &
+  Readonly<{
+    senderOwned: boolean;
+    exactEvidenceMatches: number;
+  }>;
+
+type JourneySourceTextInput = Readonly<{
+  imagePath: string | undefined;
+  nonce: string;
+}>;
+
+/** An attached image is the complete user message; only text-only runs get a visible body. */
+export function journeySourceText(input: JourneySourceTextInput): string | undefined {
+  if (input.imagePath !== undefined) return undefined;
+  return `Journey ${input.nonce}: cleaning fee 350 EGP`;
+}
+
 type RunCardCandidate = Readonly<{
   candidate: StableMessageRef;
   senderOwned: boolean;
@@ -21,6 +67,50 @@ function hasValidCoordinates(message: StableMessageRef): boolean {
     Number.isSafeInteger(message.eventIndex) &&
     message.eventIndex >= 0
   );
+}
+
+/**
+ * Select a mutation target only from exact source evidence that was absent from the pre-send
+ * message-id baseline. The DOM collector supplies the count of exact text/blob matches within each
+ * stable wrapper; this pure boundary rejects repeated evidence, multiple wrappers, invalid stable
+ * coordinates, and recipient-owned content.
+ */
+export function selectFreshOwnedSourceCandidate(input: Readonly<{
+  candidates: readonly FreshSourceCandidate[];
+  baselineMessageIds: ReadonlySet<string>;
+}>): StableMessageRef | null {
+  const matches: FreshSourceCandidate[] = [];
+  for (const candidate of input.candidates) {
+    if (input.baselineMessageIds.has(candidate.messageId)) continue;
+    if (
+      !Number.isSafeInteger(candidate.exactEvidenceMatches) ||
+      candidate.exactEvidenceMatches < 0
+    ) {
+      throw new Error("source evidence count is invalid");
+    }
+    if (candidate.exactEvidenceMatches > 1) {
+      throw new Error("fresh source attachment evidence is ambiguous within one message");
+    }
+    if (candidate.exactEvidenceMatches === 1) matches.push(candidate);
+  }
+
+  if (matches.length > 1) {
+    throw new Error("multiple fresh messages exactly matched this run");
+  }
+  if (matches.length === 0) return null;
+
+  const selected = matches[0];
+  if (!hasValidCoordinates(selected)) {
+    throw new Error("fresh source has invalid stable message coordinates");
+  }
+  if (!selected.senderOwned) {
+    throw new Error("fresh source is not sender-owned");
+  }
+  return {
+    messageId: selected.messageId,
+    messageIndex: selected.messageIndex,
+    eventIndex: selected.eventIndex,
+  };
 }
 
 export function sameStableMessage(

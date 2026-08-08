@@ -9,8 +9,8 @@
 // then `window.parent === window`. So the whole surface is reachable with a plain `page.goto` and a
 // self-post — no sign-in, no replica, no OpenChat, no CDP.
 //
-// That mattered: the four defects these guard (buttons escaping a narrow frame, Cancel leaving "Add"
-// on screen, the Type/Template fields vanishing, the card growing back) were all found BY HAND,
+// That mattered: the defects these guard (controls escaping a narrow frame, the Type/Template
+// fields vanishing, the card growing back, and payload collection without a host click) were found BY HAND,
 // twice, while `pnpm test` stayed green. jsdom cannot replace this — it has no layout engine and
 // getBoundingClientRect returns zeros, so a component test passes happily with a button 69px outside
 // the card.
@@ -27,6 +27,7 @@ declare global {
       type?: string;
       version?: number;
       frameNonce?: string;
+      requestNonce?: string;
       height?: number;
       payload?: unknown;
     }[];
@@ -57,6 +58,7 @@ const SINGLE_ROUTED = {
   currency: "EGP",
   template: "Reservation",
   direction: "credit",
+  date: "2026-08-08",
   note: "deposit",
   message: "Reservation deposit 1000 EGP",
 };
@@ -64,9 +66,9 @@ const SINGLE_ROUTED = {
 /** Three entries where only the FIRST was routed: the other two must gain nothing they never had. */
 const MULTI_ROUTED = {
   entries: [
-    { kind: "iou", amount: 1000, template: "Reservation", note: "deposit" },
-    { amount: 150, note: "food" },
-    { amount: 300, note: "fee" },
+    { kind: "iou", amount: 1000, template: "Reservation", date: "2026-08-08", note: "deposit" },
+    { amount: 150, date: "2026-08-09", note: "food" },
+    { amount: 300, date: "2026-08-10", note: "fee" },
   ],
 };
 
@@ -84,12 +86,13 @@ test.beforeEach(async ({ page }) => {
         type?: string;
         version?: number;
         frameNonce?: string;
+        requestNonce?: string;
         height?: number;
         payload?: unknown;
       };
       window.__ocMsgs!.push(m);
       if (m?.type === "oc:card:resize" && typeof m.height === "number") window.__ocHeights!.push(m.height);
-      if (m?.type === "oc:card:confirm") window.__ocConfirm = m.payload;
+      if (m?.type === "oc:card:confirm-collected") window.__ocConfirm = m.payload;
     });
   });
 });
@@ -97,6 +100,7 @@ test.beforeEach(async ({ page }) => {
 /** Protocol v2 is host-first: post a fresh bootstrap nonce and wait for the matching ready reply. */
 const FRAME_NONCE = "QkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkI";
 const ROTATED_FRAME_NONCE = "Q0NDQ0NDQ0NDQ0NDQ0NDQ0NDQ0NDQ0NDQ0NDQ0NDQ0M";
+const COLLECT_NONCE = "REREREREREREREREREREREREREREREREREREREREREQ";
 
 async function bootstrapCard(page: Page, frameNonce = FRAME_NONCE): Promise<void> {
   await expect
@@ -175,10 +179,10 @@ async function flushBridgeMessages(page: Page): Promise<void> {
 }
 
 /** Wait until the card has actually rendered the init (never a sleep): a MULTI card is identified by
- *  its "Add all N entries" button, a SINGLE card by the amount landing in the field. */
+ *  its N amount fields, a SINGLE card by the amount landing in its one field. */
 async function awaitRendered(page: Page, data: { entries?: unknown[] } & Record<string, unknown>) {
   if (Array.isArray(data.entries)) {
-    await expect(page.getByRole("button", { name: `Add all ${data.entries.length} entries` })).toBeVisible();
+    await expect(page.getByLabel("Amount", { exact: true })).toHaveCount(data.entries.length);
   } else {
     await expect(page.getByLabel("Amount", { exact: true })).toHaveValue(String(data.amount));
   }
@@ -226,30 +230,98 @@ test("bridge v2 rotates the document nonce and rejects stale replay", async ({ p
   await awaitRendered(page, { amount: 222 });
 });
 
-// ── D3: the buttons stay inside the card, at every width, in every phase ─────────────────────────
+test("bridge v2 never emits a payload without an exact host collection challenge", async ({ page }) => {
+  await initCard(page, SINGLE_PLAIN);
+  await page.evaluate(() => {
+    window.postMessage(
+      {
+        type: "oc:card:collect-confirm",
+        version: 2,
+        frameNonce: "Q0NDQ0NDQ0NDQ0NDQ0NDQ0NDQ0NDQ0NDQ0NDQ0NDQ0M",
+        requestNonce: "REREREREREREREREREREREREREREREREREREREREREQ",
+      },
+      "*",
+    );
+    window.postMessage(
+      {
+        type: "oc:card:confirm",
+        version: 2,
+        frameNonce: "QkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkI",
+        payload: { amount: 999 },
+      },
+      "*",
+    );
+  });
+  await flushBridgeMessages(page);
+  expect(await page.evaluate(() => window.__ocConfirm)).toBeUndefined();
 
-// The host sizes IOU's iframe `width: 420px; max-width: 100%`, so in a narrow bubble the frame is far
-// below its preference — a v2/mobile bubble measured ~250px. A flex row cannot shrink a button below
-// its own text, and the row is `justify-content: flex-end`, so the excess overflows the START edge:
-// the buttons slide out of the card to the LEFT, where scrollWidth cannot even see them (which is why
-// this kept being reported as "outside the window" while every scroll metric looked clean). Measured
-// before the fix: 69px outside at a 240px frame.
+  const payload = (await collectAndRead(page)) as Record<string, unknown>;
+  expect(payload.amount).toBe(300);
+  expect(
+    await page.evaluate((requestNonce) =>
+      (window.__ocMsgs ?? []).some(
+        (message) =>
+          message.type === "oc:card:confirm-collected" &&
+          message.frameNonce === "QkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkI" &&
+          message.requestNonce === requestNonce,
+      ),
+      COLLECT_NONCE,
+    ),
+  ).toBe(true);
+});
+
+test("host busy freezes the edited values until exact-byte submission finishes", async ({ page }) => {
+  await initCard(page, SINGLE_PLAIN);
+  await page.evaluate(() => {
+    window.postMessage(
+      {
+        type: "oc:card:busy",
+        version: 2,
+        frameNonce: "QkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkI",
+        busy: true,
+      },
+      "*",
+    );
+  });
+  await expect
+    .poll(() =>
+      page
+        .locator(".card input, .card select")
+        .evaluateAll((controls) => controls.length > 0 && controls.every((control) => (control as HTMLInputElement).disabled)),
+    )
+    .toBe(true);
+  await page.evaluate(() => {
+    window.postMessage(
+      {
+        type: "oc:card:busy",
+        version: 2,
+        frameNonce: "QkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkI",
+        busy: false,
+      },
+      "*",
+    );
+  });
+  await expect(page.getByLabel("Amount", { exact: true })).toBeEnabled();
+});
+
+// ── D3: editable controls stay inside the card; action controls stay host-owned ──────────────────
+
+// The host sizes IOU's iframe `width: 420px; max-width: 100%`, so a mobile bubble can be much
+// narrower. The iframe owns editable values only; Cancel/Add live in OpenChat's trusted host chrome.
 const WIDTHS = [420, 300, 240, 200, 160];
 
-/** Every button's offset inside the CARD's box. verify-card-fits measured `row.left - btn.left` only,
- *  so a button overflowing the RIGHT edge — or overflowing `.card` while sitting inside its row —
- *  scored a clean zero there. Both edges, against the card, is the assertion that actually holds. */
-async function buttonInsets(page: Page) {
+/** Every editable control's offset inside the card's box, checking both edges. */
+async function controlInsets(page: Page) {
   return page.evaluate(() => {
     const card = document.querySelector(".card") as HTMLElement | null;
     if (!card) return [];
     const cr = card.getBoundingClientRect();
-    return [...card.querySelectorAll("button")]
-      .filter((b) => (b as HTMLElement).offsetParent !== null)
-      .map((b) => {
-        const r = b.getBoundingClientRect();
+    return [...card.querySelectorAll("input, select")]
+      .filter((control) => (control as HTMLElement).offsetParent !== null)
+      .map((control) => {
+        const r = control.getBoundingClientRect();
         return {
-          label: (b as HTMLElement).innerText.trim().slice(0, 24),
+          label: control.getAttribute("aria-label") ?? control.tagName,
           leftInset: r.left - cr.left,
           rightInset: cr.right - r.right,
         };
@@ -258,58 +330,43 @@ async function buttonInsets(page: Page) {
 }
 
 function expectAllInside(insets: { label: string; leftInset: number; rightInset: number }[], where: string) {
-  expect(insets.length, `${where}: no buttons found — the card did not render`).toBeGreaterThan(0);
-  for (const b of insets) {
+  expect(insets.length, `${where}: no editable controls found — the card did not render`).toBeGreaterThan(0);
+  for (const control of insets) {
     // Half a pixel of slack for sub-pixel layout; a real escape is tens of pixels.
-    expect(b.leftInset, `${where}: "${b.label}" escapes the card's LEFT edge`).toBeGreaterThanOrEqual(-0.5);
-    expect(b.rightInset, `${where}: "${b.label}" escapes the card's RIGHT edge`).toBeGreaterThanOrEqual(-0.5);
+    expect(control.leftInset, `${where}: "${control.label}" escapes the card's LEFT edge`).toBeGreaterThanOrEqual(-0.5);
+    expect(control.rightInset, `${where}: "${control.label}" escapes the card's RIGHT edge`).toBeGreaterThanOrEqual(-0.5);
   }
 }
 
 for (const mode of ["single", "multi"] as const) {
   const data = mode === "single" ? SINGLE_PLAIN : MULTI_PLAIN;
-  test(`D3 ${mode}: buttons stay inside the card at every width, idle and cancelling`, async ({ page }) => {
+  test(`D3 ${mode}: fields stay inside the card and no iframe action button exists`, async ({ page }) => {
     for (const width of WIDTHS) {
       await page.setViewportSize({ width, height: 900 });
       await initCard(page, data);
 
-      expectAllInside(await buttonInsets(page), `${width}px idle`);
-
-      // Cancelling is the WIDEST state: it is the one label that GROWS ("Cancel" → spinner +
-      // "Cancelling…") where confirm shrinks to "Adding…". No oc:card:busy is ever posted back, so
-      // the phase sticks and can be measured at leisure.
-      await page.getByRole("button", { name: "Cancel", exact: true }).click();
-      await expect(page.getByText("Cancelling…")).toBeVisible();
-      expectAllInside(await buttonInsets(page), `${width}px cancelling`);
+      expectAllInside(await controlInsets(page), `${width}px`);
+      await expect(page.locator(".card").getByRole("button")).toHaveCount(0);
     }
   });
 }
 
-// ── D4: pressing Cancel takes "Add" off the card ─────────────────────────────────────────────────
+// ── D4: iframe presentation stays compact and explanation-free ───────────────────────────────────
 
-// Offering "Add" after the user pressed Cancel is misleading — the action is already decided — and
-// dropping it is also what keeps the widest state inside a narrow frame (one button, not two).
-// The button block is DUPLICATED in the source (once for MULTI, once for SINGLE), so a fix applied to
-// one branch only is a live regression; both are driven here.
 for (const mode of ["single", "multi"] as const) {
   const data = mode === "single" ? SINGLE_PLAIN : MULTI_PLAIN;
-  const addName = mode === "single" ? "Add to IOU" : "Add all 3 entries";
-  test(`D4 ${mode}: Cancel hides the Add button and shows Cancelling…`, async ({ page }) => {
-    await initCard(page, data);
-    await expect(page.getByRole("button", { name: addName })).toBeVisible();
-
-    await page.getByRole("button", { name: "Cancel", exact: true }).click();
-
-    await expect(page.getByRole("button", { name: /^Add (to IOU|all)/ })).toHaveCount(0);
-    await expect(page.getByText("Cancelling…")).toBeVisible();
-  });
-
   // The tags section was deleted in fde1f36 and nothing anywhere pinned its absence, so a re-added
   // control would compile and ship green. It is one line to keep it gone.
   test(`D4 ${mode}: the card carries no tags control`, async ({ page }) => {
     await initCard(page, data);
     await expect(page.getByLabel(/tag/i)).toHaveCount(0);
     expect(await page.locator(".card").innerText()).not.toMatch(/tags/i);
+  });
+
+  test(`D4 ${mode}: the card shows values without explanatory copy`, async ({ page }) => {
+    await initCard(page, data);
+
+    await expect(page.locator(".card")).not.toContainText(/Review and edit|before adding to your ledger/i);
   });
 }
 
@@ -378,74 +435,94 @@ for (const mode of ["single", "multi"] as const) {
 
 // ── D8: public transaction vs viewer-authorized private account type ──────────────────────────────
 
-// Transaction kind is public. Saved account-type names are private and must appear only after the
+// Transaction Type and Date are public. Saved account-type names are private and must appear only after the
 // viewer-approved private-context exchange; an untrusted plaintext template in init is ignored.
 // These top-level browser cases pin the public/no-private-context half. The authorized roster/render
 // half is covered by OpenChatCardPage.test.ts and the cryptographic handoff suites.
 async function cardTypeFields(page: Page) {
-  const transactions = await page
-    .getByLabel("Transaction", { exact: true })
+  const types = await page
+    .getByLabel("Type", { exact: true })
     .evaluateAll((els) => els.map((e) => (e as HTMLSelectElement).value));
-  const accountTypes = await page
-    .getByLabel("Account type", { exact: true })
+  const savedTypes = await page
+    .getByLabel("Saved type", { exact: true })
     .evaluateAll((els) => els.map((e) => (e as HTMLSelectElement).value));
-  return { transactions, accountTypes };
+  const dates = await page
+    .getByLabel("Date", { exact: true })
+    .evaluateAll((els) => els.map((e) => (e as HTMLInputElement).value));
+  return { types, savedTypes, dates };
 }
 
-async function confirmAndRead(page: Page, name: RegExp | string) {
-  await page.getByRole("button", { name }).click();
+async function collectAndRead(page: Page) {
+  await page.evaluate((nonce) => {
+    window.__ocConfirm = undefined;
+    window.postMessage(
+      {
+        type: "oc:card:collect-confirm",
+        version: 2,
+        frameNonce: "QkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkI",
+        requestNonce: nonce,
+      },
+      "*",
+    );
+  }, COLLECT_NONCE);
   await page.waitForFunction(() => window.__ocConfirm !== undefined);
   return page.evaluate(() => window.__ocConfirm);
 }
 
-test("D8 single: public transaction stays visible while plaintext account type stays private", async ({ page }) => {
+test("D8 single: public Type and Date stay visible while plaintext saved Type stays private", async ({ page }) => {
   await initCard(page, SINGLE_ROUTED);
 
-  await expect(page.getByLabel("Transaction", { exact: true })).toHaveValue("iou");
-  await expect(page.getByLabel("Account type", { exact: true })).toHaveValue("");
+  await expect(page.getByLabel("Type", { exact: true })).toHaveValue("iou");
+  await expect(page.getByLabel("Date", { exact: true })).toHaveValue("2026-08-08");
+  await expect(page.getByLabel("Saved type", { exact: true })).toHaveValue("");
   await expect(page.locator(".card")).not.toContainText("Reservation");
 
-  const payload = (await confirmAndRead(page, "Add to IOU")) as Record<string, unknown>;
+  const payload = (await collectAndRead(page)) as Record<string, unknown>;
   expect(payload.kind).toBe("iou");
+  expect(payload.date).toBe("2026-08-08");
   expect("template" in payload).toBe(false);
   expect("template_ref" in payload).toBe(false);
 });
 
-test("D8 single: public transaction edits reach the payload without a private type leak", async ({ page }) => {
+test("D8 single: public Type and Date edits reach the payload without a private type leak", async ({ page }) => {
   await initCard(page, SINGLE_ROUTED);
 
-  await page.getByLabel("Transaction", { exact: true }).selectOption("settlement");
-  await expect(page.getByLabel("Account type", { exact: true })).toHaveValue("");
+  await page.getByLabel("Type", { exact: true }).selectOption("settlement");
+  await page.getByLabel("Date", { exact: true }).fill("2026-08-11");
+  await expect(page.getByLabel("Saved type", { exact: true })).toHaveValue("");
 
-  const payload = (await confirmAndRead(page, "Add to IOU")) as Record<string, unknown>;
+  const payload = (await collectAndRead(page)) as Record<string, unknown>;
   expect(payload.kind).toBe("settlement");
+  expect(payload.date).toBe("2026-08-11");
   expect("template" in payload).toBe(false);
   expect("template_ref" in payload).toBe(false);
 });
 
-test("D8 single: no private roster means Account type starts empty and adds nothing", async ({ page }) => {
+test("D8 single: no private roster means Saved type starts empty and adds nothing", async ({ page }) => {
   await initCard(page, { amount: 50, direction: "debt", note: "coffee", message: "coffee 50" });
 
-  const { accountTypes } = await cardTypeFields(page);
-  expect(accountTypes[0]).toBe("");
+  const { savedTypes } = await cardTypeFields(page);
+  expect(savedTypes[0]).toBe("");
 
-  const payload = (await confirmAndRead(page, "Add to IOU")) as Record<string, unknown>;
+  const payload = (await collectAndRead(page)) as Record<string, unknown>;
   expect("template" in payload).toBe(false);
   expect("template_ref" in payload).toBe(false);
 });
 
-test("D8 multi: public transaction stays row-local and plaintext types stay private", async ({ page }) => {
+test("D8 multi: public Type and Date stay row-local and plaintext saved Types stay private", async ({ page }) => {
   await initCard(page, MULTI_ROUTED);
 
-  const { transactions, accountTypes } = await cardTypeFields(page);
-  expect(transactions).toEqual(["iou", "", ""]);
-  expect(accountTypes).toEqual(["", "", ""]);
+  const { types, savedTypes, dates } = await cardTypeFields(page);
+  expect(types).toEqual(["iou", "", ""]);
+  expect(savedTypes).toEqual(["", "", ""]);
+  expect(dates).toEqual(["2026-08-08", "2026-08-09", "2026-08-10"]);
   await expect(page.locator(".card")).not.toContainText("Reservation");
 
-  const rows = (await confirmAndRead(page, "Add all 3 entries")) as Record<string, unknown>[];
+  const rows = (await collectAndRead(page)) as Record<string, unknown>[];
   expect(Array.isArray(rows)).toBe(true);
   expect(rows).toHaveLength(3);
   expect(rows.map((row) => row.kind)).toEqual(["iou", undefined, undefined]);
+  expect(rows.map((row) => row.date)).toEqual(["2026-08-08", "2026-08-09", "2026-08-10"]);
   expect(rows.every((row) => !("template" in row) && !("template_ref" in row))).toBe(true);
 });
 
@@ -453,7 +530,7 @@ test("D8 multi: a host-supplied plaintext type is never offered to another row",
   await initCard(page, MULTI_ROUTED);
 
   const options = await page
-    .getByLabel("Account type", { exact: true })
+    .getByLabel("Saved type", { exact: true })
     .evaluateAll((selects) =>
       selects.map((select) =>
         [...(select as HTMLSelectElement).options].map((option) => option.text),
@@ -461,17 +538,20 @@ test("D8 multi: a host-supplied plaintext type is never offered to another row",
   );
   expect(options).toEqual([["None"], ["None"], ["None"]]);
 
-  const rows = (await confirmAndRead(page, "Add all 3 entries")) as Record<string, unknown>[];
+  const rows = (await collectAndRead(page)) as Record<string, unknown>[];
   expect(rows.every((row) => !("template" in row) && !("template_ref" in row))).toBe(true);
 });
 
-test("D8 readonly: public transaction remains visible without exposing an unshared account type", async ({ page }) => {
+test("D8 readonly: public Type and Date remain visible without exposing an unshared saved Type", async ({ page }) => {
   await openCard(page);
   await postInit(page, SINGLE_ROUTED, true);
-  await expect(page.locator(".card")).toContainText("View only");
+  await expect(page.locator(".card")).not.toContainText("View only");
+  await expect(page.locator(".card").getByRole("button")).toHaveCount(0);
 
-  await expect(page.locator(".card")).toContainText("Transaction");
+  await expect(page.locator(".card")).toContainText("Type");
   await expect(page.locator(".card")).toContainText("IOU");
-  await expect(page.locator(".card")).not.toContainText("Account type");
+  await expect(page.locator(".card")).toContainText("Date");
+  await expect(page.locator(".card")).toContainText("2026-08-08");
+  await expect(page.locator(".card")).not.toContainText("Saved type");
   await expect(page.locator(".card")).not.toContainText("Reservation");
 });

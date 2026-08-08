@@ -6,6 +6,14 @@ const journey = readFileSync(
   path.join(process.cwd(), "scripts/live/journey-fanout.ts"),
   "utf8",
 );
+const routedTypes = readFileSync(
+  path.join(process.cwd(), "scripts/live/verify-routed-card-types.ts"),
+  "utf8",
+);
+const multiEntry = readFileSync(
+  path.join(process.cwd(), "scripts/live/verify-multi-entry.ts"),
+  "utf8",
+);
 
 function between(start: string, end: string, from = 0): string {
   const startAt = journey.indexOf(start, from);
@@ -31,15 +39,14 @@ describe("live OpenChat journey cleanup policy", () => {
       "async function captureCardMessage(",
     );
     expectOrdered(capture, [
-      "freshSourceCandidates(page, exactText, baselineIds)",
-      "if (matches.length > 1)",
-      "if (matches.length === 1)",
-      "if (!matches[0].owned)",
+      "freshSourceCandidates(page, evidence, baselineIds)",
+      "selectFreshOwnedSourceCandidate({",
+      "baselineMessageIds: baselineIds",
+      "if (message !== null)",
       "exactMessageWrapper(page, message).count()",
       "return message",
     ]);
-    expect(journey).toContain("baseline.includes(messageId)");
-    expect(journey).toContain("page.locator(OPENCHAT_MESSAGE_TEXT_SELECTOR).evaluateAll(");
+    expect(journey).toContain("page.locator(MESSAGE_WRAPPER_SELECTOR).evaluateAll(");
     expect(journey).toContain("wrapper.locator(OPENCHAT_MESSAGE_TEXT_SELECTOR).evaluateAll(");
     expect(journey.match(/locator\("\.message_text"\)/g) ?? []).toHaveLength(0);
     expect(journey).not.toContain("let sheetOpen = true");
@@ -50,13 +57,14 @@ describe("live OpenChat journey cleanup policy", () => {
     const run = between("let sourceBaselineIds:", "if (failures > 0)");
     expectOrdered(run, [
       "sourceBaselineIds = await captureMessageIdBaseline(proposerOC)",
-      'await proposerOC.keyboard.press("Enter")',
+      "await sendJourneySource(proposerOC, composer, sourceText)",
       "sourceSendSucceeded = true",
       "sourceMessage = await captureFreshSourceMessage(",
-      "if (sourceSendSucceeded && sourceMessage === null && sourceBaselineIds !== null)",
+      "sourceSendSucceeded &&",
+      "sourceEvidence !== null",
       "sourceMessage = await captureFreshSourceMessage(",
       "for (const trackedCard of [...senderRunCards.values()]",
-      "if (sourceMessage !== null)",
+      "if (sourceMessage !== null && sourceEvidence !== null)",
     ]);
   });
 
@@ -69,9 +77,9 @@ describe("live OpenChat journey cleanup policy", () => {
       "proposalCardObserved ||= (await observedRunCardCount(proposerOC)) > 0",
       "if (!proposalCardObserved)",
       "findAndLoadRunCards(",
-      "rememberRunCards(senderRunCards",
+      "rememberRunCards(senderCandidateCards",
       "proposalCardObserved ||= (await observedRunCardCount(proposerOC)) > 0",
-      "uniqueTrackedRunCard(senderRunCards",
+      "uniqueTrackedRunCard(senderCandidateCards",
     ]);
     expect(retry).toContain("only waits and never clicks Propose again");
     expect(retry).not.toContain("findAndLoadRunCard(");
@@ -156,14 +164,15 @@ describe("live OpenChat journey cleanup policy", () => {
       "sourceBaselineIds = await captureMessageIdBaseline(proposerOC)",
     ]);
     expect(journey).toContain('selectedModalities.includes("image")');
-    expect(journey).toContain('"Analyze the attached receipt for an IOU."');
+    expect(journey).toContain("journeySourceText({ imagePath: SOURCE_IMAGE_PATH, nonce })");
     expectOrdered(journey, [
-      'await requireExactlyOneCardControl(frame, "Transaction")',
+      'await requireExactlyOneCardControl(frame, "Type")',
       'await requireExactlyOneCardControl(frame, "Amount")',
       'await requireExactlyOneCardControl(frame, "Currency")',
       'await requireExactlyOneCardControl(frame, "Direction")',
       'await requireExactlyOneCardControl(frame, "Note")',
-      'await requireExactlyOneCardControl(frame, "Account type")',
+      'await requireExactlyOneCardControl(frame, "Saved type")',
+      'await requireExactlyOneCardControl(frame, "Date")',
       "assertAcceptedVisionExtraction({",
       'selectOption("iou")',
       "noteControl.fill(note)",
@@ -172,6 +181,179 @@ describe("live OpenChat journey cleanup policy", () => {
     expect(journey).not.toContain('amount.fill("350")');
     expect(journey).not.toContain('currency.selectOption("EGP")');
     expect(journey).not.toContain('direction.selectOption("credit")');
+  });
+
+  it("sends SOURCE_IMAGE_PATH as an image-only exact source", () => {
+    const sourceSend = between(
+      "sourceBaselineIds = await captureMessageIdBaseline(proposerOC)",
+      "// The propose entry is the message menu",
+    );
+    expectOrdered(sourceSend, [
+      "captureExactDraftImageContent(proposerOC)",
+      "journeySourceText({ imagePath: SOURCE_IMAGE_PATH, nonce })",
+      "await sendJourneySource(proposerOC, composer, sourceText)",
+      "captureFreshSourceMessage(",
+    ]);
+    expect(sourceSend).toContain('kind: "image", exactContent: draftImageContent');
+    expect(sourceSend).not.toContain('keyboard.type("Analyze the attached receipt for an IOU.")');
+    expect(journey).not.toContain('"Analyze the attached receipt for an IOU."');
+
+    const candidates = between(
+      "async function freshSourceCandidates(",
+      "async function captureFreshSourceMessage(",
+    );
+    expect(candidates).toContain("page.locator(MESSAGE_WRAPPER_SELECTOR).evaluateAll(");
+    expect(candidates).toContain("digestUploadedAttachmentImage");
+    expect(candidates).toContain("matchesExactImageContentEvidence");
+    expect(candidates).toContain("baselineMessageIds.has(candidate.messageId)");
+    expect(candidates).toContain("if (!candidate.senderOwned) continue");
+    expect(candidates).toContain('.startsWith("blob:")');
+    expect(candidates).toContain("attachmentSelector");
+    expect(candidates).not.toContain("img.src === evidence.exactBlobUrl");
+    expect(candidates).not.toContain('querySelectorAll<HTMLImageElement>("img")');
+    expect(candidates).not.toContain("OPENCHAT_MESSAGE_TEXT_SELECTOR).last()");
+    expect(candidates).not.toContain("newest");
+    expectOrdered(candidates, [
+      "baselineMessageIds.has(candidate.messageId)",
+      "if (!candidate.senderOwned) continue",
+      "digestUploadedAttachmentImage(",
+      "matchesExactImageContentEvidence",
+    ]);
+    const capture = between(
+      "async function captureFreshSourceMessage(",
+      "async function captureCardMessage(",
+    );
+    expect(capture).toContain("selectFreshOwnedSourceCandidate");
+
+    const cleanup = between(
+      "if (sourceMessage !== null && sourceEvidence !== null)",
+      "if (proposerDeleted.length > 0)",
+    );
+    expect(cleanup).toContain("sourceEvidence");
+    expect(cleanup).not.toContain('{ kind: "source", exactText: text }');
+
+    const evidence = between(
+      "async function exactMessageEvidencePresent(",
+      "async function exactMessageDeletionProven(",
+    );
+    expect(evidence).toContain("digestUploadedAttachmentImage");
+    expect(evidence).toContain("matchesExactImageContentEvidence");
+    expect(evidence).not.toContain("evidence.evidence.exactBlobUrl");
+
+    const proposal = between("const maxProposalAttempts = 1", "check(posted,");
+    expect(proposal).toContain("exactMessageEvidencePresent(");
+    expect(proposal).toContain("sourceEvidence");
+  });
+
+  it("requires wrapper absence or a deleted tombstone instead of treating an image URL swap as deletion", () => {
+    const proof = between(
+      "async function exactMessageDeletionProven(",
+      "async function waitForExactDeletionProof(",
+    );
+    expect(proof).toContain("exactMessageWrapper(page, message)");
+    expect(proof).toContain('locator(".deleted")');
+    expect(proof).toContain("MESSAGE_DELETED_TEXT");
+    expect(proof).not.toContain("exactMessageEvidencePresent");
+
+    const wait = between(
+      "async function waitForExactDeletionProof(",
+      "async function openOwnedMobileMessageMenu(",
+    );
+    expect(wait).toContain("exactMessageDeletionProven(page, message)");
+    expect(wait).not.toContain("exactMessageEvidencePresent");
+
+    const deletion = between(
+      "async function deleteExactMessageViaUi(",
+      "async function verifyDeletedAfterReload(",
+    );
+    expect(deletion).toContain("waitForExactDeletionProof(page, message)");
+    expect(deletion).not.toContain("waitForExactEvidenceAbsent");
+  });
+
+  it("never tracks or deletes an IOU card until its verified iframe carries the exact run nonce", () => {
+    expect(journey).toContain("async function cardHasExactRunNote(");
+    expect(journey).toContain("async function rememberNonceBoundRunCards(");
+    expect(journey).toContain("left untracked because its exact run note is unavailable");
+    expect(journey).toContain('type ExactMessageEvidence =\n  | { kind: "source"; evidence: SourceMessageEvidence }\n  | { kind: "card"; observerId: string; exactNote: string };');
+
+    const cardEvidence = between(
+      'const cards = wrapper.locator(".action-card")',
+      "async function exactMessageDeletionProven(",
+    );
+    expect(cardEvidence).toContain("cardLocatorHasExactRunNote(card, evidence.exactNote)");
+    expect(cardEvidence).toContain("evidence.exactNote");
+    const noteEvidence = between(
+      "async function cardLocatorHasExactRunNote(",
+      "async function cardHasExactRunNote(",
+    );
+    expect(noteEvidence).toContain('getByLabel("Note", { exact: true })');
+
+    const cleanupInventory = between(
+      "// A failed run must not leave its still-pending chat action behind.",
+      "if (!deliveryObserved)",
+    );
+    expect(cleanupInventory).toContain("rememberNonceBoundRunCards(");
+    expect(cleanupInventory).not.toContain("rememberRunCards(");
+
+    const deletionLoop = between(
+      "for (const trackedCard of [...senderRunCards.values()].sort(",
+      "if (sourceMessage !== null && sourceEvidence !== null)",
+    );
+    expect(deletionLoop).toContain("exactNote: note");
+  });
+
+  it("keeps live card acceptance on the automatic trusted-card flow", () => {
+    for (const source of [journey, routedTypes]) {
+      expect(source).toContain('name: "Load app card", exact: true');
+      expect(source).toContain("manual Load app card gate is a regression");
+      expect(source).not.toContain("await load.click");
+      expect(source).not.toContain("Share private context");
+    }
+    expect(multiEntry).toContain('["Load app card", "Share app context"]');
+    expect(multiEntry).not.toContain("await load.click");
+    expect(multiEntry).not.toContain("Share private context");
+    expect(routedTypes).toContain('getByLabel("Type", { exact: true })');
+    expect(routedTypes).toContain('getByLabel("Date", { exact: true })');
+    expect(routedTypes).toContain('name: "Share app context", exact: true');
+
+    const confirmation = between(
+      "async function approveRunCardConfirmation(",
+      "async function cancelRunCard(",
+    );
+    expectOrdered(confirmation, [
+      'loaded.card.getByRole("button", { name: "Add to IOU", exact: true })',
+      'loaded.frame.getByRole("button").count()',
+      "await add.click",
+    ]);
+    expect(confirmation).not.toContain('loaded.frame.getByRole("button", { name: "Add to IOU"');
+    expect(confirmation).not.toContain('name: "Confirm request", exact: true }).click');
+  });
+
+  it("pins the compact trusted IOU chrome and all first-render single-card fields", () => {
+    expect(journey).toContain("async function assertTrustedIouCardChrome(");
+    expect(journey).toContain("/favicon.svg");
+    expect(journey).toContain('.locator(".app-name")');
+    expect(journey).toContain('["Load app card", "Share app context"]');
+    expect(journey).toContain("Loading contacts this external origin");
+    expect(journey).toContain('.locator(".card-url")');
+    expect(journey).toContain('requireExactlyOneCardControl(loaded.frame, "Type")');
+    expect(journey).toContain('requireExactlyOneCardControl(loaded.frame, "Saved type")');
+    expect(journey).toContain('requireExactlyOneCardControl(loaded.frame, "Date")');
+    expect(journey).toContain("IOU card has no redundant disclosure checkbox");
+    expect(journey).not.toContain("Directory entry:\\s*iou");
+  });
+
+  it("keeps the multi journey on one host-rendered stored-payload card", () => {
+    expect(multiEntry).toContain('from "./cdpPorts"');
+    expect(multiEntry).toContain("findClassicMultiCard");
+    expect(multiEntry).toContain("trackExactCardRows");
+    expect(multiEntry).toContain('name: "Add to IOU", exact: true');
+    expect(multiEntry).toContain("ONE host-owned confirmation submitted the stored batch");
+    expect(multiEntry).toContain("row.date === wanted.date");
+    expect(multiEntry).toContain("row.message === wanted.message");
+    expect(multiEntry).not.toContain("approveMultiCard(");
+    expect(multiEntry).not.toContain("frame.getByRole");
+    expect(multiEntry).not.toMatch(/\b(?:9241|9222|9231)\b/);
   });
 
   it("inventories exact IOU targets and refuses duplicate mutation", () => {
@@ -240,18 +422,18 @@ describe("live OpenChat journey cleanup policy", () => {
     expect(verifier).toContain("if (remaining.length === 0) return");
     expect(verifier).toContain("await page.waitForTimeout(1_000)");
     expect(verifier).toContain('waitFor({ state: "visible", timeout: 20_000 })');
-    expect(verifier).toContain("exactMessageEvidencePresent(page, item.message, item.evidence)");
+    expect(verifier).toContain("exactMessageDeletionProven(page, item.message)");
     expect(verifier).not.toContain('waitFor({ state: "attached"');
 
     const evidence = between(
       "async function exactMessageEvidencePresent(",
-      "async function waitForExactEvidenceAbsent(",
+      "async function exactMessageDeletionProven(",
     );
     expect(evidence).toContain(
       "if (currentObserverId !== null && currentObserverId !== evidence.observerId) return false",
     );
     expect(evidence).toContain(
-      'if (identity.title !== "Add to IOU" || !/Directory entry:\\s*iou/i.test(identity.text)) return false',
+      'identity.appName.toLocaleLowerCase("en-US") !== "iou"',
     );
     expect(evidence).not.toContain("IOU card identity no longer matches");
   });

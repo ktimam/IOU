@@ -17,11 +17,18 @@ export type OpenChatArtifactCandidate = {
   exactTexts: string[];
   cardCount: number;
   iframeInputValues: string[];
+  cardRows: OpenChatCardRowEvidence[];
+};
+
+export type OpenChatCardRowEvidence = {
+  label: string;
+  value: string;
 };
 
 export type OpenChatArtifactExpectation =
   | { kind: "text"; exactText: string }
-  | { kind: "card_inputs"; exactInputValues: string[] };
+  | { kind: "card_inputs"; exactInputValues: string[] }
+  | { kind: "card_rows"; exactRows: OpenChatCardRowEvidence[] };
 
 export type OpenChatArtifactSelection = {
   matches: OpenChatArtifactCandidate[];
@@ -109,6 +116,28 @@ export function selectExactOpenChatArtifacts(
       ),
     };
   }
+  if (expectation.kind === "card_rows") {
+    const wanted = expectation.exactRows.map((row) => ({
+      label: normalized(row.label),
+      value: normalized(row.value),
+    }));
+    if (
+      wanted.length === 0 ||
+      wanted.some((row) => row.label.length === 0 || row.value.length === 0)
+    ) {
+      return { matches: [], error: "refusing empty classic-card row evidence" };
+    }
+    return {
+      matches: fresh.filter((candidate) => {
+        if (candidate.cardCount !== 1 || candidate.cardRows.length !== wanted.length) return false;
+        return candidate.cardRows.every(
+          (row, index) =>
+            normalized(row.label) === wanted[index].label &&
+            normalized(row.value) === wanted[index].value,
+        );
+      }),
+    };
+  }
 
   // Defensive runtime guard for stale compiled harnesses or untyped JavaScript callers. A card is
   // never safe to delete merely because it is the only fresh sender-owned card: another tab or the
@@ -163,11 +192,23 @@ async function readCandidate(wrapper: Locator): Promise<OpenChatArtifactCandidat
   const cards = wrapper.locator(".action-card");
   const cardCount = await cards.count();
   const iframeInputValues: string[] = [];
+  const cardRows: OpenChatCardRowEvidence[] = [];
   if (cardCount === 1 && (await cards.first().locator("iframe").count()) === 1) {
     const inputs = cards.first().frameLocator("iframe").locator("input");
     const inputCount = await inputs.count().catch(() => 0);
     for (let index = 0; index < inputCount; index++) {
       iframeInputValues.push(await inputs.nth(index).inputValue().catch(() => ""));
+    }
+  }
+  if (cardCount === 1) {
+    const rows = cards.first().locator("table.rows tbody tr");
+    const rowCount = await rows.count().catch(() => 0);
+    for (let index = 0; index < rowCount; index++) {
+      const row = rows.nth(index);
+      cardRows.push({
+        label: await row.locator("td.label").innerText().catch(() => ""),
+        value: await row.locator("td.value").innerText().catch(() => ""),
+      });
     }
   }
   return {
@@ -176,6 +217,7 @@ async function readCandidate(wrapper: Locator): Promise<OpenChatArtifactCandidat
     exactTexts,
     cardCount,
     iframeInputValues,
+    cardRows,
   };
 }
 
@@ -358,6 +400,13 @@ export class OpenChatArtifactScope implements OpenChatArtifactCleaner {
     this.expectations.push({ kind: "card_inputs", exactInputValues: [...exactInputValues] });
   }
 
+  expectCardRows(exactRows: OpenChatCardRowEvidence[]): void {
+    this.expectations.push({
+      kind: "card_rows",
+      exactRows: exactRows.map((row) => ({ ...row })),
+    });
+  }
+
   async waitForExactTextMessage(exactText: string): Promise<OpenChatMessageRef> {
     const selection = await this.resolveExpectation({ kind: "text", exactText });
     if (selection.error) throw new Error(`${this.label}: ${selection.error}`);
@@ -381,6 +430,25 @@ export class OpenChatArtifactScope implements OpenChatArtifactCleaner {
     });
     if (selected.matches.length !== 1) {
       throw new Error(`${this.label}: exact card is not fresh, owned, and evidence-bound`);
+    }
+    this.trackCandidate(selected.matches[0], { kind: "card" });
+  }
+
+  async trackExactCardRows(
+    card: Locator,
+    exactRows: OpenChatCardRowEvidence[],
+  ): Promise<void> {
+    const baseline = this.requireBaseline();
+    const wrapper = card.locator(
+      'xpath=ancestor::*[@data-id and @data-index and starts-with(@id,"event-")][1]',
+    );
+    const candidate = await readCandidate(wrapper);
+    const selected = selectExactOpenChatArtifacts(baseline, [candidate], {
+      kind: "card_rows",
+      exactRows,
+    });
+    if (selected.matches.length !== 1) {
+      throw new Error(`${this.label}: exact classic card is not fresh, owned, and row-bound`);
     }
     this.trackCandidate(selected.matches[0], { kind: "card" });
   }

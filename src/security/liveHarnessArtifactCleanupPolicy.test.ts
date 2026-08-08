@@ -45,7 +45,11 @@ describe("live card harness artifact-cleanup policy", () => {
     it(`${name} binds cleanup to run-unique source and card evidence`, () => {
       const source = liveHarness(name);
       expect(source).toContain("artifactScope.expectExactText(");
-      expect(source).toContain("artifactScope.expectCardInputs(");
+      expect(source).toContain(
+        name === "verify-multi-entry.ts"
+          ? "artifactScope.expectCardRows("
+          : "artifactScope.expectCardInputs(",
+      );
     });
   }
 
@@ -123,13 +127,13 @@ describe("live card harness artifact-cleanup policy", () => {
     });
   }
 
-  it("the end-to-end multi-entry proof cleans both recipient and proposer fan-out envelopes", () => {
+  it("the end-to-end multi-entry proof cleans the confirmer delivery and any proposer leak", () => {
     const source = liveHarness("verify-multi-entry.ts");
     expect(source).toContain("cleanupIouBatch(confirmerIOU, expected");
-    expect(source).toContain("new ActionInboxArtifactScope(");
-    expect(source).toContain("await inboxScope.begin()");
-    expect(source).toContain("inboxScope.arm()");
-    expect(source).toContain("finalizeActionInboxArtifactCleanup(");
+    expect(source).toContain("cleanupIouBatch(proposerIOU, expected");
+    expect(source).toContain("trackExactCardRows(senderCard.card, publicRows)");
+    expect(source).toContain("cleanup returned both inbox buckets to their pre-run counts");
+    expect(source).not.toContain("new ActionInboxArtifactScope(");
   });
 
   it("the shared helper refuses recipient-only and unbound deletion paths", () => {

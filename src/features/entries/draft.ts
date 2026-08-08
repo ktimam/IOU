@@ -384,7 +384,17 @@ export function parseDraft(input: unknown, base?: Partial<EntryPayload>): ParseR
 // A per-element template resolver (SheetPage's resolveTemplateBase) OR a single shared base object.
 // parseDraftBatch accepts either: a function is called with each element (so different array
 // elements can route to different templates), an object/undefined is reused for every element.
-export type DraftBaseResolver = (raw: unknown) => Partial<EntryPayload> | undefined;
+export type DraftBaseResolverContext = {
+  index: number;
+  total: number;
+  /** True only when there is more than one transaction to resolve. */
+  multiEntry: boolean;
+};
+
+export type DraftBaseResolver = (
+  raw: unknown,
+  context: DraftBaseResolverContext,
+) => Partial<EntryPayload> | undefined;
 
 /**
  * Parse a confirmable-action payload that may carry EITHER a single entry (a JSON OBJECT) or MULTIPLE
@@ -421,7 +431,10 @@ export function parseDraftBatch(
   const single = elements.length === 1;
 
   elements.forEach((el, i) => {
-    const elBase = baseWithDefaultCurrency(resolve(el), dflt);
+    const elBase = baseWithDefaultCurrency(
+      resolve(el, { index: i, total: elements.length, multiEntry: elements.length > 1 }),
+      dflt,
+    );
     const withNote =
       single && isPlainDraft(el) && !hasText(el.note) && hasText(el.message)
         ? { ...el, note: el.message }

@@ -49,6 +49,29 @@ describe("private account templates", () => {
         .template,
     ).toBeUndefined();
   });
+
+  it("publishes the safe transaction kind as Type without publishing saved account types", () => {
+    expect(iouActionManifest.card.fields).toContainEqual({ key: "kind", label: "Type" });
+
+    const publicCard = JSON.stringify(iouActionManifest.card);
+    expect(publicCard).not.toContain("Reservation");
+    expect(publicCard).not.toContain("private-reservation-trigger");
+    expect(iouActionManifest.card.fields.map((field) => field.key)).not.toContain("template");
+    expect(iouActionManifest.card.fields.map((field) => field.key)).not.toContain("template_ref");
+  });
+
+  it("keeps the TS card fields byte-for-field aligned with the documented and registered rows", async () => {
+    const documented = (registration as {
+      card: { rows: { label: string; valueKey: string }[] };
+    }).card.rows.map((row) => ({ key: row.valueKey, label: row.label }));
+    const { buildManifestWire } = await import("./registerAiApp");
+    const registered = (buildManifestWire("") as unknown as {
+      actions: { card: { rows: { field: string; label: string }[] } }[];
+    }).actions[0].card.rows.map((row) => ({ key: row.field, label: row.label }));
+
+    expect(iouActionManifest.card.fields).toEqual(documented);
+    expect(iouActionManifest.card.fields).toEqual(registered);
+  });
 });
 
 describe("invalid-draft guardrails (schema ↔ parseDraft lock-step)", () => {
