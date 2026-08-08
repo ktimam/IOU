@@ -2,8 +2,9 @@
 // report which tree rendered. v1 marker = `.chat-summary` (hyphen); v2 = `.chat_summary`/bottom bar.
 //   pnpm exec tsx scripts/live/oc-exe-reload.ts
 import { chromium } from "@playwright/test";
+import { CDP_PORTS } from "./cdpPorts";
 async function main() {
-  const b = await chromium.connectOverCDP("http://127.0.0.1:9222");
+  const b = await chromium.connectOverCDP(`http://127.0.0.1:${CDP_PORTS.fatherOpenChat}`);
   const p = b.contexts()[0].pages().find((x) => x.url().includes("5003"))!;
   await p.goto("http://localhost:5003/chats", { waitUntil: "domcontentloaded" }).catch(() => {});
   await p.reload({ waitUntil: "domcontentloaded" }).catch(() => {});

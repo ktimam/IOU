@@ -5,13 +5,57 @@ see it, and what "done" means — enough to pick up cold.
 
 Last updated: 2026-08-08.
 
+## Operational/QC status addendum — 2026-08-08
+
+This section supplements the pushed-head history below. It records the current IOU commit, the
+pushed OpenChat PR 2 head, completed local recovery, and the remaining review/operations work.
+
+- **Resolved locally — Vite CPU:** IOU no longer watches `target`, browser profiles, `.dfx`,
+  coverage, Android output, or OpenChat artifacts and now fails on a duplicate port. OpenChat uses
+  one validated `OC_DEV_PORT` for listener and HMR. The focused failing-first policies pass; warm
+  20-second samples measured each Vite process at about **0.08% of one CPU core**.
+- **External diagnosis — GlassWire:** GlassWire 3.8.1061 x86 generated about **1.20 GiB**
+  of logs, including **1,528,967** duplicate `Process already exists` records in one log. The evidence
+  most strongly implicates GlassWire's process/resource tracking response to development-process
+  churn, but does not prove the development workload was causally irrelevant. It remained
+  stable after restart; narrower Vite watching only reduces trigger volume and is not claimed to
+  repair GlassWire.
+- **Resolved locally — reboot recovery:** the preserved PocketIC state was backed up, opened once
+  with incomplete-state recovery, cleanly checkpointed, and then strictly reopened with
+  `incomplete_state: null`. Four accounts, canister ids, versions, and the deployed commit remain
+  intact; no backend upgrade was required.
+- **Resolved locally — signed-in browser launch:** Windows had reserved every former CDP port.
+  Tracked helpers centralize `19222`, `19231`, and `19241`–`19243` and bind-probe healer relaunches.
+  Profile reuse and the DevTools-readiness wait are in local **untracked** `scripts/live/launch.ps1`.
+  Its loose process/profile matching and HTTP-only readiness probe are unsafe for another four-account
+  mutating journey until corrected; it describes this recovered machine, not behavior shipped by the commit.
+- **Image lifecycle passed:** the old IOU prompt made Qwen3-VL emit competing `settlement`/`iou`
+  objects for one visible amount; OpenChat refused the batch, and a same-model/image minimal-prompt
+  comparison isolated prompt cardinality rather than duplicate image/text input. After the prompt
+  and exact-target Delete retry fixes, the final run at revision `1786188022801` opened zero JSON
+  prompts, returned one trusted 350 EGP credit card with exact evidence `PAID: 350 EGP`, and
+  completed recipient Load → Add to IOU → routed Pending → Review & add → History → exact
+  post-reload cleanup. The neutral chat caption was not supplied to image inference.
+- **Pushed — compact recipient gate:** PR 2 head `2ff6ad73b50f4aa8d73c9b56ca0e722c933ba8f0`
+  hides the app description and exact technical fields under initially closed **Security details**.
+  Focused presentation passes **62/62** (**66/66** combined), full frontend **1,053/1,053 across 76
+  files**, and typecheck passes. The local revision is registered and all four accounts are relinked;
+  hosted review/CI and production rollout remain pending.
+- **Final IOU source gate:** **929/929 across 79 files**, both TypeScript projects, and diff check pass.
+- **Issue ledger:** [IOU #57](https://github.com/ktimam/IOU/issues/57) and
+  [#60](https://github.com/ktimam/IOU/issues/60) are fixed by this IOU commit;
+  [#58](https://github.com/ktimam/IOU/issues/58) remains open for launcher-level simulations and
+  [#59](https://github.com/ktimam/IOU/issues/59) for tracked crash-recovery lifecycle coverage.
+  The pushed OpenChat PR 2 fixes are [#104](https://github.com/ktimam/open-chat/issues/104) and
+  [#105](https://github.com/ktimam/open-chat/issues/105), pending upstream review/merge.
+
 ## Current status supersession — 2026-08-07
 
 This section overrides older hashes, deployment-pending wording, and live-QC claims below.
 
 - OpenChat PR 1 is pushed at `f43d2a2d53f2c9f8a3086104a356d4d3a315858a`.
-- OpenChat PR 2 is pushed at `fdf6e60e2cb10e93eb9d46b8f51b0bc2c31d25e0`; exact frontend
-  **1049/1049 across 76 files**, frontend typecheck, and the signed-in live journey pass. The prior
+- OpenChat PR 2 is pushed at `2ff6ad73b50f4aa8d73c9b56ca0e722c933ba8f0`; exact frontend
+  **1,053/1,053 across 76 files**, frontend typecheck, and the signed-in live journey pass. The prior
   backend/agent/ESLint/Prettier/`cargo fmt`/Linux gates cover paths unchanged by this frontend-only
   follow-up.
 - Exact PR 2 artifacts are deployed on the recovered three-subnet PocketIC state: UserIndex
@@ -29,14 +73,22 @@ This section overrides older hashes, deployment-pending wording, and live-QC cla
   **Pending from chat**/**Review & add** → prefilled `EntryForm` → persisted **History** → exact
   nonce soft-delete cleanup. It passes against the current frontend; IOU #52 tracks hosted/CI
   placement, not a missing local journey.
+- The live harness now treats Propose as a one-shot mutation: exactly one click, a 60-second
+  observation window, and no mutation retry. The failing-first source policy and controlled image
+  run close IOU #56. A stopped tool display is not assumed to have stopped its child process;
+  tracked live runs are explicitly monitored through exit.
 - Image proposal schema/attester alignment is pushed at the current PR 2 head: explicit `acceptsImage`,
   amount/string bounds, safe formats, valid calendar dates, ASCII-uppercase currency, NUL-free
-  text, and the `0.005` half-minor-unit boundary. Focused/full gates pass; live image QC remains.
-- The changed manifest must be re-registered, producing a new revision. Install the matching exact
-  IOU verifier binding and refresh/relink father, mother, child, and property manager sequentially
-  before live QC; their existing bindings are revision-pinned and should fail closed when stale.
-- Current IOU verification is unit **846/846**, Rust **68/68**, and live E2E **56/56** under split
-  verification. The initial **52/55** exposed three obsolete registry expectations; **51**
+  text, and the `0.005` half-minor-unit boundary. The current live app #1 advertises
+  `accepts_image=true`; the one-shot manager→father image journey removed malformed currency/date,
+  obtained exact attestation, auto-loaded only for the proposer, delivered only to father, rendered
+  Pending, imported through Review & add, verified History, and cleaned back to baseline.
+- The changed manifest is registered with the matching exact verifier/bindings in the current local
+  environment. Manager and father passed the image lifecycle; hosted/four-profile automation remains
+  IOU #52 rather than a missing product or local acceptance path.
+- At the superseded 2026-08-07 checkpoint, IOU verification was unit **901/901 across 77 files**, Rust **68/68**, and live E2E
+  **56/56** under split verification. The initial **52/55** exposed three obsolete registry
+  expectations; **51**
   unaffected scenarios remained green, and the replacement read-only/ownership plus live
   owner-attestation registry suite passed **5/5**. Unit coverage is **71.49%** statements/lines,
   **84.85%** branches, and **86.9%** functions.
@@ -243,7 +295,7 @@ the manager profile behaved differently from every other one.
 
 ---
 
-## 5. PR 2 ActionCard sender/identity/content state — **fixed and live-verified; hosted gate pending**
+## 5. PR 2 ActionCard sender/identity/content state — **fixed and live-verified; compact-copy push and hosted gate pending**
 
 **2026-08-07 correction.** With the deployed PR 2 head and all four local feature switches enabled,
 the live private-card journey passed **8/8** only after reloading the sender so its optimistic echo
@@ -262,17 +314,33 @@ the exact sender card transition from optimistic/unverified to directory-bound a
 without navigation or reload, and the attested card displayed neither stale untrusted label.
 
 **2026-08-08 proposer-load follow-up fixed, pushed, and live-verified.** PR 2 commit
-`fdf6e60e2cb10e93eb9d46b8f51b0bc2c31d25e0` treats the successful Propose action as iframe-load
+`2ff6ad73b50f4aa8d73c9b56ca0e722c933ba8f0` retains the successful Propose action as iframe-load
 consent only for the exact freshly proposed, fully attested sender event. Recipients, history,
 reloads, readonly views, unattested cards, unsupported browsers, and a saturated in-tab marker
 remain behind the explicit gate. A failing-first mounted regression also caught and fixed the
 late-payload/manual-load nonce-reset race. The misleading unconditional **Untrusted app content**
-label is now **External app content (isolated)**; genuine trust failures are unchanged. Focused card
-coverage passes **112/112**, the full OpenChat frontend passes **1049/1049**, typecheck has zero
+label is now **External app content (isolated)**; genuine trust failures are unchanged. The final
+frontend passes **1,053/1,053**, typecheck has zero
 errors, and the signed-in manager-to-father journey proved sender auto-load, recipient Load,
 Add to IOU, confirmer-only delivery, Review & add, IOU History, and exact cleanup.
 
 Hosted review/CI and production rollout remain pending.
+
+**2026-08-08 compact-recipient-gate follow-up (pushed and locally registered).** The trusted
+recipient's visible pre-load gate now contains only the existing app/title headers, initially closed
+**Security details**, and **Load app card**. All explanatory description text—including destination,
+identifier sharing, direct-chat participant disclosure, private-context exclusion, exact URL,
+app/revision/action, and browser isolation—is inside the closed disclosure. A later private-context
+step keeps its stable-user-id/public-key explanation inside a separate closed disclosure before the
+explicit share action.
+
+This is presentation-only. Backend content attestation, explicit recipient **Load app card**,
+credentialless/no-referrer navigation, the opaque `allow-scripts` sandbox without
+`allow-same-origin`, source/session-nonce binding, no capabilities in URLs, and fail-closed
+unattested controls are unchanged. Focused presentation coverage passes **62/62** (**66/66**
+combined), and the pushed frontend passes **1,053/1,053 across 76 files** with zero typecheck errors.
+Commit `2ff6ad73b50f4aa8d73c9b56ca0e722c933ba8f0` is registered locally at revision
+`1786188022801`; all four accounts are relinked. Hosted review/CI and production rollout remain.
 
 **Expanded QC passed locally.** `scripts/live/journey-fanout.ts` now continues past the two inbox-count
 assertions: it resolves the confirmer's exact routed sheet, checks the nonce under **Pending from
@@ -386,7 +454,7 @@ has `"include": ["src"]`. Playwright specs are unprotected by the repo typecheck
 
 ---
 
-## 7. Image proposal schema and app-attester mismatch — **fixed in tree; verification pending**
+## 7. Image proposal schema and app-attester mismatch — **fixed and live-verified**
 
 **What reproduced.** An image/model extraction could include malformed optional fields that passed
 OpenChat's shallow schema post-pass but were rejected by IOU's exact app attester. The result was an
@@ -400,21 +468,45 @@ three ASCII-uppercase currency characters, actual `YYYY-MM-DD` dates, and bounde
 note/message. Invalid optional OCR fields are removed before attestation; the canister still rejects
 any invalid exact payload that reaches it.
 
-**Done when** focused and full IOU/OpenChat gates pass at exact commits, the changed manifest is
-registered with its matching verifier binding, all affected revision-pinned user bindings are
-refreshed, and both image and text proposal browser journeys pass without weakening text behavior.
+**Verification.** OpenChat's focused image suites pass **89/89**; IOU's production schema suite
+passes **4/4**, the related draft/parser matrix passes **20/20**, and the exact Rust malformed-image
+attester case passes. The active manifest reports `accepts_image=true`. A controlled signed-in
+image journey then passed one image/source → sanitized exact card → manager auto-load → father
+explicit load/confirm → ActionInbox → routed Pending → Review & add → History, followed by
+nonce-exact source/card/entry cleanup.
 
 ---
 
-## 8. Manifest revision and four-user binding handoff — **rollout pending**
+## 8. Manifest revision and four-user binding handoff — **local rollout verified; hosted matrix pending**
 
 **What.** The schema correction changes the registered manifest. Re-registration advances the app
 revision, while IOU's verifier and each father/mother/child/property-manager connection are pinned to
 an exact revision. Testing a new frontend/manifest against old bindings is expected to fail closed
 and can be misdiagnosed as another card defect.
 
-**Done when** the updated manifest is re-registered, its newly generated exact-revision binding is
-installed on `iou_backend`, publication/directory read-back matches, and each of the four users is
-refreshed or relinked sequentially without replacing the authoritative consumer key. Only then run
-the no-reload card checks, image proposal, and expanded `journey-fanout.ts`. Record the resulting
-revision, commit hashes, test totals, and live result before marking this item deployed/verified.
+**Current disposition.** The active app #1 directory entry at revision `1786188022801`, app/inbox
+canisters, per-user-key mode, and `accepts_image=true` were read back from the current UserIndex. All
+four father/mother/child/property-manager accounts are relinked with current-revision authenticated
+selectors. The manager-to-father image journey passes; hosted four-profile automation remains under
+IOU #52, and stale revisions continue to fail closed.
+
+---
+
+## 9. True local vision-model image journey — **resolved locally 2026-08-08**
+
+**Current result.** An earlier ambiguous `CREDIT` fixture failed closed and exposed a detached
+Delete-menu race. After the bounded exact-target retry fix, the final run at revision `1786188022801`
+selected Qwen3-VL, opened **zero** manual JSON prompts, validated 350 EGP credit before editing, and
+completed recipient Load → Add to IOU → routed Pending → Review & add → 350 EGP History → exact
+entry/inbox/card/source cleanup after reload.
+
+**Adjacent negative case retained.** With one visible amount, the old IOU prompt asked for competing
+ledger interpretations and Qwen3-VL returned both `settlement` and `iou`. OpenChat refused that
+batch, posted no card, and cleaned the source. The same model/adapter/image returned one object with
+a minimal one-object prompt, so the duplication was prompt-induced rather than a duplicated image
+or inference call. The fixed IOU prompt retains the fail-closed batch boundary while requiring one
+object and exact visible amount/currency evidence for a single visible transaction.
+
+**Reproduce.** Run `scripts/live/journey-fanout.ts --real-model --image <single-entry-receipt>` from
+the manager→father environment. The script refuses `manualExtract`, waits for an image-capable model,
+clicks Propose once, requires zero prompt calls, and verifies the complete lifecycle and cleanup.

@@ -16,11 +16,12 @@ import {
   OpenChatArtifactScope,
 } from "./openChatArtifactCleanup";
 import { armManualExtractForCurrentUrl, TemporaryTabScope } from "./temporaryBrowserTab";
+import { CDP_PORTS } from "./cdpPorts";
 
 const OPENCHAT_URL = process.env.OPENCHAT_URL ?? "http://localhost:5003/chats";
-const NO_MODEL_CDP = process.env.OC_NO_MODEL_CDP ?? "http://127.0.0.1:9242";
+const NO_MODEL_CDP = process.env.OC_NO_MODEL_CDP ?? `http://127.0.0.1:${CDP_PORTS.mother}`;
 const NO_MODEL_CHAT = process.env.OC_NO_MODEL_CHAT ?? "manager";
-const MODEL_READY_CDP = process.env.OC_MODEL_READY_CDP ?? "http://127.0.0.1:9241";
+const MODEL_READY_CDP = process.env.OC_MODEL_READY_CDP ?? `http://127.0.0.1:${CDP_PORTS.manager}`;
 const MODEL_READY_CHAT = process.env.OC_MODEL_READY_CHAT ?? "father";
 const GUIDE = /on-device model/i;
 

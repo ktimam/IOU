@@ -130,7 +130,9 @@ no prose, no code fences, and do not repeat the schema. When the message describ
 transaction, respond with ONE JSON object. When it describes MULTIPLE distinct transactions,
 respond with a JSON ARRAY of such objects, one object per transaction. One LINE can hold several
 transactions: read every amount in the input and emit one object for EACH of them. Never merge two
-amounts into one object, and never leave an amount out.
+amounts into one object, and never leave an amount out. Never repeat the same transaction twice.
+One amount occurrence means exactly one object, not separate objects for both ledger perspectives
+or for both possible kinds. Choose exactly one "kind" and one "direction" for each amount occurrence.
 Each object may contain these fields:
 - "kind": "iou" when the money is a future obligation (a reservation, a booking, rent, an
   instalment, or money owed to be paid later); "settlement" when the money has already moved
@@ -143,6 +145,8 @@ Each object may contain these fields:
   date RANGE like "1-7 July" or "July 1-7", use the START date (for example 2026-07-01). For a
   relative date like "tomorrow" or "next Friday", resolve it against today.
 - "note": a short description taken from the input.
+- "message": for image input, copy the shortest exact visible text that contains the amount and
+  currency when shown. Never paraphrase it. For plain-text input, OpenChat supplies the exact source.
 Include a field only when the input supports it; omit any field you are unsure of. Never invent
 an amount, a counterparty, or any other value that is not present in the input.`;
 

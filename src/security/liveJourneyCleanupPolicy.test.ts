@@ -60,8 +60,11 @@ describe("live OpenChat journey cleanup policy", () => {
     ]);
   });
 
-  it("fences retries after the observer sees any new card and inventories every exact card", () => {
+  it("clicks Propose at most once, then only waits and inventories every exact card", () => {
     const retry = between("let proposalCardObserved = false", "check(posted,");
+    expect(retry).toContain("const maxProposalAttempts = 1");
+    expect(retry).toContain("attempt <= maxProposalAttempts");
+    expect(retry).not.toContain("attempt <= 3");
     expectOrdered(retry, [
       "proposalCardObserved ||= (await observedRunCardCount(proposerOC)) > 0",
       "if (!proposalCardObserved)",
@@ -80,20 +83,37 @@ describe("live OpenChat journey cleanup policy", () => {
     expect(journey).toContain("for (const trackedCard of [...senderRunCards.values()].sort(");
   });
 
+  it("does not mistake a rerendered historical card for a newly proposed card", () => {
+    const observer = between(
+      "async function installNewCardObserver(",
+      "async function observedCardTransitions(",
+    );
+    expect(observer).toContain("const stableCardKey = (card)");
+    expect(observer).toContain("baselineKeys: new Set(");
+    expect(observer).toContain("idsByStableKey: {}");
+    expect(observer).toContain(
+      "if (!stableKey || state.baselineKeys.has(stableKey)) continue",
+    );
+    expect(observer).toContain("state.idsByStableKey[stableKey]");
+    expect(observer).not.toContain(
+      'baseline: new Set(document.querySelectorAll(".action-card"))',
+    );
+  });
+
   it("cross-checks all stable card coordinates before confirmation", () => {
     expect(journey).toContain("captureCardMessage(card, observerId, who)");
     expect(journey).toContain(
       'ancestor::*[@data-id and @data-index and starts-with(@id,"event-")][1]',
     );
     expect(journey).toContain(
-      "senderCard!.message.messageId === confirmerCard!.message.messageId",
+      "sameStableMessage(senderCard!.message, confirmerCard!.message)",
     );
     expect(journey).toContain(
-      "senderCard!.message.messageIndex === confirmerCard!.message.messageIndex",
+      "isImmediateStableSuccessor(sourceMessage, senderCard!.message)",
     );
-    expect(journey).toContain(
-      "senderCard!.message.eventIndex === confirmerCard!.message.eventIndex",
-    );
+    expect(journey).toContain("requireSenderOwned: true");
+    expect(journey).toContain("{ expectedMessage: senderCard.message }");
+    expect(journey).not.toContain("followsExpectedSource");
   });
 
   it("answers one manual extraction prompt synchronously on only the disposable tab", () => {
@@ -111,13 +131,47 @@ describe("live OpenChat journey cleanup policy", () => {
     expect(journey).toContain("runProposeFlow still calls parseManualExtractionPrompt");
     expectOrdered(journey, [
       "proposerQcPage = await regularProposerPage.context().newPage()",
-      "await installManualPromptOverride(proposerOC, extraction)",
+      "await installManualPromptOverride(proposerOC, REAL_MODEL ? null : extraction)",
       "const promptProbe = await readManualPromptProbe(proposerOC)",
       "promptProbe.promptCalls === 1",
       "runProposeFlow opened exactly one manual extraction prompt",
     ]);
     expect(journey).not.toContain('.on("dialog"');
     expect(journey).not.toContain('.off("dialog"');
+  });
+
+  it("has a real vision-model path with no manual-extraction URL or JSON prompt", () => {
+    expect(journey).toContain(
+      'const REAL_MODEL = process.argv.includes("--real-model")',
+    );
+    expect(journey).toContain("if (REAL_MODEL && SOURCE_IMAGE_PATH === undefined)");
+    expect(journey).toContain("qcUrl.searchParams.delete(\"manualExtract\")");
+    expect(journey).toContain("REAL_MODEL ? null : extraction");
+    expect(journey).toContain("promptProbe.promptCalls === 0");
+    expect(journey).toContain("real model path opened no JSON prompt");
+    expect(journey).toContain("REAL_MODEL ? 300_000 : 60_000");
+    expectOrdered(journey, [
+      'qcUrl.searchParams.delete("manualExtract")',
+      "await waitForImageModelReady(proposerOC)",
+      "sourceBaselineIds = await captureMessageIdBaseline(proposerOC)",
+    ]);
+    expect(journey).toContain('selectedModalities.includes("image")');
+    expect(journey).toContain('"Analyze the attached receipt for an IOU."');
+    expectOrdered(journey, [
+      'await requireExactlyOneCardControl(frame, "Transaction")',
+      'await requireExactlyOneCardControl(frame, "Amount")',
+      'await requireExactlyOneCardControl(frame, "Currency")',
+      'await requireExactlyOneCardControl(frame, "Direction")',
+      'await requireExactlyOneCardControl(frame, "Note")',
+      'await requireExactlyOneCardControl(frame, "Account type")',
+      "assertAcceptedVisionExtraction({",
+      'selectOption("iou")',
+      "noteControl.fill(note)",
+      'selectOption("")',
+    ]);
+    expect(journey).not.toContain('amount.fill("350")');
+    expect(journey).not.toContain('currency.selectOption("EGP")');
+    expect(journey).not.toContain('direction.selectOption("credit")');
   });
 
   it("inventories exact IOU targets and refuses duplicate mutation", () => {
@@ -181,8 +235,45 @@ describe("live OpenChat journey cleanup policy", () => {
     expect(journey).toContain("verifyDeletedAfterReload(proposerOC, proposerDeleted)");
     expect(journey).toContain("verifyDeletedAfterReload(confirmerOC, confirmerDeleted)");
     const verifier = between("async function verifyDeletedAfterReload(", "async function lookupInboxRun(");
+    expect(verifier).toContain("const deadline = Date.now() + 20_000");
+    expect(verifier).toContain("while (Date.now() < deadline)");
+    expect(verifier).toContain("if (remaining.length === 0) return");
+    expect(verifier).toContain("await page.waitForTimeout(1_000)");
     expect(verifier).toContain('waitFor({ state: "visible", timeout: 20_000 })');
     expect(verifier).toContain("exactMessageEvidencePresent(page, item.message, item.evidence)");
     expect(verifier).not.toContain('waitFor({ state: "attached"');
+
+    const evidence = between(
+      "async function exactMessageEvidencePresent(",
+      "async function waitForExactEvidenceAbsent(",
+    );
+    expect(evidence).toContain(
+      "if (currentObserverId !== null && currentObserverId !== evidence.observerId) return false",
+    );
+    expect(evidence).toContain(
+      'if (identity.title !== "Add to IOU" || !/Directory entry:\\s*iou/i.test(identity.text)) return false',
+    );
+    expect(evidence).not.toContain("IOU card identity no longer matches");
+  });
+
+  it("retries only detached exact-message deletion after rechecking evidence and ownership", () => {
+    const deletion = between(
+      "async function deleteExactMessageViaUi(",
+      "async function verifyDeletedAfterReload(",
+    );
+    expect(deletion).toContain("const maxDeleteAttempts = 3");
+    expectOrdered(deletion, [
+      "for (let attempt = 0; attempt < maxDeleteAttempts; attempt++)",
+      "await dismissOpenChatOverlay(page)",
+      "exactMessageEvidencePresent(page, message, evidence)",
+      "messageRefFromWrapper(",
+      "messageOwnedByCurrentUser(page, message)",
+      "sameStableMessage(message, observed)",
+      'name: "Delete", exact: true',
+      "deleteItem.click",
+      "shouldRetryExactMessageDeletion({",
+    ]);
+    expect(deletion).not.toContain(".last()");
+    expect(deletion).not.toMatch(/filter\(\{\s*hasText:/);
   });
 });

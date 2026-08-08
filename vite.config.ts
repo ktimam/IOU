@@ -15,6 +15,23 @@ const OPENCHAT_DEV_FRAME_ANCESTORS = [
   "http://127.0.0.1:5001",
 ];
 
+// Vite watches the project root recursively. Keep generated canister/build state and durable browser
+// profiles out of that graph: Chromium updates cache and SQLite files continuously, which otherwise
+// turns an idle dev server into a permanent hot-reload loop. Do not replace this with polling; that
+// would trade the event storm for a constant directory scan.
+const DEV_WATCH_IGNORES = [
+  "**/target/**",
+  "**/.dfx/**",
+  "**/.openchat-iou/**",
+  "**/.openchat-inbox/**",
+  "**/.pw-profiles/**",
+  "**/.pw-profiles-scenarios/**",
+  "**/coverage/**",
+  "**/playwright-report/**",
+  "**/android/**",
+  "**/ii/**",
+];
+
 // Mirror the prod asset-canister framing posture on the dev server, which otherwise sets NO framing
 // headers at all (frameable by ANY origin — the hole this closes). Prod locks everything to
 // `frame-ancestors 'none'` and relaxes ONLY the index.html document to the OpenChat allowlist; here we
@@ -87,6 +104,10 @@ export default defineConfig({
     // "127.0.0.1" — so host and port here are load-bearing, not cosmetic. Change both together.
     port: 3000,
     host: "127.0.0.1",
+    strictPort: true,
+    watch: {
+      ignored: DEV_WATCH_IGNORES,
+    },
     // Vite's built-in CORS middleware runs after plugin middleware and owns the final ACAO header.
     // `true` is safe here because this listener is loopback-only and serves public frontend assets;
     // it is required for ES modules fetched by OpenChat's credentialless opaque-origin iframe.

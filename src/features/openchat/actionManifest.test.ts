@@ -314,4 +314,31 @@ describe("the extraction prompt tells the model a single line can hold several t
     const doc = registration as { promptTemplate?: string };
     expect(doc.promptTemplate ?? "").toMatch(/one LINE can hold several\s+transactions/i);
   });
+
+  it("forbids repeating one observed transaction as duplicate output", () => {
+    const p = IOU_EXTRACTION_PROMPT;
+    expect(p).toMatch(/never (?:repeat|emit) the same transaction twice/i);
+    expect(p).toMatch(/one amount occurrence[^.]*exactly one object/i);
+  });
+
+  it("ships the duplicate-output guard in the registered wire", () => {
+    const doc = registration as { promptTemplate?: string };
+    const prompt = doc.promptTemplate ?? "";
+    expect(prompt).toMatch(/never (?:repeat|emit) the same transaction twice/i);
+    expect(prompt).toMatch(/one amount occurrence[^.]*exactly one object/i);
+  });
+
+  it("requires image extraction to preserve exact amount/currency evidence", () => {
+    const p = IOU_EXTRACTION_PROMPT;
+    expect(p).toMatch(/"message"[^.]*image input/i);
+    expect(p).toMatch(/exact visible text[^.]*amount and\s+currency/i);
+    expect(p).toMatch(/never paraphrase/i);
+  });
+
+  it("ships the image-evidence rule in the registered wire", () => {
+    const prompt = (registration as { promptTemplate?: string }).promptTemplate ?? "";
+    expect(prompt).toMatch(/"message"[^.]*image input/i);
+    expect(prompt).toMatch(/exact visible text[^.]*amount and\s+currency/i);
+  });
+
 });

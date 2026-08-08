@@ -17,17 +17,20 @@
 set -u
 cd "$(dirname "$0")/../.."
 
+MANAGER_PORT="$(node -p "require('./scripts/live/cdp-ports.json').manager")"
+MOTHER_PORT="$(node -p "require('./scripts/live/cdp-ports.json').mother")"
+
 echo "════ Pre-flight: heal wedged CDP profiles ════"
-pnpm exec tsx scripts/live/heal-cdp.ts 9241 9242 || { echo "MATRIX FAILED: CDP heal"; exit 1; }
+pnpm exec tsx scripts/live/heal-cdp.ts "${MANAGER_PORT}" "${MOTHER_PORT}" || { echo "MATRIX FAILED: CDP heal"; exit 1; }
 
 echo
 echo "════ Direction A: v1 → v2 (manager proposes, mother confirms) ════"
-pnpm exec tsx scripts/live/journey-fanout.ts --proposer manager:9241:9241 --confirmer mother:9242:9242 \
+pnpm exec tsx scripts/live/journey-fanout.ts --proposer "manager:${MANAGER_PORT}:${MANAGER_PORT}" --confirmer "mother:${MOTHER_PORT}:${MOTHER_PORT}" \
   || { echo "MATRIX FAILED: direction A"; exit 1; }
 
 echo
 echo "════ Direction B: v2 → v1 (mother proposes, manager confirms) ════"
-pnpm exec tsx scripts/live/journey-fanout.ts --proposer mother:9242:9242 --confirmer manager:9241:9241 \
+pnpm exec tsx scripts/live/journey-fanout.ts --proposer "mother:${MOTHER_PORT}:${MOTHER_PORT}" --confirmer "manager:${MANAGER_PORT}:${MANAGER_PORT}" \
   || { echo "MATRIX FAILED: direction B"; exit 1; }
 
 echo

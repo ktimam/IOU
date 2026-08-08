@@ -50,6 +50,57 @@ describe('repository security policy', () => {
     expect(config).not.toMatch(/sourcemap:\s*true/);
   });
 
+  it('keeps Vite from watching generated state and persistent browser profiles', () => {
+    const config = read('vite.config.ts');
+    for (const ignoredPath of [
+      'target',
+      '.dfx',
+      '.openchat-iou',
+      '.openchat-inbox',
+      '.pw-profiles',
+      '.pw-profiles-scenarios',
+      'coverage',
+      'playwright-report',
+      'android',
+      'ii',
+    ]) {
+      expect(config, `missing Vite watcher exclusion for ${ignoredPath}`).toContain(
+        `**/${ignoredPath}/**`,
+      );
+    }
+    expect(config).toMatch(/watch:\s*\{[\s\S]*?ignored:/);
+    expect(config).toMatch(/strictPort:\s*true/);
+    expect(config).not.toMatch(/usePolling:\s*true/);
+  });
+
+  it('repairs only the configured OpenChat desktop executable', () => {
+    const healer = read('scripts/live/heal-cdp.ts');
+    expect(healer).not.toContain('Get-Process open-chat');
+    expect(healer).toContain('Get-CimInstance Win32_Process');
+    expect(healer).toContain('ExecutablePath');
+    expect(healer).toContain('Stop-Process -Id');
+    expect(healer).toContain('matchesExactCdpChromeProcess');
+    expect(healer).toContain('--remote-debugging-address=127.0.0.1');
+    expect(healer).not.toMatch(/CommandLine\s+-match[\s\S]*?-or[\s\S]*?remote-debugging-port/);
+  });
+
+  it('keeps the tracked UI matrix on the centralized CDP ports', () => {
+    const matrix = read('scripts/live/journey-matrix.sh');
+    expect(matrix).toContain('cdp-ports.json');
+    expect(matrix).toContain('${MANAGER_PORT}');
+    expect(matrix).toContain('${MOTHER_PORT}');
+    expect(matrix).not.toMatch(/(?:^|\D)(?:9241|9242)(?:\D|$)/);
+  });
+
+  it('keeps supported CDP entrypoints on the centralized current ports', () => {
+    const desktopReload = read('scripts/live/oc-exe-reload.ts');
+    const proposeGate = read('scripts/live/verify-nomodel-guide.ts');
+    for (const source of [desktopReload, proposeGate]) {
+      expect(source).toContain('CDP_PORTS');
+      expect(source).not.toMatch(/127\.0\.0\.1:(?:9222|9241|9242)/);
+    }
+  });
+
   it('has no emitted JavaScript config that shadows vite.config.ts', () => {
     expect(existsSync(path.join(root, 'vite.config.js'))).toBe(false);
   });
