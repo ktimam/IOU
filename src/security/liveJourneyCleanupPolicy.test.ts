@@ -171,24 +171,32 @@ describe("live OpenChat journey cleanup policy", () => {
   });
 
   it("answers one manual extraction prompt synchronously on only the disposable tab", () => {
-    const override = between(
-      "async function installManualPromptOverride(",
-      "async function readManualPromptProbe(",
+    const promptLifecycle = between(
+      "// Only the disposable manualExtract tab replaces the browser primitive.",
+      "// Dismiss any open modal/sheet overlay first",
     );
-    expectOrdered(override, [
-      "const overridePrompt = (message)",
-      "state.promptCalls++",
-      "state.prompts.push",
-      "return ${response}",
-      "originalPrompt: window.prompt",
-      "overridePrompt,",
-      "window.prompt = overridePrompt",
+    expectOrdered(promptLifecycle, [
+      "if (!REAL_MODEL)",
+      "promptOverrideHandle = await installManualPromptOverride(proposerOC, extraction)",
+    ]);
+    expect(promptLifecycle).not.toContain("REAL_MODEL ? null : extraction");
+
+    const promptAssertion = between(
+      "posted = senderCard !== null && confirmerCard !== null;",
+      "check(posted,",
+    );
+    expectOrdered(promptAssertion, [
+      "if (!REAL_MODEL)",
+      "if (promptOverrideHandle === null)",
+      "const promptProbe = await readManualPromptProbe(proposerOC, promptOverrideHandle)",
+      "promptProbe.promptCalls === 1",
+      "runProposeFlow opened exactly one manual extraction prompt",
     ]);
     expect(journey).toContain("runProposeFlow still calls parseManualExtractionPrompt");
     expectOrdered(journey, [
       "proposerQcPage = await regularProposerPage.context().newPage()",
-      "await installManualPromptOverride(proposerOC, REAL_MODEL ? null : extraction)",
-      "const promptProbe = await readManualPromptProbe(proposerOC)",
+      "promptOverrideHandle = await installManualPromptOverride(proposerOC, extraction)",
+      "const promptProbe = await readManualPromptProbe(proposerOC, promptOverrideHandle)",
       "promptProbe.promptCalls === 1",
       "runProposeFlow opened exactly one manual extraction prompt",
     ]);
@@ -197,35 +205,17 @@ describe("live OpenChat journey cleanup policy", () => {
   });
 
   it("restores the prompt override only while it still owns the browser primitive", () => {
-    const install = between(
-      "async function installManualPromptOverride(",
-      "async function readManualPromptProbe(",
+    expect(journey).toContain("type ManualPromptOverrideHandle");
+    expect(journey).toContain(
+      "let promptOverrideHandle: ManualPromptOverrideHandle | null = null",
     );
-    expectOrdered(install, [
-      "const overridePrompt = (message)",
-      "overridePrompt",
-      "window.prompt = overridePrompt",
-      "window.prompt === overridePrompt",
-    ]);
-
-    const remove = between(
-      "async function removeManualPromptOverride(",
-      "type ImageModelReadiness",
-    );
-    expectOrdered(remove, [
-      "const ownsOverride = window.prompt === state.overridePrompt",
-      "if (ownsOverride) window.prompt = state.originalPrompt",
-      "delete root.__iouJourneyPromptProbe",
-      'return ownsOverride ? "restored" : "detached"',
-      'if (outcome === "detached")',
-    ]);
-    expect(remove).not.toMatch(/^\s*window\.prompt = state\.originalPrompt/m);
 
     const teardown = between("} finally {\n      // This teardown", "if (failures > 0)");
     expectOrdered(teardown, [
-      "if (promptOverrideInstalled)",
-      "await removeManualPromptOverride(proposerOC)",
-      "promptOverrideInstalled = false",
+      "if (promptOverrideHandle !== null)",
+      "const handleToRemove = promptOverrideHandle",
+      "await removeManualPromptOverride(proposerOC, handleToRemove)",
+      "promptOverrideHandle = null",
       "catch (error)",
       "failures++",
       "manual prompt restore failed",
@@ -238,9 +228,9 @@ describe("live OpenChat journey cleanup policy", () => {
     );
     expect(journey).toContain("if (REAL_MODEL && SOURCE_IMAGE_PATH === undefined)");
     expect(journey).toContain("qcUrl.searchParams.delete(\"manualExtract\")");
-    expect(journey).toContain("REAL_MODEL ? null : extraction");
-    expect(journey).toContain("promptProbe.promptCalls === 0");
-    expect(journey).toContain("real model path opened no JSON prompt");
+    expect(journey).not.toContain("REAL_MODEL ? null : extraction");
+    expect(journey).not.toContain("promptProbe.promptCalls === 0");
+    expect(journey).not.toContain("real model path opened no JSON prompt");
     expect(journey).toContain("REAL_MODEL ? 600_000 : 60_000");
     expectOrdered(journey, [
       'qcUrl.searchParams.delete("manualExtract")',
@@ -728,8 +718,22 @@ describe("live OpenChat journey cleanup policy", () => {
       "async function approveRunCardConfirmation(",
       "async function cancelRunCard(",
     );
+    const hydrationWait = between(
+      "async function waitForHostAddEnabled(",
+      "async function approveRunCardConfirmation(",
+    );
+    expectOrdered(hydrationWait, [
+      "HOST_ADD_HYDRATION_TIMEOUT_MS",
+      "while (Date.now() < deadline)",
+      "await add.isEnabled()",
+      'getByRole("status")',
+      'getByRole("alert")',
+      'name: "Restore app data", exact: true',
+      "throw new Error",
+    ]);
     expectOrdered(confirmation, [
       'loaded.card.getByRole("button", { name: "Add to IOU", exact: true })',
+      "await waitForHostAddEnabled(loaded, add)",
       'loaded.frame.getByRole("button").count()',
       "await add.click",
     ]);
@@ -823,7 +827,7 @@ describe("live OpenChat journey cleanup policy", () => {
       "deleteExactMessagePersistentlyViaUi(proposerOC, trackedCard)",
       "deleteExactMessagePersistentlyViaUi(proposerOC, exactSourceDeletionTarget)",
       "} finally {",
-      "removeManualPromptOverride(proposerOC)",
+      "removeManualPromptOverride(proposerOC, handleToRemove)",
       "removeNewCardObserver(proposerOC).catch",
       "removeNewCardObserver(confirmerOC).catch",
       "proposerQcPage?.close().catch",

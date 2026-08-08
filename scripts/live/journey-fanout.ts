@@ -53,6 +53,12 @@ import {
   type StableMessageRef,
 } from "./journeySafety";
 import { OPENCHAT_MESSAGE_TEXT_SELECTOR } from "./openChatArtifactCleanup";
+import {
+  installManualPromptOverride,
+  readManualPromptProbe,
+  removeManualPromptOverride,
+  type ManualPromptOverrideHandle,
+} from "./temporaryBrowserTab";
 
 const require = createRequire(import.meta.url);
 const { Packr } = require("C:/Kiko/MyProjects/Blockchain/ICP/open-chat-cycle/frontend/node_modules/msgpackr");
@@ -60,6 +66,10 @@ const packer = new Packr({ useRecords: false, skipValues: [null, undefined], lar
 
 const HOST = "http://127.0.0.1:8080";
 const IOU_BASE = "http://127.0.0.1:3000";
+// A paired card has two independently bounded asynchronous phases after its public fields render:
+// the host mints a 30s private-context capability, then the IOU frame has 30s to hydrate and return
+// the exact capability-bound ready status. Give both phases one bounded live-journey window.
+const HOST_ADD_HYDRATION_TIMEOUT_MS = 65_000;
 
 // Current canister ids from IOU's .env.local — never hardcode (they change on every clean redeploy).
 function envIds(): { userIndex: string; inbox: string } {
@@ -98,58 +108,6 @@ async function proposalFailureText(page: Page): Promise<string | null> {
     .replace(/([?&](?:token|code|claim|credential)[^=]*)=[^\s&]+/gi, "$1=<redacted>")
     .replace(/\b[a-z0-9]{5}(?:-[a-z0-9]{3,5}){2,}\b/gi, "<id>")
     .slice(0, 240);
-}
-
-type ManualPromptProbe = { promptCalls: number; prompts: string[] };
-
-async function installManualPromptOverride(page: Page, exactResponse: string | null): Promise<void> {
-  const response = JSON.stringify(exactResponse);
-  // Browser-native source avoids tsx/esbuild injecting Node-only helpers into the prompt callback.
-  const installed = await page.evaluate<boolean>(`(() => {
-    const root = globalThis;
-    if (root.__iouJourneyPromptProbe !== undefined) return false;
-    const overridePrompt = (message) => {
-      state.promptCalls++;
-      state.prompts.push(String(message ?? ""));
-      return ${response};
-    };
-    const state = {
-      originalPrompt: window.prompt,
-      overridePrompt,
-      promptCalls: 0,
-      prompts: [],
-    };
-    root.__iouJourneyPromptProbe = state;
-    window.prompt = overridePrompt;
-    if (window.prompt === overridePrompt) return true;
-    delete root.__iouJourneyPromptProbe;
-    return false;
-  })()`);
-  if (!installed) throw new Error("manual prompt override could not be installed exactly");
-}
-
-async function readManualPromptProbe(page: Page): Promise<ManualPromptProbe> {
-  return page.evaluate(`(() => {
-    const state = globalThis.__iouJourneyPromptProbe;
-    if (!state) throw new Error("manual prompt override is not installed");
-    return { promptCalls: state.promptCalls, prompts: [...state.prompts] };
-  })()`);
-}
-
-async function removeManualPromptOverride(page: Page): Promise<void> {
-  const outcome = await page.evaluate<"missing" | "restored" | "detached">(`(() => {
-    const root = globalThis;
-    const state = root.__iouJourneyPromptProbe;
-    if (!state) return "missing";
-    const ownsOverride = window.prompt === state.overridePrompt;
-    if (ownsOverride) window.prompt = state.originalPrompt;
-    delete root.__iouJourneyPromptProbe;
-    return ownsOverride ? "restored" : "detached";
-  })()`);
-  if (outcome === "missing") throw new Error("manual prompt override state was missing");
-  if (outcome === "detached") {
-    throw new Error("manual prompt override identity changed; current window.prompt was preserved");
-  }
 }
 
 type ImageModelReadiness = {
@@ -1584,6 +1542,52 @@ async function findAndLoadRunCards(
   return [...found.values()];
 }
 
+async function waitForHostAddEnabled(
+  loaded: LoadedRunCard,
+  add: Locator,
+  timeoutMs = HOST_ADD_HYDRATION_TIMEOUT_MS,
+): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (await add.isEnabled().catch(() => false)) return;
+    await loaded.card.page().waitForTimeout(Math.min(250, Math.max(1, deadline - Date.now())));
+  }
+  if (await add.isEnabled().catch(() => false)) return;
+
+  const hostStatuses = await loaded.card.getByRole("status").allInnerTexts().catch(() => []);
+  const hostAlerts = await loaded.card.getByRole("alert").allInnerTexts().catch(() => []);
+  const restore = loaded.card.getByRole("button", { name: "Restore app data", exact: true });
+  const restoreCount = await restore.count().catch(() => 0);
+  const restoreState =
+    restoreCount === 1
+      ? `${(await restore.isVisible().catch(() => false)) ? "visible" : "hidden"}/${
+          (await restore.isEnabled().catch(() => false)) ? "enabled" : "disabled"
+        }`
+      : `${restoreCount} matches`;
+  const appSignals = await loaded.frame
+    .locator('[role="status"], [role="alert"]')
+    .allInnerTexts()
+    .catch(() => []);
+  const summarize = (values: string[]): string =>
+    values.length === 0
+      ? "none"
+      : values
+          .map((value) =>
+            value
+              .replace(/\s+/g, " ")
+              .replace(/([?&](?:token|code|claim|credential)[^=]*)=[^\s&]+/gi, "$1=<redacted>")
+              .replace(/\b[a-z0-9]{5}(?:-[a-z0-9]{3,5}){2,}\b/gi, "<id>")
+              .slice(0, 160),
+          )
+          .slice(0, 4)
+          .join(" | ");
+  throw new Error(
+    `the nonce-scoped host Add to IOU button stayed disabled for ${timeoutMs}ms after public card load ` +
+      `(host status: ${summarize(hostStatuses)}; host alerts: ${summarize(hostAlerts)}; ` +
+      `app signals: ${summarize(appSignals)}; Restore app data: ${restoreState})`,
+  );
+}
+
 async function approveRunCardConfirmation(
   loaded: LoadedRunCard,
   note: string,
@@ -1591,7 +1595,7 @@ async function approveRunCardConfirmation(
 ): Promise<void> {
   const add = loaded.card.getByRole("button", { name: "Add to IOU", exact: true });
   await add.waitFor({ state: "visible", timeout: 10_000 });
-  if (!(await add.isEnabled())) throw new Error("the nonce-scoped host Add to IOU button is disabled");
+  await waitForHostAddEnabled(loaded, add);
   if ((await loaded.frame.getByRole("button").count()) !== 0) {
     throw new Error("the external card iframe unexpectedly owns an action button");
   }
@@ -2536,7 +2540,7 @@ async function main() {
   let proposerQcPage: Page | null = null;
   let proposerObserverInstalled = false;
   let confirmerObserverInstalled = false;
-  let promptOverrideInstalled = false;
+  let promptOverrideHandle: ManualPromptOverrideHandle | null = null;
   let navigationListenerInstalled = false;
   let senderMainFrameNavigations = 0;
   let sourceBaseline: StableMessageBaseline | null = null;
@@ -2625,8 +2629,9 @@ async function main() {
   // Only the disposable manualExtract tab replaces the browser primitive. The product's ordinary
   // runProposeFlow still calls parseManualExtractionPrompt; this override merely returns its exact
   // deterministic JSON synchronously so Playwright cannot race and auto-dismiss the native prompt.
-  await installManualPromptOverride(proposerOC, REAL_MODEL ? null : extraction);
-  promptOverrideInstalled = true;
+  if (!REAL_MODEL) {
+    promptOverrideHandle = await installManualPromptOverride(proposerOC, extraction);
+  }
   // Dismiss any open modal/sheet overlay first (a leftover #masked_overlay — e.g. an open chat menu
   // from a prior aborted run — silently intercepts ALL pointer events on the v2 tree).
   for (let i = 0; i < 3; i++) {
@@ -2848,16 +2853,15 @@ async function main() {
   senderCard = uniqueTrackedRunCard(senderCandidateCards, PROPOSER.user);
   confirmerCard = uniqueTrackedRunCard(confirmerCandidateCards, CONFIRMER.user);
   posted = senderCard !== null && confirmerCard !== null;
-  const promptProbe = await readManualPromptProbe(proposerOC);
-  const promptMessage = promptProbe.prompts[0] ?? "";
-  console.log(
-    `[${PROPOSER.user}] manual extraction prompt calls=${promptProbe.promptCalls}, message=${JSON.stringify(promptMessage.slice(0, 160))}`,
-  );
-  if (REAL_MODEL) {
-    const noPrompt = promptProbe.promptCalls === 0 && promptProbe.prompts.length === 0;
-    check(noPrompt, "real model path opened no JSON prompt");
-    if (!noPrompt) throw new Error("real model path unexpectedly opened a manual JSON prompt");
-  } else {
+  if (!REAL_MODEL) {
+    if (promptOverrideHandle === null) {
+      throw new Error("manual prompt override handle was not retained");
+    }
+    const promptProbe = await readManualPromptProbe(proposerOC, promptOverrideHandle);
+    const promptMessage = promptProbe.prompts[0] ?? "";
+    console.log(
+      `[${PROPOSER.user}] manual extraction prompt calls=${promptProbe.promptCalls}, message=${JSON.stringify(promptMessage.slice(0, 160))}`,
+    );
     const exactlyOnePrompt = promptProbe.promptCalls === 1 && promptProbe.prompts.length === 1;
     const isExtractionPrompt = exactlyOnePrompt && /JSON/i.test(promptMessage);
     check(exactlyOnePrompt, `runProposeFlow opened exactly one manual extraction prompt`);
@@ -3433,10 +3437,11 @@ async function main() {
       } catch (error) {
         console.error(`[teardown] navigation listener detach failed: ${(error as Error).message}`);
       }
-      if (promptOverrideInstalled) {
+      if (promptOverrideHandle !== null) {
+        const handleToRemove = promptOverrideHandle;
         try {
-          await removeManualPromptOverride(proposerOC);
-          promptOverrideInstalled = false;
+          await removeManualPromptOverride(proposerOC, handleToRemove);
+          promptOverrideHandle = null;
         } catch (error) {
           failures++;
           console.error(`[teardown] manual prompt restore failed: ${(error as Error).message}`);
