@@ -43,6 +43,13 @@ release checks are exposed as
 signed-in tabs, a URL-only manual seam, `finally` cleanup, and never mutate a user's installed
 model.
 
+The first hosted browser attempt proved another false-gate mode: on the Linux runner,
+`pnpm test:ui -- test/ui/openchatCard.ui.spec.ts` ignored the intended file restriction and ran
+the whole replica-dependent UI directory. All 18 intended card cases passed, while unrelated
+replica cases consumed retries. The workflow now uses the unambiguous direct command
+`pnpm exec playwright test test/ui/openchatCard.ui.spec.ts --retries=0`, and
+`ciSupplyChainPolicy.test.ts` rejects the old form.
+
 Live acceptance already proved the exact reported cross-product on the manager profile:
 `canInferOnDevice() === true`, persistent seam absent, one query-isolated prompt, Cancel, and zero
 new cards after twelve seconds. The unique source was deleted and the normal tab restored. A

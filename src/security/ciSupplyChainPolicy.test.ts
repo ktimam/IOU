@@ -37,6 +37,9 @@ describe('CI supply-chain policy', () => {
       'pnpm exec playwright install --with-deps chromium',
     );
     expect(workflow).toContain(
+      'pnpm exec playwright test test/ui/openchatCard.ui.spec.ts --retries=0',
+    );
+    expect(workflow).not.toContain(
       'pnpm test:ui -- test/ui/openchatCard.ui.spec.ts',
     );
   });

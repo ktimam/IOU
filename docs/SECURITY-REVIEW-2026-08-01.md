@@ -61,6 +61,12 @@ four-profile gate remains local. The detailed path/commit/CI audit is in
 four-profile/live-canister gate remains open under IOU #52; deterministic cancellation and
 single-flight behavior must remain required OpenChat PR CI.
 
+The first hosted attempt exposed a command-selection bug rather than a card failure:
+`pnpm test:ui -- <file>` expanded to the entire replica-dependent UI directory on Linux. The
+intended 18 card cases all passed during that run, but unrelated replica tests retried until the
+run was stopped. CI now invokes Playwright directly with the exact file and `--retries=0`; a policy
+test rejects the ambiguous command form.
+
 At this checkpoint IOU passes **901/901 tests across 77 files**; coverage is **71.56%** statements
 and lines, **84.85%** branches, and **86.9%** functions. Typecheck, production build, and
 `pnpm audit:deps` are green. The existing 18-case card/iframe Playwright suite and 69 Rust tests
