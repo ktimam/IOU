@@ -10,9 +10,10 @@ Last updated: 2026-08-08.
 This section overrides older hashes, deployment-pending wording, and live-QC claims below.
 
 - OpenChat PR 1 is pushed at `f43d2a2d53f2c9f8a3086104a356d4d3a315858a`.
-- OpenChat PR 2 is pushed at `001a1e29881f340705444a9e11e96a54bc3eac9c` and passes the
-  exact frontend **990/990 across 70 files**, nine-package backend matrix, typechecks, ESLint,
-  Prettier, `cargo fmt`, and Linux `prod_test` gates.
+- OpenChat PR 2 is pushed at `fdf6e60e2cb10e93eb9d46b8f51b0bc2c31d25e0`; exact frontend
+  **1049/1049 across 76 files**, frontend typecheck, and the signed-in live journey pass. The prior
+  backend/agent/ESLint/Prettier/`cargo fmt`/Linux gates cover paths unchanged by this frontend-only
+  follow-up.
 - Exact PR 2 artifacts are deployed on the recovered three-subnet PocketIC state: UserIndex
   `0.0.9`, LocalUserIndex `0.0.5`, four User children `0.0.3`, the private Group `0.0.4`, and the
   Community template `0.0.4`. There is no Community instance. GroupIndex was not deployed or
@@ -20,18 +21,17 @@ This section overrides older hashes, deployment-pending wording, and live-QC cla
 - The recreated-account-safe Father two-chat/two-sheet routing journey dynamically discovers the
   current distinct House and Family ids and passes **17/17**. The disposable account-scoped Type
   isolation journey passes **12/12**.
-- Exact-PR-2 private card hydration passes **8/8** only after reloading the sender optimistic echo.
-  That proves canonical-event hydration, but the reload exposed a real PR 2 sender-state/identity
-  regression: the just-sent card could remain unverified and actionless. The candidate reconciliation,
-  identity lifecycle, and content-label fixes are in tree; exact commit/push/deploy/live QC remain
-  pending.
+- The sender-state/identity defect exposed by the earlier **8/8** hydration run is fixed and pushed.
+  The latest signed-in journey observed optimistic-to-verified reconciliation in place, auto-loaded
+  only the exact fresh proposer card, retained the recipient Load gate, and showed no stale
+  untrusted-content warning.
 - `scripts/live/journey-fanout.ts` now implements chat send → in-card **Add to IOU** → routed
   **Pending from chat**/**Review & add** → prefilled `EntryForm` → persisted **History** → exact
-  nonce soft-delete cleanup. It has not yet been counted as a passing updated-runtime run. IOU #52
-  therefore tracks execution plus hosted/CI placement, not a missing local journey.
-- Image proposal schema/attester alignment is fixed in the working trees: explicit `acceptsImage`,
+  nonce soft-delete cleanup. It passes against the current frontend; IOU #52 tracks hosted/CI
+  placement, not a missing local journey.
+- Image proposal schema/attester alignment is pushed at the current PR 2 head: explicit `acceptsImage`,
   amount/string bounds, safe formats, valid calendar dates, ASCII-uppercase currency, NUL-free
-  text, and the `0.005` half-minor-unit boundary. Focused/full gates and live image QC are pending.
+  text, and the `0.005` half-minor-unit boundary. Focused/full gates pass; live image QC remains.
 - The changed manifest must be re-registered, producing a new revision. Install the matching exact
   IOU verifier binding and refresh/relink father, mother, child, and property manager sequentially
   before live QC; their existing bindings are revision-pinned and should fail closed when stale.
@@ -260,6 +260,18 @@ labels render only for genuinely unattested cards; those cards remain actionless
 failing-first tests are present at PR 2 commit `cb6bc72b6`. The complete local journey observed
 the exact sender card transition from optimistic/unverified to directory-bound and actionable
 without navigation or reload, and the attested card displayed neither stale untrusted label.
+
+**2026-08-08 proposer-load follow-up fixed, pushed, and live-verified.** PR 2 commit
+`fdf6e60e2cb10e93eb9d46b8f51b0bc2c31d25e0` treats the successful Propose action as iframe-load
+consent only for the exact freshly proposed, fully attested sender event. Recipients, history,
+reloads, readonly views, unattested cards, unsupported browsers, and a saturated in-tab marker
+remain behind the explicit gate. A failing-first mounted regression also caught and fixed the
+late-payload/manual-load nonce-reset race. The misleading unconditional **Untrusted app content**
+label is now **External app content (isolated)**; genuine trust failures are unchanged. Focused card
+coverage passes **112/112**, the full OpenChat frontend passes **1049/1049**, typecheck has zero
+errors, and the signed-in manager-to-father journey proved sender auto-load, recipient Load,
+Add to IOU, confirmer-only delivery, Review & add, IOU History, and exact cleanup.
+
 Hosted review/CI and production rollout remain pending.
 
 **Expanded QC passed locally.** `scripts/live/journey-fanout.ts` now continues past the two inbox-count

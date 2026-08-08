@@ -233,6 +233,8 @@ type LoadedRunCard = {
   message: ChatMessageRef;
 };
 
+type CardLoadExpectation = "auto" | "explicit" | "either";
+
 type ChatMessageRef = {
   messageId: string;
   messageIndex: number;
@@ -500,6 +502,7 @@ async function findAndLoadRunCards(
   cleanGateIds: Set<string>,
   timeoutMs = 35_000,
   failOnProposalToast = false,
+  loadExpectation: CardLoadExpectation = "either",
 ): Promise<LoadedRunCard[]> {
   const found = new Map<string, LoadedRunCard>();
   let firstFoundAt: number | null = null;
@@ -531,6 +534,7 @@ async function findAndLoadRunCards(
       if ((await card.locator("iframe").count()) === 0) {
         const load = card.getByRole("button", { name: "Load app card", exact: true });
         if (await load.isVisible().catch(() => false)) {
+          if (loadExpectation === "auto") continue;
           if (!(await load.isEnabled().catch(() => false))) {
             throw new Error(`[${who}] this run's verified Load app card gate is disabled`);
           }
@@ -1331,6 +1335,7 @@ async function main() {
         senderCleanGateIds,
         18_000,
         true,
+        "auto",
       );
       rememberRunCards(senderRunCards, foundSenderCards, PROPOSER.user);
       proposalCardObserved ||= (await observedRunCardCount(proposerOC)) > 0;
@@ -1344,6 +1349,8 @@ async function main() {
           CONFIRMER.user,
           confirmerCleanGateIds,
           35_000,
+          false,
+          "explicit",
         );
         rememberRunCards(confirmerRunCards, foundConfirmerCards, CONFIRMER.user);
         confirmerCard = uniqueTrackedRunCard(confirmerRunCards, CONFIRMER.user);
@@ -1379,7 +1386,7 @@ async function main() {
   if (!exactlyOnePrompt || !isExtractionPrompt) {
     throw new Error("manual extraction prompt count/message did not match this run");
   }
-  check(posted, `the nonce-scoped action card loaded through the explicit gate on both sides`);
+  check(posted, `the nonce-scoped action card auto-loaded for its proposer and loaded for its recipient`);
   if (!posted) throw new Error("card never posted");
 
   const sameCardMessage =
@@ -1394,7 +1401,10 @@ async function main() {
     throw new Error("nonce-scoped card message coordinates did not cross-check; refusing confirmation");
   }
 
-  check(senderCard!.loadedFromCleanGate, "sender opened this new card through Load app card");
+  check(
+    !senderCard!.loadedFromCleanGate,
+    "sender's freshly proposed attested card loaded without a second Load app card click",
+  );
   check(confirmerCard!.loadedFromCleanGate, "recipient opened this new card through Load app card");
   const senderTransitions = await observedCardTransitions(proposerOC, senderCard!.observerId);
   const sawOptimistic = senderTransitions.some((value) => value.includes("Unverified card binding"));

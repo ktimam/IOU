@@ -84,15 +84,14 @@ The OpenChat contribution remains exactly two generic pull requests:
 | Pull request | Scope | Exact pushed head | Current evidence |
 |---|---|---|---|
 | [PR 1 #9132](https://github.com/open-chat-labs/open-chat/pull/9132) | Optional local inference and reusable local-model management | `f43d2a2d53f2c9f8a3086104a356d4d3a315858a` | Five focused files **145/145**, typecheck green, and exact WSL `prod_test` green |
-| [PR 2 #73](https://github.com/ktimam/open-chat/pull/73) | Generic in-chat cards and external-app/chat interfaces | `001a1e29881f340705444a9e11e96a54bc3eac9c` | Frontend **990/990 across 70 files**, the nine-package backend matrix, frontend and agent typechecks, ESLint, Prettier, `cargo fmt`, and exact Linux `prod_test` all pass |
+| [PR 2 #73](https://github.com/ktimam/open-chat/pull/73) | Generic in-chat cards and external-app/chat interfaces | `fdf6e60e2cb10e93eb9d46b8f51b0bc2c31d25e0` | Frontend **1049/1049 across 76 files**, frontend typecheck (0 errors), and the signed-in live journey pass; the prior backend/agent/ESLint/Prettier/`cargo fmt`/Linux gates cover paths unchanged by this frontend-only follow-up |
 
 ### Post-deployment PR 2 regression correction — 2026-08-07
 
-The pushed/deployed PR 2 head above passed its recorded gates, but subsequent browser QC exposed
-three generic card/interface regressions. Candidate fixes and failing-first coverage are present in
-the current OpenChat PR 2 and IOU working trees. They are **fixed in tree only** at this checkpoint:
-their exact commits, pushes, combined green gates, manifest rollout, and live acceptance are still
-pending and are not included in the `990/990`, `846/846`, `68/68`, or live totals recorded below.
+The earlier deployed PR 2 head passed its recorded gates, but subsequent browser QC exposed four
+generic card/interface regressions. Their fixes and failing-first coverage are now committed and
+pushed at `fdf6e60e2cb10e93eb9d46b8f51b0bc2c31d25e0`; local combined gates and live acceptance pass.
+Hosted review/CI and any production rollout remain pending.
 
 - A sender's optimistic ActionCard could remain unverified and actionless even after the backend
   accepted the provenance-backed send. Reloading replaced it with the canonical event and made the
@@ -116,15 +115,28 @@ pending and are not included in the `990/990`, `846/846`, `68/68`, or live total
   three ASCII uppercase characters, dates are valid `YYYY-MM-DD` calendar dates, and note/message
   are bounded and NUL-free. Invalid optional OCR fields are dropped before attestation; IOU's
   canister attester remains the final fail-closed boundary.
+- A freshly proposed, fully attested card unnecessarily stopped at a second **Load app card** privacy
+  gate, while its loaded iframe was labeled **Untrusted app content** even though the binding and full
+  content attestation had succeeded. The proposer’s successful Propose action now acts as load
+  consent only for that exact live sender event. Recipient, history, reload, readonly, unattested,
+  unsupported-browser, and bounded-capacity cases remain explicitly gated or fail closed. A late
+  sender payload cannot reset an iframe that the user already loaded manually. The sandbox remains
+  `allow-scripts` without `allow-same-origin`; the neutral label is **External app content
+  (isolated)**, while all genuine trust-failure warnings remain.
 
-The local `scripts/live/journey-fanout.ts` candidate now covers the continuous user journey rather
-than stopping at encrypted inbox counts: send a nonce-scoped chat message, propose and load its
-card, press the iframe's **Add to IOU**, assert fan-out, resolve the authenticated confirmer's exact
-app-scoped chat route, find the draft under the routed sheet's **Pending from chat**, press
+The local `scripts/live/journey-fanout.ts` now covers the continuous user journey rather than
+stopping at encrypted inbox counts: send a nonce-scoped chat message, require proposer auto-load and
+the recipient's explicit Load gate, press the iframe's **Add to IOU**, assert delivery, resolve the
+authenticated confirmer's exact app-scoped chat route, find the draft under the routed sheet's
+**Pending from chat**, press
 **Review & add**, verify the prefilled `EntryForm`, submit **Add entry**, verify the nonce in
 **History**, then soft-delete only that exact entry. The cleanup deliberately leaves the encrypted
 audit tombstone while removing the entry from ordinary history/balances. This expanded journey is
-implemented but has **not yet been counted as a live pass** against the updated registration/runtime.
+green against the pushed head: sender optimistic→verified transition happened in place with no
+navigation, no second Load click, and no stale untrusted warning; the recipient required Load,
+confirmation delivered only to the father's bucket, the IOU History entry was verified, and all
+nonce-scoped artifacts were cleaned. Focused card security tests pass **112/112**, the complete
+frontend passes **1049/1049**, and Svelte/TypeScript typecheck reports zero errors.
 
 PR 2's exact artifacts are deployed to the recovered local PocketIC state in producer-before-
 consumer order: UserIndex `0.0.9`, LocalUserIndex `0.0.5`, all four User canisters `0.0.3`, the
