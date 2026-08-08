@@ -402,7 +402,8 @@ function expectedPendingBatchSummary(expected: ExpectedEntry[]): string {
   const summaries = expected.map((entry) =>
     `${entry.kind === "settlement" ? "Settlement" : "IOU"} ` +
     `${entry.amount.toFixed(2)} ${entry.currency} \u00b7 ` +
-    `${entry.direction === "credit" ? "owed to you" : "you owe"}` +
+    `${entry.direction === "credit" ? "owed to you" : "you owe"} \u00b7 ` +
+    `${entry.date}` +
     `${entry.note ? ` \u00b7 ${entry.note}` : ""}`,
   );
   return `${expected.length} entries: ${summaries.join(" \u00b7 ")}`;

@@ -191,6 +191,10 @@ describe("live OpenChat journey cleanup policy", () => {
       "const promptProbe = await readManualPromptProbe(proposerOC, promptOverrideHandle)",
       "promptProbe.promptCalls === 1",
       "runProposeFlow opened exactly one manual extraction prompt",
+      "parseManualExtractionPrompt received the expected JSON prompt",
+      "manual extraction prompt count/message did not match this run",
+      "await removeManualPromptOverride(proposerOC, promptOverrideHandle)",
+      "promptOverrideHandle = null",
     ]);
     expect(journey).toContain("runProposeFlow still calls parseManualExtractionPrompt");
     expectOrdered(journey, [
@@ -199,6 +203,8 @@ describe("live OpenChat journey cleanup policy", () => {
       "const promptProbe = await readManualPromptProbe(proposerOC, promptOverrideHandle)",
       "promptProbe.promptCalls === 1",
       "runProposeFlow opened exactly one manual extraction prompt",
+      "await removeManualPromptOverride(proposerOC, promptOverrideHandle)",
+      "promptOverrideHandle = null",
     ]);
     expect(journey).not.toContain('.on("dialog"');
     expect(journey).not.toContain('.off("dialog"');
@@ -256,7 +262,20 @@ describe("live OpenChat journey cleanup policy", () => {
     expect(journey).not.toContain('amount.fill("350")');
     expect(journey).not.toContain('currency.selectOption("EGP")');
     expect(journey).not.toContain('direction.selectOption("credit")');
-    expect(journey).toContain(
+    expect(journey).toContain("formValues.date === resolvedDraftDate");
+  });
+
+  it("matches the exact pending summary with the same resolved date asserted in the form", () => {
+    const importFlow = between(
+      "const importCurrency =",
+      "entrySubmissionAttempted = true",
+    );
+    expectOrdered(importFlow, [
+      "const resolvedDraftDate = new Date().toISOString().slice(0, 10)",
+      "const pendingSummary = `IOU 350.00 ${importCurrency} \\u00b7 owed to you \\u00b7 ${resolvedDraftDate} \\u00b7 ${note}`",
+      "formValues.date === resolvedDraftDate",
+    ]);
+    expect(importFlow).not.toContain(
       "formValues.date === new Date().toISOString().slice(0, 10)",
     );
   });

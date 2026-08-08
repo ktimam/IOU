@@ -7,6 +7,15 @@ const source = readFileSync(
   "utf8",
 );
 
+function expectOrdered(subject: string, markers: readonly string[]): void {
+  let cursor = -1;
+  for (const marker of markers) {
+    const next = subject.indexOf(marker, cursor + 1);
+    expect(next, `missing or out-of-order marker: ${marker}`).toBeGreaterThan(cursor);
+    cursor = next;
+  }
+}
+
 describe("multi-entry inbox cleanup policy", () => {
   it("uses a synchronous tab-local prompt override instead of racing a native dialog", () => {
     expect(source).toContain("installManualPromptOverride,");
@@ -237,6 +246,12 @@ describe("multi-entry inbox cleanup policy", () => {
     expect(uniqueWait).toBeGreaterThan(exactCompare);
     expect(ambiguity).toBeGreaterThan(uniqueWait);
     expect(expectedSummary).toBeGreaterThan(uniqueWait);
+    const summarySource = source.slice(summaryBuilder, exactRows);
+    expectOrdered(summarySource, [
+      '${entry.direction === "credit" ? "owed to you" : "you owe"} \\u00b7 ',
+      '`${entry.date}`',
+      '`${entry.note ? ` \\u00b7 ${entry.note}` : ""}`',
+    ]);
     expect(source).not.toContain(".filter({ hasText: /2 entr/i })");
     expect(source).not.toContain("let sawCount = false");
   });

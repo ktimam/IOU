@@ -2869,6 +2869,11 @@ async function main() {
     if (!exactlyOnePrompt || !isExtractionPrompt) {
       throw new Error("manual extraction prompt count/message did not match this run");
     }
+    // Restore while this disposable tab is still on the exact page that owns the hook. Cleanup later
+    // reloads the proposer to prove deletions persist; retaining the handle until then would turn a
+    // successful run into a false "override state was missing" teardown failure.
+    await removeManualPromptOverride(proposerOC, promptOverrideHandle);
+    promptOverrideHandle = null;
   }
   check(posted, `the nonce-scoped trusted action card auto-loaded for both participants`);
   if (!posted) throw new Error("card never posted");
@@ -3034,7 +3039,8 @@ async function main() {
   });
   const importCurrency =
     expectedCardCurrency || (await accountDefaultCurrency(confirmerIOU));
-  const pendingSummary = `IOU 350.00 ${importCurrency} \u00b7 owed to you \u00b7 ${note}`;
+  const resolvedDraftDate = new Date().toISOString().slice(0, 10);
+  const pendingSummary = `IOU 350.00 ${importCurrency} \u00b7 owed to you \u00b7 ${resolvedDraftDate} \u00b7 ${note}`;
   // Let SheetPage's authenticated ActionInbox effect finish. Repeated short reloads cancel that
   // effect and can starve a healthy poll forever; use one uninterrupted wait, then one fallback
   // reload for a genuinely missed mount.
@@ -3076,7 +3082,7 @@ async function main() {
   };
   const formMatches =
     Number(formValues.amount) === 350 &&
-    formValues.date === new Date().toISOString().slice(0, 10) &&
+    formValues.date === resolvedDraftDate &&
     formValues.currency === importCurrency &&
     formValues.note === note &&
     formValues.credit;
