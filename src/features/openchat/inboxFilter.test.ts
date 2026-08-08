@@ -4,8 +4,15 @@
 // appear on any other sheet, while dismissal/import dedupe uses the app-scoped message handle.
 
 import { describe, it, expect } from "vitest";
-import { visibleInboxFor, type InboxCard, type ImportedEntry } from "./inboxFilter";
-import { parseDraftBatch } from "../entries/draft";
+import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
+import {
+  isCompleteVerifiedOpenChatBatch,
+  visibleInboxFor,
+  type InboxCard,
+  type ImportedEntry,
+} from "./inboxFilter";
+import { batchSummary, parseDraftBatch } from "../entries/draft";
 
 const CHAT_HANDLE = "AgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgI";
 const OTHER_CHAT_HANDLE = "BAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQ";
@@ -134,5 +141,104 @@ describe("visibleInboxFor — the wrapper-less draft_id fallback needs BOTH pars
         defaultCurrency: "",
       }),
     ).toHaveLength(1);
+  });
+});
+
+describe("visibleInboxFor — exact verified array lifecycle", () => {
+  const batch = [
+    {
+      kind: "iou",
+      amount: 350,
+      currency: "EGP",
+      direction: "credit",
+      date: "2026-08-08",
+      note: "multi-a exact-run",
+      message: "Multi exact-run: two fees",
+    },
+    {
+      kind: "settlement",
+      amount: 500,
+      currency: "USD",
+      direction: "debt",
+      date: "2026-08-09",
+      note: "multi-b exact-run",
+      message: "Multi exact-run: two fees",
+    },
+  ];
+  const card = {
+    id: "oc-exact-batch",
+    draft: batch,
+    context: {
+      chatHandle: CHAT_HANDLE,
+      messageHandle: "CQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQk",
+    },
+  };
+
+  it("routes the one array card only to its linked sheet and preserves its two-entry summary", () => {
+    const linked = visible(FC_SHEET, { inboxPending: [card] });
+    expect(linked).toEqual([card]);
+    expect(visible(HOUSE_SHEET, { inboxPending: [card] })).toEqual([]);
+
+    const parsed = parseDraftBatch(linked[0].draft, undefined, "EGP", {
+      dateEvidence: "explicit-only",
+    });
+    expect(parsed.errors).toEqual([]);
+    expect(parsed.drafts).toHaveLength(2);
+    expect(batchSummary(parsed)).toBe(
+      "2 entries: IOU 350.00 EGP \u00b7 owed to you \u00b7 2026-08-08 \u00b7 multi-a exact-run " +
+      "\u00b7 Settlement 500.00 USD \u00b7 you owe \u00b7 2026-08-09 \u00b7 multi-b exact-run",
+    );
+  });
+
+  it("never recovers a hidden date from OpenChat message or Note text", () => {
+    const parsed = parseDraftBatch(
+      [
+        {
+          ...batch[0],
+          date: undefined,
+          note: "multi-a exact-run 2023-04-05",
+          message: "Multi exact-run 2024-06-07",
+        },
+      ],
+      undefined,
+      "EGP",
+      { dateEvidence: "explicit-only" },
+    );
+    expect(parsed.errors).toEqual([]);
+    expect(new Date(parsed.drafts[0].initial.ts ?? 0).toISOString().slice(0, 10)).toBe(
+      new Date().toISOString().slice(0, 10),
+    );
+  });
+
+  it("rejects the whole verified array when even one row is consumer-invalid", () => {
+    const parsed = parseDraftBatch(
+      [batch[0], { ...batch[1], amount: 0 }],
+      undefined,
+      "EGP",
+      { dateEvidence: "explicit-only" },
+    );
+    expect(parsed.drafts).toHaveLength(1);
+    expect(parsed.errors).toHaveLength(1);
+    expect(isCompleteVerifiedOpenChatBatch(parsed)).toBe(false);
+    expect(
+      isCompleteVerifiedOpenChatBatch({ drafts: parsed.drafts, errors: [] }),
+    ).toBe(true);
+  });
+
+  it("wires the all-or-nothing guard before either SheetPage review mutation", () => {
+    const source = readFileSync(resolve(__dirname, "../entries/SheetPage.tsx"), "utf8");
+    const parsedAt = source.indexOf("const { drafts, errors } = parseDraftBatch(");
+    const guardAt = source.indexOf(
+      'if (p.source === "openchat" && !isCompleteVerifiedOpenChatBatch({ drafts, errors }))',
+      parsedAt,
+    );
+    const batchAt = source.indexOf("setBatch({", guardAt);
+    const singleAt = source.indexOf("openAdd(", guardAt);
+
+    expect(parsedAt).toBeGreaterThanOrEqual(0);
+    expect(guardAt).toBeGreaterThan(parsedAt);
+    expect(batchAt).toBeGreaterThan(guardAt);
+    expect(singleAt).toBeGreaterThan(guardAt);
+    expect(source.slice(guardAt, Math.min(batchAt, singleAt))).toContain("return;");
   });
 });

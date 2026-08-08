@@ -12,7 +12,6 @@
 // unrelated Family type never reaches it.
 import {
   chromium,
-  type Dialog,
   type Frame,
   type FrameLocator,
   type Locator,
@@ -23,11 +22,14 @@ import { CDP_PORTS } from "./cdpPorts";
 import {
   exactOpenChatMessageWrapper,
   finalizeOpenChatArtifactCleanup,
-  OPENCHAT_MESSAGE_TEXT_SELECTOR,
+  type OpenChatMessageRef,
   OpenChatArtifactScope,
 } from "./openChatArtifactCleanup";
 import {
   armManualExtractForCurrentUrl,
+  installManualPromptOverride,
+  readManualPromptProbe,
+  removeManualPromptOverride,
   TemporaryTabScope,
 } from "./temporaryBrowserTab";
 
@@ -49,75 +51,70 @@ type LoadedRunCard = {
 };
 
 async function installNewCardObserver(page: Page, tag: string): Promise<void> {
-  await page.evaluate((observerTag) => {
-    type ObserverState = {
-      observer: MutationObserver;
-      tag: string;
-      nextId: number;
-      baseline: Set<Element>;
-      records: Record<string, string[]>;
-    };
-    const root = globalThis as typeof globalThis & { __iouRoutedCardObserver?: ObserverState };
+  await page.evaluate(`((observerTag) => {
+    const root = globalThis;
     root.__iouRoutedCardObserver?.observer.disconnect();
     const state = {
       tag: observerTag,
       nextId: 0,
       baseline: new Set(document.querySelectorAll(".action-card")),
       records: {},
-    } as Omit<ObserverState, "observer"> & { observer?: MutationObserver };
+      observer: undefined,
+    };
     const sample = () => {
-      for (const card of document.querySelectorAll<HTMLElement>(".action-card")) {
+      for (const card of document.querySelectorAll(".action-card")) {
         if (state.baseline.has(card)) continue;
         let id = card.dataset.iouRoutedCardId;
         if (!id) {
-          id = `${observerTag}-${state.nextId++}`;
+          id = observerTag + "-" + state.nextId++;
           card.dataset.iouRoutedCardId = id;
         }
-        const text = card.innerText.replace(/\s+/g, " ").trim();
-        const records = (state.records[id] ??= []);
+        const text = card.innerText.replace(/\\s+/g, " ").trim();
+        const records = (state.records[id] ||= []);
         if (records.at(-1) !== text) records.push(text);
       }
     };
     const observer = new MutationObserver(sample);
     state.observer = observer;
-    root.__iouRoutedCardObserver = state as ObserverState;
+    root.__iouRoutedCardObserver = state;
     observer.observe(document.body, { childList: true, subtree: true, characterData: true });
     sample();
-  }, tag);
+  })(${JSON.stringify(tag)})`);
 }
 
 async function observedTransitions(page: Page, observerId: string): Promise<string[]> {
-  return page.evaluate((id) => {
-    const root = globalThis as typeof globalThis & {
-      __iouRoutedCardObserver?: { records: Record<string, string[]> };
-    };
-    return [...(root.__iouRoutedCardObserver?.records[id] ?? [])];
-  }, observerId);
+  return page.evaluate(
+    `(() => [...(globalThis.__iouRoutedCardObserver?.records[${JSON.stringify(observerId)}] ?? [])])()`,
+  );
 }
 
 async function removeNewCardObserver(page: Page): Promise<void> {
-  await page.evaluate(() => {
-    const root = globalThis as typeof globalThis & {
-      __iouRoutedCardObserver?: { observer: MutationObserver; tag: string };
-    };
+  await page.evaluate(`(() => {
+    const root = globalThis;
     const state = root.__iouRoutedCardObserver;
     state?.observer.disconnect();
     if (state) {
-      for (const card of document.querySelectorAll<HTMLElement>(
-        ".action-card[data-iou-routed-card-id]",
-      )) {
-        if (card.dataset.iouRoutedCardId?.startsWith(`${state.tag}-`)) {
+      for (const card of document.querySelectorAll(".action-card[data-iou-routed-card-id]")) {
+        if (card.dataset.iouRoutedCardId?.startsWith(state.tag + "-")) {
           delete card.dataset.iouRoutedCardId;
         }
       }
     }
     delete root.__iouRoutedCardObserver;
-  }).catch(() => {});
+  })()`).catch(() => {});
 }
 
 async function findAutoLoadedRunCard(page: Page, note: string): Promise<LoadedRunCard | null> {
   const deadline = Date.now() + 45_000;
   while (Date.now() < deadline) {
+    const actionFailures = await visibleMatches(
+      page.locator(".toast").filter({ hasText: "Action failed" }),
+    );
+    if (actionFailures.length > 1) throw new Error("multiple action-failure notices are visible");
+    if (actionFailures.length === 1) {
+      const message = (await actionFailures[0].innerText()).replace(/\s+/g, " ").trim();
+      throw new Error(`OpenChat rejected the proposed card: ${message}`);
+    }
     const cards = page.locator(".action-card[data-iou-routed-card-id]");
     for (let index = 0; index < await cards.count().catch(() => 0); index++) {
       const card = cards.nth(index);
@@ -158,9 +155,26 @@ async function findAutoLoadedRunCard(page: Page, note: string): Promise<LoadedRu
   return null;
 }
 
+async function dismissBlockingOpenChatOverlays(page: Page): Promise<void> {
+  const hasBlockingOverlay = async (): Promise<boolean> =>
+    Boolean(await page.evaluate(`(() => [...document.querySelectorAll(".overlay")].some((overlay) => {
+      const rect = overlay.getBoundingClientRect();
+      return getComputedStyle(overlay).pointerEvents !== "none" && rect.width > 0 && rect.height > 0;
+    }))()`));
+  for (let attempt = 0; attempt < 4; attempt++) {
+    if (!(await hasBlockingOverlay())) return;
+    await page.keyboard.press("Escape");
+    await page.waitForTimeout(250);
+  }
+  if (await hasBlockingOverlay()) {
+    throw new Error("a fresh-tab OpenChat overlay still blocks chat selection");
+  }
+}
+
 async function openDirectChat(page: Page, counterpart: string): Promise<void> {
   await page.goto(`${OPENCHAT_URL}/chats`, { waitUntil: "domcontentloaded" }).catch(() => {});
   await page.waitForTimeout(2500);
+  await dismissBlockingOpenChatOverlays(page);
   await page
     .locator(".chat-summary, .chat_summary")
     .filter({ hasText: new RegExp(`^\\s*${counterpart}\\b`, "i") })
@@ -178,80 +192,143 @@ async function optionLabels(select: ReturnType<Page["locator"]>): Promise<string
   return select.locator("option").allTextContents().then((values) => values.map((value) => value.trim()));
 }
 
+async function visibleMatches(locator: Locator): Promise<Locator[]> {
+  const result: Locator[] = [];
+  for (let index = 0; index < await locator.count(); index++) {
+    const candidate = locator.nth(index);
+    if (await candidate.isVisible().catch(() => false)) result.push(candidate);
+  }
+  return result;
+}
+
+async function exactlyOneVisible(locator: Locator, label: string): Promise<Locator> {
+  const matches = await visibleMatches(locator);
+  if (matches.length !== 1) throw new Error(`${label}: expected one visible match, found ${matches.length}`);
+  return matches[0];
+}
+
+async function waitForExactCardCancellation(
+  page: Page,
+  message: OpenChatMessageRef,
+  cancel: Locator,
+): Promise<void> {
+  const cancelled = exactOpenChatMessageWrapper(page, message).locator(
+    ".action-card .state-cancelled",
+  );
+
+  // respondToActionCard commits before its promise settles, but the UI receives the new card state
+  // through the chat-update poller. A disposable/background tab uses the one-minute idle interval,
+  // so first wait for the host RPC to finish, then force one fresh chat load instead of timing out
+  // against the foreground-only five-second poll cadence.
+  const startedAt = Date.now();
+  const settleDeadline = startedAt + 30_000;
+  let sawBusy = false;
+  let responseSettled = false;
+  while (Date.now() < settleDeadline) {
+    if (await cancelled.isVisible().catch(() => false)) return;
+    if (!(await cancel.isVisible().catch(() => false))) {
+      responseSettled = true;
+      break;
+    }
+    if (!(await cancel.isEnabled().catch(() => false))) {
+      sawBusy = true;
+    } else if (sawBusy || Date.now() - startedAt >= 1_000) {
+      responseSettled = true;
+      break;
+    }
+    await page.waitForTimeout(100);
+  }
+  if (!responseSettled) {
+    throw new Error("the exact card Cancel request did not settle");
+  }
+
+  await page.reload({ waitUntil: "domcontentloaded" });
+  await cancelled.waitFor({ state: "visible", timeout: 30_000 });
+}
+
+async function openProposeAction(page: Page, message: OpenChatMessageRef): Promise<Locator> {
+  const wrapper = exactOpenChatMessageWrapper(page, message);
+  if ((await wrapper.count()) !== 1) throw new Error("exact source wrapper is unavailable");
+  const classes = (await wrapper.getAttribute("class"))?.split(/\s+/) ?? [];
+  const propose = page.getByRole("menuitem", { name: "Propose action", exact: true });
+  const deadline = Date.now() + 30_000;
+  while (Date.now() < deadline) {
+    await page.keyboard.press("Escape").catch(() => {});
+    if (classes.includes("message")) {
+      const bubble = wrapper.locator(".bubble-wrapper");
+      if ((await bubble.count()) !== 1) throw new Error("classic source bubble is ambiguous");
+      await bubble.hover();
+      await page.waitForTimeout(500);
+      await (await exactlyOneVisible(bubble.locator(".menu-icon"), "classic source menu")).click({
+        timeout: 10_000,
+      });
+    } else {
+      const trigger = wrapper.locator(".message_bubble_wrapper > .menu-trigger");
+      if ((await trigger.count()) !== 1) throw new Error("mobile source menu trigger is ambiguous");
+      await trigger.scrollIntoViewIfNeeded();
+      await trigger.dispatchEvent("click");
+      await page.waitForTimeout(500);
+      let menus = await visibleMatches(page.locator(".message_bubble_menu.second.me"));
+      if (menus.length === 0) {
+        const box = await trigger.boundingBox();
+        if (!box) throw new Error("mobile source menu trigger has no bounds");
+        const session = await page.context().newCDPSession(page);
+        try {
+          const point = { x: box.x + box.width / 2, y: box.y + box.height / 2 };
+          await session.send("Input.dispatchTouchEvent", { type: "touchStart", touchPoints: [point] });
+          await page.waitForTimeout(750);
+          await session.send("Input.dispatchTouchEvent", { type: "touchEnd", touchPoints: [] });
+        } finally {
+          await session.detach().catch(() => {});
+        }
+        await page.waitForTimeout(500);
+        menus = await visibleMatches(page.locator(".message_bubble_menu.second.me"));
+      }
+      if (menus.length !== 1) {
+        throw new Error(`mobile source menu: expected one visible match, found ${menus.length}`);
+      }
+      await (
+        await exactlyOneVisible(menus[0].locator(".menu-btn button"), "mobile source full menu")
+      ).click({ timeout: 10_000 });
+    }
+
+    await page.waitForTimeout(250);
+    const matches = await visibleMatches(propose);
+    if (matches.length > 1) throw new Error("sender-owned Propose action is ambiguous");
+    if (matches.length === 1) return matches[0];
+    await page.waitForTimeout(750);
+  }
+  throw new Error("source message never became confirmed with an available Propose action");
+}
+
 async function proposeFreshRentCard(
   page: Page,
   message: string,
-  note: string,
   artifactScope: OpenChatArtifactScope,
+  promptOverride: Awaited<ReturnType<typeof installManualPromptOverride>>,
 ): Promise<void> {
-  const beforeCards = await page.locator(".action-card").count();
-  const extraction = JSON.stringify({
-    kind: "iou",
-    amount: 321,
-    currency: "EGP",
-    direction: "credit",
-    note,
-  });
-  const onDialog = (dialog: Dialog) => {
-    const response = /JSON/i.test(dialog.message()) ? extraction : "1";
-    void dialog.accept(response).catch(() => {});
-  };
-  page.on("dialog", onDialog);
-  try {
-    const composer = page.locator(".ProseMirror").first();
-    await composer.waitFor({ timeout: 15000 });
-    await composer.click();
-    await page.keyboard.type(message);
-    await page.keyboard.press("Enter");
-    await page.waitForTimeout(3200);
-    const sourceMessage = await artifactScope.waitForExactTextMessage(message);
-    const sourceText = exactOpenChatMessageWrapper(page, sourceMessage)
-      .locator(OPENCHAT_MESSAGE_TEXT_SELECTOR)
-      .first();
-
-    const propose = page.locator('button:has(path[d^="M7.5,5.6"])').first();
-    let sheetOpen = false;
-    for (let attempt = 0; attempt < 3 && !sheetOpen; attempt++) {
-      await page.waitForTimeout(2500);
-      await sourceText.scrollIntoViewIfNeeded();
-      await page.waitForTimeout(700);
-      await sourceText.click({ button: "right", timeout: 8000 }).catch(() => {});
-      sheetOpen = await propose
-        .waitFor({ state: "visible", timeout: 4000 })
-        .then(() => true)
-        .catch(() => false);
-      if (!sheetOpen) {
-        const box = await sourceText.boundingBox();
-        if (!box) continue;
-        await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
-        await page.mouse.down();
-        await page.waitForTimeout(900);
-        await page.mouse.up();
-        sheetOpen = await propose
-          .waitFor({ state: "visible", timeout: 4000 })
-          .then(() => true)
-          .catch(() => false);
-      }
-      if (!sheetOpen) {
-        await page.keyboard.press("Escape").catch(() => {});
-        await page
-          .locator("#masked_overlay")
-          .click({ position: { x: 5, y: 5 }, timeout: 1500 })
-          .catch(() => {});
-      }
-    }
-    if (!sheetOpen) throw new Error("message action sheet did not expose Propose action");
-    await propose.click();
-
-    await page.waitForFunction(
-      (count) => document.querySelectorAll(".action-card").length > count,
-      beforeCards,
-      { timeout: 45000 },
-    );
-    check(true, "fresh IOU card was proposed without reconnecting Father");
-  } finally {
-    page.off("dialog", onDialog);
+  const composer = page.locator(".ProseMirror").first();
+  await composer.waitFor({ timeout: 15000 });
+  await composer.click();
+  await page.keyboard.type(message);
+  await page.keyboard.press("Enter");
+  await page.waitForTimeout(3200);
+  const sourceMessage = await artifactScope.waitForExactTextMessage(message);
+  await page.waitForTimeout(2500);
+  const propose = await openProposeAction(page, sourceMessage);
+  await propose.click();
+  const promptDeadline = Date.now() + 10_000;
+  let promptProbe = await readManualPromptProbe(page, promptOverride);
+  while (promptProbe.promptCalls === 0 && Date.now() < promptDeadline) {
+    await page.waitForTimeout(100);
+    promptProbe = await readManualPromptProbe(page, promptOverride);
   }
+  if (promptProbe.promptCalls !== 1) {
+    throw new Error(
+      `expected one manual-extraction prompt, found ${promptProbe.promptCalls}; prompts=${JSON.stringify(promptProbe.prompts)}`,
+    );
+  }
+  check(true, "fresh IOU card proposal accepted one exact manual extraction");
 }
 
 async function main(): Promise<void> {
@@ -272,6 +349,15 @@ async function main(): Promise<void> {
   const nonce = `${Date.now()}-${webcrypto.getRandomValues(new Uint32Array(1))[0].toString(36)}`;
   const message = `Rent live ${nonce}: 321 EGP due tomorrow`;
   const note = `rent live ${nonce}`;
+  const extraction = JSON.stringify({
+    kind: "iou",
+    amount: 321,
+    currency: "EGP",
+    direction: "credit",
+    date: new Date(Date.now() + 86_400_000).toISOString().slice(0, 10),
+    note,
+    message,
+  });
   artifactScope = new OpenChatArtifactScope(page, "routed-card private-type live proof");
   await artifactScope.begin();
   artifactScope.expectExactText(message);
@@ -279,34 +365,58 @@ async function main(): Promise<void> {
   const marker = `iou-routed-card-${Date.now()}`;
   let observerInstalled = false;
   let navigationListenerInstalled = false;
+  let promptOverride: Awaited<ReturnType<typeof installManualPromptOverride>> | null = null;
   let mainFrameNavigations = 0;
+  const finalizePromptOverride = async (): Promise<void> => {
+    if (!promptOverride) return;
+    let failure: unknown;
+    try {
+      const finalPromptProbe = await readManualPromptProbe(page, promptOverride);
+      if (finalPromptProbe.promptCalls !== 1) {
+        throw new Error(
+          `expected exactly one manual-extraction prompt at final teardown, found ${finalPromptProbe.promptCalls}: ${finalPromptProbe.prompts.join(" | ")}`,
+        );
+      }
+    } catch (error) {
+      failure = error;
+    }
+    try {
+      await removeManualPromptOverride(page, promptOverride);
+    } catch (error) {
+      failure ??= error;
+    }
+    promptOverride = null;
+    if (failure !== undefined) throw failure;
+  };
   const onNavigation = (frame: Frame) => {
     if (frame === page.mainFrame()) mainFrameNavigations++;
   };
   try {
     await installNewCardObserver(page, marker);
     observerInstalled = true;
-    await page.evaluate((value) => {
-      (globalThis as typeof globalThis & { __iouRoutedDocumentMarker?: string })
-        .__iouRoutedDocumentMarker = value;
-    }, marker);
+    await page.evaluate(
+      `globalThis.__iouRoutedDocumentMarker = ${JSON.stringify(marker)}`,
+    );
     page.on("framenavigated", onNavigation);
     navigationListenerInstalled = true;
+    promptOverride = await installManualPromptOverride(page, extraction);
 
     // A reused committed card cannot prove sender reconciliation. Always create one fresh card and
     // retain the same tagged DOM node from its optimistic state through verification and automatic loading.
-    await proposeFreshRentCard(page, message, note, artifactScope);
+    await proposeFreshRentCard(page, message, artifactScope, promptOverride);
     const loaded = await findAutoLoadedRunCard(page, note);
     check(loaded !== null, "the nonce-scoped sender card became directory-bound and loaded automatically");
     if (!loaded) throw new Error("this run's exact sender card never became actionable");
-    await artifactScope.trackExactCard(loaded.card, [note]);
+    const cardMessage = await artifactScope.trackExactCard(loaded.card, [note]);
 
     const transitions = await observedTransitions(page, loaded.observerId);
     const sawOptimistic = transitions.some((value) => value.includes("Unverified card binding"));
     const sawVerified = transitions.some((value) => /^iou\s+Add to IOU\b/i.test(value));
-    const markerSurvived = await page.evaluate((value) =>
-      (globalThis as typeof globalThis & { __iouRoutedDocumentMarker?: string })
-        .__iouRoutedDocumentMarker === value, marker);
+    const markerSurvived = Boolean(
+      await page.evaluate(
+        `globalThis.__iouRoutedDocumentMarker === ${JSON.stringify(marker)}`,
+      ),
+    );
     check(sawOptimistic, "the sender card was observed in its optimistic/unverified state");
     check(sawVerified, "the same sender card became directory-bound");
     check(loaded.loadedAutomatically, "that exact trusted card loaded without a manual gate");
@@ -375,14 +485,31 @@ async function main(): Promise<void> {
       "loading private Type context does not ask Father to connect again",
     );
     check(mainFrameNavigations === 0, "private-context hydration also stayed in the same chat document");
+    // No later step can legitimately ask for extraction. Verify the full proposal/card interval and
+    // restore prompt before the cancellation fallback is allowed to reload this disposable tab.
+    await finalizePromptOverride();
+    const cancel = loaded.card.getByRole("button", { name: "Cancel", exact: true });
+    await cancel.waitFor({ state: "visible", timeout: 10_000 });
+    check(await cancel.isEnabled(), "the exact pending proof card exposes its host-owned Cancel action");
+    await cancel.click();
+    await waitForExactCardCancellation(page, cardMessage, cancel);
+    check(true, "the exact proof card was cancelled before message cleanup");
     console.log("ROUTED CARD TYPE LIVE VERIFY PASSED");
   } finally {
+    let promptTeardownFailure: unknown;
+    await finalizePromptOverride().catch((error) => {
+      promptTeardownFailure = error;
+    });
     if (navigationListenerInstalled) page.off("framenavigated", onNavigation);
     if (observerInstalled) await removeNewCardObserver(page);
-    await page.evaluate((value) => {
-      const root = globalThis as typeof globalThis & { __iouRoutedDocumentMarker?: string };
-      if (root.__iouRoutedDocumentMarker === value) delete root.__iouRoutedDocumentMarker;
-    }, marker).catch(() => {});
+    await page
+      .evaluate(`(() => {
+        if (globalThis.__iouRoutedDocumentMarker === ${JSON.stringify(marker)}) {
+          delete globalThis.__iouRoutedDocumentMarker;
+        }
+      })()`)
+      .catch(() => {});
+    if (promptTeardownFailure !== undefined) throw promptTeardownFailure;
   }
   } catch (error) {
     primaryFailed = true;

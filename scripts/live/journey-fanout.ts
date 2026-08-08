@@ -38,10 +38,13 @@ import { readFileSync } from "node:fs";
 import { CDP_PORTS } from "./cdpPorts";
 import {
   assertAcceptedVisionExtraction,
+  classifySentImageResource,
   isImmediateStableSuccessor,
   journeySourceText,
   matchesExactImageContentEvidence,
+  matchesExactMessageInventory,
   matchesRunCardCandidate,
+  retainsNonceBoundCardEvidence,
   sameStableMessage,
   selectFreshOwnedSourceCandidate,
   shouldRetryExactMessageDeletion,
@@ -102,18 +105,27 @@ type ManualPromptProbe = { promptCalls: number; prompts: string[] };
 async function installManualPromptOverride(page: Page, exactResponse: string | null): Promise<void> {
   const response = JSON.stringify(exactResponse);
   // Browser-native source avoids tsx/esbuild injecting Node-only helpers into the prompt callback.
-  await page.evaluate(`(() => {
+  const installed = await page.evaluate<boolean>(`(() => {
     const root = globalThis;
-    const previous = root.__iouJourneyPromptProbe;
-    if (previous) window.prompt = previous.originalPrompt;
-    const state = { originalPrompt: window.prompt, promptCalls: 0, prompts: [] };
-    root.__iouJourneyPromptProbe = state;
-    window.prompt = (message) => {
+    if (root.__iouJourneyPromptProbe !== undefined) return false;
+    const overridePrompt = (message) => {
       state.promptCalls++;
       state.prompts.push(String(message ?? ""));
       return ${response};
     };
+    const state = {
+      originalPrompt: window.prompt,
+      overridePrompt,
+      promptCalls: 0,
+      prompts: [],
+    };
+    root.__iouJourneyPromptProbe = state;
+    window.prompt = overridePrompt;
+    if (window.prompt === overridePrompt) return true;
+    delete root.__iouJourneyPromptProbe;
+    return false;
   })()`);
+  if (!installed) throw new Error("manual prompt override could not be installed exactly");
 }
 
 async function readManualPromptProbe(page: Page): Promise<ManualPromptProbe> {
@@ -125,13 +137,19 @@ async function readManualPromptProbe(page: Page): Promise<ManualPromptProbe> {
 }
 
 async function removeManualPromptOverride(page: Page): Promise<void> {
-  await page.evaluate(`(() => {
+  const outcome = await page.evaluate<"missing" | "restored" | "detached">(`(() => {
     const root = globalThis;
     const state = root.__iouJourneyPromptProbe;
-    if (!state) return;
-    window.prompt = state.originalPrompt;
+    if (!state) return "missing";
+    const ownsOverride = window.prompt === state.overridePrompt;
+    if (ownsOverride) window.prompt = state.originalPrompt;
     delete root.__iouJourneyPromptProbe;
+    return ownsOverride ? "restored" : "detached";
   })()`);
+  if (outcome === "missing") throw new Error("manual prompt override state was missing");
+  if (outcome === "detached") {
+    throw new Error("manual prompt override identity changed; current window.prompt was preserved");
+  }
 }
 
 type ImageModelReadiness = {
@@ -358,6 +376,12 @@ type LoadedRunCard = {
 
 type ChatMessageRef = StableMessageRef;
 
+type StableMessageBaseline = Readonly<{
+  messageIds: ReadonlySet<string>;
+  maxMessageIndex: number;
+  maxEventIndex: number;
+}>;
+
 type RunCardCorrelation = Readonly<{
   expectedSource?: ChatMessageRef;
   expectedMessage?: ChatMessageRef;
@@ -366,16 +390,67 @@ type RunCardCorrelation = Readonly<{
 
 type SourceMessageEvidence =
   | { kind: "text"; exactText: string }
-  | { kind: "image"; exactContent: ExactImageContentEvidence };
+  | {
+      kind: "image";
+      exactContent: ExactImageContentEvidence;
+      exactDraftUrl: string;
+    };
+
+type ExactDraftSelectionBoundary = Readonly<{
+  footerMarker: string;
+  messageIds: readonly string[];
+  messageInventoryDigest: string;
+}>;
+
+type ExactPartialDraftBinding = ExactDraftSelectionBoundary &
+  Readonly<{
+    draftUrl: string;
+  }>;
+
+type ExactDraftImageBinding = ExactPartialDraftBinding &
+  Readonly<{
+    exactContent: ExactImageContentEvidence;
+  }>;
+
+type ExactOptimisticSourceBinding = Readonly<{
+  boundMessage: ChatMessageRef;
+  boundDraftUrl: string;
+}>;
+
+type ExactSourceMessageEvidence = Readonly<{
+  kind: "source";
+  evidence: SourceMessageEvidence;
+  optimisticBinding?: ExactOptimisticSourceBinding;
+}>;
+
+type ExactCardMessageEvidence = Readonly<{
+  kind: "card";
+  observerId: string;
+  boundMessage: ChatMessageRef;
+  boundExactNote: string;
+}>;
 
 type ExactMessageEvidence =
-  | { kind: "source"; evidence: SourceMessageEvidence }
-  | { kind: "card"; observerId: string; exactNote: string };
+  | ExactSourceMessageEvidence
+  | ExactCardMessageEvidence;
+
+type ExactMessageDeletionTarget = Readonly<{
+  message: ChatMessageRef;
+  evidence: ExactMessageEvidence;
+}>;
+
+type NonceBoundRunCard = LoadedRunCard &
+  Readonly<{
+    deletionEvidence: ExactCardMessageEvidence;
+  }>;
 
 const MESSAGE_WRAPPER_SELECTOR = '[data-id][data-index][id^="event-"]';
 const ATTACHMENT_IMAGE_SELECTOR =
   '.img-wrapper > img.unzoomed:not(.draft), .regular_image_content img.image:not(.draft)';
 const MESSAGE_DELETED_TEXT = /^Message deleted by .+ on .+$/i;
+const DRAFT_FOOTER_MARKER_ATTRIBUTE = "data-iou-journey-draft-footer";
+const CLOSE_ICON_PATH =
+  "M19,6.41L17.59,5L12,10.59L6.41,5L5,6.41L10.59,12L5,17.59L6.41,19L12,13.41L17.59,19L19,17.59L13.41,12L19,6.41Z";
 
 function exactMessageWrapper(page: Page, message: ChatMessageRef): Locator {
   return page.locator(
@@ -402,16 +477,101 @@ async function messageRefFromWrapper(wrapper: Locator, label: string): Promise<C
   };
 }
 
-async function captureMessageIdBaseline(page: Page): Promise<Set<string>> {
-  const ids = await page.locator(MESSAGE_WRAPPER_SELECTOR).evaluateAll((wrappers) => {
-    const result: string[] = [];
+async function captureStableMessageBaseline(page: Page): Promise<StableMessageBaseline> {
+  const observed = await page.locator(MESSAGE_WRAPPER_SELECTOR).evaluateAll((wrappers) => {
+    const records: Array<{ messageId: string; messageIndex: number; eventIndex: number }> = [];
+    let invalid = 0;
     for (const wrapper of wrappers) {
-      const id = wrapper.getAttribute("data-id");
-      if (id !== null && /^\d+$/.test(id)) result.push(id);
+      const messageId = wrapper.getAttribute("data-id") ?? "";
+      const rawMessageIndex = wrapper.getAttribute("data-index") ?? "";
+      const event = /^event-(\d+)$/.exec(wrapper.getAttribute("id") ?? "");
+      if (!/^\d+$/.test(messageId) || !/^\d+$/.test(rawMessageIndex) || event === null) {
+        invalid++;
+        continue;
+      }
+      const messageIndex = Number(rawMessageIndex);
+      const eventIndex = Number(event[1]);
+      if (!Number.isSafeInteger(messageIndex) || !Number.isSafeInteger(eventIndex)) {
+        invalid++;
+        continue;
+      }
+      records.push({ messageId, messageIndex, eventIndex });
     }
-    return result;
+    return { records, invalid };
   });
-  return new Set(ids);
+  if (observed.invalid !== 0) {
+    throw new Error(`source baseline contains ${observed.invalid} invalid stable message wrapper(s)`);
+  }
+  return {
+    messageIds: new Set(observed.records.map((record) => record.messageId)),
+    maxMessageIndex: observed.records.reduce(
+      (maximum, record) => Math.max(maximum, record.messageIndex),
+      -1,
+    ),
+    maxEventIndex: observed.records.reduce(
+      (maximum, record) => Math.max(maximum, record.eventIndex),
+      -1,
+    ),
+  };
+}
+
+async function captureMessageIdBaseline(page: Page): Promise<Set<string>> {
+  return new Set((await captureStableMessageBaseline(page)).messageIds);
+}
+
+async function captureExactMessageInventoryDigest(page: Page): Promise<string> {
+  const records = await page.locator(MESSAGE_WRAPPER_SELECTOR).evaluateAll(
+    (wrappers, { textSelector, attachmentSelector }) => {
+      const result: string[] = [];
+      for (const wrapper of wrappers as HTMLElement[]) {
+        const texts: string[] = [];
+        for (const node of wrapper.querySelectorAll<HTMLElement>(textSelector)) {
+          const normalized = node.innerText.replace(/\s+/g, " ").trim();
+          if (normalized !== "") texts.push(normalized);
+        }
+        texts.sort();
+
+        const attachmentUrls: string[] = [];
+        for (const image of wrapper.querySelectorAll<HTMLImageElement>(attachmentSelector)) {
+          attachmentUrls.push(image.src);
+        }
+        attachmentUrls.sort();
+
+        const cardIdentities: string[] = [];
+        for (const card of wrapper.querySelectorAll<HTMLElement>(".action-card")) {
+          const title = card.querySelector(".title")?.textContent?.replace(/\s+/g, " ").trim() ?? "";
+          const appName =
+            card.querySelector(".app-name")?.textContent?.replace(/\s+/g, " ").trim() ?? "";
+          cardIdentities.push(`${title}\u0000${appName}`);
+        }
+        cardIdentities.sort();
+
+        result.push(
+          JSON.stringify({
+            messageId: wrapper.dataset.id ?? "",
+            messageIndex: wrapper.dataset.index ?? "",
+            eventId: wrapper.id,
+            senderOwned:
+              wrapper.classList.contains("me") ||
+              (wrapper.classList.contains("container") &&
+                getComputedStyle(wrapper).justifyContent === "flex-end"),
+            texts,
+            attachmentUrls,
+            cardIdentities,
+          }),
+        );
+      }
+      result.sort();
+      return result;
+    },
+    {
+      textSelector: OPENCHAT_MESSAGE_TEXT_SELECTOR,
+      attachmentSelector: ATTACHMENT_IMAGE_SELECTOR,
+    },
+  );
+  const bytes = new TextEncoder().encode(JSON.stringify(records));
+  const hash = new Uint8Array(await webcrypto.subtle.digest("SHA-256", bytes));
+  return [...hash].map((byte) => byte.toString(16).padStart(2, "0")).join("");
 }
 
 async function digestImageResource(
@@ -471,14 +631,370 @@ async function digestUploadedAttachmentImage(
   return digestImageResource(page, url, true, label);
 }
 
-async function captureExactDraftImageContent(page: Page): Promise<ExactImageContentEvidence> {
-  const image = await exactlyOneVisible(
+async function assertNoPreexistingDraftAttachment(page: Page, composer: Locator): Promise<void> {
+  const visibleDraftMedia = await visibleMatches(
+    page.locator(
+      ".footer img.draft, .footer video.draft, .footer audio.draft, .footer a.draft, .footer .draft-container .msg-preview",
+    ),
+  );
+  const visibleAttachmentStates = await visibleMatches(
+    page.locator(".footer .message_entry_wrapper.has_attachment"),
+  );
+  if (visibleDraftMedia.length !== 0 || visibleAttachmentStates.length !== 0) {
+    throw new Error(
+      `image journey refuses to replace a pre-existing draft attachment (${visibleDraftMedia.length} media/${visibleAttachmentStates.length} mobile states)`,
+    );
+  }
+  if ((await composer.innerText()).replace(/\s+/g, " ").trim() !== "") {
+    throw new Error("image journey requires an empty composer before selecting its attachment");
+  }
+}
+
+async function prepareExactDraftAttachmentSelection(
+  page: Page,
+  composer: Locator,
+  footerMarker: string,
+): Promise<ExactDraftSelectionBoundary> {
+  await assertNoPreexistingDraftAttachment(page, composer);
+  if (!/^[a-z0-9-]+$/i.test(footerMarker)) {
+    throw new Error("image journey draft footer marker is invalid");
+  }
+  if ((await page.locator(`[${DRAFT_FOOTER_MARKER_ATTRIBUTE}]`).count()) !== 0) {
+    throw new Error("image journey found a pre-existing draft footer marker");
+  }
+  const footer = composer.locator(
+    'xpath=ancestor::*[contains(concat(" ", normalize-space(@class), " "), " footer ")][1]',
+  );
+  if ((await footer.count()) !== 1 || !(await footer.isVisible())) {
+    throw new Error("image journey composer is not attached to one visible footer");
+  }
+  const composers = await visibleMatches(footer.locator(".ProseMirror"));
+  if (composers.length !== 1) {
+    throw new Error(`image journey footer contains ${composers.length} visible composers`);
+  }
+  const expectedComposer = await composer.elementHandle();
+  if (expectedComposer === null) throw new Error("image journey composer detached before binding");
+  let sameComposer = false;
+  try {
+    sameComposer = await composers[0].evaluate((node, expected) => node === expected, expectedComposer);
+  } finally {
+    await expectedComposer.dispose();
+  }
+  if (!sameComposer) throw new Error("image journey selected composer changed exact footer identity");
+
+  const messageIds = [...(await captureMessageIdBaseline(page))].sort();
+  const messageInventoryDigest = await captureExactMessageInventoryDigest(page);
+  await footer.evaluate(
+    (node, { attribute, footerMarker }) => {
+      if (node.hasAttribute(attribute)) throw new Error("draft footer marker already exists");
+      node.setAttribute(attribute, footerMarker);
+    },
+    { attribute: DRAFT_FOOTER_MARKER_ATTRIBUTE, footerMarker },
+  );
+  return { footerMarker, messageIds, messageInventoryDigest };
+}
+
+async function installExactDraftBlobCapture(page: Page): Promise<void> {
+  // A blob URL can be rendered by an <img> while fetch(blobUrl) from an automation evaluation
+  // realm is rejected. Capture the exact processed Blob at its creation point instead. This hook
+  // is installed only around file selection and is restored before the message is sent.
+  const installed = await page.evaluate<boolean>(`(() => {
+    const root = globalThis;
+    if (root.__iouExactDraftBlobCapture !== undefined) return false;
+    const originalCreateObjectURL = URL.createObjectURL;
+    const captured = new Map();
+    const state = {
+      active: true,
+      originalCreateObjectURL,
+      captureCreateObjectURL: undefined,
+      captured,
+    };
+    const captureCreateObjectURL = function (object) {
+      const url = originalCreateObjectURL.call(URL, object);
+      if (state.active && object instanceof Blob) captured.set(url, object);
+      return url;
+    };
+    state.captureCreateObjectURL = captureCreateObjectURL;
+    root.__iouExactDraftBlobCapture = state;
+    URL.createObjectURL = captureCreateObjectURL;
+    if (URL.createObjectURL !== captureCreateObjectURL) {
+      state.active = false;
+      captured.clear();
+      delete root.__iouExactDraftBlobCapture;
+      return false;
+    }
+    return true;
+  })()`);
+  if (!installed) throw new Error("image journey draft Blob capture was already installed");
+}
+
+async function retainExactPartialDraftBinding(
+  page: Page,
+  binding: ExactDraftSelectionBoundary,
+): Promise<ExactPartialDraftBinding> {
+  const exactDraft = await exactlyOneVisible(
     page.locator('img.draft[src^="blob:"]'),
     "image journey draft attachment",
     15_000,
   );
-  const draftUrl = await image.evaluate((node) => (node as HTMLImageElement).src);
-  return digestImageResource(page, draftUrl, false, "image journey draft attachment");
+  const draftUrl = await exactDraft.evaluate((node) => (node as HTMLImageElement).src);
+  if (!draftUrl.startsWith("blob:")) throw new Error("selected image draft URL is not a blob URL");
+  const markedFooters = await visibleMatches(
+    page.locator(
+      `[${DRAFT_FOOTER_MARKER_ATTRIBUTE}=${JSON.stringify(binding.footerMarker)}]`,
+    ),
+  );
+  if (markedFooters.length !== 1) {
+    throw new Error(`selected image draft has ${markedFooters.length} exact marked footers`);
+  }
+  const footer = exactDraft.locator(
+    `xpath=ancestor::*[@${DRAFT_FOOTER_MARKER_ATTRIBUTE}=${JSON.stringify(binding.footerMarker)}][1]`,
+  );
+  if ((await footer.count()) !== 1 || !(await footer.isVisible())) {
+    throw new Error("selected image draft left its exact marked footer");
+  }
+  const composers = await visibleMatches(footer.locator(".ProseMirror"));
+  if (
+    composers.length !== 1 ||
+    (await composers[0].innerText()).replace(/\s+/g, " ").trim() !== ""
+  ) {
+    throw new Error("selected image draft does not share one empty composer in its exact footer");
+  }
+  const observedMessageIds = await captureMessageIdBaseline(page);
+  const observedDigest = await captureExactMessageInventoryDigest(page);
+  if (
+    !matchesExactMessageInventory({
+      expectedMessageIds: binding.messageIds,
+      observedMessageIds,
+      expectedDigest: binding.messageInventoryDigest,
+      observedDigest,
+    })
+  ) {
+    throw new Error("message inventory changed while binding the selected image draft");
+  }
+  return { ...binding, draftUrl };
+}
+
+async function captureExactDraftImageContent(
+  page: Page,
+  binding: ExactPartialDraftBinding,
+): Promise<ExactDraftImageBinding> {
+  const images = await visibleMatches(page.locator('img.draft[src^="blob:"]'));
+  const exactImages: Locator[] = [];
+  for (const image of images) {
+    if ((await image.evaluate((node) => (node as HTMLImageElement).src)) === binding.draftUrl) {
+      exactImages.push(image);
+    }
+  }
+  if (exactImages.length !== 1) {
+    throw new Error(
+      `image journey exact draft attachment is ambiguous (${exactImages.length} matches)`,
+    );
+  }
+  await exactImages[0].evaluate((node) => (node as HTMLImageElement).decode());
+  const draftUrl = binding.draftUrl;
+  try {
+    const exactContent = await page.evaluate<ExactImageContentEvidence>(`(async () => {
+      const resourceUrl = ${JSON.stringify(draftUrl)};
+      const state = globalThis.__iouExactDraftBlobCapture;
+      if (state === undefined) throw new Error("draft Blob capture is unavailable");
+      const blob = state.captured.get(resourceUrl);
+      if (!(blob instanceof Blob)) throw new Error("visible draft URL was not captured exactly");
+      const bytes = await blob.arrayBuffer();
+      if (bytes.byteLength === 0) throw new Error("empty image body");
+      const mimeType = blob.type.split(";", 1)[0].trim().toLocaleLowerCase("en-US");
+      if (!mimeType.startsWith("image/")) throw new Error("missing image MIME type");
+      const hash = new Uint8Array(await crypto.subtle.digest("SHA-256", bytes));
+      return {
+        sha256: [...hash].map((byte) => byte.toString(16).padStart(2, "0")).join(""),
+        byteLength: bytes.byteLength,
+        mimeType,
+      };
+    })()`);
+    return { ...binding, exactContent };
+  } catch (error) {
+    throw new Error(
+      `image journey draft attachment: exact processed image bytes could not be verified: ${(error as Error).message}`,
+    );
+  }
+}
+
+async function removeExactDraftBlobCapture(page: Page): Promise<void> {
+  await page.evaluate(`(() => {
+    const root = globalThis;
+    const state = root.__iouExactDraftBlobCapture;
+    if (state === undefined) return "missing";
+    const ownsHook = URL.createObjectURL === state.captureCreateObjectURL;
+    state.active = false;
+    if (ownsHook) URL.createObjectURL = state.originalCreateObjectURL;
+    state.captured.clear();
+    delete root.__iouExactDraftBlobCapture;
+    return ownsHook ? "restored" : "detached";
+  })()`);
+}
+
+async function clearExactUnsentDraftAttachment(
+  page: Page,
+  binding: ExactPartialDraftBinding,
+): Promise<boolean> {
+  if (
+    !/^blob:/.test(binding.draftUrl) ||
+    !/^[a-z0-9-]+$/i.test(binding.footerMarker) ||
+    binding.messageIds.length !== new Set(binding.messageIds).size ||
+    !/^[0-9a-f]{64}$/.test(binding.messageInventoryDigest)
+  ) {
+    throw new Error("exact unsent draft binding is invalid");
+  }
+  const exactVisibleDrafts = async (): Promise<Locator[]> => {
+    const candidates = await visibleMatches(page.locator('img.draft[src^="blob:"]'));
+    const matches: Locator[] = [];
+    for (const candidate of candidates) {
+      if ((await candidate.evaluate((node) => (node as HTMLImageElement).src)) === binding.draftUrl) {
+        matches.push(candidate);
+      }
+    }
+    return matches;
+  };
+  const drafts = await exactVisibleDrafts();
+  if (drafts.length > 1) {
+    throw new Error(`exact unsent image draft is ambiguous (${drafts.length} visible matches)`);
+  }
+  const allImageDrafts = await visibleMatches(page.locator('img.draft[src^="blob:"]'));
+  if (drafts.length === 1 && allImageDrafts.length !== 1) {
+    throw new Error(
+      `exact unsent image draft is not the sole visible image draft (${allImageDrafts.length} total)`,
+    );
+  }
+
+  const markedFooters = await visibleMatches(
+    page.locator(
+      `[${DRAFT_FOOTER_MARKER_ATTRIBUTE}=${JSON.stringify(binding.footerMarker)}]`,
+    ),
+  );
+  if (markedFooters.length !== 1) {
+    throw new Error(`exact unsent image draft has ${markedFooters.length} marked footers`);
+  }
+  const footer = markedFooters[0];
+  const composers = await visibleMatches(footer.locator(".ProseMirror"));
+  if (composers.length !== 1) {
+    throw new Error(
+      `exact image draft and composer are not in the same exact footer (${composers.length} composers)`,
+    );
+  }
+  if ((await composers[0].innerText()).replace(/\s+/g, " ").trim() !== "") {
+    throw new Error("image draft composer is not empty; refusing attachment-only cleanup");
+  }
+
+  const currentMessageIds = await captureMessageIdBaseline(page);
+  const currentMessageDigest = await captureExactMessageInventoryDigest(page);
+  if (
+    !matchesExactMessageInventory({
+      expectedMessageIds: binding.messageIds,
+      observedMessageIds: currentMessageIds,
+      expectedDigest: binding.messageInventoryDigest,
+      observedDigest: currentMessageDigest,
+    })
+  ) {
+    throw new Error("message inventory changed after the exact image draft was bound");
+  }
+  if (drafts.length === 0) return false;
+
+  const exactDraft = drafts[0];
+  const exactMarkedFooter = exactDraft.locator(
+    `xpath=ancestor::*[@${DRAFT_FOOTER_MARKER_ATTRIBUTE}=${JSON.stringify(binding.footerMarker)}][1]`,
+  );
+  if ((await exactMarkedFooter.count()) !== 1) {
+    throw new Error("exact unsent image draft is not attached to its same exact footer");
+  }
+  const mobileContainer = exactDraft.locator(
+    'xpath=ancestor::*[contains(concat(" ", normalize-space(@class), " "), " message_entry_wrapper ") and contains(concat(" ", normalize-space(@class), " "), " has_attachment ")][1]',
+  );
+  const visibleMobileContainers = await visibleMatches(mobileContainer);
+  if (visibleMobileContainers.length > 1) {
+    throw new Error("exact unsent image draft has ambiguous mobile attachment containers");
+  }
+  const mobileControls =
+    visibleMobileContainers.length === 1
+      ? await visibleMatches(
+          visibleMobileContainers[0].locator(".close > button.icon_button[type=button]"),
+        )
+      : [];
+  const classicControls = await visibleMatches(
+    footer.locator(".open-draw > div[role=button]"),
+  );
+  const controls = [...mobileControls, ...classicControls];
+  if (controls.length !== 1) {
+    throw new Error(
+      `expected one exact draft-removal control, found ${mobileControls.length} mobile/${classicControls.length} classic`,
+    );
+  }
+  const exactClosePath = controls[0].locator(
+    `:scope > svg > path[d="${CLOSE_ICON_PATH}"]`,
+  );
+  if (
+    (await exactClosePath.count()) !== 1 ||
+    (await controls[0].locator(":scope > svg > path").count()) !== 1
+  ) {
+    throw new Error("exact draft-removal control does not contain only the canonical Close icon");
+  }
+  await controls[0].click({ timeout: 10_000 });
+
+  const deadline = Date.now() + 5_000;
+  while (Date.now() < deadline) {
+    const remainingDrafts = await exactVisibleDrafts();
+    const mobileAttachmentState = await visibleMatches(
+      footer.locator(".message_entry_wrapper.has_attachment"),
+    );
+    if (remainingDrafts.length === 0 && mobileAttachmentState.length === 0) break;
+    await page.waitForTimeout(100);
+  }
+  if (
+    (await exactVisibleDrafts()).length !== 0 ||
+    (await visibleMatches(footer.locator(".message_entry_wrapper.has_attachment"))).length !== 0
+  ) {
+    throw new Error("unsent draft attachment remained visible after exact removal");
+  }
+  const afterComposers = await visibleMatches(footer.locator(".ProseMirror"));
+  if (
+    afterComposers.length !== 1 ||
+    (await afterComposers[0].innerText()).replace(/\s+/g, " ").trim() !== ""
+  ) {
+    throw new Error("same-footer composer changed while removing an unsent draft");
+  }
+  const afterMessageIds = await captureMessageIdBaseline(page);
+  const afterMessageDigest = await captureExactMessageInventoryDigest(page);
+  if (
+    !matchesExactMessageInventory({
+      expectedMessageIds: binding.messageIds,
+      observedMessageIds: afterMessageIds,
+      expectedDigest: binding.messageInventoryDigest,
+      observedDigest: afterMessageDigest,
+    })
+  ) {
+    throw new Error("message inventory changed while removing an unsent draft");
+  }
+  return true;
+}
+
+async function removeExactDraftFooterMarker(
+  page: Page,
+  boundary: ExactDraftSelectionBoundary,
+): Promise<void> {
+  const marked = page.locator(
+    `[${DRAFT_FOOTER_MARKER_ATTRIBUTE}=${JSON.stringify(boundary.footerMarker)}]`,
+  );
+  const count = await marked.count();
+  if (count === 0) return;
+  if (count !== 1) throw new Error(`draft footer marker is ambiguous (${count} matches)`);
+  await marked.evaluate(
+    (node, { attribute, footerMarker }) => {
+      if (node.getAttribute(attribute) !== footerMarker) {
+        throw new Error("draft footer marker identity changed");
+      }
+      node.removeAttribute(attribute);
+    },
+    { attribute: DRAFT_FOOTER_MARKER_ATTRIBUTE, footerMarker: boundary.footerMarker },
+  );
 }
 
 async function sendJourneySource(
@@ -498,14 +1014,34 @@ async function sendJourneySource(
   await page.keyboard.press("Enter");
 }
 
+type FreshSourceScanCandidate = FreshSourceCandidate &
+  Readonly<{
+    exactOptimisticBindingMatches: number;
+  }>;
+
+type SentImageDomState = Readonly<{
+  attributeSrc: string;
+  src: string;
+  currentSrc: string;
+  complete: boolean;
+  naturalWidth: number;
+  naturalHeight: number;
+}>;
+
 async function freshSourceCandidates(
   page: Page,
   evidence: SourceMessageEvidence,
-  baselineMessageIds: ReadonlySet<string>,
-): Promise<FreshSourceCandidate[]> {
+  baseline: StableMessageBaseline,
+): Promise<FreshSourceScanCandidate[]> {
   const domCandidates = await page.locator(MESSAGE_WRAPPER_SELECTOR).evaluateAll(
     (wrappers, { evidence, textSelector, attachmentSelector }) => {
-      const candidates: Array<FreshSourceCandidate & { attachmentUrls: string[] }> = [];
+      const candidates: Array<
+        FreshSourceCandidate & {
+          attachmentStates: SentImageDomState[];
+          captionTextCount: number;
+          exactOptimisticBindingMatches: number;
+        }
+      > = [];
       for (const wrapper of wrappers as HTMLElement[]) {
         const messageId = wrapper.dataset.id ?? "";
         const rawMessageIndex = wrapper.dataset.index ?? "";
@@ -524,23 +1060,63 @@ async function freshSourceCandidates(
             }
           }
         }
+        let captionTextCount = 0;
+        if (evidence.kind === "image") {
+          for (const node of wrapper.querySelectorAll<HTMLElement>(textSelector)) {
+            if (
+              node.classList.contains("markdown-wrapper") &&
+              node.closest(".message_text") !== null
+            )
+              continue;
+            if (node.innerText.replace(/\s+/g, " ").trim() !== "") captionTextCount++;
+          }
+        }
         const classicOwned =
           wrapper.classList.contains("message") && wrapper.classList.contains("me");
         const mobileOwned =
           wrapper.classList.contains("container") &&
           getComputedStyle(wrapper).justifyContent === "flex-end";
+        const attachmentStates =
+          evidence.kind === "image"
+            ? [...wrapper.querySelectorAll<HTMLImageElement>(attachmentSelector)].map((image) => {
+                const rawAttributeSrc = image.getAttribute("src") ?? "";
+                let attributeSrc = "";
+                if (rawAttributeSrc !== "") {
+                  try {
+                    attributeSrc = new URL(rawAttributeSrc, document.baseURI).href;
+                  } catch {
+                    attributeSrc = rawAttributeSrc;
+                  }
+                }
+                return {
+                  attributeSrc,
+                  src: image.src,
+                  currentSrc: image.currentSrc,
+                  complete: image.complete,
+                  naturalWidth: image.naturalWidth,
+                  naturalHeight: image.naturalHeight,
+                };
+              })
+            : [];
         candidates.push({
           messageId,
           messageIndex: Number(rawMessageIndex),
           eventIndex: Number(eventMatch?.[1]),
           senderOwned: classicOwned || mobileOwned,
-          attachmentUrls:
-            evidence.kind === "image"
-              ? [...wrapper.querySelectorAll<HTMLImageElement>(attachmentSelector)].map(
-                  (image) => image.src,
-                )
-              : [],
+          attachmentStates,
+          captionTextCount,
           exactEvidenceMatches,
+          exactOptimisticBindingMatches:
+            evidence.kind === "image" &&
+            attachmentStates.length === 1 &&
+            attachmentStates[0].attributeSrc === evidence.exactDraftUrl &&
+            attachmentStates[0].src === evidence.exactDraftUrl &&
+            attachmentStates[0].currentSrc === evidence.exactDraftUrl &&
+            attachmentStates[0].complete &&
+            attachmentStates[0].naturalWidth > 0 &&
+            attachmentStates[0].naturalHeight > 0
+              ? 1
+              : 0,
         });
       }
       return candidates;
@@ -552,9 +1128,11 @@ async function freshSourceCandidates(
     },
   );
 
-  const candidates: FreshSourceCandidate[] = [];
+  const candidates: FreshSourceScanCandidate[] = [];
   for (const candidate of domCandidates) {
-    if (baselineMessageIds.has(candidate.messageId)) continue;
+    if (baseline.messageIds.has(candidate.messageId)) continue;
+    if (candidate.messageIndex <= baseline.maxMessageIndex) continue;
+    if (candidate.eventIndex <= baseline.maxEventIndex) continue;
     if (!candidate.senderOwned) continue;
     if (evidence.kind === "text") {
       candidates.push({
@@ -563,33 +1141,64 @@ async function freshSourceCandidates(
         eventIndex: candidate.eventIndex,
         senderOwned: candidate.senderOwned,
         exactEvidenceMatches: candidate.exactEvidenceMatches,
+        exactOptimisticBindingMatches: 0,
       });
       continue;
     }
-    if (candidate.attachmentUrls.length > 1) {
-      throw new Error("fresh source has multiple attachment images; refusing ambiguity");
-    }
-    if (candidate.attachmentUrls.length === 0 || candidate.attachmentUrls[0].startsWith("blob:")) {
+    if (candidate.captionTextCount !== 0) {
       candidates.push({
         messageId: candidate.messageId,
         messageIndex: candidate.messageIndex,
         eventIndex: candidate.eventIndex,
         senderOwned: true,
         exactEvidenceMatches: 0,
+        exactOptimisticBindingMatches: 0,
+      });
+      continue;
+    }
+    if (candidate.attachmentStates.length > 1) {
+      throw new Error("fresh source has multiple attachment images; refusing ambiguity");
+    }
+    if (candidate.attachmentStates.length === 0) {
+      candidates.push({
+        messageId: candidate.messageId,
+        messageIndex: candidate.messageIndex,
+        eventIndex: candidate.eventIndex,
+        senderOwned: true,
+        exactEvidenceMatches: 0,
+        exactOptimisticBindingMatches: 0,
+      });
+      continue;
+    }
+    const readiness = classifySentImageResource(candidate.attachmentStates[0]);
+    if (readiness.kind === "pending") {
+      candidates.push({
+        messageId: candidate.messageId,
+        messageIndex: candidate.messageIndex,
+        eventIndex: candidate.eventIndex,
+        senderOwned: true,
+        exactEvidenceMatches: 0,
+        exactOptimisticBindingMatches: candidate.exactOptimisticBindingMatches,
       });
       continue;
     }
     const observed = await digestUploadedAttachmentImage(
       page,
-      candidate.attachmentUrls[0],
+      readiness.url,
       `fresh source ${candidate.messageId}`,
     );
+    if (!matchesExactImageContentEvidence(evidence.exactContent, observed)) {
+      throw new Error(
+        `fresh source ${candidate.messageId}: uploaded image bytes do not match the exact draft`,
+      );
+    }
     candidates.push({
       messageId: candidate.messageId,
       messageIndex: candidate.messageIndex,
       eventIndex: candidate.eventIndex,
       senderOwned: true,
-      exactEvidenceMatches: matchesExactImageContentEvidence(evidence.exactContent, observed) ? 1 : 0,
+      exactEvidenceMatches: 1,
+      exactOptimisticBindingMatches: candidate.exactOptimisticBindingMatches,
     });
   }
   return candidates;
@@ -598,23 +1207,59 @@ async function freshSourceCandidates(
 async function captureFreshSourceMessage(
   page: Page,
   evidence: SourceMessageEvidence,
-  baselineIds: ReadonlySet<string>,
+  baseline: StableMessageBaseline,
   who: string,
   timeoutMs = 15_000,
+  onExactOptimisticBinding?: (message: ChatMessageRef) => void,
 ): Promise<ChatMessageRef> {
   const deadline = Date.now() + timeoutMs;
+  let exactOptimisticMessage: ChatMessageRef | null = null;
   while (Date.now() < deadline) {
-    const candidates = await freshSourceCandidates(page, evidence, baselineIds);
+    const candidates = await freshSourceCandidates(page, evidence, baseline);
+    if (evidence.kind === "image") {
+      let optimistic: ChatMessageRef | null;
+      try {
+        optimistic = selectFreshOwnedSourceCandidate({
+          candidates: candidates.map((candidate) => ({
+            ...candidate,
+            exactEvidenceMatches: candidate.exactOptimisticBindingMatches,
+          })),
+          baselineMessageIds: baseline.messageIds,
+          baselineMaxMessageIndex: baseline.maxMessageIndex,
+          baselineMaxEventIndex: baseline.maxEventIndex,
+        });
+      } catch (error) {
+        throw new Error(`[${who}] ${(error as Error).message}; refusing optimistic ambiguity`);
+      }
+      if (optimistic !== null) {
+        if (
+          exactOptimisticMessage !== null &&
+          !sameStableMessage(exactOptimisticMessage, optimistic)
+        ) {
+          throw new Error(`[${who}] exact optimistic source coordinates changed`);
+        }
+        exactOptimisticMessage = optimistic;
+        onExactOptimisticBinding?.(optimistic);
+      }
+    }
     let message: ChatMessageRef | null;
     try {
       message = selectFreshOwnedSourceCandidate({
         candidates,
-        baselineMessageIds: baselineIds,
+        baselineMessageIds: baseline.messageIds,
+        baselineMaxMessageIndex: baseline.maxMessageIndex,
+        baselineMaxEventIndex: baseline.maxEventIndex,
       });
     } catch (error) {
       throw new Error(`[${who}] ${(error as Error).message}; refusing ambiguity`);
     }
     if (message !== null) {
+      if (
+        exactOptimisticMessage !== null &&
+        !sameStableMessage(exactOptimisticMessage, message)
+      ) {
+        throw new Error(`[${who}] uploaded source differs from its exact optimistic binding`);
+      }
       if ((await exactMessageWrapper(page, message).count()) !== 1) {
         throw new Error(`[${who}] fresh Journey message coordinates are not unique`);
       }
@@ -666,9 +1311,9 @@ function messageRefKey(message: ChatMessageRef): string {
   return `${message.messageId}/${message.messageIndex}/${message.eventIndex}`;
 }
 
-function rememberRunCards(
-  tracked: Map<string, LoadedRunCard>,
-  cards: readonly LoadedRunCard[],
+function rememberRunCards<T extends LoadedRunCard>(
+  tracked: Map<string, T>,
+  cards: readonly T[],
   who: string,
 ): void {
   for (const card of cards) {
@@ -683,7 +1328,12 @@ function rememberRunCards(
   }
 }
 
-async function cardLocatorHasExactRunNote(card: Locator, exactNote: string): Promise<boolean> {
+type CurrentCardEvidence = "match" | "mismatch" | "unavailable";
+
+async function cardLocatorExactRunNoteState(
+  card: Locator,
+  exactNote: string,
+): Promise<CurrentCardEvidence> {
   const publicRows = card.locator("table.rows tr");
   const publicRowCount = await publicRows.count();
   let publicNoteRows = 0;
@@ -699,14 +1349,18 @@ async function cardLocatorHasExactRunNote(card: Locator, exactNote: string): Pro
   }
   if (publicNoteRows > 0) {
     if (publicNoteRows > 1) throw new Error("card has ambiguous public Note rows");
-    return publicMatches === 1;
+    return publicMatches === 1 ? "match" : "mismatch";
   }
 
   const iframeCount = await card.locator("iframe").count();
-  if (iframeCount !== 1) return false;
+  if (iframeCount !== 1) return "unavailable";
   const note = card.frameLocator("iframe").getByLabel("Note", { exact: true });
-  if ((await note.count().catch(() => 0)) !== 1) return false;
-  return (await note.inputValue().catch(() => "")) === exactNote;
+  if ((await note.count().catch(() => 0)) !== 1) return "unavailable";
+  return (await note.inputValue().catch(() => "")) === exactNote ? "match" : "mismatch";
+}
+
+async function cardLocatorHasExactRunNote(card: Locator, exactNote: string): Promise<boolean> {
+  return (await cardLocatorExactRunNoteState(card, exactNote)) === "match";
 }
 
 async function cardHasExactRunNote(card: LoadedRunCard, exactNote: string): Promise<boolean> {
@@ -714,7 +1368,7 @@ async function cardHasExactRunNote(card: LoadedRunCard, exactNote: string): Prom
 }
 
 async function rememberNonceBoundRunCards(
-  tracked: Map<string, LoadedRunCard>,
+  tracked: Map<string, NonceBoundRunCard>,
   cards: readonly LoadedRunCard[],
   exactNote: string,
   who: string,
@@ -726,14 +1380,20 @@ async function rememberNonceBoundRunCards(
       );
       continue;
     }
-    rememberRunCards(tracked, [card], who);
+    const deletionEvidence: ExactCardMessageEvidence = {
+      kind: "card",
+      observerId: card.observerId,
+      boundMessage: { ...card.message },
+      boundExactNote: exactNote,
+    };
+    rememberRunCards(tracked, [{ ...card, deletionEvidence }], who);
   }
 }
 
-function uniqueTrackedRunCard(
-  tracked: ReadonlyMap<string, LoadedRunCard>,
+function uniqueTrackedRunCard<T extends LoadedRunCard>(
+  tracked: ReadonlyMap<string, T>,
   who: string,
-): LoadedRunCard | null {
+): T | null {
   if (tracked.size > 1) {
     throw new Error(`[${who}] ${tracked.size} nonce-exact run cards were found; refusing confirmation`);
   }
@@ -987,18 +1647,25 @@ async function exactlyOneVisible(locator: Locator, label: string, timeoutMs = 5_
   throw new Error(`${label}: no visible match appeared`);
 }
 
+async function blockingOpenChatOverlayCount(page: Page): Promise<number> {
+  return page.evaluate(`(() => [...document.querySelectorAll(".overlay")].filter((overlay) => {
+    const rect = overlay.getBoundingClientRect();
+    return getComputedStyle(overlay).pointerEvents !== "none" && rect.width > 0 && rect.height > 0;
+  }).length)()`);
+}
+
 async function dismissOpenChatOverlay(page: Page): Promise<void> {
-  for (let attempt = 0; attempt < 3; attempt++) {
-    const open = await page.evaluate(() => {
-      const overlay = document.querySelector("#masked_overlay");
-      return overlay instanceof HTMLElement && overlay.classList.contains("visible");
-    });
-    if (!open) return;
+  let remainingBlockingOverlays = await blockingOpenChatOverlayCount(page);
+  for (let attempt = 0; remainingBlockingOverlays > 0 && attempt < 8; attempt++) {
     await page.keyboard.press("Escape").catch(() => {});
-    await page.waitForTimeout(300);
+    await page.waitForTimeout(250);
+    remainingBlockingOverlays = await blockingOpenChatOverlayCount(page);
   }
-  const stillOpen = await page.locator("#masked_overlay.visible").isVisible().catch(() => false);
-  if (stillOpen) throw new Error("an existing OpenChat overlay could not be dismissed safely");
+  if (remainingBlockingOverlays > 0) {
+    throw new Error(
+      `${remainingBlockingOverlays} blocking OpenChat overlay(s) could not be dismissed`,
+    );
+  }
 }
 
 async function exactMessageEvidencePresent(
@@ -1012,17 +1679,69 @@ async function exactMessageEvidencePresent(
   if (wrapperCount === 0) return false;
   if (evidence.kind === "source") {
     if (evidence.evidence.kind === "image") {
-      const urls = await wrapper.locator(ATTACHMENT_IMAGE_SELECTOR).evaluateAll((nodes) =>
-        (nodes as HTMLImageElement[]).map((image) => image.src),
+      const captionTextCount = await wrapper.locator(OPENCHAT_MESSAGE_TEXT_SELECTOR).evaluateAll(
+        (nodes) => {
+          let count = 0;
+          for (const node of nodes as HTMLElement[]) {
+            if (
+              node.classList.contains("markdown-wrapper") &&
+              node.closest(".message_text") !== null
+            )
+              continue;
+            if (node.innerText.replace(/\s+/g, " ").trim() !== "") count++;
+          }
+          return count;
+        },
       );
-      if (urls.length !== 1) {
+      if (captionTextCount !== 0) return false;
+      const attachmentStates = await wrapper
+        .locator(ATTACHMENT_IMAGE_SELECTOR)
+        .evaluateAll((nodes) =>
+          (nodes as HTMLImageElement[]).map((image) => {
+            const rawAttributeSrc = image.getAttribute("src") ?? "";
+            let attributeSrc = "";
+            if (rawAttributeSrc !== "") {
+              try {
+                attributeSrc = new URL(rawAttributeSrc, document.baseURI).href;
+              } catch {
+                attributeSrc = rawAttributeSrc;
+              }
+            }
+            return {
+              attributeSrc,
+              src: image.src,
+              currentSrc: image.currentSrc,
+              complete: image.complete,
+              naturalWidth: image.naturalWidth,
+              naturalHeight: image.naturalHeight,
+            };
+          }),
+        );
+      if (attachmentStates.length !== 1) {
         throw new Error(
-          `message ${message.messageId}: expected one exact attachment image, found ${urls.length}`,
+          `message ${message.messageId}: expected one exact attachment image, found ${attachmentStates.length}`,
+        );
+      }
+      const readiness = classifySentImageResource(attachmentStates[0]);
+      if (readiness.kind === "pending") {
+        const binding = evidence.optimisticBinding;
+        const renderedBlobUrls = [
+          attachmentStates[0].attributeSrc,
+          attachmentStates[0].src,
+          attachmentStates[0].currentSrc,
+        ].filter((url) => url.startsWith("blob:"));
+        return (
+          binding !== undefined &&
+          binding.boundDraftUrl.startsWith("blob:") &&
+          binding.boundDraftUrl === evidence.evidence.exactDraftUrl &&
+          renderedBlobUrls.every((url) => url === binding.boundDraftUrl) &&
+          sameStableMessage(message, binding.boundMessage) &&
+          (await messageOwnedByCurrentUser(page, message))
         );
       }
       const observed = await digestUploadedAttachmentImage(
         page,
-        urls[0],
+        readiness.url,
         `message ${message.messageId}`,
       );
       return matchesExactImageContentEvidence(evidence.evidence.exactContent, observed);
@@ -1049,18 +1768,33 @@ async function exactMessageEvidencePresent(
   const cards = wrapper.locator(".action-card");
   const cardCount = await cards.count();
   if (cardCount > 1) throw new Error(`message ${message.messageId}: card evidence is ambiguous`);
-  if (cardCount === 0) return false;
-  const card = cards.first();
-  const currentObserverId = await card.getAttribute("data-iou-journey-card-id");
-  if (currentObserverId !== null && currentObserverId !== evidence.observerId) return false;
-  const identity = await card.evaluate((node) => ({
-    title: node.querySelector(".title")?.textContent?.replace(/\s+/g, " ").trim() ?? "",
-    appName: node.querySelector(".app-name")?.textContent?.replace(/\s+/g, " ").trim() ?? "",
-  }));
-  if (identity.title !== "Add to IOU" || identity.appName.toLocaleLowerCase("en-US") !== "iou") {
-    return false;
+  let currentIdentity: CurrentCardEvidence = "unavailable";
+  let currentNote: CurrentCardEvidence = "unavailable";
+  if (cardCount === 1) {
+    const card = cards.first();
+    const currentObserverId = await card.getAttribute("data-iou-journey-card-id");
+    if (currentObserverId !== null && currentObserverId !== evidence.observerId) return false;
+    const identity = await card.evaluate((node) => ({
+      title: node.querySelector(".title")?.textContent?.replace(/\s+/g, " ").trim() ?? "",
+      appName: node.querySelector(".app-name")?.textContent?.replace(/\s+/g, " ").trim() ?? "",
+    }));
+    currentIdentity =
+      identity.title === "Add to IOU" &&
+      identity.appName.toLocaleLowerCase("en-US") === "iou"
+        ? "match"
+        : "mismatch";
+    if (currentIdentity === "match") {
+      currentNote = await cardLocatorExactRunNoteState(card, evidence.boundExactNote);
+    }
   }
-  return cardLocatorHasExactRunNote(card, evidence.exactNote);
+  return retainsNonceBoundCardEvidence({
+    target: message,
+    boundMessage: evidence.boundMessage,
+    senderOwned: await messageOwnedByCurrentUser(page, message),
+    boundExactNote: evidence.boundExactNote,
+    currentIdentity,
+    currentNote,
+  });
 }
 
 async function exactMessageDeletionProven(
@@ -1118,6 +1852,7 @@ async function openOwnedMobileMessageMenu(page: Page, message: ChatMessageRef): 
     if (menus.length === 0) {
       const box = await trigger.boundingBox();
       if (!box) throw new Error(`message ${message.messageId}: mobile trigger has no bounds`);
+      await dismissOpenChatOverlay(page);
       const session = await page.context().newCDPSession(page);
       try {
         const point = { x: box.x + box.width / 2, y: box.y + box.height / 2 };
@@ -1142,6 +1877,46 @@ async function openOwnedMobileMessageMenu(page: Page, message: ChatMessageRef): 
     await page.waitForTimeout(1_200);
   }
   throw new Error(`message ${message.messageId}: exact mobile message menu did not open`);
+}
+
+async function refreshExactOpenChatDeletionBoundary(
+  page: Page,
+  targets: readonly ExactMessageDeletionTarget[],
+): Promise<void> {
+  if (targets.length === 0) return;
+  const exactChatUrl = page.url();
+  await page.reload({ waitUntil: "domcontentloaded" });
+  await page
+    .locator(".ProseMirror")
+    .first()
+    .waitFor({ state: "visible", timeout: 20_000 });
+  if (page.url() !== exactChatUrl) {
+    throw new Error("OpenChat cleanup reload left the exact chat route");
+  }
+
+  for (const target of targets) {
+    const deadline = Date.now() + 20_000;
+    let revalidated = false;
+    while (Date.now() < deadline) {
+      if (await exactMessageEvidencePresent(page, target.message, target.evidence)) {
+        const observed = await messageRefFromWrapper(
+          exactMessageWrapper(page, target.message),
+          `message ${target.message.messageId}: refreshed deletion target`,
+        );
+        const senderOwned = await messageOwnedByCurrentUser(page, target.message);
+        if (sameStableMessage(target.message, observed) && senderOwned) {
+          revalidated = true;
+          break;
+        }
+      }
+      await page.waitForTimeout(250);
+    }
+    if (!revalidated) {
+      throw new Error(
+        `message ${target.message.messageId}: refreshed exact deletion evidence or ownership is unavailable`,
+      );
+    }
+  }
 }
 
 async function deleteExactMessageViaUi(
@@ -1174,12 +1949,38 @@ async function deleteExactMessageViaUi(
         if ((await bubble.count()) !== 1) {
           throw new Error(`message ${message.messageId}: exact classic bubble is ambiguous`);
         }
+        await dismissOpenChatOverlay(page);
         await bubble.hover();
-        const menuIcon = await exactlyOneVisible(
-          bubble.locator(".menu-icon"),
-          "classic message menu",
-        );
-        await menuIcon.click({ timeout: 10_000 });
+        const menuIcons = bubble.locator(".menu-icon");
+        let visibleMenuIcons = await visibleMatches(menuIcons);
+        for (let menuAttempt = 0; visibleMenuIcons.length === 0 && menuAttempt < 4; menuAttempt++) {
+          await page.waitForTimeout(100);
+          visibleMenuIcons = await visibleMatches(menuIcons);
+        }
+        if (visibleMenuIcons.length > 1) {
+          throw new Error(`message ${message.messageId}: exact classic menu is ambiguous`);
+        }
+        if (visibleMenuIcons.length === 1) {
+          await dismissOpenChatOverlay(page);
+          await visibleMenuIcons[0].click({ timeout: 10_000 });
+        } else {
+          if ((await menuIcons.count()) !== 1) {
+            throw new Error(
+              `message ${message.messageId}: responsive classic menu icon is not uniquely attached`,
+            );
+          }
+          const hiddenByResponsiveCss = await menuIcons.evaluate((node) => {
+            const menu = node.closest(".menu");
+            return node.isConnected && menu !== null && getComputedStyle(menu).display === "none";
+          });
+          if (!hiddenByResponsiveCss) {
+            throw new Error(
+              `message ${message.messageId}: classic menu is neither visible nor responsively hidden`,
+            );
+          }
+          await dismissOpenChatOverlay(page);
+          await menuIcons.dispatchEvent("click");
+        }
       } else {
         const menu = await openOwnedMobileMessageMenu(page, message);
         const more = await exactlyOneVisible(
@@ -1189,19 +1990,33 @@ async function deleteExactMessageViaUi(
         await more.click({ timeout: 10_000 });
       }
 
-      const deleteForMe = await visibleMatches(
-        page.getByRole("menuitem", { name: "Delete for me", exact: true }),
-      );
-      if (deleteForMe.length !== 0) {
-        throw new Error(
-          `message ${message.messageId}: UI offered Delete for me instead of sender deletion`,
+      const deleteMenuDeadline = Date.now() + 10_000;
+      let deleteDispatched = false;
+      while (Date.now() < deleteMenuDeadline) {
+        const deleteForMe = await visibleMatches(
+          page.getByRole("menuitem", { name: "Delete for me", exact: true }),
         );
+        if (deleteForMe.length !== 0) {
+          throw new Error(
+            `message ${message.messageId}: UI offered Delete for me instead of sender deletion`,
+          );
+        }
+        const senderDelete = await visibleMatches(
+          page.getByRole("menuitem", { name: "Delete", exact: true }),
+        );
+        if (senderDelete.length > 1) {
+          throw new Error(`message ${message.messageId}: sender Delete menu item is ambiguous`);
+        }
+        if (senderDelete.length === 1) {
+          await senderDelete[0].dispatchEvent("click", undefined, { timeout: 2_000 });
+          deleteDispatched = true;
+          break;
+        }
+        await page.waitForTimeout(100);
       }
-      const deleteItem = await exactlyOneVisible(
-        page.getByRole("menuitem", { name: "Delete", exact: true }),
-        "sender Delete menu item",
-      );
-      await deleteItem.click({ timeout: 10_000 });
+      if (!deleteDispatched) {
+        throw new Error(`message ${message.messageId}: sender Delete menu item did not appear`);
+      }
 
       const confirmation = page.getByRole("button", { name: "Yes please", exact: true });
       const confirmationDeadline = Date.now() + 2_000;
@@ -1249,6 +2064,78 @@ async function deleteExactMessageViaUi(
     }
   }
   throw new Error(`message ${message.messageId}: exact Delete retry limit exhausted`);
+}
+
+async function deleteExactMessagePersistentlyViaUi(
+  page: Page,
+  target: ExactMessageDeletionTarget,
+): Promise<void> {
+  const maxPersistenceAttempts = 3;
+  const backendDeleteSettleMs = 5_000;
+  const exactChatUrl = page.url();
+  for (let attempt = 0; attempt < maxPersistenceAttempts; attempt++) {
+    await deleteExactMessageViaUi(page, target.message, target.evidence);
+    // OpenChat renders its local tombstone before the asynchronous backend delete has settled.
+    // Keep the document alive briefly so the in-flight update is not aborted by verification.
+    await page.waitForTimeout(backendDeleteSettleMs);
+    await page.reload({ waitUntil: "domcontentloaded" });
+    await page
+      .locator(".ProseMirror")
+      .first()
+      .waitFor({ state: "visible", timeout: 20_000 });
+    if (page.url() !== exactChatUrl) {
+      throw new Error("OpenChat persistence reload left the exact chat route");
+    }
+
+    const reappearanceDeadline = Date.now() + 5_000;
+    let reappeared = false;
+    while (Date.now() < reappearanceDeadline) {
+      const wrapper = exactMessageWrapper(page, target.message);
+      const wrapperCount = await wrapper.count();
+      if (wrapperCount > 1) {
+        throw new Error(
+          `message ${target.message.messageId}: stable coordinates are ambiguous after persistence reload`,
+        );
+      }
+      if (wrapperCount === 0) {
+        await page.waitForTimeout(250);
+        continue;
+      }
+      if (await exactMessageDeletionProven(page, target.message)) return;
+      if (!(await exactMessageEvidencePresent(page, target.message, target.evidence))) {
+        await page.waitForTimeout(250);
+        continue;
+      }
+      const observed = await messageRefFromWrapper(
+        wrapper,
+        `message ${target.message.messageId}: persisted deletion target`,
+      );
+      const senderOwned = await messageOwnedByCurrentUser(page, target.message);
+      if (!sameStableMessage(target.message, observed)) {
+        throw new Error(`message ${target.message.messageId}: persisted target coordinates changed`);
+      }
+      if (!senderOwned) {
+        await page.waitForTimeout(250);
+        continue;
+      }
+      reappeared = true;
+      break;
+    }
+    if (await exactMessageDeletionProven(page, target.message)) return;
+    if (!reappeared) {
+      throw new Error(
+        `message ${target.message.messageId}: persistence reload did not prove deletion or exact evidence`,
+      );
+    }
+    if (attempt + 1 >= maxPersistenceAttempts) {
+      throw new Error(
+        `message ${target.message.messageId}: exact deletion reappeared after ${maxPersistenceAttempts} attempts`,
+      );
+    }
+    console.log(
+      `[cleanup] message ${target.message.messageId}: exact deletion reappeared after reload; retrying ${attempt + 2}/${maxPersistenceAttempts}`,
+    );
+  }
 }
 
 async function verifyDeletedAfterReload(
@@ -1642,6 +2529,9 @@ async function main() {
     direction: "credit",
     ...(imageScenario ? { date: "2026-02-30" } : {}),
     note,
+    ...(imageScenario
+      ? {}
+      : { message: journeySourceText({ imagePath: SOURCE_IMAGE_PATH, nonce })! }),
   });
   let proposerQcPage: Page | null = null;
   let proposerObserverInstalled = false;
@@ -1649,25 +2539,52 @@ async function main() {
   let promptOverrideInstalled = false;
   let navigationListenerInstalled = false;
   let senderMainFrameNavigations = 0;
-  let sourceBaselineIds: Set<string> | null = null;
-  let sourceSendSucceeded = false;
+  let sourceBaseline: StableMessageBaseline | null = null;
+  let sourceSendAttempted = false;
+  let sourceSendProven = false;
+  let draftBlobCaptureInstalled = false;
+  let draftAttachmentSelectionStarted = false;
+  let exactDraftSelectionBoundary: ExactDraftSelectionBoundary | null = null;
+  let exactPartialDraftBinding: ExactPartialDraftBinding | null = null;
+  let exactDraftImageBinding: ExactDraftImageBinding | null = null;
   let sourceEvidence: SourceMessageEvidence | null = null;
   let sourceMessage: ChatMessageRef | null = null;
+  let exactOptimisticSourceBinding: ExactOptimisticSourceBinding | null = null;
   let senderCard: LoadedRunCard | null = null;
   let confirmerCard: LoadedRunCard | null = null;
   const senderCandidateCards = new Map<string, LoadedRunCard>();
   const confirmerCandidateCards = new Map<string, LoadedRunCard>();
-  const senderRunCards = new Map<string, LoadedRunCard>();
-  const confirmerRunCards = new Map<string, LoadedRunCard>();
+  const senderRunCards = new Map<string, NonceBoundRunCard>();
+  const confirmerRunCards = new Map<string, NonceBoundRunCard>();
   let confirmerLinkedSheet: string | null = null;
   let confirmationAttempted = false;
   let entrySubmissionAttempted = false;
   let deliveryObserved = false;
   let journeyBodyCompleted = false;
   const documentMarker = `iou-card-journey-${nonce}`;
+  const draftFooterMarker = `${documentMarker}-draft-footer`;
   const onSenderNavigation = (frame: Frame) => {
     if (frame === proposerOC.mainFrame()) senderMainFrameNavigations++;
   };
+  const retainExactOptimisticSourceBinding = (message: ChatMessageRef) => {
+    if (sourceEvidence?.kind !== "image") {
+      throw new Error("exact optimistic image binding appeared without image source evidence");
+    }
+    const next: ExactOptimisticSourceBinding = {
+      boundMessage: { ...message },
+      boundDraftUrl: sourceEvidence.exactDraftUrl,
+    };
+    if (
+      exactOptimisticSourceBinding !== null &&
+      (!sameStableMessage(exactOptimisticSourceBinding.boundMessage, next.boundMessage) ||
+        exactOptimisticSourceBinding.boundDraftUrl !== next.boundDraftUrl)
+    ) {
+      throw new Error("exact optimistic image binding changed stable source identity");
+    }
+    exactOptimisticSourceBinding = next;
+  };
+  const currentExactOptimisticSourceBinding = (): ExactOptimisticSourceBinding | null =>
+    exactOptimisticSourceBinding;
 
   try {
 
@@ -1722,10 +2639,9 @@ async function main() {
     await proposerOC.locator("#masked_overlay").click({ position: { x: 10, y: 10 }, timeout: 3000 }).catch(() => {});
     await proposerOC.waitForTimeout(500);
   }
-  sourceBaselineIds = await captureMessageIdBaseline(proposerOC);
+  sourceBaseline = await captureStableMessageBaseline(proposerOC);
   const composer = proposerOC.locator(".ProseMirror").first();
   await composer.waitFor({ timeout: 15000 });
-  let draftImageContent: ExactImageContentEvidence | undefined;
   if (SOURCE_IMAGE_PATH !== undefined) {
     const fileInputs = proposerOC.locator('input[type="file"]');
     const imageFileInputs = proposerOC.locator('input[type="file"][accept*="image"]');
@@ -1742,16 +2658,40 @@ async function main() {
         `image journey expected one exact image input, found ${imageInputCount} image/${inputCount} total`,
       );
     }
-    await exactFileInput.setInputFiles(SOURCE_IMAGE_PATH);
-    draftImageContent = await captureExactDraftImageContent(proposerOC);
+    exactDraftSelectionBoundary = await prepareExactDraftAttachmentSelection(
+      proposerOC,
+      composer,
+      draftFooterMarker,
+    );
+    await installExactDraftBlobCapture(proposerOC);
+    draftBlobCaptureInstalled = true;
+    draftAttachmentSelectionStarted = true;
+    try {
+      await exactFileInput.setInputFiles(SOURCE_IMAGE_PATH);
+      exactPartialDraftBinding = await retainExactPartialDraftBinding(
+        proposerOC,
+        exactDraftSelectionBoundary,
+      );
+      exactDraftImageBinding = await captureExactDraftImageContent(
+        proposerOC,
+        exactPartialDraftBinding,
+      );
+    } finally {
+      await removeExactDraftBlobCapture(proposerOC);
+      draftBlobCaptureInstalled = false;
+    }
   }
   const sourceText = journeySourceText({ imagePath: SOURCE_IMAGE_PATH, nonce });
   sourceEvidence =
-    draftImageContent === undefined
+    exactDraftImageBinding === null
       ? { kind: "text", exactText: sourceText! }
-      : { kind: "image", exactContent: draftImageContent };
+      : {
+          kind: "image",
+          exactContent: exactDraftImageBinding.exactContent,
+          exactDraftUrl: exactDraftImageBinding.draftUrl,
+        };
+  sourceSendAttempted = true;
   await sendJourneySource(proposerOC, composer, sourceText);
-  sourceSendSucceeded = true;
   console.log(
     sourceText === undefined
       ? `[${PROPOSER.user}] sent image-only attachment`
@@ -1760,18 +2700,29 @@ async function main() {
   sourceMessage = await captureFreshSourceMessage(
     proposerOC,
     sourceEvidence,
-    sourceBaselineIds,
+    sourceBaseline,
     PROPOSER.user,
+    15_000,
+    retainExactOptimisticSourceBinding,
   );
+  const optimisticBindingAfterCapture = currentExactOptimisticSourceBinding();
+  if (
+    optimisticBindingAfterCapture !== null &&
+    !sameStableMessage(sourceMessage, optimisticBindingAfterCapture.boundMessage)
+  ) {
+    throw new Error("uploaded source differs from the retained exact optimistic binding");
+  }
+  sourceSendProven = true;
   check(
     true,
     `${PROPOSER.user} fresh Journey source is sender-owned and captured as message ${sourceMessage.messageId}/${sourceMessage.messageIndex}/${sourceMessage.eventIndex}`,
   );
 
   // The propose entry is the message menu ("Propose action"): hover the just-sent bubble to reveal
-  // its menu icon, open it, click the item — the manual-JSON prompt then fires and the dialog
-  // handler above answers it deterministically. Retried once in case the dialog answer raced;
-  // success gate = OUR card's confirm button visible on the CONFIRMER's side. The confirm button
+  // its menu icon, open it, click the item — the manual-JSON prompt then fires and the override
+  // above answers it deterministically. Propose is clicked at most once; slow model work extends the
+  // observation window instead. Success = OUR card's confirm button visible on the CONFIRMER side.
+  // The confirm button
   // carries the MANIFEST's confirm_label — for the live iou app "Add to IOU".
   //
   // Confirm targeting is scoped to THIS RUN'S card, never the last card on the page. The sender-side
@@ -1779,9 +2730,9 @@ async function main() {
   // recipient may load only the exact message id/index/event coordinates selected on the sender.
   // Deterministic mode's nonce remains secondary evidence. Real-model mode sends only the image
   // bytes and validates the model-owned iframe values before any downstream edit.
-  // v1 vs v2 propose UI: the classic tree has .bubble-wrapper + a hover menu with a TEXT item; the
-  // v2 (components_mobile) tree opens an icon-button sheet on LONG-PRESS, where the propose item is
-  // the AutoFix (wand) ICON button — no text, so target its SVG path.
+  // v1 vs v2 propose UI: the classic tree has .bubble-wrapper + a hover menu with a text item. The
+  // v2 (components_mobile) tree first opens a sender-owned icon toolbar; open its exact More control
+  // and select Propose action from the accessible full menu rather than depending on an SVG path.
   const isV2 = (await proposerOC.locator(".bubble-wrapper").count()) === 0;
   console.log(`[${PROPOSER.user}] propose UI tree: ${isV2 ? "v2 (mobile)" : "v1 (classic)"}`);
   let posted = false;
@@ -1805,9 +2756,9 @@ async function main() {
       }
       if (isV2) {
         const ownedMenu = await openOwnedMobileMessageMenu(proposerOC, sourceMessage!);
-        const autoFix = await exactlyOneVisible(
-          ownedMenu.locator('button:has(path[d^="M7.5,5.6"])'),
-          "sender-owned Propose action",
+        const more = await exactlyOneVisible(
+          ownedMenu.locator(".menu-btn button"),
+          "sender-owned mobile full menu",
         );
         // openOwnedMobileMessageMenu already opened the exact sender-owned message's v2 sheet using
         // its stable wrapper and the device-appropriate gesture; do not run a second gesture path.
@@ -1815,7 +2766,12 @@ async function main() {
         if (proposalCardObserved) {
           throw new Error("a card appeared while opening the v2 action sheet; refusing another Propose click");
         }
-        await autoFix.click({ timeout: 8000 });
+        await more.click({ timeout: 8_000 });
+        const propose = await exactlyOneVisible(
+          proposerOC.getByRole("menuitem", { name: "Propose action", exact: true }),
+          "sender-owned Propose action",
+        );
+        await propose.click({ timeout: 12_000 });
       } else {
         const wrapper = exactMessageWrapper(proposerOC, sourceMessage!);
         if (!(await wrapper.evaluate((node) => node.classList.contains("me")))) {
@@ -1828,7 +2784,7 @@ async function main() {
         const menuIcon = await exactlyOneVisible(bubble.locator(".menu-icon"), "classic source menu");
         await menuIcon.click({ timeout: 12000 });
         const propose = await exactlyOneVisible(
-          proposerOC.getByText("Propose action", { exact: true }),
+          proposerOC.getByRole("menuitem", { name: "Propose action", exact: true }),
           "classic sender-owned Propose action",
         );
         proposalCardObserved ||= (await observedRunCardCount(proposerOC)) > 0;
@@ -1852,7 +2808,7 @@ async function main() {
         proposerOC,
         note,
         PROPOSER.user,
-        REAL_MODEL ? 300_000 : 60_000,
+        REAL_MODEL ? 600_000 : 60_000,
         true,
         { expectedSource: sourceMessage!, requireSenderOwned: true },
       );
@@ -1966,28 +2922,34 @@ async function main() {
   if (REAL_MODEL) {
     // Validate the model-owned semantic fields before editing anything. The source has no visible
     // text, so a text-only path or wrong extraction fails here. Only downstream test correlation
-    // fields are normalized after acceptance; amount/currency/direction remain untouched.
+    // fields are normalized after acceptance; the fixture-owned Type, amount, currency, direction,
+    // and absent Date remain untouched.
+    const entryCount = await frame.getByLabel("Type", { exact: true }).count();
     const transaction = await requireExactlyOneCardControl(frame, "Type");
     const amount = await requireExactlyOneCardControl(frame, "Amount");
     const currency = await requireExactlyOneCardControl(frame, "Currency");
     const direction = await requireExactlyOneCardControl(frame, "Direction");
     const noteControl = await requireExactlyOneCardControl(frame, "Note");
     const accountType = await requireExactlyOneCardControl(frame, "Saved type");
-    await requireExactlyOneCardControl(frame, "Date");
-
+    const date = await requireExactlyOneCardControl(frame, "Date");
     const accepted = assertAcceptedVisionExtraction({
+      entryCount,
+      kind: await transaction.inputValue(),
       amount: await amount.inputValue(),
       currency: await currency.inputValue(),
       direction: await direction.inputValue(),
+      date: await date.inputValue(),
     });
     check(
-      accepted.amount === 350 &&
+      accepted.entryCount === 1 &&
+        accepted.kind === "iou" &&
+        accepted.amount === 350 &&
         accepted.currency === "EGP" &&
-        accepted.direction === "credit",
-      "the image-only vision model extracted 350 EGP credit before card editing",
+        accepted.direction === "credit" &&
+        accepted.date === "",
+      "the image-only model produced one IOU/350 EGP/credit/no-date entry before card editing",
     );
 
-    await transaction.selectOption("iou");
     await noteControl.fill(note);
     const senderNoteControl = await requireExactlyOneCardControl(senderCard!.frame, "Note");
     await senderNoteControl.fill(note);
@@ -2098,6 +3060,7 @@ async function main() {
     // with test/ui/flows.ts: the transaction currency is the first select and the transaction
     // amount is the first number input (later controls belong to optional fee/schedule sections).
     amount: await entryDialog.locator('input[type="number"]').first().inputValue(),
+    date: await entryDialog.locator('input[type="date"]').first().inputValue(),
     currency: await entryDialog.locator("select").first().inputValue(),
     note: await entryDialog.locator('input[placeholder="lunch, taxi, etc."]').inputValue(),
     credit: await entryDialog
@@ -2109,6 +3072,7 @@ async function main() {
   };
   const formMatches =
     Number(formValues.amount) === 350 &&
+    formValues.date === new Date().toISOString().slice(0, 10) &&
     formValues.currency === importCurrency &&
     formValues.note === note &&
     formValues.credit;
@@ -2140,23 +3104,42 @@ async function main() {
       console.error(`[cleanup] navigation-listener teardown failed: ${(error as Error).message}`);
     }
 
+    if (draftBlobCaptureInstalled) {
+      try {
+        await removeExactDraftBlobCapture(proposerOC);
+        draftBlobCaptureInstalled = false;
+      } catch (error) {
+        failures++;
+        console.error(`[cleanup] draft Blob capture teardown failed: ${(error as Error).message}`);
+      }
+    }
+
     // Enter may have succeeded even if the immediate coordinate capture then failed. Recover only a
     // unique sender-owned message carrying this run's exact text/blob evidence and absent message id;
     // ambiguity is reported and left untouched.
     if (
-      sourceSendSucceeded &&
+      sourceSendAttempted &&
       sourceMessage === null &&
-      sourceBaselineIds !== null &&
+      sourceBaseline !== null &&
       sourceEvidence !== null
     ) {
       try {
         sourceMessage = await captureFreshSourceMessage(
           proposerOC,
           sourceEvidence,
-          sourceBaselineIds,
+          sourceBaseline,
           PROPOSER.user,
           3_000,
+          retainExactOptimisticSourceBinding,
         );
+        const optimisticBindingAfterRecovery = currentExactOptimisticSourceBinding();
+        if (
+          optimisticBindingAfterRecovery !== null &&
+          !sameStableMessage(sourceMessage, optimisticBindingAfterRecovery.boundMessage)
+        ) {
+          throw new Error("recovered source differs from the retained exact optimistic binding");
+        }
+        sourceSendProven = true;
         console.log(`[cleanup] recovered exact Journey source message ${sourceMessage.messageId}`);
       } catch (error) {
         failures++;
@@ -2164,9 +3147,40 @@ async function main() {
       }
     }
 
+    if (
+      draftAttachmentSelectionStarted &&
+      !sourceSendProven &&
+      exactPartialDraftBinding !== null
+    ) {
+      try {
+        const removed = await clearExactUnsentDraftAttachment(
+          proposerOC,
+          exactPartialDraftBinding,
+        );
+        cleanupCheck(
+          true,
+          removed
+            ? "cleanup removed exact unsent image draft"
+            : "cleanup proved the exact bound image draft was already absent",
+        );
+      } catch (error) {
+        failures++;
+        console.error(`[cleanup] exact unsent image draft removal failed: ${(error as Error).message}`);
+      }
+    }
+    if (exactDraftSelectionBoundary !== null) {
+      try {
+        await removeExactDraftFooterMarker(proposerOC, exactDraftSelectionBoundary);
+      } catch (error) {
+        failures++;
+        console.error(`[cleanup] exact draft footer marker removal failed: ${(error as Error).message}`);
+      }
+    }
+
     // A failed run must not leave its still-pending chat action behind. Re-identify only the
-    // sender-owned immediate successor of this run's captured source. If source capture failed,
-    // leave the chat untouched rather than weakening cleanup identity.
+    // sender-owned immediate successor of this run's captured source. A late real-model completion
+    // gets one additional nonce-bound observation window here; this never retries Propose. If source
+    // capture failed, leave the chat untouched rather than weakening cleanup identity.
     if (proposerObserverInstalled && sourceMessage !== null) {
       try {
         await rememberNonceBoundRunCards(
@@ -2175,7 +3189,7 @@ async function main() {
             proposerOC,
             note,
             PROPOSER.user,
-            5_000,
+            REAL_MODEL ? 60_000 : 5_000,
             false,
             { expectedSource: sourceMessage, requireSenderOwned: true },
           ),
@@ -2306,63 +3320,109 @@ async function main() {
       evidence: ExactMessageEvidence;
     }> = [];
     const deletedCardKeys = new Set<string>();
+    const exactCardDeletionTargets: ExactMessageDeletionTarget[] = [];
     for (const trackedCard of [...senderRunCards.values()].sort(
       (left, right) => right.message.messageIndex - left.message.messageIndex,
     )) {
-      const evidence: ExactMessageEvidence = {
-        kind: "card",
-        observerId: trackedCard.observerId,
-        exactNote: note,
-      };
-      try {
-        await deleteExactMessageViaUi(proposerOC, trackedCard.message, evidence);
-        proposerDeleted.push({ message: trackedCard.message, evidence });
-        deletedCardKeys.add(messageRefKey(trackedCard.message));
-        cleanupCheck(true, `cleanup deleted exact OpenChat card message ${trackedCard.message.messageId}`);
-      } catch (error) {
-        failures++;
-        console.error(
-          `[cleanup] exact OpenChat card ${trackedCard.message.messageId}/${trackedCard.message.messageIndex}/${trackedCard.message.eventIndex} was not deleted: ${(error as Error).message}`,
-        );
-      }
+      const evidence = trackedCard.deletionEvidence;
+      exactCardDeletionTargets.push({ message: trackedCard.message, evidence });
     }
-    if (sourceMessage !== null && sourceEvidence !== null) {
-      const evidence: ExactMessageEvidence = { kind: "source", evidence: sourceEvidence };
-      try {
-        await deleteExactMessageViaUi(proposerOC, sourceMessage, evidence);
-        proposerDeleted.push({ message: sourceMessage, evidence });
-        cleanupCheck(true, `cleanup deleted exact Journey source message ${sourceMessage.messageId}`);
-      } catch (error) {
-        failures++;
-        console.error(
-          `[cleanup] exact Journey source ${sourceMessage.messageId}/${sourceMessage.messageIndex}/${sourceMessage.eventIndex} was not deleted: ${(error as Error).message}`,
-        );
-      }
+    const optimisticBindingForCleanup = currentExactOptimisticSourceBinding();
+    const sourceCleanupMessage =
+      sourceMessage ?? optimisticBindingForCleanup?.boundMessage ?? null;
+    const exactSourceDeletionTarget: ExactMessageDeletionTarget | null =
+      sourceCleanupMessage !== null && sourceEvidence !== null
+        ? {
+            message: sourceCleanupMessage,
+            evidence: {
+              kind: "source",
+              evidence: sourceEvidence,
+              ...(optimisticBindingForCleanup === null
+                ? {}
+                : { optimisticBinding: optimisticBindingForCleanup }),
+            },
+          }
+        : null;
+    let openChatDeletionBoundaryReady = true;
+    try {
+      await refreshExactOpenChatDeletionBoundary(proposerOC, [
+        ...exactCardDeletionTargets,
+        ...(exactSourceDeletionTarget === null ? [] : [exactSourceDeletionTarget]),
+      ]);
+    } catch (error) {
+      failures++;
+      openChatDeletionBoundaryReady = false;
+      console.error(
+        `[cleanup] OpenChat deletion boundary refresh failed; exact chat deletion will be skipped: ${(error as Error).message}`,
+      );
     }
 
-    if (proposerDeleted.length > 0) {
-      try {
-        await verifyDeletedAfterReload(proposerOC, proposerDeleted);
-        cleanupCheck(true, "exact OpenChat message deletions survived proposer reload");
-      } catch (error) {
-        failures++;
-        console.error(`[cleanup] proposer reload verification failed: ${(error as Error).message}`);
+    if (openChatDeletionBoundaryReady) {
+      for (const trackedCard of exactCardDeletionTargets) {
+        const evidence = trackedCard.evidence;
+        try {
+          await deleteExactMessagePersistentlyViaUi(proposerOC, trackedCard);
+          proposerDeleted.push({ message: trackedCard.message, evidence });
+          deletedCardKeys.add(messageRefKey(trackedCard.message));
+          cleanupCheck(
+            true,
+            `cleanup deleted exact OpenChat card message ${trackedCard.message.messageId}`,
+          );
+        } catch (error) {
+          failures++;
+          console.error(
+            `[cleanup] exact OpenChat card ${trackedCard.message.messageId}/${trackedCard.message.messageIndex}/${trackedCard.message.eventIndex} was not deleted: ${(error as Error).message}`,
+          );
+        }
       }
-    }
-    const confirmerDeleted = [...confirmerRunCards.entries()]
-      .filter(([key]) => deletedCardKeys.has(key))
-      .map(([, card]) => ({
-        message: card.message,
-        evidence: { kind: "card", observerId: card.observerId, exactNote: note } as ExactMessageEvidence,
-      }));
-    if (confirmerDeleted.length > 0) {
-      try {
-        await verifyDeletedAfterReload(confirmerOC, confirmerDeleted);
-        cleanupCheck(true, "exact card deletion propagated to the confirmer and survived reload");
-      } catch (error) {
-        failures++;
-        console.error(`[cleanup] confirmer reload verification failed: ${(error as Error).message}`);
+      if (exactSourceDeletionTarget !== null) {
+        const evidence = exactSourceDeletionTarget.evidence;
+        try {
+          await deleteExactMessagePersistentlyViaUi(proposerOC, exactSourceDeletionTarget);
+          proposerDeleted.push({ message: exactSourceDeletionTarget.message, evidence });
+          cleanupCheck(
+            true,
+            `cleanup deleted exact Journey source message ${exactSourceDeletionTarget.message.messageId}`,
+          );
+        } catch (error) {
+          failures++;
+          console.error(
+            `[cleanup] exact Journey source ${exactSourceDeletionTarget.message.messageId}/${exactSourceDeletionTarget.message.messageIndex}/${exactSourceDeletionTarget.message.eventIndex} was not deleted: ${(error as Error).message}`,
+          );
+        }
       }
+
+      if (proposerDeleted.length > 0) {
+        try {
+          await verifyDeletedAfterReload(proposerOC, proposerDeleted);
+          cleanupCheck(true, "exact OpenChat message deletions survived proposer reload");
+        } catch (error) {
+          failures++;
+          console.error(`[cleanup] proposer reload verification failed: ${(error as Error).message}`);
+        }
+      }
+      const confirmerDeleted = [...confirmerRunCards.entries()]
+        .filter(([key]) => deletedCardKeys.has(key))
+        .map(([, card]) => ({
+          message: card.message,
+          evidence: card.deletionEvidence,
+        }));
+      if (confirmerDeleted.length > 0) {
+        try {
+          await verifyDeletedAfterReload(confirmerOC, confirmerDeleted);
+          cleanupCheck(
+            true,
+            "exact card deletion propagated to the confirmer and survived reload",
+          );
+        } catch (error) {
+          failures++;
+          console.error(`[cleanup] confirmer reload verification failed: ${(error as Error).message}`);
+        }
+      }
+    } else {
+      console.error(
+        "[cleanup] OpenChat message deletion was skipped; IOU and inbox cleanup continued",
+      );
     }
 
     } finally {
@@ -2374,9 +3434,13 @@ async function main() {
         console.error(`[teardown] navigation listener detach failed: ${(error as Error).message}`);
       }
       if (promptOverrideInstalled) {
-        await removeManualPromptOverride(proposerOC).catch((error) =>
-          console.error(`[teardown] manual prompt restore failed: ${(error as Error).message}`),
-        );
+        try {
+          await removeManualPromptOverride(proposerOC);
+          promptOverrideInstalled = false;
+        } catch (error) {
+          failures++;
+          console.error(`[teardown] manual prompt restore failed: ${(error as Error).message}`);
+        }
       }
       if (proposerObserverInstalled) await removeNewCardObserver(proposerOC).catch(() => {});
       if (confirmerObserverInstalled) await removeNewCardObserver(confirmerOC).catch(() => {});

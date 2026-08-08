@@ -15,7 +15,6 @@ const EXACT_PUBLIC_ROWS = [
   "direction",
   "date",
   "note",
-  "message",
 ];
 
 function schemaProperties(schema: unknown): Record<string, Record<string, unknown>> {
@@ -39,12 +38,14 @@ function expectImageSafeOptionalFields(schema: unknown): void {
     minLength: 3,
     maxLength: 3,
     format: "ascii-uppercase",
+    "x-openchat-require-text-evidence": true,
   });
   expect(properties.date).toMatchObject({
     type: "string",
     format: "date",
     minLength: 10,
     maxLength: 10,
+    "x-openchat-omit-for-image-only": true,
   });
   expect(properties.note).toMatchObject({
     type: "string",
@@ -53,13 +54,20 @@ function expectImageSafeOptionalFields(schema: unknown): void {
   });
   expect(properties.message).toMatchObject({
     type: "string",
+    minLength: 1,
     maxLength: 200,
     format: "utf8-no-nul",
+    "x-openchat-omit-for-image-only": true,
   });
+  expect((schema as { required?: unknown }).required).toEqual([
+    "amount",
+    "kind",
+    "direction",
+  ]);
 }
 
 describe("OpenChat image extraction compatibility", () => {
-  it("declares enough bounded schema metadata to remove malformed optional vision output", () => {
+  it("declares bounded optional vision fields and strips unreviewed image-only date text", () => {
     expectImageSafeOptionalFields(buildIouOutputSchema([]));
     expectImageSafeOptionalFields(
       (registration as { responseSchema: unknown }).responseSchema,
@@ -83,7 +91,6 @@ describe("OpenChat image extraction compatibility", () => {
       "Direction",
       "Date",
       "Note",
-      "Message",
     ]);
   });
 

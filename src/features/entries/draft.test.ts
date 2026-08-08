@@ -475,6 +475,31 @@ describe("message vs note — the evidence is separate from the description", ()
     expect(new Date(ts).toISOString().slice(5, 10)).toBe("08-01");
   });
 
+  it("uses only the Date field reviewed on an OpenChat card", () => {
+    const hiddenGuess = {
+      amount: 350,
+      currency: "EGP",
+      note: "CLEANING FEE 2023-04-05",
+      message: "CLEANING FEE 2024-06-07",
+    };
+    const withoutDate = parseDraftBatch([hiddenGuess], undefined, undefined, {
+      dateEvidence: "explicit-only",
+    });
+    expect(new Date(withoutDate.drafts[0].initial.ts ?? 0).toISOString().slice(0, 10)).toBe(
+      new Date().toISOString().slice(0, 10),
+    );
+
+    const reviewedDate = parseDraftBatch(
+      [{ ...hiddenGuess, date: "2026-08-08" }],
+      undefined,
+      undefined,
+      { dateEvidence: "explicit-only" },
+    );
+    expect(new Date(reviewedDate.drafts[0].initial.ts ?? 0).toISOString().slice(0, 10)).toBe(
+      "2026-08-08",
+    );
+  });
+
   it("falls back to `note` for drafts written before the split", () => {
     // A card posted before this change carries the raw text in `note` and no `message` at all.
     const { drafts } = parseDraftBatch([{ amount: 25000, currency: "EGP", note: "Reservation 1-7 Aug 25000 EGP" }]);

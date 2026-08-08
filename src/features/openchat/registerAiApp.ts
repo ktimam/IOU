@@ -246,9 +246,9 @@ type PasteJson = {
 
 /**
  * Build the app manifest wire value. The TS manifest (actionManifest.ts) is the source of truth
- * for prompt / schema / rules; the paste JSON (docs/openchat-registration.json, statically
- * imported so this stays browser-safe) supplies the fields that only exist there (action
- * description, full card template, endpoint).
+ * for prompt / schema / rules / public rows; the paste JSON
+ * (docs/openchat-registration.json, statically imported so this stays browser-safe) supplies the
+ * fields that only exist there (action description, card chrome, endpoint).
  *
  * `consumerPublicKeyPem` may be the EMPTY string when the manifest sets `perUserKeys=true`:
  * delivery then always uses each user's own paired key, the app-level key is unused, and
@@ -292,7 +292,7 @@ export function buildManifestWire(
       title: paste.card.title,
       confirm_label: paste.card.confirmLabel,
       cancel_label: paste.card.cancelLabel,
-      rows: paste.card.rows.map((r) => ({ field: r.valueKey, label: r.label })),
+      rows: iouActionManifest.card.fields.map(({ key, label }) => ({ field: key, label })),
       disclosure: opt(paste.card.disclosure),
     },
     endpoint: paste.endpoint,

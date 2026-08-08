@@ -17,7 +17,7 @@
 //   pnpm exec tsx scripts/live/verify-multi-entry.ts
 import {
   chromium,
-  type Dialog,
+  type ConsoleMessage,
   type Locator,
   type Page,
 } from "@playwright/test";
@@ -26,14 +26,19 @@ import { webcrypto } from "node:crypto";
 import { CDP_PORTS } from "./cdpPorts";
 import { isImmediateStableSuccessor, sameStableMessage } from "./journeySafety";
 import {
+  dismissBlockingOpenChatOverlays,
   exactOpenChatMessageWrapper,
   finalizeOpenChatArtifactCleanup,
+  openExactOwnedClassicOpenChatMessageMenu,
   OpenChatArtifactScope,
   type OpenChatCardRowEvidence,
   type OpenChatMessageRef,
 } from "./openChatArtifactCleanup";
 import {
   armManualExtractForCurrentUrl,
+  installManualPromptOverride,
+  readManualPromptProbe,
+  removeManualPromptOverride,
   TemporaryTabScope,
 } from "./temporaryBrowserTab";
 
@@ -174,7 +179,6 @@ function expectedPublicRows(expected: ExpectedEntry[]): OpenChatCardRowEvidence[
       `Direction: ${entry.direction}`,
       `Date: ${entry.date}`,
       `Note: ${entry.note}`,
-      `Message: ${entry.message}`,
     ].join(" · "),
   }));
 }
@@ -193,6 +197,42 @@ async function exactlyOneVisible(locator: Locator, label: string): Promise<Locat
     throw new Error(`${label}: expected one visible control, found ${visible.length}`);
   }
   return visible[0];
+}
+
+async function visibleLocatorTexts(locator: Locator): Promise<string[]> {
+  const visible: string[] = [];
+  for (let index = 0; index < await locator.count(); index++) {
+    const candidate = locator.nth(index);
+    if (!(await candidate.isVisible().catch(() => false))) continue;
+    const exactText = (await candidate.innerText().catch(() => "")).trim();
+    visible.push(exactText.length > 0 ? exactText : "<empty>");
+  }
+  return visible;
+}
+
+async function throwVisibleProposalBlocker(page: Page): Promise<void> {
+  // Do not guess which translation/error prefix a failed proposal will use. Any toast produced by
+  // this otherwise-isolated tab after the one Propose click is terminal evidence for this run.
+  const toastTexts = await visibleLocatorTexts(page.locator(".toast"));
+  if (toastTexts.length > 0) {
+    throw new Error(`proposal toast: ${toastTexts.join(" | ")}`);
+  }
+
+  const chooserTexts = await visibleLocatorTexts(page.locator(".ai-action-choices"));
+  if (chooserTexts.length > 0) {
+    throw new Error(`proposal stopped at action chooser: ${chooserTexts.join(" | ")}`);
+  }
+
+  const checkConnection = page.getByRole("button", { name: /Check connection/i });
+  if ((await visibleLocatorTexts(checkConnection)).length > 0) {
+    const modal = checkConnection.locator(
+      'xpath=ancestor::*[contains(concat(" ", normalize-space(@class), " "), " modal-content ")][1]',
+    );
+    const modalText = (await modal.innerText().catch(() => "")).replace(/\s+/g, " ").trim();
+    throw new Error(
+      `proposal stopped at app-link consent${modalText.length > 0 ? `: ${modalText}` : ""}`,
+    );
+  }
 }
 
 async function cardRows(card: Locator): Promise<OpenChatCardRowEvidence[]> {
@@ -252,6 +292,7 @@ async function findClassicMultiCard(
   let firstFoundAt: number | undefined;
   let found: LoadedMultiCard | null = null;
   while (Date.now() < deadline) {
+    await throwVisibleProposalBlocker(page);
     const cards = expectedMessage
       ? exactOpenChatMessageWrapper(page, expectedMessage).locator(".action-card")
       : page.locator(".action-card");
@@ -286,6 +327,7 @@ async function findClassicMultiCard(
     }
     await page.waitForTimeout(400);
   }
+  await throwVisibleProposalBlocker(page);
   return found;
 }
 
@@ -354,6 +396,64 @@ async function cancelMultiCard(card: LoadedMultiCard): Promise<boolean> {
   if (!(await cancel.isVisible().catch(() => false)) || !(await cancel.isEnabled())) return false;
   await cancel.click({ timeout: 8_000 });
   return true;
+}
+
+function expectedPendingBatchSummary(expected: ExpectedEntry[]): string {
+  const summaries = expected.map((entry) =>
+    `${entry.kind === "settlement" ? "Settlement" : "IOU"} ` +
+    `${entry.amount.toFixed(2)} ${entry.currency} \u00b7 ` +
+    `${entry.direction === "credit" ? "owed to you" : "you owe"}` +
+    `${entry.note ? ` \u00b7 ${entry.note}` : ""}`,
+  );
+  return `${expected.length} entries: ${summaries.join(" \u00b7 ")}`;
+}
+
+async function exactPendingBatchRows(
+  page: Page,
+  exactSummary: string,
+): Promise<Locator[]> {
+  const section = page.locator("section.card").filter({
+    has: page.getByRole("heading", { name: /Pending from chat/i }),
+  });
+  const rows = section.locator(":scope > ul > li");
+  const matches: Locator[] = [];
+  const normalizedExpected = normalized(exactSummary);
+  for (let index = 0; index < await rows.count(); index++) {
+    const row = rows.nth(index);
+    const summary = row.locator(":scope > span.small");
+    if ((await summary.count()) !== 1) continue;
+    // The verified OpenChat provenance cue is nested. Compare only the direct text node emitted by
+    // batchSummary so a similarly worded card, stale sibling, or button label cannot satisfy this.
+    const renderedSummary = await summary.evaluate((node) =>
+      [...node.childNodes]
+        .filter((child) => child.nodeType === Node.TEXT_NODE)
+        .map((child) => child.textContent ?? "")
+        .join(" ")
+        .replace(/\s+/g, " ")
+        .trim(),
+    );
+    if (renderedSummary === normalizedExpected) matches.push(row);
+  }
+  return matches;
+}
+
+async function waitForUniqueExactPendingBatch(
+  page: Page,
+  exactSummary: string,
+  timeoutMs: number,
+): Promise<Locator | null> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const rows = await exactPendingBatchRows(page, exactSummary);
+    if (rows.length > 1) {
+      throw new Error(
+        `pending IOU batch: found ${rows.length} exact matches; refusing ambiguity`,
+      );
+    }
+    if (rows.length === 1 && await rows[0].isVisible().catch(() => false)) return rows[0];
+    await page.waitForTimeout(250);
+  }
+  return null;
 }
 
 async function lookupInboxBatch(
@@ -519,6 +619,7 @@ async function main() {
 
   // 1. Open the direct chat on both OC sides; resolve both user ids from the URLs.
   await proposerOC.waitForTimeout(3000);
+  await dismissBlockingOpenChatOverlays(proposerOC);
   await proposerOC.locator(".chat-summary, .chat_summary").filter({ hasText: new RegExp(CONFIRMER.user, "i") }).first().click({ timeout: 15000 });
   await proposerOC.waitForTimeout(2500);
   await armManualExtractForCurrentUrl(proposerOC);
@@ -526,6 +627,7 @@ async function main() {
   check(!!confirmerId, `${CONFIRMER.user} user id resolved (${confirmerId})`);
 
   await confirmerOC.waitForTimeout(3000);
+  await dismissBlockingOpenChatOverlays(confirmerOC);
   await confirmerOC.locator(".chat-summary, .chat_summary").filter({ hasText: new RegExp(PROPOSER.user, "i") }).first().click({ timeout: 15000 });
   await confirmerOC.waitForTimeout(2500);
   const proposerId = /user\/([a-z0-9-]+)/.exec(confirmerOC.url())?.[1];
@@ -565,15 +667,14 @@ async function main() {
       message: text,
     },
   ];
-  const extraction = JSON.stringify(
-    expected.map(({ message: _message, ...entry }) => entry),
-  );
+  const extraction = JSON.stringify(expected);
   const publicRows = expectedPublicRows(expected);
   artifactScope = new OpenChatArtifactScope(proposerOC, "multi-entry end-to-end live proof");
   await artifactScope.begin();
   artifactScope.expectExactText(text);
   artifactScope.expectCardRows(publicRows);
-  let dialogInstalled = false;
+  let promptOverride: Awaited<ReturnType<typeof installManualPromptOverride>> | null = null;
+  let proposalListenersInstalled = false;
   let senderCard: LoadedMultiCard | null = null;
   let runCard: LoadedMultiCard | null = null;
   let confirmationAttempted = false;
@@ -582,18 +683,25 @@ async function main() {
   let importAttempted = false;
   let bodyCompleted = false;
   let extractionPromptCalls = 0;
-  const onDialog = (dialog: Dialog) => {
-    const isExtraction = /JSON/i.test(dialog.message());
-    if (isExtraction) extractionPromptCalls++;
-    const reply = isExtraction ? extraction : "1";
-    dialog.accept(reply).catch(() => {});
+  const proposalDiagnostics: string[] = [];
+  const onConsole = (message: ConsoleMessage) => {
+    if (message.type() !== "error" && message.type() !== "warning") return;
+    if (proposalDiagnostics.length < 20) {
+      proposalDiagnostics.push(`[console:${message.type()}] ${message.text()}`);
+    }
   };
-
+  const onPageError = (error: Error) => {
+    if (proposalDiagnostics.length < 20) {
+      proposalDiagnostics.push(`[pageerror] ${error.message}`);
+    }
+  };
   try {
     // 2. Propose exactly once from the fresh, sender-owned source message. A slow backend extends
     // observation; it never causes another mutating click or a duplicate card.
-    proposerOC.on("dialog", onDialog);
-    dialogInstalled = true;
+    promptOverride = await installManualPromptOverride(proposerOC, extraction);
+    proposerOC.on("console", onConsole);
+    proposerOC.on("pageerror", onPageError);
+    proposalListenersInstalled = true;
     const composer = proposerOC.locator(".ProseMirror").first();
     await composer.waitFor({ timeout: 15_000 });
     await composer.click();
@@ -605,21 +713,37 @@ async function main() {
       (node) => node.classList.contains("message") && node.classList.contains("me"),
     );
     if (!senderOwned) throw new Error("multi source is not a sender-owned classic message");
-    const bubble = sourceWrapper.locator(".bubble-wrapper");
-    if ((await bubble.count()) !== 1) throw new Error("multi source bubble is not unique");
-    await bubble.scrollIntoViewIfNeeded();
-    await bubble.hover();
-    const menu = bubble.locator(".menu-icon");
-    if ((await menu.count()) !== 1) throw new Error("multi source menu is not unique");
-    await menu.click({ timeout: 12_000 });
+    await openExactOwnedClassicOpenChatMessageMenu(proposerOC, sourceWrapper);
     const propose = await exactlyOneVisible(
-      proposerOC.getByText("Propose action", { exact: true }),
+      proposerOC.getByRole("menuitem", { name: "Propose action", exact: true }),
       "multi Propose action",
     );
     await propose.click({ timeout: 12_000 });
 
+    const extractionPromptDeadline = Date.now() + 10_000;
+    let promptProbe = await readManualPromptProbe(proposerOC, promptOverride);
+    while (promptProbe.promptCalls === 0 && Date.now() < extractionPromptDeadline) {
+      await throwVisibleProposalBlocker(proposerOC);
+      await proposerOC.waitForTimeout(100);
+      promptProbe = await readManualPromptProbe(proposerOC, promptOverride);
+    }
+    extractionPromptCalls = promptProbe.promptCalls;
+    await throwVisibleProposalBlocker(proposerOC);
+    console.log(
+      `[diag] multi JSON extraction prompt count after Propose=${extractionPromptCalls}`,
+    );
+    if (promptProbe.promptCalls !== 1) {
+      throw new Error(
+        `multi Propose expected exactly one JSON extraction prompt, observed ${promptProbe.promptCalls}: ${promptProbe.prompts.join(" | ")}`,
+      );
+    }
+
     senderCard = await findClassicMultiCard(proposerOC, publicRows, undefined, 60_000);
-    if (!senderCard) throw new Error("sender's exact classic multi card never posted");
+    if (!senderCard) {
+      throw new Error(
+        `sender's exact classic multi card never posted (JSON extraction prompt count: ${extractionPromptCalls}); proposal diagnostics: ${proposalDiagnostics.join(" || ") || "none"}`,
+      );
+    }
     await artifactScope.trackExactCardRows(senderCard.card, publicRows);
     if (!isImmediateStableSuccessor(sourceMessage, senderCard.message)) {
       throw new Error("multi card is not the immediate stable successor of this run's source");
@@ -670,27 +794,26 @@ async function main() {
   }
   linkedSheet = route.linkedSheet;
   await confirmerIOU.goto(`${IOU_BASE}/sheet/${linkedSheet}`, { waitUntil: "domcontentloaded" });
-  await confirmerIOU.waitForTimeout(2500);
 
-  // The pending card summary must read "2 entries: …" (batchSummary). Poll — the inbox polls at 15 s.
-  const pendingSection = confirmerIOU.locator("section.card").filter({
-    has: confirmerIOU.getByRole("heading", { name: /Pending from chat/i }),
-  });
-  const pendingCard = pendingSection.locator(":scope > ul > li")
-    .filter({ hasText: /2 entr/i })
-    .filter({ hasText: expected[0].note })
-    .filter({ hasText: expected[1].note })
-    .first();
-  let sawCount = false;
-  for (let i = 0; i < 12 && !sawCount; i++) {
-    sawCount = await pendingCard.isVisible().catch(() => false);
-    if (!sawCount) {
-      await confirmerIOU.reload({ waitUntil: "domcontentloaded" }).catch(() => {});
-      await confirmerIOU.waitForTimeout(3000);
-    }
+  // Let SheetPage finish its replicated ActionInbox fetch, signature verification, and decryption.
+  // Repeated short reloads unmount the page and mark every in-flight load cancelled; that can starve
+  // a healthy inbox forever. Wait uninterrupted, then allow one fallback reload for a missed mount.
+  const pendingSummary = expectedPendingBatchSummary(expected);
+  let pendingCard = await waitForUniqueExactPendingBatch(
+    confirmerIOU,
+    pendingSummary,
+    30_000,
+  );
+  if (pendingCard === null) {
+    await confirmerIOU.reload({ waitUntil: "domcontentloaded" });
+    pendingCard = await waitForUniqueExactPendingBatch(
+      confirmerIOU,
+      pendingSummary,
+      30_000,
+    );
   }
-  check(sawCount, 'the IOU pending card shows "2 entries"');
-  if (!sawCount) throw new Error("the exact two-entry pending card did not render");
+  check(pendingCard !== null, 'the IOU pending card shows one exact "2 entries" summary');
+  if (pendingCard === null) throw new Error("the exact two-entry pending card did not render");
 
   await pendingCard.getByRole("button", { name: /Review & add/ }).click({ timeout: 10_000 });
   const modal = confirmerIOU.getByRole("dialog");
@@ -715,7 +838,34 @@ async function main() {
   check(!(await pendingCard.isVisible().catch(() => false)), "the pending card disappeared after Add all");
   bodyCompleted = true;
   } finally {
-    if (dialogInstalled) proposerOC.off("dialog", onDialog);
+    if (proposalListenersInstalled) {
+      proposerOC.off("console", onConsole);
+      proposerOC.off("pageerror", onPageError);
+    }
+    if (promptOverride) {
+      try {
+        const finalPromptProbe = await readManualPromptProbe(proposerOC, promptOverride);
+        extractionPromptCalls = finalPromptProbe.promptCalls;
+        if (finalPromptProbe.promptCalls !== 1) {
+          failures++;
+          console.error(
+            `[teardown] multi Propose expected exactly one JSON extraction prompt, observed ${finalPromptProbe.promptCalls}: ${finalPromptProbe.prompts.join(" | ")}`,
+          );
+        } else {
+          console.log("[teardown] multi JSON extraction prompt count remained exactly one");
+        }
+      } catch (error) {
+        failures++;
+        console.error(
+          `[teardown] manual prompt probe read failed: ${(error as Error).message}`,
+        );
+      } finally {
+        await removeManualPromptOverride(proposerOC, promptOverride).catch((error) => {
+          failures++;
+          console.error(`[teardown] manual prompt restore failed: ${(error as Error).message}`);
+        });
+      }
+    }
     if (!deliveryObserved && runCard) {
       try {
         const cancelled = await cancelMultiCard(runCard);

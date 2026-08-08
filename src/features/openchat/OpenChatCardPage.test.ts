@@ -5,6 +5,7 @@ import { describe, expect, it } from "vitest";
 import { buildConfirmPayload, type CardFormState } from "./cardBridge";
 import {
   hydrateSavedTypeForCard,
+  isCardFormValid,
   ReadonlyView,
   TypeFields,
   templateRefContextForCard,
@@ -13,6 +14,7 @@ import type { TxnTemplate } from "../templates/TemplatesContext";
 import { encryptTemplateRef } from "./templateRef";
 import * as openChatCardPage from "./OpenChatCardPage";
 import type { CardTransportSession } from "./cardPrivateContext";
+import { IOU_MAX_MAJOR_AMOUNT, IOU_MIN_MAJOR_AMOUNT } from "./actionManifest";
 
 const TYPE: TxnTemplate = {
   id: "private-reservation-id",
@@ -66,6 +68,82 @@ const ignoreChange = <K extends keyof CardFormState>(
 ): void => undefined;
 
 describe("OpenChat IOU card account type visibility", () => {
+  it("fails closed or defers collection until required private Types are hydrated", () => {
+    const readiness = (openChatCardPage as unknown as {
+      privateCollectionReadiness?: (input: {
+        privateContextRequired: boolean;
+        typesState: "waiting" | "loading" | "ready" | "error";
+        privateContextLoaded: boolean;
+      }) => "ready" | "defer" | "reject";
+    }).privateCollectionReadiness;
+    expect(readiness).toBeTypeOf("function");
+
+    expect(
+      readiness!({
+        privateContextRequired: false,
+        typesState: "waiting",
+        privateContextLoaded: false,
+      }),
+    ).toBe("ready");
+    expect(
+      readiness!({
+        privateContextRequired: true,
+        typesState: "loading",
+        privateContextLoaded: false,
+      }),
+    ).toBe("defer");
+    expect(
+      readiness!({
+        privateContextRequired: true,
+        typesState: "ready",
+        privateContextLoaded: true,
+      }),
+    ).toBe("ready");
+    for (const state of [
+      { typesState: "waiting", privateContextLoaded: false },
+      { typesState: "error", privateContextLoaded: false },
+      { typesState: "ready", privateContextLoaded: false },
+    ] as const) {
+      expect(readiness!({ privateContextRequired: true, ...state })).toBe("reject");
+    }
+  });
+
+  it("keeps only the latest exact loading-time host challenge and resumes it after current hydration", () => {
+    const source = readFileSync(resolve(__dirname, "OpenChatCardPage.tsx"), "utf8");
+    expect(source).toContain("const deferredCollectionRef = useRef<DeferredCollectionChallenge>()");
+    expect(source).toContain("privateCollectionReadiness({");
+    expect(source).toContain('if (readiness === "defer")');
+    expect(source).toContain("deferCollectionChallenge(");
+    expect(source).toContain("flushDeferredCollection(");
+    expect(source).toContain("deferredCollectionRef.current = undefined");
+    expect(source).toContain('buildPrivateContextStatus(capturedNonce, capability, "ready")');
+    expect(source).toContain('buildPrivateContextStatus(capturedNonce, capability, "error")');
+    expect(source).toContain("const existing = deferredCollectionRef.current");
+    expect(source).toContain("collectionRequestRef.current = requestNonce");
+    expect(source).toContain("if (event.source !== window.parent) return");
+    expect(source).toContain("frameNonceRef.current !== challenge.frameNonce");
+    expect(source).toContain("privateCapabilityRef.current !== challenge.capability");
+    expect(source).toContain("transportRef.current !== challenge.session");
+    expect(source).toContain("collectionRequestRef.current !== challenge.requestNonce");
+    expect(source).toContain("currentContext.appId !== challenge.context.appId");
+    expect(source).toContain("currentContext.appRevision !== challenge.context.appRevision");
+    expect(source).toContain("currentContext.actionId !== challenge.context.actionId");
+    expect(source).toContain("currentContext.privateContext?.capability !== challenge.capability");
+    expect(source).toContain("collectionRequestRef.current === collect.requestNonce");
+
+    const readyAt = source.indexOf('setCurrentTypesState({ kind: "ready" })');
+    const flushAt = source.indexOf("flushDeferredCollection(", readyAt);
+    expect(readyAt).toBeGreaterThanOrEqual(0);
+    expect(flushAt).toBeGreaterThan(readyAt);
+  });
+
+  it("neither renders nor exposes redundant public message text", () => {
+    const source = readFileSync(resolve(__dirname, "OpenChatCardPage.tsx"), "utf8");
+    expect(source).not.toContain("data-public-message-evidence");
+    expect(source).not.toContain('<Field label="Message">');
+    expect(source).not.toContain('aria-label="Message"');
+  });
+
   it("collects only in response to the host's one-click challenge and owns no submit buttons", () => {
     const source = readFileSync(resolve(__dirname, "OpenChatCardPage.tsx"), "utf8");
     expect(source).toContain("parseCollectConfirm(event.data, frameNonce)");
@@ -142,6 +220,35 @@ describe("OpenChat IOU card account type visibility", () => {
     expect(editable).toContain('aria-label="Type"');
     expect(readonly).toContain("Type");
     expect(readonly).toContain("IOU");
+    expect(editable).not.toContain(">Auto</option>");
+  });
+
+  it("requires a valid public Type for both single and multi collection", () => {
+    expect(isCardFormValid(FORM)).toBe(true);
+    expect(isCardFormValid({ ...FORM, kind: "" })).toBe(false);
+    expect(isCardFormValid({ ...FORM, amount: "0" })).toBe(false);
+    expect(isCardFormValid({ ...FORM, amount: String(IOU_MIN_MAJOR_AMOUNT) })).toBe(true);
+    expect(isCardFormValid({ ...FORM, amount: "0.0049" })).toBe(false);
+    expect(isCardFormValid({ ...FORM, amount: String(IOU_MAX_MAJOR_AMOUNT) })).toBe(true);
+    expect(isCardFormValid({ ...FORM, amount: "90071992547410" })).toBe(false);
+    expect(isCardFormValid({ ...FORM, currency: "" })).toBe(true);
+    expect(isCardFormValid({ ...FORM, currency: "USD" })).toBe(true);
+    expect(isCardFormValid({ ...FORM, currency: "US" })).toBe(false);
+    expect(isCardFormValid({ ...FORM, date: "" })).toBe(true);
+    expect(isCardFormValid({ ...FORM, date: "2026-08-09" })).toBe(true);
+    expect(isCardFormValid({ ...FORM, date: "2026-02-30" })).toBe(false);
+    expect(isCardFormValid({ ...FORM, date: "0000-01-01" })).toBe(false);
+    expect(isCardFormValid({ ...FORM, note: "n".repeat(4_096) })).toBe(true);
+    expect(isCardFormValid({ ...FORM, note: "n".repeat(4_097) })).toBe(false);
+    expect(isCardFormValid({ ...FORM, note: "bad\0note" })).toBe(false);
+    expect(
+      ([FORM, { ...FORM, kind: "settlement", amount: "25" }] satisfies CardFormState[]).every(
+        isCardFormValid,
+      ),
+    ).toBe(true);
+    expect(([FORM, { ...FORM, kind: "" }] satisfies CardFormState[]).every(isCardFormValid)).toBe(
+      false,
+    );
   });
 
   it("renders the extracted Date as an editable card field", () => {

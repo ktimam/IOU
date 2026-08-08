@@ -10,6 +10,7 @@ import {
   buildConfirmPayload,
   buildMultiConfirmPayload,
   buildPrivateContextReady,
+  buildPrivateContextStatus,
   buildReady,
   buildResize,
   currencyStatedIn,
@@ -274,13 +275,14 @@ describe("initToFormState and currency evidence", () => {
     });
   });
 
-  it("leaves an absent or model-invented currency to the importing IOU user", () => {
+  it("leaves absent or plain-text-invented currency to the importing IOU user", () => {
     expect(initToFormState({ amount: 5 }).currency).toBe("");
     const state = initToFormState({
       amount: 300,
       currency: "USD",
       direction: "debt",
       note: "Owe 300 uber",
+      message: "Owe 300 uber",
     });
     expect(state.currency).toBe("");
     const payload = buildConfirmPayload(state);
@@ -291,19 +293,48 @@ describe("initToFormState and currency evidence", () => {
     expect(usd.ok && usd.value.initial.currency).toBe("USD");
   });
 
+  it("keeps a schema-conformed image currency visible when no redundant message echo exists", () => {
+    const state = initToFormState(
+      {
+        kind: "settlement",
+        amount: 5,
+        currency: "USD",
+        direction: "debt",
+        note: "Lunch",
+      },
+      "EGP",
+    );
+    expect(state.currency).toBe("USD");
+    expect(buildConfirmPayload(state)).toMatchObject({ currency: "USD" });
+  });
+
   it("honours an explicitly stated code or symbol, using word boundaries", () => {
     expect(currencyStatedIn("Owe 300 USD for uber", "USD")).toBe(true);
     expect(currencyStatedIn("paid $300", "USD")).toBe(true);
     expect(currencyStatedIn("paid £20", "GBP")).toBe(true);
+    expect(currencyStatedIn("paid 20 Egyptian pounds", "EGP")).toBe(true);
+    expect(currencyStatedIn("paid E£350", "EGP")).toBe(true);
     expect(currencyStatedIn("usduber", "USD")).toBe(false);
+    expect(currencyStatedIn("USD1", "USD")).toBe(false);
+    expect(currencyStatedIn("éUSDé", "USD")).toBe(false);
     expect(currencyStatedIn("crusade", "USD")).toBe(false);
-    expect(initToFormState({ amount: 300, currency: "usd", note: "Owe 300 USD" }).currency).toBe("USD");
+    expect(
+      initToFormState({
+        amount: 300,
+        currency: "usd",
+        note: "uber",
+        message: "Owe 300 USD",
+      }).currency,
+    ).toBe("USD");
   });
 
   it("uses the configured app currency only when the message left currency unstated", () => {
     expect(initToFormState({ amount: 300, note: "Owe 300 uber" }, " egp ").currency).toBe("EGP");
     expect(
-      initToFormState({ amount: 300, currency: "USD", note: "Owe 300 USD uber" }, "EGP").currency,
+      initToFormState(
+        { amount: 300, currency: "USD", note: "uber", message: "Owe 300 USD uber" },
+        "EGP",
+      ).currency,
     ).toBe("USD");
   });
 });
@@ -331,6 +362,12 @@ describe("confirm payloads", () => {
     const result = parseDraft(payload);
     expect(result.ok).toBe(true);
     if (result.ok) expect(result.value.initial.amount_minor).toBe(4250);
+  });
+
+  it("emits the same trimmed Date value the form gate reviewed", () => {
+    expect(buildConfirmPayload({ ...baseState, date: " 2026-06-24 " }).date).toBe(
+      "2026-06-24",
+    );
   });
 
   it("keeps an invalid amount raw so downstream validation reports it", () => {
@@ -370,6 +407,13 @@ describe("outbound bridge messages", () => {
         recipientPublicKey: RECIPIENT_PUBLIC_KEY,
       },
     });
+    expect(buildPrivateContextStatus(FRAME_NONCE, OTHER_NONCE, "ready")).toEqual({
+      type: CARD_MSG.privateContextStatus,
+      version: CARD_INIT_VERSION,
+      frameNonce: FRAME_NONCE,
+      capability: OTHER_NONCE,
+      status: "ready",
+    });
     expect(buildResize(FRAME_NONCE, 320)).toEqual({
       type: CARD_MSG.resize,
       version: CARD_INIT_VERSION,
@@ -390,6 +434,7 @@ describe("outbound bridge messages", () => {
     });
     expect(() => buildReady("bad")).toThrow();
     expect(() => buildPrivateContextReady(FRAME_NONCE, "bad")).toThrow();
+    expect(() => buildPrivateContextStatus(FRAME_NONCE, "bad", "error")).toThrow();
   });
 
   it("accepts only the nonce-bound host private-context request", () => {

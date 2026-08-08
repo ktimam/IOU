@@ -246,16 +246,65 @@ async function exactlyOneVisible(
   throw new Error(`${label}: no visible match`);
 }
 
-async function dismissOverlay(page: Page): Promise<void> {
-  for (let attempt = 0; attempt < 3; attempt++) {
-    const visible = await page.locator("#masked_overlay.visible").isVisible().catch(() => false);
-    if (!visible) return;
+async function blockingOpenChatOverlayCount(page: Page): Promise<number> {
+  return page.evaluate(`(() => [...document.querySelectorAll(".overlay")].filter((overlay) => {
+    const rect = overlay.getBoundingClientRect();
+    return getComputedStyle(overlay).pointerEvents !== "none" && rect.width > 0 && rect.height > 0;
+  }).length)()`);
+}
+
+export async function dismissBlockingOpenChatOverlays(page: Page): Promise<void> {
+  let remainingBlockingOverlays = await blockingOpenChatOverlayCount(page);
+  for (let attempt = 0; remainingBlockingOverlays > 0 && attempt < 8; attempt++) {
     await page.keyboard.press("Escape").catch(() => undefined);
     await page.waitForTimeout(250);
+    remainingBlockingOverlays = await blockingOpenChatOverlayCount(page);
   }
-  if (await page.locator("#masked_overlay.visible").isVisible().catch(() => false)) {
-    throw new Error("an existing OpenChat overlay could not be dismissed");
+  if (remainingBlockingOverlays > 0) {
+    throw new Error(
+      `${remainingBlockingOverlays} blocking OpenChat overlay(s) could not be dismissed`,
+    );
   }
+}
+
+export async function openExactOwnedClassicOpenChatMessageMenu(
+  page: Page,
+  wrapper: Locator,
+): Promise<void> {
+  if ((await wrapper.count()) !== 1) throw new Error("classic message wrapper is not unique");
+  if (!(await senderOwned(wrapper))) throw new Error("classic message is not sender-owned");
+  if (!(await wrapper.evaluate((node) => node.classList.contains("message")))) {
+    throw new Error("exact message is not a classic OpenChat message");
+  }
+  const bubble = wrapper.locator(".bubble-wrapper");
+  if ((await bubble.count()) !== 1) throw new Error("classic artifact bubble is not unique");
+  await bubble.scrollIntoViewIfNeeded();
+  await dismissBlockingOpenChatOverlays(page);
+  await bubble.hover();
+  const menuIcons = bubble.locator(".menu-icon");
+  let visibleMenuIcons = await visibleMatches(menuIcons);
+  for (let attempt = 0; visibleMenuIcons.length === 0 && attempt < 4; attempt++) {
+    await page.waitForTimeout(100);
+    visibleMenuIcons = await visibleMatches(menuIcons);
+  }
+  if (visibleMenuIcons.length > 1) throw new Error("classic message menu is ambiguous");
+  if (visibleMenuIcons.length === 1) {
+    await dismissBlockingOpenChatOverlays(page);
+    await visibleMenuIcons[0].click({ timeout: 10_000 });
+    return;
+  }
+  if ((await menuIcons.count()) !== 1) {
+    throw new Error("classic responsive menu icon is not uniquely attached");
+  }
+  const hiddenByResponsiveCss = await menuIcons.evaluate((node) => {
+    const menu = node.closest(".menu");
+    return node.isConnected && menu !== null && getComputedStyle(menu).display === "none";
+  });
+  if (!hiddenByResponsiveCss) {
+    throw new Error("classic message menu icon is neither visible nor responsively hidden");
+  }
+  await dismissBlockingOpenChatOverlays(page);
+  await menuIcons.dispatchEvent("click");
 }
 
 async function openOwnedMobileMenu(page: Page, wrapper: Locator): Promise<Locator> {
@@ -263,13 +312,14 @@ async function openOwnedMobileMenu(page: Page, wrapper: Locator): Promise<Locato
   if ((await trigger.count()) !== 1) throw new Error("mobile message trigger is not unique");
   await trigger.scrollIntoViewIfNeeded();
   for (let attempt = 0; attempt < 3; attempt++) {
-    await dismissOverlay(page);
+    await dismissBlockingOpenChatOverlays(page);
     await trigger.dispatchEvent("click").catch(() => undefined);
     await page.waitForTimeout(400);
     let menus = await visibleMatches(page.locator(".message_bubble_menu.second.me"));
     if (menus.length === 0) {
       const box = await trigger.boundingBox();
       if (!box) throw new Error("mobile message trigger has no bounds");
+      await dismissBlockingOpenChatOverlays(page);
       const session = await page.context().newCDPSession(page);
       try {
         const point = { x: box.x + box.width / 2, y: box.y + box.height / 2 };
@@ -317,14 +367,8 @@ async function deleteExactArtifact(page: Page, artifact: TrackedArtifact): Promi
   if (!(await senderOwned(wrapper))) {
     throw new Error(`${messageKey(artifact.message)}: artifact is no longer sender-owned`);
   }
-  await dismissOverlay(page);
   if (await wrapper.evaluate((node) => node.classList.contains("message"))) {
-    const bubble = wrapper.locator(".bubble-wrapper");
-    if ((await bubble.count()) !== 1) throw new Error("classic artifact bubble is not unique");
-    await bubble.hover();
-    await (await exactlyOneVisible(bubble.locator(".menu-icon"), "classic message menu")).click({
-      timeout: 10_000,
-    });
+    await openExactOwnedClassicOpenChatMessageMenu(page, wrapper);
   } else {
     const menu = await openOwnedMobileMenu(page, wrapper);
     await (await exactlyOneVisible(menu.locator(".menu-btn button"), "mobile more menu")).click({
@@ -363,6 +407,75 @@ async function deleteExactArtifact(page: Page, artifact: TrackedArtifact): Promi
     await page.waitForTimeout(250);
   }
   throw new Error(`${messageKey(artifact.message)}: evidence remained after deletion`);
+}
+
+function sameMessageCoordinates(
+  left: OpenChatMessageRef,
+  right: OpenChatMessageRef,
+): boolean {
+  return (
+    left.messageId === right.messageId &&
+    left.messageIndex === right.messageIndex &&
+    left.eventIndex === right.eventIndex
+  );
+}
+
+/**
+ * OpenChat can optimistically remove a message before its backend deletion is durable. Give the
+ * backend one bounded settle window, reload, and retry only if the same stable coordinates return
+ * with the original exact evidence and sender ownership intact. Any changed or ambiguous state is
+ * terminal: cleanup must never widen from this run's evidence to a generic/newest-message guess.
+ */
+async function deleteExactArtifactPersistently(
+  page: Page,
+  artifact: TrackedArtifact,
+): Promise<boolean> {
+  const maxPersistenceAttempts = 3;
+  const backendDeleteSettleMs = 5_000;
+  let deleted = false;
+
+  for (let attempt = 0; attempt < maxPersistenceAttempts; attempt++) {
+    const deletedThisAttempt = await deleteExactArtifact(page, artifact);
+    if (!deletedThisAttempt) return deleted;
+    deleted = true;
+
+    await page.waitForTimeout(backendDeleteSettleMs);
+    const exactChatUrl = page.url();
+    await page.reload({ waitUntil: "domcontentloaded" });
+    await page.locator(".ProseMirror").first().waitFor({ state: "visible", timeout: 20_000 });
+    if (page.url() !== exactChatUrl) {
+      throw new Error(`${messageKey(artifact.message)}: reload left the exact chat`);
+    }
+
+    const wrapper = exactOpenChatMessageWrapper(page, artifact.message);
+    const reappeared = await wrapper
+      .waitFor({ state: "attached", timeout: backendDeleteSettleMs })
+      .then(() => true)
+      .catch(() => false);
+    if (!reappeared) return deleted;
+    if ((await wrapper.count()) !== 1) {
+      throw new Error(`${messageKey(artifact.message)}: reappeared wrapper is ambiguous`);
+    }
+    if (!(await evidencePresent(page, artifact))) {
+      throw new Error(
+        `${messageKey(artifact.message)}: coordinates reappeared without the original exact evidence`,
+      );
+    }
+    if (!(await senderOwned(wrapper))) {
+      throw new Error(`${messageKey(artifact.message)}: reappeared artifact is not sender-owned`);
+    }
+    const observed = await messageRefFromWrapper(wrapper, "reappeared exact artifact");
+    if (!sameMessageCoordinates(observed, artifact.message)) {
+      throw new Error(`${messageKey(artifact.message)}: reappeared coordinates changed`);
+    }
+    if (attempt + 1 >= maxPersistenceAttempts) {
+      throw new Error(
+        `${messageKey(artifact.message)}: deletion reappeared after 3 exact retries`,
+      );
+    }
+  }
+
+  return deleted;
 }
 
 export class OpenChatArtifactScope implements OpenChatArtifactCleaner {
@@ -418,7 +531,10 @@ export class OpenChatArtifactScope implements OpenChatArtifactCleaner {
     return selection.matches[0].message;
   }
 
-  async trackExactCard(card: Locator, exactInputValues: string[]): Promise<void> {
+  async trackExactCard(
+    card: Locator,
+    exactInputValues: string[],
+  ): Promise<OpenChatMessageRef> {
     const baseline = this.requireBaseline();
     const wrapper = card.locator(
       'xpath=ancestor::*[@data-id and @data-index and starts-with(@id,"event-")][1]',
@@ -432,6 +548,7 @@ export class OpenChatArtifactScope implements OpenChatArtifactCleaner {
       throw new Error(`${this.label}: exact card is not fresh, owned, and evidence-bound`);
     }
     this.trackCandidate(selected.matches[0], { kind: "card" });
+    return selected.matches[0].message;
   }
 
   async trackExactCardRows(
@@ -481,7 +598,9 @@ export class OpenChatArtifactScope implements OpenChatArtifactCleaner {
     );
     for (const artifact of artifacts) {
       try {
-        if (await deleteExactArtifact(this.page, artifact)) report.deleted.push(artifact.message);
+        if (await deleteExactArtifactPersistently(this.page, artifact)) {
+          report.deleted.push(artifact.message);
+        }
       } catch (error) {
         report.errors.push(
           `${this.label}: ${messageKey(artifact.message)} cleanup failed: ${errorMessage(error)}`,
@@ -489,26 +608,6 @@ export class OpenChatArtifactScope implements OpenChatArtifactCleaner {
       }
     }
 
-    if (report.deleted.length > 0) {
-      try {
-        await this.page.reload({ waitUntil: "domcontentloaded" });
-        await this.page.waitForTimeout(1_000);
-        for (const artifact of artifacts) {
-          if (
-            report.deleted.some(
-              (deleted) => messageKey(deleted) === messageKey(artifact.message),
-            ) &&
-            (await evidencePresent(this.page, artifact))
-          ) {
-            report.errors.push(
-              `${this.label}: ${messageKey(artifact.message)} deletion did not survive reload`,
-            );
-          }
-        }
-      } catch (error) {
-        report.errors.push(`${this.label}: reload verification failed: ${errorMessage(error)}`);
-      }
-    }
     return report;
   }
 

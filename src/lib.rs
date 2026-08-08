@@ -1785,6 +1785,63 @@ fn is_structural_encrypted_template_ref(value: &str) -> bool {
     (29..=1_052).contains(&decoded_len)
 }
 
+fn contains_whole_text_token(text: &str, token: &str) -> bool {
+    let folded_text = text.to_lowercase();
+    let folded_token = token.to_lowercase();
+    if folded_token.is_empty() {
+        return false;
+    }
+    folded_text.match_indices(&folded_token).any(|(start, matched)| {
+        let before_is_word = folded_text[..start]
+            .chars()
+            .next_back()
+            .is_some_and(char::is_alphanumeric);
+        let end = start + matched.len();
+        let after_is_word = folded_text[end..]
+            .chars()
+            .next()
+            .is_some_and(char::is_alphanumeric);
+        !before_is_word && !after_is_word
+    })
+}
+
+fn text_currency_evidence_matches(text: &str, token: &str) -> bool {
+    if token.is_empty() {
+        return false;
+    }
+    if token
+        .chars()
+        .any(|ch| !ch.is_alphanumeric() && !ch.is_whitespace())
+    {
+        return text.to_lowercase().contains(&token.to_lowercase());
+    }
+    contains_whole_text_token(text, token)
+}
+
+fn initial_currency_is_evidenced(draft: &AttestedEntryDraft) -> bool {
+    let (Some(currency), Some(message)) = (draft.currency.as_deref(), draft.message.as_deref())
+    else {
+        // Image-only extraction deliberately omits its model-authored message echo. Without an
+        // authenticated source-modality flag the attester cannot distinguish that valid case from
+        // text with no echo, so the strict evidence check applies whenever authoritative text is
+        // actually present. OpenChat independently applies the same registered schema policy.
+        return true;
+    };
+    let aliases: &[&str] = match currency {
+        "USD" => &["$", "dollar", "dollars", "US dollar", "US dollars"],
+        "GBP" => &["£", "pound sterling", "pounds sterling"],
+        "EUR" => &["€", "euro", "euros"],
+        "JPY" => &["¥", "yen"],
+        "INR" => &["₹", "rupee", "rupees"],
+        "EGP" => &["E£", "Egyptian pound", "Egyptian pounds", "ج.م"],
+        _ => &[],
+    };
+    text_currency_evidence_matches(message, currency)
+        || aliases
+            .iter()
+            .any(|alias| text_currency_evidence_matches(message, alias))
+}
+
 fn validate_attested_entry_draft(draft: &AttestedEntryDraft, allow_template_ref: bool) -> bool {
     let Some(amount) = draft.amount.as_f64() else {
         return false;
@@ -1794,26 +1851,22 @@ fn validate_attested_entry_draft(draft: &AttestedEntryDraft, allow_template_ref:
         && amount > 0.0
         && minor_units.is_finite()
         && (1.0..=9_007_199_254_740_991.0).contains(&minor_units)
-        && draft
-            .kind
-            .as_deref()
-            .is_none_or(|value| matches!(value, "iou" | "settlement"))
+        && matches!(draft.kind.as_deref(), Some("iou" | "settlement"))
         && draft.currency.as_deref().is_none_or(|value| {
             value.len() == 3 && value.bytes().all(|byte| byte.is_ascii_uppercase())
         })
-        && draft
-            .direction
-            .as_deref()
-            .is_none_or(|value| matches!(value, "credit" | "debt"))
+        && matches!(draft.direction.as_deref(), Some("credit" | "debt"))
         && draft.date.as_deref().is_none_or(is_ascii_date)
         && draft
             .note
             .as_deref()
             .is_none_or(|value| value.chars().count() <= 4_096 && !value.contains('\0'))
-        && draft
-            .message
-            .as_deref()
-            .is_none_or(|value| value.chars().count() <= 200 && !value.contains('\0'))
+        && draft.message.as_deref().is_none_or(|value| {
+            !value.is_empty() && value.chars().count() <= 200 && !value.contains('\0')
+        })
+        // `allow_template_ref=false` is the initial model-produced stored payload. Confirmation
+        // payloads use true and may contain a currency the user explicitly edited in the card.
+        && (allow_template_ref || initial_currency_is_evidenced(draft))
         && match draft.template_ref.as_deref() {
             None => true,
             Some(value) => allow_template_ref && is_structural_encrypted_template_ref(value),
@@ -1847,7 +1900,6 @@ fn draft_public_values(draft: &AttestedEntryDraft) -> Vec<(&'static str, String)
         draft.direction.clone().map(|value| ("Direction", value)),
         draft.date.clone().map(|value| ("Date", value)),
         draft.note.clone().map(|value| ("Note", value)),
-        draft.message.clone().map(|value| ("Message", value)),
     ]
     .into_iter()
     .flatten()
@@ -6944,10 +6996,6 @@ mod tests {
                 AttestedActionCardRow { label: "Direction".into(), value: "debt".into() },
                 AttestedActionCardRow { label: "Date".into(), value: "2026-08-05".into() },
                 AttestedActionCardRow { label: "Note".into(), value: "rent".into() },
-                AttestedActionCardRow {
-                    label: "Message".into(),
-                    value: "I owe 25 USD rent".into(),
-                },
             ],
             confirm_label: IOU_CARD_CONFIRM_LABEL.into(),
             cancel_label: IOU_CARD_CANCEL_LABEL.into(),
@@ -7057,12 +7105,12 @@ mod tests {
         let mut binding = test_card_attestation_binding();
         binding.commitment.content.title = "Add to IOU (2 entries)".into();
         binding.commitment.content.confirm_payload = Some(
-            br#"[{"kind":"iou","amount":20,"currency":"USD","direction":"debt","date":"2026-08-08","note":"rent","message":"rent 20"},{"kind":"settlement","amount":30,"currency":"EGP","direction":"credit","note":"paid"}]"#.to_vec(),
+            br#"[{"kind":"iou","amount":20,"currency":"USD","direction":"debt","date":"2026-08-08","note":"rent","message":"rent 20 USD"},{"kind":"settlement","amount":30,"currency":"EGP","direction":"credit","note":"paid","message":"paid 30 EGP"}]"#.to_vec(),
         );
         binding.commitment.content.rows = vec![
             AttestedActionCardRow {
                 label: "Entry 1".into(),
-                value: "Amount: 20 · Currency: USD · Type: iou · Direction: debt · Date: 2026-08-08 · Note: rent · Message: rent 20".into(),
+                value: "Amount: 20 · Currency: USD · Type: iou · Direction: debt · Date: 2026-08-08 · Note: rent".into(),
             },
             AttestedActionCardRow {
                 label: "Entry 2".into(),
@@ -7120,53 +7168,128 @@ mod tests {
     #[test]
     fn initial_card_payload_rejects_private_type_unknown_duplicate_and_malformed_fields() {
         for payload in [
-            br#"{"amount":25,"template":"Rent"}"#.as_slice(),
-            br#"{"amount":25,"template_ref":"ioutr1.AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"}"#.as_slice(),
-            br#"{"amount":25,"account_type":"Rent"}"#.as_slice(),
-            br#"{"amount":25,"amount":26}"#.as_slice(),
-            br#"{"amount":0}"#.as_slice(),
-            br#"{"amount":25,"currency":"usd"}"#.as_slice(),
-            br#"{"amount":25,"kind":"Rent"}"#.as_slice(),
+            br#"{"amount":25,"kind":"iou","direction":"debt","message":"I owe 25 USD","template":"Rent"}"#.as_slice(),
+            br#"{"amount":25,"kind":"iou","direction":"debt","message":"I owe 25 USD","template_ref":"ioutr1.AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"}"#.as_slice(),
+            br#"{"amount":25,"kind":"iou","direction":"debt","message":"I owe 25 USD","account_type":"Rent"}"#.as_slice(),
+            br#"{"amount":25,"kind":"iou","direction":"debt","message":"I owe 25 USD","amount":26}"#.as_slice(),
+            br#"{"amount":0,"kind":"iou","direction":"debt","message":"I owe 0 USD"}"#.as_slice(),
+            br#"{"amount":25,"kind":"iou","direction":"debt","message":"I owe 25 usd","currency":"usd"}"#.as_slice(),
+            br#"{"amount":25,"kind":"Rent","direction":"debt","message":"I owe 25 USD"}"#.as_slice(),
         ] {
             assert!(parse_attested_entry_drafts(payload, false).is_none());
         }
     }
 
     #[test]
+    fn card_attester_requires_registered_ledger_semantics_and_validates_optional_source_evidence() {
+        for payload in [
+            br#"{"amount":25,"direction":"debt","message":"I owe 25 USD"}"#.as_slice(),
+            br#"{"amount":25,"kind":"iou","message":"I owe 25 USD"}"#.as_slice(),
+            br#"{"amount":25,"kind":"iou","direction":"debt","message":""}"#.as_slice(),
+            br#"{"amount":25,"kind":"iou","direction":"debt","message":"bad\u0000evidence"}"#.as_slice(),
+        ] {
+            assert!(parse_attested_entry_drafts(payload, false).is_none());
+        }
+        assert!(parse_attested_entry_drafts(
+            br#"{"amount":25,"kind":"iou","direction":"debt"}"#,
+            false,
+        )
+        .is_some());
+        assert!(parse_attested_entry_drafts(
+            br#"{"amount":25,"kind":"iou","direction":"debt","message":"I owe 25 USD"}"#,
+            false,
+        )
+        .is_some());
+        let overlong = format!(
+            r#"{{"amount":25,"kind":"iou","direction":"debt","message":"{}"}}"#,
+            "x".repeat(201)
+        );
+        assert!(parse_attested_entry_drafts(overlong.as_bytes(), false).is_none());
+    }
+
+    #[test]
+    fn initial_attester_recomputes_registered_text_currency_evidence_but_preserves_image_and_edits() {
+        for payload in [
+            br#"{"amount":20,"kind":"settlement","currency":"USD","direction":"debt","message":"paid 20"}"#.as_slice(),
+            br#"{"amount":20,"kind":"settlement","currency":"USD","direction":"debt","message":"paid 20 EGP"}"#.as_slice(),
+            br#"{"amount":20,"kind":"settlement","currency":"USD","direction":"debt","message":"paid crusade"}"#.as_slice(),
+        ] {
+            assert!(parse_attested_entry_drafts(payload, false).is_none());
+        }
+        for payload in [
+            br#"{"amount":20,"kind":"settlement","currency":"USD","direction":"debt","message":"paid 20 USD"}"#.as_slice(),
+            br#"{"amount":20,"kind":"settlement","currency":"USD","direction":"debt","message":"paid $20"}"#.as_slice(),
+            br#"{"amount":20,"kind":"settlement","currency":"GBP","direction":"debt","message":"paid 20 pounds sterling"}"#.as_slice(),
+            r#"{"amount":20,"kind":"settlement","currency":"EGP","direction":"debt","message":"paid E£20"}"#.as_bytes(),
+            r#"{"amount":20,"kind":"settlement","currency":"EGP","direction":"debt","message":"paid 20 ج.م"}"#.as_bytes(),
+            // No model-authored text echo is the registered image-only shape.
+            br#"{"amount":20,"kind":"settlement","currency":"USD","direction":"debt"}"#.as_slice(),
+        ] {
+            assert!(parse_attested_entry_drafts(payload, false).is_some());
+        }
+        let registered_aliases: [(&str, &[&str]); 6] = [
+            ("USD", &["$", "dollar", "dollars", "US dollar", "US dollars"]),
+            ("GBP", &["£", "pound sterling", "pounds sterling"]),
+            ("EUR", &["€", "euro", "euros"]),
+            ("JPY", &["¥", "yen"]),
+            ("INR", &["₹", "rupee", "rupees"]),
+            ("EGP", &["E£", "Egyptian pound", "Egyptian pounds", "ج.م"]),
+        ];
+        for (currency, aliases) in registered_aliases {
+            for alias in aliases {
+                let payload = format!(
+                    r#"{{"amount":20,"kind":"settlement","currency":"{currency}","direction":"debt","message":"paid 20 {alias}"}}"#,
+                );
+                assert!(
+                    parse_attested_entry_drafts(payload.as_bytes(), false).is_some(),
+                    "registered currency alias was rejected: {currency} / {alias}",
+                );
+            }
+        }
+        // Final confirmation is a user-reviewed payload; an edited currency must not be rejected
+        // merely because the original source text named a different one.
+        assert!(parse_attested_entry_drafts(
+            br#"{"amount":20,"kind":"settlement","currency":"USD","direction":"debt","message":"paid 20 EGP"}"#,
+            true,
+        )
+        .is_some());
+    }
+
+    #[test]
     fn app_attester_rejects_unsanitized_image_style_optional_fields() {
         for payload in [
-            br#"{"amount":25,"currency":"$"}"#.as_slice(),
-            br#"{"amount":25,"currency":"$$$"}"#.as_slice(),
-            br#"{"amount":25,"currency":"egp"}"#.as_slice(),
-            br#"{"amount":25,"currency":"\uFF25\uFF27\uFF30"}"#.as_slice(),
-            br#"{"amount":25,"date":"08/07/2026"}"#.as_slice(),
-            br#"{"amount":25,"date":"0000-01-01"}"#.as_slice(),
-            br#"{"amount":25,"date":"2026-13-40"}"#.as_slice(),
-            br#"{"amount":25,"date":"2026-02-29"}"#.as_slice(),
-            br#"{"amount":25,"date":"2026-04-31"}"#.as_slice(),
-            br#"{"amount":25,"note":"receipt\u0000hidden"}"#.as_slice(),
-            br#"{"amount":25,"message":"message\u0000hidden"}"#.as_slice(),
-            br#"{"amount":25,"note":"\uD800"}"#.as_slice(),
-            br#"{"amount":25,"message":"\uDC00"}"#.as_slice(),
-            br#"{"amount":0.0049}"#.as_slice(),
-            br#"{"amount":90071992547410}"#.as_slice(),
+            br#"{"amount":25,"kind":"iou","direction":"debt","message":"I owe 25","currency":"$"}"#.as_slice(),
+            br#"{"amount":25,"kind":"iou","direction":"debt","message":"I owe 25","currency":"$$$"}"#.as_slice(),
+            br#"{"amount":25,"kind":"iou","direction":"debt","message":"I owe 25 egp","currency":"egp"}"#.as_slice(),
+            br#"{"amount":25,"kind":"iou","direction":"debt","message":"I owe 25 EGP","currency":"\uFF25\uFF27\uFF30"}"#.as_slice(),
+            br#"{"amount":25,"kind":"iou","direction":"debt","message":"I owe 25 on 08/07/2026","date":"08/07/2026"}"#.as_slice(),
+            br#"{"amount":25,"kind":"iou","direction":"debt","message":"I owe 25","date":"0000-01-01"}"#.as_slice(),
+            br#"{"amount":25,"kind":"iou","direction":"debt","message":"I owe 25","date":"2026-13-40"}"#.as_slice(),
+            br#"{"amount":25,"kind":"iou","direction":"debt","message":"I owe 25","date":"2026-02-29"}"#.as_slice(),
+            br#"{"amount":25,"kind":"iou","direction":"debt","message":"I owe 25","date":"2026-04-31"}"#.as_slice(),
+            br#"{"amount":25,"kind":"iou","direction":"debt","message":"I owe 25","note":"receipt\u0000hidden"}"#.as_slice(),
+            br#"{"amount":25,"kind":"iou","direction":"debt","message":"message\u0000hidden"}"#.as_slice(),
+            br#"{"amount":25,"kind":"iou","direction":"debt","message":"I owe 25","note":"\uD800"}"#.as_slice(),
+            br#"{"amount":25,"kind":"iou","direction":"debt","message":"\uDC00"}"#.as_slice(),
+            br#"{"amount":0.0049,"kind":"iou","direction":"debt","message":"I owe 0.0049"}"#.as_slice(),
+            br#"{"amount":90071992547410,"kind":"iou","direction":"debt","message":"I owe too much"}"#.as_slice(),
         ] {
             assert!(parse_attested_entry_drafts(payload, false).is_none());
         }
 
-        let overlong_note = format!(r#"{{"amount":25,"note":"{}"}}"#, "n".repeat(4_097));
+        let overlong_note = format!(r#"{{"amount":25,"kind":"iou","direction":"debt","message":"I owe 25","note":"{}"}}"#, "n".repeat(4_097));
         assert!(parse_attested_entry_drafts(overlong_note.as_bytes(), false).is_none());
-        let overlong_message = format!(r#"{{"amount":25,"message":"{}"}}"#, "m".repeat(201));
+        let overlong_message = format!(r#"{{"amount":25,"kind":"iou","direction":"debt","message":"{}"}}"#, "m".repeat(201));
         assert!(parse_attested_entry_drafts(overlong_message.as_bytes(), false).is_none());
 
-        // Every rejected model field above is optional. Dropping it produces exact bytes the app
-        // can safely attest; IOU fills account defaults only after the user's final confirmation.
-        assert!(parse_attested_entry_drafts(br#"{"amount":25}"#, false).is_some());
-        assert!(parse_attested_entry_drafts(br#"{"amount":0.005}"#, false).is_some());
+        // Optional malformed fields can be omitted, but the registered ledger semantics remain
+        // mandatory at the app attestation boundary. Source text is optional for image-only input.
+        assert!(parse_attested_entry_drafts(br#"{"amount":25,"kind":"iou","direction":"debt","message":"I owe 25"}"#, false).is_some());
+        assert!(parse_attested_entry_drafts(br#"{"amount":0.005,"kind":"iou","direction":"debt","message":"I owe 0.005"}"#, false).is_some());
         assert!(
-            parse_attested_entry_drafts(br#"{"amount":25,"date":"2024-02-29"}"#, false).is_some()
+            parse_attested_entry_drafts(br#"{"amount":25,"kind":"iou","direction":"debt","message":"I owe 25 on leap day","date":"2024-02-29"}"#, false).is_some()
         );
-        assert!(parse_attested_entry_drafts(br#"{"amount":90071992547409.9}"#, false).is_some());
+        assert!(parse_attested_entry_drafts(br#"{"amount":90071992547409.9,"kind":"iou","direction":"debt","message":"I owe the maximum"}"#, false).is_some());
     }
 
     #[test]
@@ -7175,7 +7298,7 @@ mod tests {
         let link = test_card_link();
         let encrypted_ref = format!("ioutr1.{}", "A".repeat(39));
         let payload = format!(
-            "{{\"amount\":25,\"direction\":\"debt\",\"template_ref\":\"{encrypted_ref}\"}}"
+            "{{\"amount\":25,\"kind\":\"iou\",\"direction\":\"debt\",\"message\":\"I owe 25 USD\",\"template_ref\":\"{encrypted_ref}\"}}"
         )
         .into_bytes();
         let binding = test_confirmation_binding(payload);
@@ -7196,7 +7319,9 @@ mod tests {
             false,
         ));
 
-        let no_private_ref = test_confirmation_binding(br#"{"amount":25,"direction":"debt"}"#.to_vec());
+        let no_private_ref = test_confirmation_binding(
+            br#"{"amount":25,"kind":"iou","direction":"debt","message":"I owe 25 USD"}"#.to_vec(),
+        );
         assert!(attests_exact_iou_card_confirmation(
             &no_private_ref,
             Some(&configured),
@@ -7245,13 +7370,13 @@ mod tests {
         let configured = test_ai_app_v2_binding();
         let link = test_card_link();
         for payload in [
-            br#"{"amount":25,"template":"Rent"}"#.as_slice(),
-            br#"{"amount":25,"type":"Rent"}"#.as_slice(),
-            br#"{"amount":25,"account_type":"Rent"}"#.as_slice(),
-            br#"{"amount":25,"template_ref":"Rent"}"#.as_slice(),
-            br#"{"amount":25,"template_ref":"ioutr1.AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAB"}"#.as_slice(),
-            br#"{"amount":25,"amount":26}"#.as_slice(),
-            br#"{"amount":0.001}"#.as_slice(),
+            br#"{"amount":25,"kind":"iou","direction":"debt","message":"I owe 25 USD","template":"Rent"}"#.as_slice(),
+            br#"{"amount":25,"kind":"iou","direction":"debt","message":"I owe 25 USD","type":"Rent"}"#.as_slice(),
+            br#"{"amount":25,"kind":"iou","direction":"debt","message":"I owe 25 USD","account_type":"Rent"}"#.as_slice(),
+            br#"{"amount":25,"kind":"iou","direction":"debt","message":"I owe 25 USD","template_ref":"Rent"}"#.as_slice(),
+            br#"{"amount":25,"kind":"iou","direction":"debt","message":"I owe 25 USD","template_ref":"ioutr1.AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAB"}"#.as_slice(),
+            br#"{"amount":25,"kind":"iou","direction":"debt","message":"I owe 25 USD","amount":26}"#.as_slice(),
+            br#"{"amount":0.001,"kind":"iou","direction":"debt","message":"I owe 0.001 USD"}"#.as_slice(),
             br#"[]"#.as_slice(),
         ] {
             let binding = test_confirmation_binding(payload.to_vec());

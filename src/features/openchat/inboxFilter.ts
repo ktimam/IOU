@@ -28,6 +28,14 @@ export type ImportedEntry = {
   payload: { draft_id?: string; import_message_id?: string };
 };
 
+/** A verified OpenChat card is one exact payload: never import only its parseable survivors. */
+export function isCompleteVerifiedOpenChatBatch(result: {
+  drafts: readonly unknown[];
+  errors: readonly string[];
+}): boolean {
+  return result.drafts.length > 0 && result.errors.length === 0;
+}
+
 export type VisibleInboxInput<T extends InboxCard> = {
   /** Everything the on-chain inbox poll has produced for this user (all sheets). */
   inboxPending: T[];
@@ -64,7 +72,9 @@ export function visibleInboxFor<T extends InboxCard>({
       // keys off its FIRST entry's draftId.
       let draftId: string | undefined;
       if (messageHandle === undefined) {
-        const parsed = parseDraftBatch(p.draft, resolveTemplateBase, defaultCurrency);
+        const parsed = parseDraftBatch(p.draft, resolveTemplateBase, defaultCurrency, {
+          dateEvidence: "explicit-only",
+        });
         draftId = parsed.drafts[0]?.draftId;
       }
       return !isImportedIntoSheet(entries, messageHandle, draftId);

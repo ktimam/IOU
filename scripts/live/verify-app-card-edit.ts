@@ -81,7 +81,14 @@ async function main() {
   await artifactScope.begin();
   artifactScope.expectExactText(sourceText);
   artifactScope.expectCardInputs([note]);
-  const ex = JSON.stringify({ kind: "iou", amount: 350, currency: "EGP", direction: "credit", note });
+  const ex = JSON.stringify({
+    kind: "iou",
+    amount: 350,
+    currency: "EGP",
+    direction: "credit",
+    note,
+    message: sourceText,
+  });
   const h = (d: import("@playwright/test").Dialog) => { void d.accept(/JSON/i.test(d.message()) ? ex : "1").catch(()=>{}); };
   oc.on("dialog", h);
   try {

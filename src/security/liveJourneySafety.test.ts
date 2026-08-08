@@ -1,9 +1,12 @@
 import { describe, expect, it } from 'vitest';
 import {
   assertAcceptedVisionExtraction,
+  classifySentImageResource,
   journeySourceText,
   matchesExactImageContentEvidence,
+  matchesExactMessageInventory,
   matchesRunCardCandidate,
+  retainsNonceBoundCardEvidence,
   selectFreshOwnedSourceCandidate,
   shouldRetryExactMessageDeletion,
   type StableMessageRef,
@@ -16,6 +19,139 @@ const source: StableMessageRef = {
 };
 
 describe('live journey source policy', () => {
+  it('requires both the exact message-id set and DOM digest at a draft boundary', () => {
+    expect(
+      matchesExactMessageInventory({
+        expectedMessageIds: ['9', '3'],
+        observedMessageIds: new Set(['3', '9']),
+        expectedDigest: 'a'.repeat(64),
+        observedDigest: 'a'.repeat(64),
+      }),
+    ).toBe(true);
+
+    for (const mismatch of [
+      {
+        observedMessageIds: new Set(['3', '10']),
+        observedDigest: 'a'.repeat(64),
+      },
+      {
+        observedMessageIds: new Set(['3', '9']),
+        observedDigest: 'b'.repeat(64),
+      },
+      {
+        observedMessageIds: new Set(['3']),
+        observedDigest: 'a'.repeat(64),
+      },
+    ]) {
+      expect(
+        matchesExactMessageInventory({
+          expectedMessageIds: ['9', '3'],
+          expectedDigest: 'a'.repeat(64),
+          ...mismatch,
+        }),
+      ).toBe(false);
+    }
+    expect(
+      matchesExactMessageInventory({
+        expectedMessageIds: ['9', '9'],
+        observedMessageIds: new Set(['9']),
+        expectedDigest: 'a'.repeat(64),
+        observedDigest: 'a'.repeat(64),
+      }),
+    ).toBe(false);
+  });
+
+  it('waits through OpenChat blob and thumbnail fallbacks until the exact HTTP upload is rendered', () => {
+    expect(
+      classifySentImageResource({
+        attributeSrc: 'blob:http://localhost:5003/draft',
+        src: 'blob:http://localhost:5003/draft',
+        currentSrc: 'blob:http://localhost:5003/draft',
+        complete: true,
+        naturalWidth: 900,
+        naturalHeight: 680,
+      }),
+    ).toEqual({ kind: 'pending', reason: 'temporary' });
+
+    expect(
+      classifySentImageResource({
+        attributeSrc: 'data:image/png;base64,dGh1bWJuYWls',
+        src: 'data:image/png;base64,dGh1bWJuYWls',
+        currentSrc: 'data:image/png;base64,dGh1bWJuYWls',
+        complete: true,
+        naturalWidth: 300,
+        naturalHeight: 227,
+      }),
+    ).toEqual({ kind: 'pending', reason: 'temporary' });
+
+    expect(
+      classifySentImageResource({
+        attributeSrc: 'http://aaaaa-aa.localhost:8080/blobs/42',
+        src: 'http://aaaaa-aa.localhost:8080/blobs/42',
+        currentSrc: 'data:image/png;base64,dGh1bWJuYWls',
+        complete: true,
+        naturalWidth: 300,
+        naturalHeight: 227,
+      }),
+    ).toEqual({ kind: 'pending', reason: 'transition' });
+
+    expect(
+      classifySentImageResource({
+        attributeSrc: 'http://aaaaa-aa.localhost:8080/blobs/42',
+        src: 'http://aaaaa-aa.localhost:8080/blobs/42',
+        currentSrc: 'http://aaaaa-aa.localhost:8080/blobs/42',
+        complete: true,
+        naturalWidth: 900,
+        naturalHeight: 680,
+      }),
+    ).toEqual({
+      kind: 'ready',
+      url: 'http://aaaaa-aa.localhost:8080/blobs/42',
+    });
+  });
+
+  it('does not treat an unloaded or changing HTTP image as byte-verifiable', () => {
+    expect(
+      classifySentImageResource({
+        attributeSrc: 'https://storage.example/new',
+        src: 'https://storage.example/new',
+        currentSrc: '',
+        complete: false,
+        naturalWidth: 0,
+        naturalHeight: 0,
+      }),
+    ).toEqual({ kind: 'pending', reason: 'not-loaded' });
+
+    expect(
+      classifySentImageResource({
+        attributeSrc: 'https://storage.example/new',
+        src: 'https://storage.example/new',
+        currentSrc: 'https://storage.example/old',
+        complete: true,
+        naturalWidth: 900,
+        naturalHeight: 680,
+      }),
+    ).toEqual({ kind: 'pending', reason: 'transition' });
+  });
+
+  it.each([
+    'ftp://storage.example/image.png',
+    'javascript:alert(1)',
+    'data:text/html;base64,PGgxPm5vdCBhbiBpbWFnZTwvaDE+',
+    'not a resolved URL',
+  ])('fails closed for terminal unsupported sent-image URL %s', (url) => {
+    expect(() =>
+      classifySentImageResource({
+        attributeSrc: url,
+        src: url,
+        currentSrc: url,
+        complete: true,
+        naturalWidth: 900,
+        naturalHeight: 680,
+      }),
+    ).toThrow(/unsupported|invalid/i);
+  });
+
   it('sends an image as the entire message, without a visible caption', () => {
     expect(
       journeySourceText({
@@ -99,8 +235,45 @@ describe('live journey source policy', () => {
       selectFreshOwnedSourceCandidate({
         candidates: [historical, fresh],
         baselineMessageIds: new Set(['100']),
+        baselineMaxMessageIndex: 40,
+        baselineMaxEventIndex: 51,
       }),
     ).toEqual({ messageId: '101', messageIndex: 41, eventIndex: 52 });
+  });
+
+  it('rejects an exact older image that was virtualized outside the pre-send DOM baseline', () => {
+    const virtualizedHistorical = {
+      messageId: '99',
+      messageIndex: 40,
+      eventIndex: 51,
+      senderOwned: true,
+      exactEvidenceMatches: 1,
+    };
+    const fresh = {
+      messageId: '101',
+      messageIndex: 41,
+      eventIndex: 52,
+      senderOwned: true,
+      exactEvidenceMatches: 1,
+    };
+
+    expect(
+      selectFreshOwnedSourceCandidate({
+        candidates: [virtualizedHistorical, fresh],
+        baselineMessageIds: new Set(['100']),
+        baselineMaxMessageIndex: 40,
+        baselineMaxEventIndex: 51,
+      }),
+    ).toEqual({ messageId: '101', messageIndex: 41, eventIndex: 52 });
+
+    expect(
+      selectFreshOwnedSourceCandidate({
+        candidates: [{ ...fresh, eventIndex: 51 }],
+        baselineMessageIds: new Set(['100']),
+        baselineMaxMessageIndex: 40,
+        baselineMaxEventIndex: 51,
+      }),
+    ).toBeNull();
   });
 
   it.each([
@@ -155,6 +328,8 @@ describe('live journey source policy', () => {
       selectFreshOwnedSourceCandidate({
         candidates,
         baselineMessageIds: new Set(),
+        baselineMaxMessageIndex: -1,
+        baselineMaxEventIndex: -1,
       }),
     ).toThrow(error);
   });
@@ -225,21 +400,38 @@ describe('live journey mutation targeting', () => {
 });
 
 describe('real image acceptance', () => {
-  it('accepts meaningful pre-edit values extracted from the image', () => {
+  const exactFixtureExtraction = {
+    entryCount: 1,
+    kind: 'iou',
+    amount: '350.00',
+    currency: 'EGP',
+    direction: 'credit',
+    date: '',
+  } as const;
+
+  it('accepts every initial semantic value and the blank image-only date from the fixture', () => {
     expect(
-      assertAcceptedVisionExtraction({
-        amount: '350.00',
-        currency: 'EGP',
-        direction: 'credit',
-      }),
-    ).toEqual({ amount: 350, currency: 'EGP', direction: 'credit' });
+      assertAcceptedVisionExtraction(exactFixtureExtraction),
+    ).toEqual({
+      entryCount: 1,
+      kind: 'iou',
+      amount: 350,
+      currency: 'EGP',
+      direction: 'credit',
+      date: '',
+    });
   });
 
   it.each([
-    [{ amount: '', currency: 'EGP', direction: 'credit' }, 'amount'],
-    [{ amount: '351', currency: 'EGP', direction: 'credit' }, 'amount'],
-    [{ amount: '350', currency: 'USD', direction: 'credit' }, 'currency'],
-    [{ amount: '350', currency: 'EGP', direction: 'debt' }, 'direction'],
+    [{ ...exactFixtureExtraction, entryCount: 0 }, 'entry count'],
+    [{ ...exactFixtureExtraction, entryCount: 2 }, 'entry count'],
+    [{ ...exactFixtureExtraction, kind: '' }, 'kind'],
+    [{ ...exactFixtureExtraction, kind: 'settlement' }, 'kind'],
+    [{ ...exactFixtureExtraction, amount: '' }, 'amount'],
+    [{ ...exactFixtureExtraction, amount: '351' }, 'amount'],
+    [{ ...exactFixtureExtraction, currency: 'USD' }, 'currency'],
+    [{ ...exactFixtureExtraction, direction: 'debt' }, 'direction'],
+    [{ ...exactFixtureExtraction, date: '2026-08-08' }, 'date'],
   ])('rejects a wrong pre-edit extraction: %s', (candidate, field) => {
     expect(() => assertAcceptedVisionExtraction(candidate)).toThrow(field);
   });
@@ -313,6 +505,77 @@ describe('exact message deletion retries', () => {
         maxAttempts: 3,
         ...scenario,
         target,
+      }),
+    ).toBe(false);
+  });
+});
+
+describe('nonce-bound confirmed-card evidence', () => {
+  const target: StableMessageRef = {
+    messageId: '800',
+    messageIndex: 99,
+    eventIndex: 100,
+  };
+
+  it('retains a previously verified nonce when the same owned card message is consumed', () => {
+    expect(
+      retainsNonceBoundCardEvidence({
+        target,
+        boundMessage: target,
+        senderOwned: true,
+        boundExactNote: 'journey-run-800',
+        currentIdentity: 'unavailable',
+        currentNote: 'unavailable',
+      }),
+    ).toBe(true);
+  });
+
+  it.each([
+    {
+      label: 'stable coordinates changed',
+      boundMessage: { ...target, eventIndex: 101 },
+      senderOwned: true,
+      boundExactNote: 'journey-run-800',
+      currentIdentity: 'unavailable' as const,
+      currentNote: 'unavailable' as const,
+    },
+    {
+      label: 'message is no longer sender-owned',
+      boundMessage: target,
+      senderOwned: false,
+      boundExactNote: 'journey-run-800',
+      currentIdentity: 'unavailable' as const,
+      currentNote: 'unavailable' as const,
+    },
+    {
+      label: 'no exact note was bound before collapse',
+      boundMessage: target,
+      senderOwned: true,
+      boundExactNote: '   ',
+      currentIdentity: 'match' as const,
+      currentNote: 'unavailable' as const,
+    },
+    {
+      label: 'a currently rendered card has another app identity',
+      boundMessage: target,
+      senderOwned: true,
+      boundExactNote: 'journey-run-800',
+      currentIdentity: 'mismatch' as const,
+      currentNote: 'unavailable' as const,
+    },
+    {
+      label: 'a currently rendered card exposes another note',
+      boundMessage: target,
+      senderOwned: true,
+      boundExactNote: 'journey-run-800',
+      currentIdentity: 'match' as const,
+      currentNote: 'mismatch' as const,
+    },
+  ])('fails closed when $label', (scenario) => {
+    expect(
+      retainsNonceBoundCardEvidence({
+        target,
+        ...scenario,
       }),
     ).toBe(false);
   });

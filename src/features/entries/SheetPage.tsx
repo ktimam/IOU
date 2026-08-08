@@ -81,7 +81,10 @@ import {
   isImportedIntoSheet,
   planObsoleteInboxStorageCleanup,
 } from "../openchat/inboxDedupe";
-import { visibleInboxFor } from "../openchat/inboxFilter";
+import {
+  isCompleteVerifiedOpenChatBatch,
+  visibleInboxFor,
+} from "../openchat/inboxFilter";
 import {
   restoreOpenChatTemplateRefs,
 } from "../openchat/templateRefImport";
@@ -316,17 +319,23 @@ export function SheetPage() {
   // Import an AI-extracted draft (chat bridge, Milestone 0): parse the pasted
   // JSON, dedupe by draft_id, then open the prefilled EntryForm to confirm.
   // Nothing is written until the user confirms in the form (no auto-write).
-  // Resolve the template a chat message was routed to (the manifest keyword_map / model sets
-  // `raw.template` to the template's NAME) against THIS account's types, so parseDraft can fill gaps
-  // the extraction left. Unknown/deleted/renamed — and any name that only exists on ANOTHER of the
-  // user's accounts, which the single per-user manifest roster makes routable here — resolves to no
-  // base, so no foreign fee/schedule/currency can reach this sheet. See resolveTemplateBase.ts.
+  // Resolve legacy paste/connector template hints against THIS account's types, so parseDraft can
+  // fill gaps without allowing an unknown/deleted/foreign type to contribute defaults. OpenChat's
+  // public manifest contains no saved-type roster or plaintext template field: its dedicated
+  // resolver below uses row-local evidence (or a verified encrypted template_ref) at import.
   const resolveTemplateBase = (
     raw: unknown,
     context?: DraftBaseResolverContext,
   ): Partial<EntryPayload> | undefined =>
     resolveTemplateBaseFor(allTemplates, raw, {
       evidence: context?.multiEntry ? "row-local" : "full",
+    }).base;
+  const resolveOpenChatTemplateBase = (
+    raw: unknown,
+    context?: DraftBaseResolverContext,
+  ): Partial<EntryPayload> | undefined =>
+    resolveTemplateBaseFor(allTemplates, raw, {
+      evidence: templateEvidenceForImport("openchat", context?.multiEntry ?? false),
     }).base;
 
   const openFromDraft = () => {
@@ -486,17 +495,17 @@ export function SheetPage() {
     // different template) and the IOU default currency is injected per element.
     const { drafts, errors } = parseDraftBatch(
       inboundDraft,
-      (raw, context) =>
-        resolveTemplateBaseFor(allTemplates, raw, {
-          // Every OpenChat row is model-produced, including an array that the
-          // model filtered down to one survivor. Its repeated full `message`
-          // may mention a dropped sibling, so only row-local note evidence may
-          // select account-private money defaults. Local/non-OpenChat singles
-          // retain the existing full-message convenience matching.
-          evidence: templateEvidenceForImport(p.source, context?.multiEntry ?? false),
-        }).base,
+      p.source === "openchat" ? resolveOpenChatTemplateBase : resolveTemplateBase,
       prefs.defaultCurrency,
+      p.source === "openchat" ? { dateEvidence: "explicit-only" } : undefined,
     );
+    if (p.source === "openchat" && !isCompleteVerifiedOpenChatBatch({ drafts, errors })) {
+      toasts.show({
+        kind: "error",
+        text: "Invalid verified card: " + errors.join("; "),
+      });
+      return;
+    }
     if (drafts.length === 0) {
       toasts.show({ kind: "error", text: "Invalid draft from chat: " + errors.join("; ") });
       return;
@@ -829,7 +838,7 @@ export function SheetPage() {
         sheetId,
         entries,
         dismissed: pairTemplates.dismissed,
-        resolveTemplateBase,
+        resolveTemplateBase: resolveOpenChatTemplateBase,
         defaultCurrency: prefs.defaultCurrency,
       }),
     // resolveTemplateBase is re-created each render but only reads the account's
@@ -1301,7 +1310,12 @@ export function SheetPage() {
             {[...pending, ...visibleInbox].map((p) => {
               // Single OR multi-entry card: batchSummary renders the count ("N entries: …") for a
               // multi card and the plain summary for a single one (byte-identical to before).
-              const rb = parseDraftBatch(p.draft, resolveTemplateBase, prefs.defaultCurrency);
+              const rb = parseDraftBatch(
+                p.draft,
+                p.source === "openchat" ? resolveOpenChatTemplateBase : resolveTemplateBase,
+                prefs.defaultCurrency,
+                p.source === "openchat" ? { dateEvidence: "explicit-only" } : undefined,
+              );
               return (
                 <li
                   key={p.id}

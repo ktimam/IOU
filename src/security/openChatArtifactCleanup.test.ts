@@ -68,12 +68,12 @@ describe("exact OpenChat artifact selection", () => {
       {
         label: "Entry 1",
         value:
-          "Amount: 350 · Currency: EGP · Type: iou · Direction: credit · Date: 2026-08-08 · Note: multi-a run-abc · Message: Multi run-abc: two fees",
+          "Amount: 350 · Currency: EGP · Type: iou · Direction: credit · Date: 2026-08-08 · Note: multi-a run-abc",
       },
       {
         label: "Entry 2",
         value:
-          "Amount: 500 · Currency: USD · Type: settlement · Direction: debt · Date: 2026-08-09 · Note: multi-b run-abc · Message: Multi run-abc: two fees",
+          "Amount: 500 · Currency: USD · Type: settlement · Direction: debt · Date: 2026-08-09 · Note: multi-b run-abc",
       },
     ];
     const withRows = (

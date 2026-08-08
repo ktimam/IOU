@@ -5,6 +5,7 @@ import {
   IOU_EXTRACTION_PROMPT,
   buildIouRules,
   buildIouOutputSchema,
+  IOU_CURRENCY_EVIDENCE_MAP,
   IOU_MIN_MAJOR_AMOUNT,
 } from "./actionManifest";
 import { parseDraft } from "../entries/draft";
@@ -74,24 +75,32 @@ describe("private account templates", () => {
   });
 });
 
-describe("invalid-draft guardrails (schema ↔ parseDraft lock-step)", () => {
+describe("invalid attested-card guardrails", () => {
   // Live-reproduced 2026-07-22: the on-device model turned the message "hi" into
   // {"kind":"settlement","amount":0,"currency":"USD","note":"hi"}; OpenChat posted+deposited it and
-  // IOU could only render "invalid draft". The registered schema must DECLARE what parseDraft
-  // enforces so OpenChat's post-generation schema check drops such extractions (no_extraction)
-  // before a card ever posts.
+  // IOU could only render "invalid draft". The registered schema and canister attester require the
+  // exact public ledger semantics so OpenChat drops bad model output before a card posts. The local
+  // paste/legacy parser is deliberately more permissive and may infer defaults outside this trust
+  // boundary.
 
-  it("schema requires amount but NOT currency (currency defaults to the user's IOU setting)", () => {
-    // amount is unrecoverable → required (a degenerate amount-0/absent extraction must be dropped).
+  it("schema requires ledger semantics but NOT currency or model-authored source evidence", () => {
+    // amount/kind/direction are unrecoverable without silently changing ledger meaning, so an
+    // absent or invalid value must be dropped rather than masked by a card UI default.
     // currency IS recoverable: IOU fills a missing currency from prefs.defaultCurrency on import
     // (baseWithDefaultCurrency), so requiring it would wrongly BLOCK a no-currency message at the
     // OpenChat gate before IOU can default it (live 2026-07-23: "paid 120 for groceries" → no card).
     const required = iouActionManifest.outputSchema.required as string[];
-    expect(required).toContain("amount");
+    expect(required).toEqual(["amount", "kind", "direction"]);
     expect(required).not.toContain("currency");
+    expect(required).not.toContain("message");
     // The template-enriched schema (the one actually registered) carries the same requirement.
-    expect(buildIouOutputSchema([]).required as string[]).toContain("amount");
+    expect(buildIouOutputSchema([]).required as string[]).toEqual([
+      "amount",
+      "kind",
+      "direction",
+    ]);
     expect(buildIouOutputSchema([]).required as string[]).not.toContain("currency");
+    expect(buildIouOutputSchema([]).required as string[]).not.toContain("message");
   });
 
   it("schema starts at the exact value that rounds to one minor unit", () => {
@@ -222,17 +231,11 @@ describe("iouActionManifest", () => {
   });
 });
 
-// The wire is assembled from TWO sources that no single script keeps in step: the rules and the
-// response schema are regenerated into docs/openchat-registration.json by
-// scripts/gen-openchat-registration.ts, but `card.rows` is HAND-EDITED there and left untouched by
-// that script (registerAiApp.ts reads the rows straight from the paste JSON). So a `from_message`
-// rule can silently lose the schema property or the card row it depends on, and nothing would fail.
-//
-// That matters because of how the evidence reaches a RECEIVED card: reverseMapRows rebuilds the
-// extraction from the card's visible rows, so a field with no row simply is not there for the
-// partner — currency verification and date recovery would quietly fall back. This is the invariant
-// that catches it.
-describe("registered wire — every from_message field survives to the card", () => {
+// The TS manifest is authoritative for schema, rules, and the compact public rows. The generator
+// keeps the pasteable registration JSON synchronized, and buildManifestWire reads the same TS row
+// list directly. `message` deliberately survives only in the stored payload/schema: it must not be
+// repeated as public description text in every classic multi-entry summary.
+describe("registered wire — schema evidence stays private and public rows stay compact", () => {
   it("contains no unbounded JSON Schema pattern keyword at any depth", async () => {
     const collectKeyPaths = (
       value: unknown,
@@ -266,7 +269,7 @@ describe("registered wire — every from_message field survives to the card", ()
     expect(collectKeyPaths(documentedSchema, "pattern")).toEqual([]);
   });
 
-  it("declares each from_message field in BOTH the response schema and the card rows", async () => {
+  it("keeps from_message evidence in the payload schema but off the public card rows", async () => {
     const { buildManifestWire } = await import("./registerAiApp");
     const wire = buildManifestWire("") as unknown as {
       actions: { response_schema: string; rules: unknown[]; card: { rows: { field: string; label: string }[] } }[];
@@ -280,13 +283,12 @@ describe("registered wire — every from_message field survives to the card", ()
     expect(fromMessageFields.length).toBeGreaterThan(0);
     for (const field of fromMessageFields) {
       expect(Object.keys(schema.properties ?? {})).toContain(field);
-      expect(action.card.rows.map((r) => r.field)).toContain(field);
+      expect(action.card.rows.map((r) => r.field)).not.toContain(field);
     }
   });
 
-  it("declares a card row for every field the confirm payload carries", async () => {
-    // The rows are hand-edited in docs/openchat-registration.json. Pin the complete
-    // public list and explicitly exclude the former private `template` channel.
+  it("declares only the compact user-reviewed fields as public card rows", async () => {
+    // Pin the complete public list and explicitly exclude private/redundant channels.
     const { buildManifestWire } = await import("./registerAiApp");
     const rows = (buildManifestWire("") as unknown as {
       actions: { card: { rows: { field: string }[] } }[];
@@ -298,7 +300,6 @@ describe("registered wire — every from_message field survives to the card", ()
       "direction",
       "date",
       "note",
-      "message",
     ]);
   });
 
@@ -327,8 +328,8 @@ describe("the extraction prompt tells the model a single line can hold several t
     const p = IOU_EXTRACTION_PROMPT;
     expect(p).toMatch(/one LINE can hold several\s+transactions/i);
     expect(p).toMatch(/one object for\s+EACH/i);
-    expect(p).toMatch(/never merge two\s+amounts/i);
-    expect(p).toMatch(/never leave an amount\s+out/i);
+    expect(p).toMatch(/never merge two\s+amounts[^.]*distinct transactions/i);
+    expect(p).toMatch(/never leave an amount\s+out[^.]*distinct transaction/i);
   });
 
   it("ships that guidance in the REGISTERED wire, not just the local constant", () => {
@@ -351,17 +352,156 @@ describe("the extraction prompt tells the model a single line can hold several t
     expect(prompt).toMatch(/one amount occurrence[^.]*exactly one object/i);
   });
 
-  it("requires image extraction to preserve exact amount/currency evidence", () => {
+  it("puts a numeric-occurrence cardinality check before classification and repeats it last", () => {
     const p = IOU_EXTRACTION_PROMPT;
-    expect(p).toMatch(/"message"[^.]*image input/i);
-    expect(p).toMatch(/exact visible text[^.]*amount and\s+currency/i);
-    expect(p).toMatch(/never paraphrase/i);
+    const normalized = p.replace(/\s+/g, " ");
+    const cardinality = p.indexOf("CARDINALITY — APPLY THIS BEFORE CLASSIFICATION");
+    const kind = p.indexOf('- "kind"');
+    const finalCheck = p.lastIndexOf("FINAL COUNT CHECK");
+
+    expect(cardinality).toBeGreaterThanOrEqual(0);
+    expect(kind).toBeGreaterThan(cardinality);
+    expect(finalCheck).toBeGreaterThan(kind);
+    expect(p).toMatch(
+      /exactly one distinct transaction amount[\s\S]*exactly\s+ONE JSON\s+object/i,
+    );
+    expect(normalized).toMatch(/never create separate debtor and creditor views/i);
+    expect(normalized).toMatch(/number of output objects[^.]*number of distinct transactions/i);
+    expect(normalized).toMatch(/one transaction[^.]*object, not an array/i);
   });
 
-  it("ships the image-evidence rule in the registered wire", () => {
+  it("pins concrete direction phrases and forbids inventing today's date", () => {
+    const p = IOU_EXTRACTION_PROMPT;
+    const normalized = p.replace(/\s+/g, " ");
+    expect(p).toMatch(/"owed to you"[^.]*"credit"/i);
+    expect(p).toMatch(/"you owe"[^.]*"debt"/i);
+    expect(normalized).toMatch(/output the literal JSON value "credit" or "debt"/i);
+    expect(normalized).toMatch(/never copy a source phrase into "direction"/i);
+    expect(p).toMatch(/host calendar anchor[^.]*reference\s+context only/i);
+    expect(normalized).toMatch(/never output today's date unless the source itself says "today"/i);
+    expect(normalized).toMatch(/no visible date digits or date words[^.]*omit "date"/i);
+    expect(iouActionManifest.rules).toContainEqual({
+      kind: "keyword_map",
+      field: "direction",
+      mode: "override",
+      map: [
+        {
+          value: "credit",
+          keywords: ["owed to you", "you are owed", "due to you", "payable to you"],
+        },
+        {
+          value: "debt",
+          keywords: ["you owe", "owed by you", "due from you", "payable by you"],
+        },
+      ],
+    });
+  });
+
+  it("requires a literal object boundary for a one-amount source", () => {
+    const normalized = IOU_EXTRACTION_PROMPT.replace(/\s+/g, " ");
+    expect(normalized).toMatch(
+      /one distinct transaction amount[^.]*first non-whitespace output character[^.]*\{/i,
+    );
+    expect(normalized).toMatch(/last non-whitespace output character[^.]*\}/i);
+    expect(normalized).toMatch(/do not wrap that object in \[\]/i);
+  });
+
+  it("does not turn receipt totals/components or a repeated total into extra transactions", () => {
+    const normalized = IOU_EXTRACTION_PROMPT.replace(/\s+/g, " ");
+    expect(normalized).toMatch(/line-item prices[^.]*subtotal[^.]*tax[^.]*tip[^.]*change[^.]*balance/i);
+    expect(normalized).toMatch(
+      /repeated displays? of (?:the same transaction|its) total[^.]*not (?:a )?separate/i,
+    );
+    expect(normalized).toMatch(/equal amounts[^.]*distinct transaction descriptions[^.]*separate/i);
+    expect(normalized).toMatch(/dates[^.]*times[^.]*IDs[^.]*quantities[^.]*percentages[^.]*exchange rates/i);
+  });
+
+  it("ships the cardinality, direction, and date guards in the registered wire", () => {
     const prompt = (registration as { promptTemplate?: string }).promptTemplate ?? "";
-    expect(prompt).toMatch(/"message"[^.]*image input/i);
-    expect(prompt).toMatch(/exact visible text[^.]*amount and\s+currency/i);
+    expect(prompt).toContain("CARDINALITY — APPLY THIS BEFORE CLASSIFICATION");
+    expect(prompt).toContain("FINAL COUNT CHECK");
+    expect(prompt).toMatch(/"owed to you"[^.]*"credit"/i);
+    expect(prompt).toMatch(/literal JSON value "credit" or "debt"/i);
+    expect(prompt).toMatch(/host calendar anchor[^.]*reference\s+context only/i);
+    expect(prompt.replace(/\s+/g, " ")).toMatch(
+      /no visible date digits or date words[^.]*omit "date"/i,
+    );
+    expect(prompt).toBe(IOU_EXTRACTION_PROMPT);
+
+    const finalRule = iouActionManifest.rules.at(-1);
+    expect(iouActionManifest.rules).toContainEqual({ kind: "context", provide: ["today"] });
+    expect(finalRule).toEqual({
+      kind: "instruction",
+      text:
+        'FINAL FORMAT CHECK: map visible phrases like "OWED TO YOU" to exactly "direction":"credit" and "YOU OWE" to exactly "direction":"debt"; never use the phrase itself as the value. Any host calendar anchor is reference only: remove "date" unless the source visibly states a date or relative-date phrase. One transaction must be one object, never an array.',
+    });
+    expect((registration.rules as unknown[]).at(-1)).toEqual(finalRule);
+  });
+
+  it("does not require redundant model-authored message text for image extraction", () => {
+    const p = IOU_EXTRACTION_PROMPT;
+    expect(p).toMatch(/"message"[^.]*plain-text input[^.]*omit for image input/i);
+    expect(p).not.toMatch(/image input[^.]*exact visible text/i);
+    expect(iouActionManifest.outputSchema.required as string[]).not.toContain("message");
+  });
+
+  it("ships the optional image-message policy in the registered wire", () => {
+    const prompt = (registration as { promptTemplate?: string }).promptTemplate ?? "";
+    expect(prompt).toMatch(/"message"[^.]*plain-text input[^.]*omit for image input/i);
+    const registeredSchema = registration.responseSchema as {
+      required?: string[];
+      properties?: Record<string, Record<string, unknown>>;
+    };
+    const sourceProperties = iouActionManifest.outputSchema.properties as Record<
+      string,
+      Record<string, unknown>
+    >;
+    expect(registeredSchema.required).not.toContain("message");
+    expect(sourceProperties.date).toMatchObject({
+      "x-openchat-omit-for-image-only": true,
+    });
+    expect(sourceProperties.message).toMatchObject({
+      "x-openchat-omit-for-image-only": true,
+    });
+    expect(registeredSchema.properties?.date).toMatchObject({
+      "x-openchat-omit-for-image-only": true,
+    });
+    expect(registeredSchema.properties?.message).toMatchObject({
+      "x-openchat-omit-for-image-only": true,
+    });
+  });
+
+  it("ships the generic plain-text currency evidence contract and its exact aliases", async () => {
+    const sourceCurrency = (iouActionManifest.outputSchema.properties as Record<
+      string,
+      Record<string, unknown>
+    >).currency;
+    const documentedCurrency = (
+      registration.responseSchema as {
+        properties?: Record<string, Record<string, unknown>>;
+      }
+    ).properties?.currency;
+    const { buildManifestWire } = await import("./registerAiApp");
+    const action = (buildManifestWire("") as unknown as {
+      actions: { response_schema: string; rules: unknown[] }[];
+    }).actions[0];
+    const registeredCurrency = (
+      JSON.parse(action.response_schema) as {
+        properties?: Record<string, Record<string, unknown>>;
+      }
+    ).properties?.currency;
+    const expectedRule = {
+      kind: "keyword_map",
+      field: "currency",
+      mode: "hint",
+      map: IOU_CURRENCY_EVIDENCE_MAP,
+    };
+
+    expect(sourceCurrency?.["x-openchat-require-text-evidence"]).toBe(true);
+    expect(documentedCurrency?.["x-openchat-require-text-evidence"]).toBe(true);
+    expect(registeredCurrency?.["x-openchat-require-text-evidence"]).toBe(true);
+    expect(buildIouRules([])).toContainEqual(expectedRule);
+    expect(registration.rules).toContainEqual(expectedRule);
   });
 
 });

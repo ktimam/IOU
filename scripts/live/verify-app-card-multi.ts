@@ -116,8 +116,22 @@ async function main() {
   artifactScope.expectExactText(sourceText);
   artifactScope.expectCardInputs([noteA, noteB]);
   const arr = JSON.stringify([
-    { kind: "iou", amount: 350, currency: "EGP", direction: "credit", note: noteA },
-    { kind: "iou", amount: 500, currency: "USD", direction: "debt", note: noteB },
+    {
+      kind: "iou",
+      amount: 350,
+      currency: "EGP",
+      direction: "credit",
+      note: noteA,
+      message: sourceText,
+    },
+    {
+      kind: "iou",
+      amount: 500,
+      currency: "USD",
+      direction: "debt",
+      note: noteB,
+      message: sourceText,
+    },
   ]);
   dialogHandler = (d: Dialog) => { void d.accept(/JSON/i.test(d.message()) ? arr : "1").catch(()=>{}); };
   dialogPage = oc;

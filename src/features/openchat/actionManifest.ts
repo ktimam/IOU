@@ -126,13 +126,26 @@ export type IouActionManifest = {
 export const IOU_EXTRACTION_PROMPT = `You are extracting money transactions for a 2-person shared
 ledger. The input is a chat message: plain text, an image (for example a receipt, a bank transfer
 screenshot, or a booking confirmation), or both. Respond with ONLY compact JSON and nothing else -
-no prose, no code fences, and do not repeat the schema. When the message describes a SINGLE
-transaction, respond with ONE JSON object. When it describes MULTIPLE distinct transactions,
-respond with a JSON ARRAY of such objects, one object per transaction. One LINE can hold several
-transactions: read every amount in the input and emit one object for EACH of them. Never merge two
-amounts into one object, and never leave an amount out. Never repeat the same transaction twice.
-One amount occurrence means exactly one object, not separate objects for both ledger perspectives
-or for both possible kinds. Choose exactly one "kind" and one "direction" for each amount occurrence.
+no prose, no code fences, and do not repeat the schema.
+
+CARDINALITY — APPLY THIS BEFORE CLASSIFICATION:
+1. Count distinct ledger transactions, not every printed number. Dates, times, IDs, quantities,
+   percentages, and exchange rates are not transaction amounts. A transaction amount is an amount
+   attached to a distinct item, charge, payment, or obligation. Headings, labels, parties, and the two
+   ledger perspectives are not additional transactions. For one receipt or payment, line-item prices,
+   subtotal, tax, tip, cash tendered, change, running balance, and repeated displays of its total are
+   not separate transactions unless the source explicitly describes a separate charge to record.
+2. Exactly one distinct transaction amount is a SINGLE transaction and means exactly ONE JSON
+   object, never an array. One amount occurrence means exactly one object. Never create separate
+   debtor and creditor views, separate kinds, or duplicate objects for that one transaction.
+3. Two or more distinct transaction amounts are MULTIPLE transactions and mean a JSON ARRAY with
+   exactly one object per transaction, in reading order. One LINE can hold several transactions:
+   emit one object for EACH distinct transaction amount. Never merge two amounts that belong to
+   distinct transactions, never leave an amount out when it belongs to a distinct transaction, and
+   never emit the same transaction twice. Never repeat the same transaction twice. Equal amounts
+   tied to distinct transaction descriptions are separate transactions; a repeated display of the
+   same transaction is not.
+
 Each object may contain these fields:
 - "kind": "iou" when the money is a future obligation (a reservation, a booking, rent, an
   instalment, or money owed to be paid later); "settlement" when the money has already moved
@@ -140,21 +153,42 @@ Each object may contain these fields:
 - "amount": the amount in major currency units, as a JSON number (never a string).
 - "currency": the 3-letter ISO currency code. OPTIONAL - omit it when the message states no
   currency; IOU then uses the user's default currency.
-- "direction": "credit" when the amount is owed TO the user; "debt" when the user owes it.
-- "date": the transaction or due date as YYYY-MM-DD. Infer the year from "Today is" below. For a
-  date RANGE like "1-7 July" or "July 1-7", use the START date (for example 2026-07-01). For a
-  relative date like "tomorrow" or "next Friday", resolve it against today.
+- "direction": phrases such as "owed to you", "you are owed", "due to you", or "payable to you"
+  mean "credit". Phrases such as "you owe", "owed by you", "due from you", or "payable by you"
+  mean "debt". Output the literal JSON value "credit" or "debt"; never copy a source phrase into
+  "direction". Keep the source's viewpoint; do not invert it.
+- "date": the transaction or due date as YYYY-MM-DD, but only when the source itself contains a
+  date or an explicit relative-date phrase. A host calendar anchor, when supplied for text input,
+  is reference context only for resolving relative phrases. Never output today's date unless the
+  source itself says "today". If there are no visible date digits or date words in the source, omit
+  "date". For a date range, use the start date.
 - "note": a short description taken from the input.
-- "message": for image input, copy the shortest exact visible text that contains the amount and
-  currency when shown. Never paraphrase it. For plain-text input, OpenChat supplies the exact source.
+- "message": OpenChat supplies a bounded exact-source prefix for plain-text input; omit for image input.
 Include a field only when the input supports it; omit any field you are unsure of. Never invent
-an amount, a counterparty, or any other value that is not present in the input.`;
+an amount, a counterparty, or any other value that is not present in the input.
+
+FINAL COUNT CHECK: the number of output objects MUST equal the number of distinct transactions.
+One transaction means one object, not an array. For one distinct transaction amount, the first
+non-whitespace output character MUST be { and the last non-whitespace output character MUST be }.
+Do not wrap that object in []. Each object must choose exactly one "kind" and one "direction".`;
 
 // The canister attester rounds major units to integer minor units. Half a minor unit is the exact
 // smallest positive major-unit value that rounds to one; the maximum remains within JavaScript's
 // exact integer range after multiplying by 100.
 export const IOU_MIN_MAJOR_AMOUNT = 0.005;
 export const IOU_MAX_MAJOR_AMOUNT = Number.MAX_SAFE_INTEGER / 100;
+
+// Optional plain-text evidence vocabulary for currencies whose normalized ISO value may differ
+// from the literal source token. OpenChat uses this only because the currency schema opts into the
+// generic text-evidence policy; image-only extraction is unaffected.
+export const IOU_CURRENCY_EVIDENCE_MAP: { value: string; keywords: string[] }[] = [
+  { value: "USD", keywords: ["$", "dollar", "dollars", "US dollar", "US dollars"] },
+  { value: "GBP", keywords: ["£", "pound sterling", "pounds sterling"] },
+  { value: "EUR", keywords: ["€", "euro", "euros"] },
+  { value: "JPY", keywords: ["¥", "yen"] },
+  { value: "INR", keywords: ["₹", "rupee", "rupees"] },
+  { value: "EGP", keywords: ["E£", "Egyptian pound", "Egyptian pounds", "ج.م"] },
+];
 
 // Extraction rules registered alongside the prompt (OpenChat's generic rules engine executes
 // them; the keywords/values here are IOU's data). "override" keyword_map + normalize run in the
@@ -200,15 +234,44 @@ export const IOU_EXTRACTION_RULES: AiActionRule[] = [
       },
     ],
   },
-  // Stamp the raw message onto `message`, NOT `note`. OpenChat applies this rule to EVERY element of
+  {
+    kind: "keyword_map",
+    field: "direction",
+    mode: "override",
+    map: [
+      {
+        value: "credit",
+        keywords: ["owed to you", "you are owed", "due to you", "payable to you"],
+      },
+      {
+        value: "debt",
+        keywords: ["you owe", "owed by you", "due from you", "payable by you"],
+      },
+    ],
+  },
+  {
+    kind: "keyword_map",
+    field: "currency",
+    mode: "hint",
+    map: IOU_CURRENCY_EVIDENCE_MAP,
+  },
+  // Stamp plain-text input onto `message`, NOT `note`. OpenChat applies this rule to EVERY element of
   // a multi-transaction extraction with the same text, so pointing it at `note` gave all three rows of
   // "Owe me 300 uber 150 food / 500 movies" the whole message as their description. `note` is now left
-  // as the model wrote it (per transaction); `message` is the evidence currencyStatedIn and extractTs
-  // read. Still unconditional: the evidence must be present on every row, never on some of them.
+  // as the model wrote it (per transaction); `message` remains optional for image-only input because
+  // the image itself is the source and a model-authored text echo adds no trustworthy evidence.
   { kind: "from_message", field: "message", maxLength: 200 },
   { kind: "normalize", field: "amount", ops: ["k_m_suffix"] },
   { kind: "normalize", field: "currency", ops: ["uppercase", "trim"] },
+  // OpenChat appends the calendar anchor only for opted-in text input. Image-only inference never
+  // receives host date text, so a vision model cannot mistake it for visible receipt evidence.
+  { kind: "context", provide: ["today"] },
   { kind: "instruction", text: "Amounts like '26k' mean 26000." },
+  {
+    kind: "instruction",
+    text:
+      'FINAL FORMAT CHECK: map visible phrases like "OWED TO YOU" to exactly "direction":"credit" and "YOU OWE" to exactly "direction":"debt"; never use the phrase itself as the value. Any host calendar anchor is reference only: remove "date" unless the source visibly states a date or relative-date phrase. One transaction must be one object, never an array.',
+  },
 ];
 
 export const iouActionManifest: IouActionManifest = {
@@ -239,6 +302,7 @@ export const iouActionManifest: IouActionManifest = {
         minLength: 3,
         maxLength: 3,
         format: "ascii-uppercase",
+        "x-openchat-require-text-evidence": true,
       },
       direction: { enum: ["credit", "debt"] },
       date: {
@@ -246,16 +310,23 @@ export const iouActionManifest: IouActionManifest = {
         minLength: 10,
         maxLength: 10,
         format: "date",
+        "x-openchat-omit-for-image-only": true,
       },
       note: { type: "string", maxLength: 4_096, format: "utf8-no-nul" },
       // Declared so conformToSchema keeps it — an undeclared key is dropped before the card is built.
-      message: { type: "string", maxLength: 200, format: "utf8-no-nul" },
+      message: {
+        type: "string",
+        minLength: 1,
+        maxLength: 200,
+        format: "utf8-no-nul",
+        "x-openchat-omit-for-image-only": true,
+      },
     },
-    // Only `amount` is required — it can't be recovered if absent. `currency` is intentionally NOT
-    // required: IOU fills a missing currency from the user's default (prefs.defaultCurrency) on
-    // import (baseWithDefaultCurrency), so requiring it here would wrongly drop a no-currency message
-    // at OpenChat's post-generation gate before IOU can default it.
-    required: ["amount"],
+    // These values define the ledger semantics and cannot safely fall through to card UI defaults.
+    // Currency remains optional because IOU can recover it from prefs.defaultCurrency. `message` is
+    // optional too: OpenChat supplies authoritative text input itself, while a vision model's text
+    // echo is not proof of what an image contains. Missing ledger semantics still fail closed.
+    required: ["amount", "kind", "direction"],
   },
   rules: IOU_EXTRACTION_RULES,
   card: {
@@ -268,7 +339,6 @@ export const iouActionManifest: IouActionManifest = {
       { key: "direction", label: "Direction" },
       { key: "date", label: "Date" },
       { key: "note", label: "Note" },
-      { key: "message", label: "Message" },
     ],
     directionLabels: {
       credit: "Owed to you",

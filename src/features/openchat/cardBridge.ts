@@ -15,6 +15,7 @@
 import type { EntryDraft } from "../entries/draft";
 import { isEncryptedTemplateRef } from "./templateRef";
 import type { Direction } from "../entries/types";
+import { IOU_CURRENCY_EVIDENCE_MAP } from "./actionManifest";
 
 // The bridge message type strings, both directions. Exactly the values in the
 // build contract; kept in one table so page + tests can't drift.
@@ -24,6 +25,7 @@ export const CARD_MSG = {
   // iframe (app) → host
   ready: "oc:card:ready",
   privateContextReady: "oc:card:private-context-ready",
+  privateContextStatus: "oc:card:private-context-status",
   resize: "oc:card:resize",
   confirm: "oc:card:confirm",
   confirmCollected: "oc:card:confirm-collected",
@@ -88,14 +90,12 @@ export type CardInit = {
 };
 
 // The editable form the page collects. Every public field is a plain string.
-// `kind` is the public IOU/Settlement choice:
-// "" means the extraction carried no kind, so buildConfirmPayload omits it and
-// parseDraft re-infers it. `date` is likewise a passthrough of the prefill date.
+// `kind` is the public IOU/Settlement choice. A malformed legacy init can still produce "", but the
+// form gate blocks collection until the user chooses a backend-valid value. `date` is a passthrough
+// of the visible reviewed Date control.
 export type CardFormState = {
-  // The raw message text the extraction came from, passed straight through — never edited, never
-  // shown. It is the evidence currency verification and date recovery run on at import, so the card
-  // has to hand it back or those fall back to the (now per-entry) note and lose the date. Optional so
-  // a hand-built state (tests, the standalone page) stays valid without it.
+  // Authoritative plain-text source, passed through without rendering or editing. It validates a
+  // claimed text currency; OpenChat imports never derive Date from it. Image-only cards omit it.
   message?: string;
   kind: "iou" | "settlement" | "";
   // Selected account-scoped saved-Type id. It is populated only from the privately hydrated roster
@@ -337,33 +337,32 @@ export function parseCollectConfirm(
 }
 
 /** Seed the editable form from the (loose, untrusted) extraction object. */
-// Currency symbols worth honouring when a message writes the symbol instead of the ISO code.
-const CURRENCY_SYMBOLS: Record<string, string> = {
-  $: "USD",
-  "£": "GBP",
-  "€": "EUR",
-  "¥": "JPY",
-  "₹": "INR",
-  "ج.م": "EGP",
-};
-
 /**
  * Did the MESSAGE actually state this currency, or did the extraction model invent it?
  *
  * The model routinely emits a currency the message never mentions ("Owe 300 uber" -> USD), and the
  * prompt asking it to omit one is not binding on a small on-device model. We can check deterministically
- * because IOU's own `from_message` rule copies the message text into `note` — so the note IS the
- * message. A currency counts as stated when its ISO code appears as a WHOLE word (so "USD" does not
+ * because IOU's own `from_message` rule copies plain-text input into `message`. A currency counts as
+ * stated when its ISO code appears as a WHOLE word (so "USD" does not
  * match inside a longer token) or when a symbol that maps to it appears.
  *
- * Unverifiable (no note) counts as NOT stated: deferring to the user's own default currency is the
- * safer, more predictable outcome, and it is exactly what they asked for.
+ * This check applies to authoritative plain-text evidence. Image-only inference deliberately has no
+ * model-authored `message` echo; its schema-conformed currency stays visible for user review.
  */
 export function currencyStatedIn(text: string, code: string): boolean {
   const c = code.trim().toUpperCase();
   if (c === "" || text.trim() === "") return false;
-  if (new RegExp(`(?:^|[^A-Za-z])${c}(?:[^A-Za-z]|$)`, "i").test(text)) return true;
-  return Object.entries(CURRENCY_SYMBOLS).some(([sym, mapped]) => mapped === c && text.includes(sym));
+  const aliases = IOU_CURRENCY_EVIDENCE_MAP.find((entry) => entry.value === c)?.keywords ?? [];
+  const folded = text.toLowerCase();
+  const stated = (token: string) => {
+    const candidate = token.toLowerCase();
+    if (/[^\p{L}\p{N}\s]/u.test(candidate)) return folded.includes(candidate);
+    return new RegExp(
+      `(?:^|[^\\p{L}\\p{N}])${candidate.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}(?:[^\\p{L}\\p{N}]|$)`,
+      "iu",
+    ).test(text);
+  };
+  return stated(c) || aliases.some(stated);
 }
 
 export function initToFormState(data: EntryDraft, seedCurrency = ""): CardFormState {
@@ -383,19 +382,15 @@ export function initToFormState(data: EntryDraft, seedCurrency = ""): CardFormSt
   // the only thing every viewer resolves identically, so both members of a card see — and import —
   // the same code. Unset => "" => today's per-user deferral, unchanged.
   //
-  // We land in that state both when the extraction omits a currency AND when it supplies one the
-  // message never stated — the model guesses "USD" for a bare "Owe 300 uber", which otherwise sailed
-  // straight past the default-currency logic and imported as USD for an EGP user. A currency the
-  // message DID state is still honoured (see currencyStatedIn); the user can always pick one anyway.
-  // The MESSAGE is the evidence, not the note: since the note became the model's own per-entry
-  // description ("uber"), checking it would miss a currency the user actually typed. Falls back to
-  // the note for cards posted before the split, where the note WAS the message.
-  const evidence = typeof data.message === "string" && data.message.trim() !== ""
-    ? data.message
-    : String(data.note ?? "");
+  // For plain text, OpenChat supplies the bounded exact-source prefix in `message`; a claimed
+  // currency that excerpt did not state is a model guess and falls back to the app/default currency. Image-only inference
+  // intentionally omits `message`: the claimed currency came from the pixels, remains editable, and
+  // must stay visible rather than being silently replaced by an unrelated account default.
+  const evidence =
+    typeof data.message === "string" && data.message.trim() !== "" ? data.message : undefined;
   const claimed = typeof data.currency === "string" ? data.currency.trim() : "";
   const currency =
-    claimed !== "" && currencyStatedIn(evidence, claimed)
+    claimed !== "" && (evidence === undefined || currencyStatedIn(evidence, claimed))
       ? claimed.toUpperCase()
       : seedCurrency.trim().toUpperCase(); // the app card currency, else "" (resolve at import)
   const direction: Direction = data.direction === "debt" ? "debt" : "credit";
@@ -453,8 +448,8 @@ export function buildConfirmPayload(
   // prefs.defaultCurrency at import (baseWithDefaultCurrency). A picked currency is passed through.
   const currency = state.currency.trim().toUpperCase();
   if (currency !== "") payload.currency = currency;
-  // Pass the evidence straight back so the import can still verify the currency and recover the
-  // date; omitted when absent so nothing new appears on a card that never carried it.
+  // Preserve authoritative plain-text source context when present. OpenChat imports deliberately
+  // resolve their date only from the reviewed Date field, never from this hidden text.
   if ((state.message ?? "").trim() !== "") payload.message = state.message;
   if (state.kind !== "") payload.kind = state.kind;
   // Return only the encrypted, row-bound saved-type reference. The plaintext id/name and roster
@@ -463,7 +458,8 @@ export function buildConfirmPayload(
   if (isEncryptedTemplateRef(templateRef)) {
     payload.template_ref = templateRef;
   }
-  if (state.date.trim() !== "") payload.date = state.date;
+  const date = state.date.trim();
+  if (date !== "") payload.date = date;
   return payload;
 }
 
@@ -504,6 +500,23 @@ export function buildPrivateContextReady(frameNonce: string, recipientPublicKey:
       recipientKeyScheme: CARD_RECIPIENT_KEY_SCHEME,
       recipientPublicKey,
     },
+  } as const;
+}
+
+export function buildPrivateContextStatus(
+  frameNonce: string,
+  capability: string,
+  status: "ready" | "error",
+) {
+  if (!isCanonicalFrameNonce(frameNonce) || !isCanonicalFrameNonce(capability)) {
+    throw new Error("invalid private card context binding");
+  }
+  return {
+    type: CARD_MSG.privateContextStatus,
+    version: CARD_INIT_VERSION,
+    frameNonce,
+    capability,
+    status,
   } as const;
 }
 

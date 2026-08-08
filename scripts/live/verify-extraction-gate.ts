@@ -103,7 +103,14 @@ async function main() {
   await propose(
     p,
     positiveText,
-    JSON.stringify({ kind: "iou", amount: 350, currency: "EGP", direction: "credit", note: positiveNote }),
+    JSON.stringify({
+      kind: "iou",
+      amount: 350,
+      currency: "EGP",
+      direction: "credit",
+      note: positiveNote,
+      message: positiveText,
+    }),
   );
   let afterPos = await cards();
   for (let i = 0; i < 10 && afterPos <= before; i++) {

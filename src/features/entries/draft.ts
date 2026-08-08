@@ -29,9 +29,9 @@ export type EntryDraft = {
   // The RAW message text, stamped by the manifest's `from_message` rule. It used to be written over
   // `note`, which meant every entry of a multi-transaction message got the whole message as its
   // description ("Owe me 300 uber 150 food" on all three rows). `note` is now the model's own
-  // per-entry description and this carries the evidence that currency verification and date recovery
-  // need. Absent on drafts from before the split (and on pasted JSON) — every reader falls back to
-  // `note`, so those behave exactly as they did.
+  // per-entry description and this carries authoritative plain-text evidence. Legacy/paste parsing
+  // may use it for currency/date recovery; reviewed OpenChat cards use their explicit Date field
+  // instead. It is absent on image-only and pre-split drafts.
   message?: string;
   fee_percent?: number; // IOU only, 0..100
   fee_fixed?: number | string; // IOU only, MAJOR units
@@ -124,8 +124,8 @@ function mkUtcDate(y: number, mo: number, day: number): number | null {
 /**
  * Deterministically parse a loose date phrase from free text → ms epoch at UTC midnight, or null.
  * The small on-device model reliably fails to emit YYYY-MM-DD (and the schema pattern then drops
- * it), so we recover the date from the raw message text (captured in `note` via a from_message
- * rule). Handles: an embedded YYYY-MM-DD; "Month D" / "D Month"; a range "D-D Month" / "Month D-D"
+ * it), so legacy/paste parsing can recover the date from raw source text (`message`, or pre-split
+ * `note`). Handles: an embedded YYYY-MM-DD; "Month D" / "D Month"; a range "D-D Month" / "Month D-D"
  * (→ the START day); "D/M[/Y]" day-first. Year defaults to the current UTC year when absent; the
  * range end and any time-of-day are ignored.
  */
@@ -152,11 +152,10 @@ function todayTsUtc(): number {
 }
 
 /**
- * The transaction date (UTC-midnight ms) a draft resolves to: the date embedded in the message text
- * (captured in `note`; a "1-5 July" range → its START) wins over the model's `date` field (the
- * on-device model tends to copy "Today is …"); then the `date` field; then today. Exported so a
- * matched template's due schedule anchors on the SAME date the entry gets — otherwise a portion
- * "due in 0 days" lands on today instead of the reservation date.
+ * Resolve the transaction date at UTC midnight. Paste/import paths can recover a date from their
+ * source message before consulting `date`. A reviewed OpenChat action card uses `explicit-only`, so
+ * hidden model-authored message/note text can never override its visible Date control. Both modes
+ * fall back to today, and template schedules anchor on the same resolved date as the entry.
  */
 export function messageEvidence(d: { message?: unknown; note?: unknown }): string {
   if (typeof d.message === "string" && d.message.trim() !== "") return d.message;
@@ -172,9 +171,22 @@ function isPlainDraft(v: unknown): v is EntryDraft {
   return typeof v === "object" && v !== null && !Array.isArray(v);
 }
 
-export function extractTs(d: { message?: unknown; note?: unknown; date?: unknown }): number {
-  const noteDate = looseDateToTs(messageEvidence(d));
-  if (noteDate != null) return noteDate;
+export type DraftParseOptions = Readonly<{
+  /**
+   * OpenChat action cards expose one explicit Date control before confirmation. Once the user has
+   * reviewed that field, hidden message/note text must not silently derive a different date.
+   */
+  dateEvidence?: "message-first" | "explicit-only";
+}>;
+
+export function extractTs(
+  d: { message?: unknown; note?: unknown; date?: unknown },
+  options: DraftParseOptions = {},
+): number {
+  if (options.dateEvidence !== "explicit-only") {
+    const noteDate = looseDateToTs(messageEvidence(d));
+    if (noteDate != null) return noteDate;
+  }
   if (typeof d.date === "string") {
     const t = dateToTs(d.date) ?? looseDateToTs(d.date);
     if (t != null) return t;
@@ -198,7 +210,11 @@ function fnv1a(s: string): string {
  * Validate + normalize an untrusted draft into EntryForm defaults.
  * Returns typed form defaults + a stable draftId, or a list of errors.
  */
-export function parseDraft(input: unknown, base?: Partial<EntryPayload>): ParseResult {
+export function parseDraft(
+  input: unknown,
+  base?: Partial<EntryPayload>,
+  options: DraftParseOptions = {},
+): ParseResult {
   const errors: string[] = [];
   if (input == null || typeof input !== "object" || Array.isArray(input)) {
     return { ok: false, errors: ["draft must be a JSON object"] };
@@ -242,15 +258,13 @@ export function parseDraft(input: unknown, base?: Partial<EntryPayload>): ParseR
   if (d.direction === "credit" || d.direction === "debt") direction = d.direction;
   else if (d.direction != null) errors.push('direction must be "credit" or "debt"');
 
-  // date (default today, UTC). The small on-device model reliably copies "Today is …" into the date
-  // field instead of parsing phrases like "1-12 July" (verified: it emits today's date), so for a
-  // TEXT message the raw message text — captured in `note` via a from_message rule — is more
-  // trustworthy than the model's date field; parse it FIRST. For an image (no note text) fall back
-  // to the model's date field (from vision), then to today.
-  const ts = extractTs(d);
-  // Surface a malformed `date` only when the message text didn't already supply the date (it wins in
-  // extractTs). Same evidence source, so the two can never disagree about whether a date was found.
-  const noteDate = looseDateToTs(messageEvidence(d));
+  // Date defaults to today (UTC). Paste/legacy parsing may recover a source-message date first.
+  // OpenChat card imports pass `explicit-only`: the visible reviewed Date is authoritative, while
+  // hidden message/note prose cannot silently restore a model guess that the card omitted.
+  const ts = extractTs(d, options);
+  // Surface a malformed `date` only when legacy/paste message evidence did not already supply one.
+  const noteDate =
+    options.dateEvidence === "explicit-only" ? null : looseDateToTs(messageEvidence(d));
   if (noteDate == null) {
     if (typeof d.date === "string") {
       if (dateToTs(d.date) == null && looseDateToTs(d.date) == null) errors.push("date must be YYYY-MM-DD");
@@ -375,7 +389,8 @@ export function parseDraft(input: unknown, base?: Partial<EntryPayload>): ParseR
   const summary =
     `${kind === "settlement" ? "Settlement" : "IOU"} ` +
     `${(grossMinor! / 100).toFixed(2)} ${currency} · ` +
-    `${direction === "credit" ? "owed to you" : "you owe"}` +
+    `${direction === "credit" ? "owed to you" : "you owe"} · ` +
+    `${new Date(ts).toISOString().slice(0, 10)}` +
     `${note ? ` · ${note}` : ""}`;
 
   return { ok: true, value: { initial, draftId, summary } };
@@ -412,6 +427,7 @@ export function parseDraftBatch(
   payload: unknown,
   base?: Partial<EntryPayload> | DraftBaseResolver,
   defaultCurrency?: string,
+  options: DraftParseOptions = {},
 ): { drafts: ParsedDraft[]; errors: string[] } {
   const resolve: DraftBaseResolver =
     typeof base === "function" ? base : () => base as Partial<EntryPayload> | undefined;
@@ -439,7 +455,7 @@ export function parseDraftBatch(
       single && isPlainDraft(el) && !hasText(el.note) && hasText(el.message)
         ? { ...el, note: el.message }
         : el;
-    const res = parseDraft(withNote, elBase);
+    const res = parseDraft(withNote, elBase, options);
     if (!res.ok) {
       // One error entry per invalid element. Prefix array elements so the human can tell which one;
       // a lone object keeps parseDraft's raw errors (unchanged single-entry behaviour).

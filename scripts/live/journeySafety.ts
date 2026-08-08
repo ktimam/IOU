@@ -10,6 +10,72 @@ export type ExactImageContentEvidence = Readonly<{
   mimeType: string;
 }>;
 
+export type SentImageResourceState = Readonly<{
+  attributeSrc: string;
+  src: string;
+  currentSrc: string;
+  complete: boolean;
+  naturalWidth: number;
+  naturalHeight: number;
+}>;
+
+export type SentImageResourceReadiness =
+  | Readonly<{ kind: "pending"; reason: "not-loaded" | "temporary" | "transition" }>
+  | Readonly<{ kind: "ready"; url: string }>;
+
+function sentImageUrlKind(url: string): "missing" | "temporary" | "uploaded" {
+  if (url === "") return "missing";
+  let parsed: URL;
+  try {
+    parsed = new URL(url);
+  } catch {
+    throw new Error("sent image URL is invalid");
+  }
+  if (parsed.protocol === "blob:") return "temporary";
+  if (parsed.protocol === "data:" && /^data:image\//i.test(url)) return "temporary";
+  if (parsed.protocol === "http:" || parsed.protocol === "https:") return "uploaded";
+  throw new Error(`sent image URL uses an unsupported protocol: ${parsed.protocol}`);
+}
+
+/**
+ * OpenChat first renders a local blob URL, can briefly render its data:image thumbnail fallback,
+ * then rehydrates the message with the uploaded HTTP(S) blob URL. Only the last, fully rendered
+ * state may be fetched and hashed as exact upload evidence.
+ */
+export function classifySentImageResource(
+  state: SentImageResourceState,
+): SentImageResourceReadiness {
+  const attributeSrcKind = sentImageUrlKind(state.attributeSrc);
+  const srcKind = sentImageUrlKind(state.src);
+  const currentSrcKind = sentImageUrlKind(state.currentSrc);
+  if (
+    attributeSrcKind === "temporary" ||
+    srcKind === "temporary" ||
+    currentSrcKind === "temporary"
+  ) {
+    if (attributeSrcKind !== srcKind || srcKind !== currentSrcKind) {
+      return { kind: "pending", reason: "transition" };
+    }
+    return { kind: "pending", reason: "temporary" };
+  }
+  if (
+    attributeSrcKind === "missing" ||
+    srcKind === "missing" ||
+    currentSrcKind === "missing" ||
+    !state.complete ||
+    !Number.isFinite(state.naturalWidth) ||
+    state.naturalWidth <= 0 ||
+    !Number.isFinite(state.naturalHeight) ||
+    state.naturalHeight <= 0
+  ) {
+    return { kind: "pending", reason: "not-loaded" };
+  }
+  if (state.attributeSrc !== state.src || state.src !== state.currentSrc) {
+    return { kind: "pending", reason: "transition" };
+  }
+  return { kind: "ready", url: state.currentSrc };
+}
+
 function hasValidImageContentEvidence(value: ExactImageContentEvidence): boolean {
   return (
     /^[0-9a-f]{64}$/.test(value.sha256) &&
@@ -31,6 +97,30 @@ export function matchesExactImageContentEvidence(
     expected.byteLength === observed.byteLength &&
     expected.mimeType === observed.mimeType
   );
+}
+
+/** Preserve a fail-closed DOM boundary around a draft-only UI mutation. */
+export function matchesExactMessageInventory(input: Readonly<{
+  expectedMessageIds: readonly string[];
+  observedMessageIds: ReadonlySet<string>;
+  expectedDigest: string;
+  observedDigest: string;
+}>): boolean {
+  if (
+    !/^[0-9a-f]{64}$/.test(input.expectedDigest) ||
+    !/^[0-9a-f]{64}$/.test(input.observedDigest) ||
+    input.expectedDigest !== input.observedDigest
+  ) {
+    return false;
+  }
+  const expectedIds = new Set(input.expectedMessageIds);
+  if (
+    expectedIds.size !== input.expectedMessageIds.length ||
+    expectedIds.size !== input.observedMessageIds.size
+  ) {
+    return false;
+  }
+  return [...expectedIds].every((messageId) => input.observedMessageIds.has(messageId));
 }
 
 export type FreshSourceCandidate = StableMessageRef &
@@ -78,10 +168,22 @@ function hasValidCoordinates(message: StableMessageRef): boolean {
 export function selectFreshOwnedSourceCandidate(input: Readonly<{
   candidates: readonly FreshSourceCandidate[];
   baselineMessageIds: ReadonlySet<string>;
+  baselineMaxMessageIndex: number;
+  baselineMaxEventIndex: number;
 }>): StableMessageRef | null {
+  if (
+    !Number.isSafeInteger(input.baselineMaxMessageIndex) ||
+    input.baselineMaxMessageIndex < -1 ||
+    !Number.isSafeInteger(input.baselineMaxEventIndex) ||
+    input.baselineMaxEventIndex < -1
+  ) {
+    throw new Error("source baseline has invalid stable coordinate maxima");
+  }
   const matches: FreshSourceCandidate[] = [];
   for (const candidate of input.candidates) {
     if (input.baselineMessageIds.has(candidate.messageId)) continue;
+    if (candidate.messageIndex <= input.baselineMaxMessageIndex) continue;
+    if (candidate.eventIndex <= input.baselineMaxEventIndex) continue;
     if (
       !Number.isSafeInteger(candidate.exactEvidenceMatches) ||
       candidate.exactEvidenceMatches < 0
@@ -162,16 +264,66 @@ export function matchesRunCardCandidate(input: RunCardCandidate): boolean {
   return input.exactNoteMatch;
 }
 
+type CurrentNonceBoundCardEvidence = "match" | "mismatch" | "unavailable";
+
+/**
+ * Retain a nonce binding after a confirmed card consumes its live UI only when the binding was
+ * captured for this exact immutable message and the message is still sender-owned. Any currently
+ * rendered identity or note mismatch overrides the retained evidence and fails closed.
+ */
+export function retainsNonceBoundCardEvidence(input: Readonly<{
+  target: StableMessageRef;
+  boundMessage: StableMessageRef;
+  senderOwned: boolean;
+  boundExactNote: string;
+  currentIdentity: CurrentNonceBoundCardEvidence;
+  currentNote: CurrentNonceBoundCardEvidence;
+}>): boolean {
+  return (
+    sameStableMessage(input.target, input.boundMessage) &&
+    input.senderOwned &&
+    input.boundExactNote.trim().length > 0 &&
+    (input.currentIdentity === "match" || input.currentIdentity === "unavailable") &&
+    (input.currentNote === "match" || input.currentNote === "unavailable")
+  );
+}
+
 type VisionExtraction = Readonly<{
+  entryCount: number;
+  kind: string;
   amount: string;
   currency: string;
   direction: string;
+  date: string;
 }>;
 
-/** Validate the meaningful model-owned values before the harness edits any downstream field. */
+/**
+ * Validate every fixture-owned model value before the harness edits any downstream field.
+ *
+ * The fixture visibly contains one IOU request for 350 EGP owed to the viewer and no date. The image
+ * itself is the source of truth; a vision model's hidden text echo is neither required nor treated as
+ * additional evidence.
+ */
 export function assertAcceptedVisionExtraction(
   extraction: VisionExtraction,
-): Readonly<{ amount: number; currency: 'EGP'; direction: 'credit' }> {
+): Readonly<{
+  entryCount: 1;
+  kind: 'iou';
+  amount: number;
+  currency: 'EGP';
+  direction: 'credit';
+  date: '';
+}> {
+  if (!Number.isSafeInteger(extraction.entryCount) || extraction.entryCount !== 1) {
+    throw new Error(
+      `real image entry count must be exactly one before editing; received ${extraction.entryCount}`,
+    );
+  }
+  if (extraction.kind !== 'iou') {
+    throw new Error(
+      `real image kind must be iou before editing; received ${extraction.kind || 'empty'}`,
+    );
+  }
   const amount = Number(extraction.amount);
   if (!Number.isFinite(amount) || amount !== 350) {
     throw new Error(`real image amount must be 350 before editing; received ${extraction.amount}`);
@@ -186,7 +338,19 @@ export function assertAcceptedVisionExtraction(
       `real image direction must be credit before editing; received ${extraction.direction || 'empty'}`,
     );
   }
-  return { amount, currency: 'EGP', direction: 'credit' };
+  if (extraction.date.trim() !== '') {
+    throw new Error(
+      `real image date must be absent before editing; received ${extraction.date}`,
+    );
+  }
+  return {
+    entryCount: 1,
+    kind: 'iou',
+    amount,
+    currency: 'EGP',
+    direction: 'credit',
+    date: '',
+  };
 }
 
 type ExactMessageDeletionRetry = Readonly<{

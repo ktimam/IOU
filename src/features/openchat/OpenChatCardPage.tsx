@@ -29,6 +29,7 @@ import {
   buildMultiConfirmPayload,
   buildReady,
   buildPrivateContextReady,
+  buildPrivateContextStatus,
   buildResize,
   buildCollectedConfirm,
   type CardFormState,
@@ -46,6 +47,7 @@ import {
   type LoadedCardPrivateContext,
 } from "./cardPrivateContext";
 import { encryptTemplateRef, type TemplateRefContext } from "./templateRef";
+import { IOU_MAX_MAJOR_AMOUNT, IOU_MIN_MAJOR_AMOUNT } from "./actionManifest";
 
 // Plain-language direction labels (same vocabulary the OC-rendered card used, so
 // a human catches an inversion before confirming).
@@ -132,6 +134,36 @@ export function privateLoadMatchesCurrent(
   );
 }
 
+type CardTypesState =
+  | { kind: "waiting" | "loading" | "ready" }
+  | { kind: "error"; message: string };
+
+type DeferredCollectionChallenge = Readonly<{
+  frameNonce: string;
+  requestNonce: string;
+  capability: string;
+  session: CardTransportSession;
+  context: CardInitContext;
+}>;
+
+/**
+ * Decide whether the iframe may snapshot its current form for a host-owned Add click.
+ *
+ * Public-only cards have no private state to wait for. Once the host grants private context, the
+ * form must either defer during the exact hydration flight or reject; it may collect only after the
+ * authoritative private context and saved-Type roster are both installed.
+ */
+export function privateCollectionReadiness(input: Readonly<{
+  privateContextRequired: boolean;
+  typesState: CardTypesState["kind"];
+  privateContextLoaded: boolean;
+}>): "ready" | "defer" | "reject" {
+  if (!input.privateContextRequired) return "ready";
+  if (input.typesState === "loading" && !input.privateContextLoaded) return "defer";
+  if (input.typesState === "ready" && input.privateContextLoaded) return "ready";
+  return "reject";
+}
+
 async function encryptedTypeRef(
   state: CardFormState,
   entryIndex: number,
@@ -190,8 +222,9 @@ export function OpenChatCardPage() {
   const rootRef = useRef<HTMLDivElement>(null);
   const [ctx, setCtx] = useState<CardInitContext | null>(null);
   const [form, setForm] = useState<CardFormState>(() => initToFormState({}));
-  // MULTI mode: a non-null list of per-entry form states (initEntries detected data.entries).
-  // null → SINGLE mode, which renders exactly today's one-entry UI from `form`.
+  // Direct/legacy MULTI init compatibility: current OpenChat multi cards use the host-owned classic
+  // stored-payload view and resolve Saved types row-locally during IOU import. null → the normal
+  // trusted SINGLE iframe UI from `form`.
   const [multi, setMulti] = useState<CardFormState[] | null>(null);
   // The host owns the only action buttons. Its busy signal freezes the editable values after that
   // click while it collects, grants, and submits the exact snapshot.
@@ -208,20 +241,21 @@ export function OpenChatCardPage() {
   const initializedNonceRef = useRef<string | null>(null);
   const collectionRequestRef = useRef<string>();
   const collectionInFlightRef = useRef(false);
+  const deferredCollectionRef = useRef<DeferredCollectionChallenge>();
   const transportRef = useRef<CardTransportSession>();
   const privateContextRef = useRef<LoadedCardPrivateContext>();
   const privateCapabilityRef = useRef<string>();
   const privateInitContextRef = useRef<CardInitContext>();
   const [templates, setTemplates] = useState<TxnTemplate[]>([]);
-  const [typesState, setTypesState] = useState<
-    { kind: "waiting" | "loading" | "ready" } | { kind: "error"; message: string }
-  >({ kind: "waiting" });
+  const [typesState, setTypesState] = useState<CardTypesState>({ kind: "waiting" });
+  const typesStateRef = useRef<CardTypesState>(typesState);
   const formRef = useRef(form);
   const multiRef = useRef(multi);
   const ctxRef = useRef(ctx);
   formRef.current = form;
   multiRef.current = multi;
   ctxRef.current = ctx;
+  typesStateRef.current = typesState;
 
   useEffect(() => {
     let cancelled = false;
@@ -254,11 +288,21 @@ export function OpenChatCardPage() {
   useEffect(() => {
     let disposed = false;
 
+    const setCurrentTypesState = (next: CardTypesState) => {
+      typesStateRef.current = next;
+      setTypesState(next);
+    };
+
     const clearPrivateSelections = () => {
-      setForm((current) => clearSavedTypeSelection(current));
-      setMulti((current) =>
-        current ? current.map((entry) => clearSavedTypeSelection(entry)) : current,
-      );
+      const nextForm = clearSavedTypeSelection(formRef.current);
+      formRef.current = nextForm;
+      setForm(nextForm);
+      const currentMulti = multiRef.current;
+      if (currentMulti) {
+        const nextMulti = currentMulti.map((entry) => clearSavedTypeSelection(entry));
+        multiRef.current = nextMulti;
+        setMulti(nextMulti);
+      }
     };
 
     const resetPrivateState = () => {
@@ -266,9 +310,172 @@ export function OpenChatCardPage() {
       privateContextRef.current = undefined;
       privateCapabilityRef.current = undefined;
       privateInitContextRef.current = undefined;
+      deferredCollectionRef.current = undefined;
       setTemplates([]);
-      setTypesState({ kind: "waiting" });
+      setCurrentTypesState({ kind: "waiting" });
       clearPrivateSelections();
+    };
+
+    const collectCurrentCard = (
+      frameNonce: string,
+      requestNonce: string,
+      reservedDeferredChallenge = false,
+    ) => {
+      if (
+        disposed ||
+        frameNonceRef.current !== frameNonce ||
+        collectionInFlightRef.current ||
+        (reservedDeferredChallenge
+          ? collectionRequestRef.current !== requestNonce
+          : collectionRequestRef.current === requestNonce)
+      ) {
+        return;
+      }
+      const capturedContext = ctxRef.current;
+      const readiness = privateCollectionReadiness({
+        privateContextRequired: capturedContext?.privateContext !== undefined,
+        typesState: typesStateRef.current.kind,
+        privateContextLoaded: privateContextRef.current !== undefined,
+      });
+      if (readiness !== "ready") return;
+
+      const capturedForm = { ...formRef.current };
+      const capturedMulti = multiRef.current?.map((entry) => ({ ...entry })) ?? null;
+      if (
+        !capturedContext ||
+        capturedContext.readonly ||
+        (capturedMulti
+          ? capturedMulti.length === 0 || !capturedMulti.every(isCardFormValid)
+          : !isCardFormValid(capturedForm))
+      ) {
+        return;
+      }
+      const capturedPrivate = privateContextRef.current;
+      if (
+        (capturedMulti
+          ? capturedMulti.some((entry) => entry.templateId)
+          : capturedForm.templateId !== undefined) &&
+        !capturedPrivate
+      ) {
+        setCurrentTypesState({ kind: "error", message: "Account types are not ready." });
+        return;
+      }
+      collectionRequestRef.current = requestNonce;
+      collectionInFlightRef.current = true;
+      setSubmitting(true);
+      void (async () => {
+        try {
+          const refs = capturedPrivate
+            ? await Promise.all(
+                (capturedMulti ?? [capturedForm]).map((entry, index) =>
+                  encryptedTypeRef(entry, index, capturedPrivate),
+                ),
+              )
+            : [];
+          const currentContext = ctxRef.current;
+          if (
+            disposed ||
+            frameNonceRef.current !== frameNonce ||
+            collectionRequestRef.current !== requestNonce ||
+            (capturedPrivate && privateContextRef.current !== capturedPrivate) ||
+            !currentContext ||
+            currentContext.readonly ||
+            currentContext.appId !== capturedContext.appId ||
+            currentContext.appRevision !== capturedContext.appRevision ||
+            currentContext.actionId !== capturedContext.actionId
+          ) {
+            return;
+          }
+          const payload = capturedMulti
+            ? buildMultiConfirmPayload(capturedMulti, refs)
+            : buildConfirmPayload(capturedForm, refs[0]);
+          post(buildCollectedConfirm(frameNonce, requestNonce, payload));
+        } catch (error) {
+          setCurrentTypesState({
+            kind: "error",
+            message:
+              error instanceof Error
+                ? error.message
+                : "Could not protect the selected account type.",
+          });
+        } finally {
+          if (collectionRequestRef.current === requestNonce) {
+            collectionInFlightRef.current = false;
+          }
+        }
+      })();
+    };
+
+    const deferCollectionChallenge = (frameNonce: string, requestNonce: string): boolean => {
+      const context = ctxRef.current;
+      const capability = privateCapabilityRef.current;
+      const session = transportRef.current;
+      if (
+        collectionInFlightRef.current ||
+        collectionRequestRef.current === requestNonce ||
+        frameNonceRef.current !== frameNonce ||
+        !context ||
+        context.readonly ||
+        context.privateContext?.capability !== capability ||
+        capability === undefined ||
+        session === undefined
+      ) {
+        return false;
+      }
+      const existing = deferredCollectionRef.current;
+      if (existing) {
+        if (
+          existing.frameNonce !== frameNonce ||
+          existing.capability !== capability ||
+          existing.session !== session ||
+          existing.context.appId !== context.appId ||
+          existing.context.appRevision !== context.appRevision ||
+          existing.context.actionId !== context.actionId
+        ) {
+          return false;
+        }
+      }
+      collectionRequestRef.current = requestNonce;
+      deferredCollectionRef.current = {
+        frameNonce,
+        requestNonce,
+        capability,
+        session,
+        context,
+      };
+      return true;
+    };
+
+    const flushDeferredCollection = () => {
+      const challenge = deferredCollectionRef.current;
+      if (!challenge) return;
+      const currentContext = ctxRef.current;
+      const loaded = privateContextRef.current;
+      if (
+        disposed ||
+        frameNonceRef.current !== challenge.frameNonce ||
+        collectionRequestRef.current !== challenge.requestNonce ||
+        privateCapabilityRef.current !== challenge.capability ||
+        transportRef.current !== challenge.session ||
+        !currentContext ||
+        currentContext.readonly ||
+        currentContext.appId !== challenge.context.appId ||
+        currentContext.appRevision !== challenge.context.appRevision ||
+        currentContext.actionId !== challenge.context.actionId ||
+        currentContext.privateContext?.capability !== challenge.capability ||
+        !loaded ||
+        !cardContextMatchesInit(loaded.authoritative, currentContext) ||
+        privateCollectionReadiness({
+          privateContextRequired: true,
+          typesState: typesStateRef.current.kind,
+          privateContextLoaded: true,
+        }) !== "ready"
+      ) {
+        deferredCollectionRef.current = undefined;
+        return;
+      }
+      deferredCollectionRef.current = undefined;
+      collectCurrentCard(challenge.frameNonce, challenge.requestNonce, true);
     };
 
     function onMessage(event: MessageEvent) {
@@ -290,6 +497,7 @@ export function OpenChatCardPage() {
           destroyCardTransportSession(transportRef.current);
           transportRef.current = undefined;
           resetPrivateState();
+          ctxRef.current = null;
           setCtx(null);
           setSubmitting(false);
           collectionRequestRef.current = undefined;
@@ -306,80 +514,35 @@ export function OpenChatCardPage() {
           transportRef.current = session;
           post(buildPrivateContextReady(frameNonce, session.publicKeyBase64Url));
         } catch {
-          setTypesState({ kind: "error", message: "Could not create a private card session." });
+          setCurrentTypesState({
+            kind: "error",
+            message: "Could not create a private card session.",
+          });
         }
         return;
       }
       const collect = parseCollectConfirm(event.data, frameNonce);
       if (collect) {
         // This page has no action button of its own. Only the exact parent WindowProxy can deliver a
-        // fresh host-click challenge, and an exact request nonce is answered at most once per frame.
-        if (collectionInFlightRef.current || collectionRequestRef.current === collect.requestNonce) return;
-        const capturedContext = ctxRef.current;
-        const capturedForm = { ...formRef.current };
-        const capturedMulti = multiRef.current?.map((entry) => ({ ...entry })) ?? null;
+        // fresh host-click challenge. A required private grant in its exact loading state reserves
+        // that one request instead of returning a public-only payload; successful hydration resumes
+        // the same nonce automatically, so the human never has to click Add twice.
         if (
-          !capturedContext ||
-          capturedContext.readonly ||
-          (capturedMulti
-            ? capturedMulti.length === 0 || !capturedMulti.every(isAmountValid)
-            : !isAmountValid(capturedForm))
-        ) {
+          collectionInFlightRef.current ||
+          collectionRequestRef.current === collect.requestNonce
+        ) return;
+        const currentContext = ctxRef.current;
+        const readiness = privateCollectionReadiness({
+          privateContextRequired: currentContext?.privateContext !== undefined,
+          typesState: typesStateRef.current.kind,
+          privateContextLoaded: privateContextRef.current !== undefined,
+        });
+        if (readiness === "defer") {
+          deferCollectionChallenge(frameNonce, collect.requestNonce);
           return;
         }
-        const capturedPrivate = privateContextRef.current;
-        if (
-          (capturedMulti
-            ? capturedMulti.some((entry) => entry.templateId)
-            : capturedForm.templateId !== undefined) &&
-          !capturedPrivate
-        ) {
-          setTypesState({ kind: "error", message: "Account types are not ready." });
-          return;
-        }
-        collectionRequestRef.current = collect.requestNonce;
-        collectionInFlightRef.current = true;
-        setSubmitting(true);
-        void (async () => {
-          try {
-            const refs = capturedPrivate
-              ? await Promise.all(
-                  (capturedMulti ?? [capturedForm]).map((entry, index) =>
-                    encryptedTypeRef(entry, index, capturedPrivate),
-                  ),
-                )
-              : [];
-            const currentContext = ctxRef.current;
-            if (
-              disposed ||
-              frameNonceRef.current !== frameNonce ||
-              (capturedPrivate && privateContextRef.current !== capturedPrivate) ||
-              !currentContext ||
-              currentContext.readonly ||
-              currentContext.appId !== capturedContext.appId ||
-              currentContext.appRevision !== capturedContext.appRevision ||
-              currentContext.actionId !== capturedContext.actionId
-            ) {
-              return;
-            }
-            const payload = capturedMulti
-              ? buildMultiConfirmPayload(capturedMulti, refs)
-              : buildConfirmPayload(capturedForm, refs[0]);
-            post(buildCollectedConfirm(frameNonce, collect.requestNonce, payload));
-          } catch (error) {
-            setTypesState({
-              kind: "error",
-              message:
-                error instanceof Error
-                  ? error.message
-                  : "Could not protect the selected account type.",
-            });
-          } finally {
-            if (collectionRequestRef.current === collect.requestNonce) {
-              collectionInFlightRef.current = false;
-            }
-          }
-        })();
+        if (readiness === "reject") return;
+        collectCurrentCard(frameNonce, collect.requestNonce);
         return;
       }
       // Progress signal from the host freezes/unfreezes the fields while it performs the exact-byte
@@ -391,6 +554,7 @@ export function OpenChatCardPage() {
       }
       const parsed = parseInit(event.data, frameNonce);
       if (!parsed) return; // ignore devtools / HMR / foreign messages
+      ctxRef.current = parsed.context;
       setCtx(parsed.context);
       if (initializedNonceRef.current !== frameNonce) {
         initializedNonceRef.current = frameNonce;
@@ -399,10 +563,14 @@ export function OpenChatCardPage() {
         const seed = appCurrencyRef.current ?? "";
         const entries = initEntries(parsed.data, seed);
         if (entries) {
+          multiRef.current = entries;
           setMulti(entries);
         } else {
+          multiRef.current = null;
+          const initialForm = initToFormState(parsed.data, seed);
+          formRef.current = initialForm;
           setMulti(null);
-          setForm(initToFormState(parsed.data, seed));
+          setForm(initialForm);
         }
       }
 
@@ -415,7 +583,9 @@ export function OpenChatCardPage() {
       const capability = privateGrant.capability;
       privateInitContextRef.current = parsed.context;
       if (!session) {
-        setTypesState({
+        deferredCollectionRef.current = undefined;
+        post(buildPrivateContextStatus(frameNonce, capability, "error"));
+        setCurrentTypesState({
           kind: "error",
           message: "Private card context was not requested for this frame.",
         });
@@ -423,18 +593,29 @@ export function OpenChatCardPage() {
       }
       if (privateCapabilityRef.current === capability) {
         const loaded = privateContextRef.current;
-        if (loaded && !cardContextMatchesInit(loaded.authoritative, parsed.context)) {
-          resetPrivateState();
-          setTypesState({ kind: "error", message: "Private card context did not match this card." });
+        if (loaded) {
+          if (!cardContextMatchesInit(loaded.authoritative, parsed.context)) {
+            post(buildPrivateContextStatus(frameNonce, capability, "error"));
+            resetPrivateState();
+            setCurrentTypesState({
+              kind: "error",
+              message: "Private card context did not match this card.",
+            });
+          } else {
+            // Re-acknowledge an exact idempotent init: the host may have retried after losing the
+            // first status message, but no capability/session/card coordinate is allowed to drift.
+            post(buildPrivateContextStatus(frameNonce, capability, "ready"));
+          }
         }
         return;
       }
       destroyLoadedCardContext(privateContextRef.current);
       privateContextRef.current = undefined;
+      deferredCollectionRef.current = undefined;
       privateCapabilityRef.current = capability;
       setTemplates([]);
       clearPrivateSelections();
-      setTypesState({ kind: "loading" });
+      setCurrentTypesState({ kind: "loading" });
       const capturedNonce = frameNonce;
       void loadCardPrivateContext(capability, session)
         .then((loaded) => {
@@ -455,15 +636,19 @@ export function OpenChatCardPage() {
             if (!disposed && loadIsCurrent && !contextMatches) {
               privateCapabilityRef.current = undefined;
               privateInitContextRef.current = undefined;
+              deferredCollectionRef.current = undefined;
               clearPrivateSelections();
-              setTypesState({ kind: "error", message: "Private card context did not match this card." });
+              setCurrentTypesState({
+                kind: "error",
+                message: "Private card context did not match this card.",
+              });
+              post(buildPrivateContextStatus(capturedNonce, capability, "error"));
             }
             return;
           }
           destroyLoadedCardContext(privateContextRef.current);
           privateContextRef.current = loaded;
           setTemplates(loaded.templates);
-          setTypesState({ kind: "ready" });
 
           const rawEntries = Array.isArray(parsed.data.entries) ? parsed.data.entries : null;
           if (rawEntries && rawEntries.length > 0) {
@@ -471,21 +656,31 @@ export function OpenChatCardPage() {
             // row. The shared full message can still name a dropped sibling,
             // so even a one-row array uses only its row-local note evidence.
             const evidence = "row-local" as const;
-            setMulti((current) =>
-              current
-                ? current.map((state, index) =>
-                    hydrateSavedTypeForCard(
-                      state,
-                      rawEntries[index] ?? {},
-                      loaded.templates,
-                      { evidence },
-                    ),
-                  )
-                : current,
-            );
+            const currentMulti = multiRef.current;
+            if (currentMulti) {
+              const hydratedMulti = currentMulti.map((state, index) =>
+                hydrateSavedTypeForCard(
+                  state,
+                  rawEntries[index] ?? {},
+                  loaded.templates,
+                  { evidence },
+                ),
+              );
+              multiRef.current = hydratedMulti;
+              setMulti(hydratedMulti);
+            }
           } else {
-            setForm((current) => hydrateSavedTypeForCard(current, parsed.data, loaded.templates));
+            const hydratedForm = hydrateSavedTypeForCard(
+              formRef.current,
+              parsed.data,
+              loaded.templates,
+            );
+            formRef.current = hydratedForm;
+            setForm(hydratedForm);
           }
+          setCurrentTypesState({ kind: "ready" });
+          post(buildPrivateContextStatus(capturedNonce, capability, "ready"));
+          flushDeferredCollection();
         })
         .catch((error) => {
           if (
@@ -501,11 +696,13 @@ export function OpenChatCardPage() {
           ) return;
           privateCapabilityRef.current = undefined;
           privateInitContextRef.current = undefined;
+          deferredCollectionRef.current = undefined;
           clearPrivateSelections();
-          setTypesState({
+          setCurrentTypesState({
             kind: "error",
             message: error instanceof Error ? error.message : "Account types are unavailable.",
           });
+          post(buildPrivateContextStatus(capturedNonce, capability, "error"));
         });
     }
     window.addEventListener("message", onMessage);
@@ -523,6 +720,7 @@ export function OpenChatCardPage() {
       initializedNonceRef.current = null;
       collectionRequestRef.current = undefined;
       collectionInFlightRef.current = false;
+      deferredCollectionRef.current = undefined;
     };
   }, [post]);
 
@@ -562,8 +760,7 @@ export function OpenChatCardPage() {
     [form.currency],
   );
 
-  const amountNum = Number(form.amount);
-  const amountValid = form.amount.trim() !== "" && Number.isFinite(amountNum) && amountNum > 0;
+  const formValid = isCardFormValid(form);
 
   const set = <K extends keyof CardFormState>(key: K, value: CardFormState[K]) =>
     setForm((f) => ({ ...f, [key]: value }));
@@ -576,7 +773,7 @@ export function OpenChatCardPage() {
       setMulti((m) => (m ? m.map((e, i) => (i === idx ? { ...e, [key]: value } : e)) : m)),
     [],
   );
-  const multiAllValid = !!multi && multi.length > 0 && multi.every(isAmountValid);
+  const multiAllValid = !!multi && multi.length > 0 && multi.every(isCardFormValid);
 
   const readonly = ctx?.readonly ?? true;
   const theme = ctx?.theme ?? "dark";
@@ -616,7 +813,11 @@ export function OpenChatCardPage() {
   }, [themeVars]);
 
   return (
-    <div ref={rootRef} style={rootStyle} data-theme={theme}>
+    <div
+      ref={rootRef}
+      style={rootStyle}
+      data-theme={theme}
+    >
       <div
         className="card"
         style={{
@@ -645,7 +846,7 @@ export function OpenChatCardPage() {
 
         {multi ? (
           readonly ? (
-            // MULTI + readonly: every entry rendered read-only, numbered, no buttons.
+            // Direct/legacy MULTI + readonly: every entry rendered read-only and numbered.
             <div style={{ display: "flex", flexDirection: "column", gap: 6, marginTop: 6 }}>
               {multi.map((entry, i) => (
                 <div key={i} style={entryBlockStyle}>
@@ -655,7 +856,7 @@ export function OpenChatCardPage() {
               ))}
             </div>
           ) : (
-            // MULTI + editable: N compact entry blocks + a single "Add all N entries" confirm.
+            // Direct/legacy MULTI + editable: compact entry blocks; host actions remain outside.
             <div style={{ display: "flex", flexDirection: "column", gap: 6, marginTop: 6 }}>
               {multi.map((entry, i) => (
                 <EntryRow
@@ -670,7 +871,7 @@ export function OpenChatCardPage() {
               ))}
               {!multiAllValid && (
                 <span style={{ fontSize: "0.75rem", color: "var(--text-dim)", textAlign: "right" }}>
-                  Each entry needs an amount greater than 0 to add.
+                  Check each entry's amount, Type, direction, and Note before adding.
                 </span>
               )}
             </div>
@@ -687,8 +888,9 @@ export function OpenChatCardPage() {
                 <input
                   type="number"
                   inputMode="decimal"
-                  step="0.01"
-                  min="0"
+                  step="any"
+                  min={IOU_MIN_MAJOR_AMOUNT}
+                  max={IOU_MAX_MAJOR_AMOUNT}
                   aria-label="Amount"
                   disabled={submitting}
                   value={form.amount}
@@ -742,14 +944,15 @@ export function OpenChatCardPage() {
                 aria-label="Note"
                 disabled={submitting}
                 value={form.note}
+                maxLength={4_096}
                 onChange={(e) => set("note", e.target.value)}
                 placeholder="lunch, taxi, reservation…"
                 style={inputStyle}
               />
             </Field>
-            {!amountValid && (
+            {!formValid && (
               <span style={{ fontSize: "0.75rem", color: "var(--text-dim)", textAlign: "right" }}>
-                Enter an amount greater than 0 to add.
+                Check the amount, Type, direction, and Note before adding.
               </span>
             )}
           </div>
@@ -801,11 +1004,36 @@ function Field({
   );
 }
 
-// True when a form state's amount parses to a positive number — the same rule the single card uses
-// to gate its confirm. Gates each MULTI row and the "Add all" button.
-function isAmountValid(s: CardFormState): boolean {
+// Match the registered/backend-required public ledger semantics before answering the host's one-click
+// collection challenge. The Type selector cannot create an invalid blank value, and stale/malformed
+// initialization remains fail closed in both single and multi mode.
+export function isCardFormValid(s: CardFormState): boolean {
   const n = Number(s.amount);
-  return s.amount.trim() !== "" && Number.isFinite(n) && n > 0;
+  const minorUnits = Math.round(n * 100);
+  const currency = s.currency.trim();
+  const date = s.date.trim();
+  const dateTimestamp = /^\d{4}-\d{2}-\d{2}$/.test(date)
+    ? Date.parse(`${date}T00:00:00Z`)
+    : Number.NaN;
+  const dateIsValid =
+    date === "" ||
+    (date.slice(0, 4) !== "0000" &&
+      Number.isFinite(dateTimestamp) &&
+      new Date(dateTimestamp).toISOString().slice(0, 10) === date);
+  return (
+    s.amount.trim() !== "" &&
+    Number.isFinite(n) &&
+    n >= IOU_MIN_MAJOR_AMOUNT &&
+    n <= IOU_MAX_MAJOR_AMOUNT &&
+    Number.isSafeInteger(minorUnits) &&
+    minorUnits >= 1 &&
+    (currency === "" || /^[A-Za-z]{3}$/.test(currency)) &&
+    (s.kind === "iou" || s.kind === "settlement") &&
+    (s.direction === "credit" || s.direction === "debt") &&
+    dateIsValid &&
+    [...s.note].length <= 4_096 &&
+    !s.note.includes("\0")
+  );
 }
 
 // A subtle bordered container that separates one entry from the next in MULTI mode.
@@ -861,7 +1089,6 @@ export function TypeFields({
           onChange={(e) => onChange("kind", e.target.value as CardFormState["kind"])}
           style={inputStyle}
         >
-          <option value="">Auto</option>
           <option value="iou">{KIND_LABELS.iou}</option>
           <option value="settlement">{KIND_LABELS.settlement}</option>
         </select>
@@ -886,7 +1113,7 @@ export function TypeFields({
   );
 }
 
-/** Public transaction date, shown and editable before either single or batch confirmation. */
+/** Public transaction date, shown in the single iframe and direct/legacy multi compatibility UI. */
 export function DateField({
   form,
   onChange,
@@ -910,7 +1137,6 @@ export function DateField({
   );
 }
 
-/** Every saved-type name this card carries, deduped — the only suggestions it can offer (see TypeFields). */
 // One editable entry in MULTI mode: amount / currency / direction on one wrapping line, note below.
 // Reuses the single card's Field + inputStyle + DIRECTION_LABELS so styling and theming match
 // exactly. Purely presentational — edits flow up through onChange; no session/canister/identity use.
@@ -926,8 +1152,8 @@ function EntryRow({
   total: number;
   entry: CardFormState;
   onChange: <K extends keyof CardFormState>(key: K, value: CardFormState[K]) => void;
-  // Pooled across ALL rows, not just this one: a message that routed one entry to a type usually
-  // wants its siblings on the same one, and copying it should not mean retyping it.
+  // Compatibility-only roster input. Current OpenChat multi never enters this iframe; its Saved
+  // types resolve independently from each row's local evidence during IOU import/review.
   templates: TxnTemplate[];
   disabled: boolean;
 }) {
@@ -935,7 +1161,7 @@ function EntryRow({
     () => orderedCurrencies(entry.currency, [entry.currency]),
     [entry.currency],
   );
-  const valid = isAmountValid(entry);
+  const valid = isCardFormValid(entry);
   return (
     <div style={entryBlockStyle}>
       <EntryHeading index={index} total={total} />
@@ -944,8 +1170,9 @@ function EntryRow({
           <input
             type="number"
             inputMode="decimal"
-            step="0.01"
-           min="0"
+            step="any"
+           min={IOU_MIN_MAJOR_AMOUNT}
+           max={IOU_MAX_MAJOR_AMOUNT}
            aria-label="Amount"
            disabled={disabled}
            value={entry.amount}
@@ -994,6 +1221,7 @@ function EntryRow({
            aria-label="Note"
            disabled={disabled}
            value={entry.note}
+          maxLength={4_096}
           onChange={(e) => onChange("note", e.target.value)}
           placeholder="lunch, taxi, reservation…"
           style={inputStyle}
@@ -1001,7 +1229,7 @@ function EntryRow({
       </Field>
       {!valid && (
         <span style={{ fontSize: "0.6875rem", color: "var(--debt)" }}>
-          Enter an amount greater than 0.
+          Enter an amount greater than 0 and choose a Type.
         </span>
       )}
     </div>
