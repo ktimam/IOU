@@ -17,6 +17,13 @@ function expectOrdered(subject: string, markers: readonly string[]): void {
 }
 
 describe("multi-entry inbox cleanup policy", () => {
+  it("states every claimed currency in the exact source evidence", () => {
+    expect(source).toContain(
+      'const text = `Multi ${nonce}: 350 EGP iou credit 2026-08-08 multi-a; 500 USD settlement debt 2026-08-09 multi-b`',
+    );
+    expect(source).not.toContain("two fees");
+  });
+
   it("uses a synchronous tab-local prompt override instead of racing a native dialog", () => {
     expect(source).toContain("installManualPromptOverride,");
     expect(source).toContain("readManualPromptProbe,");

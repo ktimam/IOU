@@ -51,6 +51,7 @@ type TrackedArtifact = {
 
 const MESSAGE_WRAPPER_SELECTOR = '[data-id][data-index][id^="event-"]';
 export const OPENCHAT_MESSAGE_TEXT_SELECTOR = ".message_text, .markdown-wrapper";
+const MESSAGE_DELETED_TEXT = /^Message deleted by .+ on .+$/i;
 
 async function renderedMessageTexts(wrapper: Locator): Promise<string[]> {
   return wrapper.locator(OPENCHAT_MESSAGE_TEXT_SELECTOR).evaluateAll((nodes) =>
@@ -361,6 +362,32 @@ async function evidencePresent(
   return matches === 1;
 }
 
+async function exactArtifactDeletionProven(
+  page: Page,
+  message: OpenChatMessageRef,
+): Promise<boolean> {
+  const wrapper = exactOpenChatMessageWrapper(page, message);
+  const wrapperCount = await wrapper.count();
+  if (wrapperCount > 1) {
+    throw new Error(`${messageKey(message)}: stable coordinates are ambiguous after deletion`);
+  }
+  if (wrapperCount === 0) return true;
+  // A live message can quote a deleted reply. Only the current message content is a tombstone;
+  // nested `.reply-wrapper .deleted` descendants are not deletion proof for these coordinates.
+  const classicTombstones = await wrapper.locator(".message-bubble > .deleted").count();
+  if (classicTombstones > 1) {
+    throw new Error(`${messageKey(message)}: deletion tombstone is ambiguous`);
+  }
+  if (classicTombstones === 1) return true;
+  const mobileContent = wrapper.locator(".message_bubble_content");
+  const mobileContentCount = await mobileContent.count();
+  if (mobileContentCount > 1) {
+    throw new Error(`${messageKey(message)}: mobile message content is ambiguous after deletion`);
+  }
+  if (mobileContentCount === 0) return false;
+  return MESSAGE_DELETED_TEXT.test(normalized(await mobileContent.innerText()));
+}
+
 async function deleteExactArtifact(page: Page, artifact: TrackedArtifact): Promise<boolean> {
   if (!(await evidencePresent(page, artifact))) return false;
   const wrapper = exactOpenChatMessageWrapper(page, artifact.message);
@@ -456,7 +483,9 @@ async function deleteExactArtifactPersistently(
     if ((await wrapper.count()) !== 1) {
       throw new Error(`${messageKey(artifact.message)}: reappeared wrapper is ambiguous`);
     }
-    if (!(await evidencePresent(page, artifact))) {
+    const originalEvidencePresent = await evidencePresent(page, artifact);
+    if (!originalEvidencePresent) {
+      if (await exactArtifactDeletionProven(page, artifact.message)) return deleted;
       throw new Error(
         `${messageKey(artifact.message)}: coordinates reappeared without the original exact evidence`,
       );

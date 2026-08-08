@@ -647,7 +647,7 @@ async function main() {
   console.log("[inbox] before:", before);
 
   const nonce = `${Date.now()}-${webcrypto.getRandomValues(new Uint32Array(1))[0].toString(36)}`;
-  const text = `Multi ${nonce}: two fees`;
+  const text = `Multi ${nonce}: 350 EGP iou credit 2026-08-08 multi-a; 500 USD settlement debt 2026-08-09 multi-b`;
   const expected: ExpectedEntry[] = [
     {
       kind: "iou",

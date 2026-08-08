@@ -293,6 +293,11 @@ describe("live card harness artifact-cleanup policy", () => {
     const reload = source.indexOf('await page.reload({ waitUntil: "domcontentloaded" })', settle);
     const exactWrapper = source.indexOf("exactOpenChatMessageWrapper(page, artifact.message)", reload);
     const exactEvidence = source.indexOf("await evidencePresent(page, artifact)", exactWrapper);
+    const absentEvidenceGate = source.indexOf("if (!originalEvidencePresent)", exactEvidence);
+    const deletionProof = source.indexOf(
+      "await exactArtifactDeletionProven(page, artifact.message)",
+      absentEvidenceGate,
+    );
     const ownership = source.indexOf("await senderOwned(wrapper)", exactEvidence);
     const coordinates = source.indexOf("await messageRefFromWrapper(wrapper", ownership);
     const stableGuard = source.indexOf("sameMessageCoordinates(observed, artifact.message)", coordinates);
@@ -303,12 +308,42 @@ describe("live card harness artifact-cleanup policy", () => {
     expect(reload).toBeGreaterThan(settle);
     expect(exactWrapper).toBeGreaterThan(reload);
     expect(exactEvidence).toBeGreaterThan(exactWrapper);
+    expect(absentEvidenceGate).toBeGreaterThan(exactEvidence);
+    expect(deletionProof).toBeGreaterThan(absentEvidenceGate);
     expect(ownership).toBeGreaterThan(exactEvidence);
     expect(coordinates).toBeGreaterThan(ownership);
     expect(stableGuard).toBeGreaterThan(coordinates);
     expect(source.slice(helper, source.indexOf("export class OpenChatArtifactScope"))).not.toContain(
       "MESSAGE_WRAPPER_SELECTOR",
     );
+  });
+
+  it("accepts an exact persisted OpenChat tombstone after reload", () => {
+    const source = liveHarness("openChatArtifactCleanup.ts");
+    const proof = source.indexOf("async function exactArtifactDeletionProven(");
+    const absence = source.indexOf("if (wrapperCount === 0) return true", proof);
+    const classic = source.indexOf('wrapper.locator(".message-bubble > .deleted")', absence);
+    const mobile = source.indexOf('wrapper.locator(".message_bubble_content")', classic);
+    const textFallback = source.indexOf(
+      "MESSAGE_DELETED_TEXT.test(normalized(await mobileContent.innerText()))",
+      mobile,
+    );
+    const persistent = source.indexOf("async function deleteExactArtifactPersistently(");
+    const evidenceRetry = source.indexOf("await evidencePresent(page, artifact)", persistent);
+    const absentEvidenceGate = source.indexOf("if (!originalEvidencePresent)", evidenceRetry);
+    const afterReloadProof = source.indexOf(
+      "await exactArtifactDeletionProven(page, artifact.message)",
+      absentEvidenceGate,
+    );
+
+    expect(proof).toBeGreaterThanOrEqual(0);
+    expect(absence).toBeGreaterThan(proof);
+    expect(classic).toBeGreaterThan(absence);
+    expect(mobile).toBeGreaterThan(classic);
+    expect(textFallback).toBeGreaterThan(mobile);
+    expect(evidenceRetry).toBeGreaterThan(persistent);
+    expect(absentEvidenceGate).toBeGreaterThan(evidenceRetry);
+    expect(afterReloadProof).toBeGreaterThan(absentEvidenceGate);
   });
 
   it("continues exact cleanup after one artifact fails", () => {
