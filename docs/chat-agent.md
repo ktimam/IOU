@@ -249,10 +249,10 @@ form — NOT `{entries:[…]}`.
 - **No on-device model → guide, not a raw JSON box (Issue 1, OpenChat-side UI).** When OpenChat has
   no on-device model it no longer pops a raw `window.prompt` for JSON at real users — it shows a
   failure toast guiding them to set one up (profile → App settings → On-device models). The manual
-  JSON path survives ONLY behind a test seam: `localStorage["oc:manualExtract"] === "1"` (or
-  `?manualExtract=1`). The IOU live harness sets that flag on the OC page before proposing —
-  `scripts/live/journey-fanout.ts`, `verify-extraction-gate.ts` (and thus `journey-matrix.sh`, which
-  delegates to them). `scripts/live/verify-multi-entry.ts` covers the array path the same way.
+  JSON path survives ONLY behind a URL-scoped test seam on a disposable tab:
+  `?manualExtract=1`. Persistent storage is deliberately ignored, so a crashed harness cannot
+  change later user proposals. IOU live harnesses clone the signed-in context into temporary tabs,
+  close them in `finally`, and never remove or replace the user's installed model.
 
 - **Multiple entries, one card, confirm ALL (Issue 2).** The manifest prompt now instructs the model
   to emit a JSON ARRAY when a message describes MULTIPLE distinct transactions (a single object

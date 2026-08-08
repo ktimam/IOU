@@ -1,6 +1,184 @@
 # IOU and OpenChat fork security review — 2026-08-01
 
-## Executive result
+## Current-state supersession -- 2026-08-08
+
+This addendum supersedes the 2026-08-07 statements for the manual extraction seam, Propose/Cancel
+behavior, live-harness profile safety, and browser-artifact cleanup. The older sections remain
+dated audit history.
+
+Browser QC reproduced a generic PR 2 regression: a real user with an installed model could receive
+the internal raw-JSON QC prompt, and pressing **Cancel** could continue into inference and post one
+or more cards. The defect required both product and harness failures. OpenChat commit `1219b8a21`
+gave the manual prompt precedence over an available model; IOU live scripts had persisted
+`oc:manualExtract=1` in the manager's real profile; and Cancel used the same `undefined` result as
+"seam disabled." The mobile tree also lacked a one-at-a-time Propose boundary.
+
+The pushed OpenChat correction is generic card/interface work and belongs only to PR 2. It is
+commit `cb6bc72b6` on [PR 2 #73](https://github.com/ktimam/open-chat/pull/73), superseding the
+older PR 2 frontend heads recorded in the dated sections below:
+
+- persistent storage no longer enables manual extraction; only an explicit query on a temporary QC
+  tab can do so;
+- Cancel has a distinct result and exits before inference or card posting; malformed and
+  wrong-shaped JSON also abort;
+- desktop and mobile share a behavior-tested single-flight boundary, desktop has a real generic
+  multi-action chooser, and both surfaces expose in-flight progress;
+- focused logic tests live beside `aiActionRunner.ts` and `singleFlight.ts`, which standard
+  OpenChat PR CI executes. The focused gate passes **77/77**, the full frontend gate passes
+  **1,035/1,035 across 75 files**, and typecheck is green.
+
+The IOU correction is harness-only. Signed-in checks clone the authenticated context into disposable
+tabs, close them in `finally`, and do not mutate the normal tab, persistent seam, downloaded model,
+or model IndexedDB. The complete Journey harness captures exact source/card message IDs, deletes its
+card before its source through ordinary OpenChat UI, and verifies cleanup after reload. Named release
+commands are `pnpm test:live:openchat:propose` and `pnpm test:live:openchat:journey`.
+
+The refreshed dependency gate also identified
+[GHSA-2v37-7h3g-55p8](https://github.com/advisories/GHSA-2v37-7h3g-55p8) in transitive
+`nanoid@3.3.16` (via PostCSS/Vite). IOU now pins the patched 3.x release `3.3.17` through the
+pnpm workspace override; the lockfile resolves only that version and `pnpm audit:deps` is green.
+
+Live acceptance on the manager profile proved the reported boundary with the model available:
+`canInferOnDevice() === true`, no persistent flag, one query-isolated prompt, Cancel, and zero new
+cards after twelve seconds. The unique check message was removed and the normal tab restored. A
+reviewed exact-ID cleanup separately removed eight duplicate/Journey cards and ten anchored Journey
+sources while preserving `owe 200` and all unrelated messages.
+
+The complete signed-in manager-to-father journey also passes against the running local environment:
+one exact source, one JSON extraction prompt in the disposable QC tab, one backend-attested card on
+both sides, in-place optimistic-to-verified reconciliation without reload, **Add to IOU**, a
+one-envelope increase only for the confirmer, the exact routed **Pending from chat** draft,
+prefilled **Review & add**, and the exact 350 EGP entry in **History**. Teardown then soft-deletes
+only that nonce-scoped IOU entry and its two OpenChat messages, restores both inbox counts, reloads
+both chat views, and proves the test artifacts remain absent.
+
+The Claude-era tests were not deleted. The failure escaped because the signed-in scripts were
+outside standard IOU CI, IOU Playwright covered the consumer iframe/import rather than OpenChat's
+message-menu Propose path, and `1219b8a21` changed the OpenChat unit expectation to accept the
+regression. IOU CI now requires that existing 18-case card/iframe Playwright suite; the signed-in
+four-profile gate remains local. The detailed path/commit/CI audit is in
+`docs/test-coverage-gaps.md`. A hosted
+four-profile/live-canister gate remains open under IOU #52; deterministic cancellation and
+single-flight behavior must remain required OpenChat PR CI.
+
+At this checkpoint IOU passes **901/901 tests across 77 files**; coverage is **71.56%** statements
+and lines, **84.85%** branches, and **86.9%** functions. Typecheck, production build, and
+`pnpm audit:deps` are green. The existing 18-case card/iframe Playwright suite and 69 Rust tests
+also pass.
+
+## Current-state supersession — 2026-08-07
+
+This section is the authoritative status for hashes, tests, deployment, local topology, and live
+acceptance. Any older passage below that calls itself "current", says PR 2 is at `16080b078`, says
+the setup-token backend is undeployed, or describes the former six-subnet local replica is retained
+only as dated audit history and must not be used operationally.
+
+The OpenChat contribution remains exactly two generic pull requests:
+
+| Pull request | Scope | Exact pushed head | Current evidence |
+|---|---|---|---|
+| [PR 1 #9132](https://github.com/open-chat-labs/open-chat/pull/9132) | Optional local inference and reusable local-model management | `f43d2a2d53f2c9f8a3086104a356d4d3a315858a` | Five focused files **145/145**, typecheck green, and exact WSL `prod_test` green |
+| [PR 2 #73](https://github.com/ktimam/open-chat/pull/73) | Generic in-chat cards and external-app/chat interfaces | `001a1e29881f340705444a9e11e96a54bc3eac9c` | Frontend **990/990 across 70 files**, the nine-package backend matrix, frontend and agent typechecks, ESLint, Prettier, `cargo fmt`, and exact Linux `prod_test` all pass |
+
+### Post-deployment PR 2 regression correction — 2026-08-07
+
+The pushed/deployed PR 2 head above passed its recorded gates, but subsequent browser QC exposed
+three generic card/interface regressions. Candidate fixes and failing-first coverage are present in
+the current OpenChat PR 2 and IOU working trees. They are **fixed in tree only** at this checkpoint:
+their exact commits, pushes, combined green gates, manifest rollout, and live acceptance are still
+pending and are not included in the `990/990`, `846/846`, `68/68`, or live totals recorded below.
+
+- A sender's optimistic ActionCard could remain unverified and actionless even after the backend
+  accepted the provenance-backed send. Reloading replaced it with the canonical event and made the
+  card usable, but that workaround is not acceptable product behavior. The PR 2 candidate now
+  reconciles a successful, provenance-backed send into the authoritative verified card state while
+  stripping send-only provenance, confirmation payload, recipient keys, and inbox routing material
+  from the local event/cache. Forged or send-only RTC card data remains a fail-closed placeholder.
+- The card component did not reliably bind or re-resolve the authoritative app identity when an
+  optimistic card transitioned to its backend-attested state, and session resets could discard the
+  identity. The candidate re-runs exact app resolution when the primitive verification identity
+  changes and preserves that binding across iframe-session reset. It also corrects stale copy:
+  `Directory binding only; card content is untrusted` and `Untrusted card text` now remain only for
+  genuinely unattested content; a content-attested card no longer carries those labels. Unattested
+  cards still have their actions disabled.
+- Image proposals could carry model/OCR fields that passed OpenChat's shallow post-pass but failed
+  IOU's stricter app attester, producing an unavailable or untrusted/actionless card. The candidate
+  requires explicit `acceptsImage: true` for image input and applies declared numeric bounds,
+  Unicode code-point string bounds, real calendar-date validation, and a small allowlist of safe
+  formats. IOU's manifest now mirrors its attester: amount `0.005` is the lowest value that rounds
+  to one minor unit, the upper bound remains safe after multiplying by 100, currency is exactly
+  three ASCII uppercase characters, dates are valid `YYYY-MM-DD` calendar dates, and note/message
+  are bounded and NUL-free. Invalid optional OCR fields are dropped before attestation; IOU's
+  canister attester remains the final fail-closed boundary.
+
+The local `scripts/live/journey-fanout.ts` candidate now covers the continuous user journey rather
+than stopping at encrypted inbox counts: send a nonce-scoped chat message, propose and load its
+card, press the iframe's **Add to IOU**, assert fan-out, resolve the authenticated confirmer's exact
+app-scoped chat route, find the draft under the routed sheet's **Pending from chat**, press
+**Review & add**, verify the prefilled `EntryForm`, submit **Add entry**, verify the nonce in
+**History**, then soft-delete only that exact entry. The cleanup deliberately leaves the encrypted
+audit tombstone while removing the entry from ordinary history/balances. This expanded journey is
+implemented but has **not yet been counted as a live pass** against the updated registration/runtime.
+
+PR 2's exact artifacts are deployed to the recovered local PocketIC state in producer-before-
+consumer order: UserIndex `0.0.9`, LocalUserIndex `0.0.5`, all four User canisters `0.0.3`, the
+private Group instance `0.0.4`, and the Community child template `0.0.4`. There is no Community
+instance in this fixture, so only its template was published. GroupIndex was not upgraded or
+deployed as part of this rollout and must not be reported as such. The exact rollout completed with
+clear queues and no failed upgrades.
+
+The recoverable state is now a supported three-subnet PocketIC topology restored with
+`SubnetStateConfig::FromPath` for NNS, Internet Identity, and System state. It passed clean deletion,
+checkpoint, and strict reopen with `incomplete_state: null` while preserving canister ids and user
+state. The former six-subnet snapshot cannot be reopened consistently because its saved cross-subnet
+counters disagree; normal `dfx start`, `dfx stop`, and the old six-subnet `local-up.sh` flow must not
+be used against this state.
+
+The IOU-local `scripts/live/pocketic-recovered.ps1` wrapper was safety-reviewed and then completed
+two full clean stop/checkpoint/strict-reopen/status cycles. Every reopen dynamically parsed its new
+instance id, control port, and exact PID, then revalidated the complete three-subnet topology and
+all seven deployed canisters. After cycle 2, exact PR 2 head `001a1e298` remained healthy and the
+restarted live checks still passed routing **17/17**, Type isolation **12/12**, and card hydration
+**8/8**. The rejected extra cleanup gate was not run: the obsolete six-subnet state and remaining
+WSL artifacts remain preserved. Earlier bounded removal of rebuildable debug/build output recovered
+about **46.8 GiB**.
+
+Current live acceptance is deliberately split by boundary:
+
+- the disposable account-scoped Type isolation journey passes **12/12** assertions, including
+  partner visibility, author cross-account isolation, unrelated-user denial, removal propagation,
+  and cleanup;
+- the recreated-account-safe Father per-chat routing journey passes **17/17** assertions. It
+  dynamically discovers the current distinct House and Family sheet ids, routes Father–manager to
+  House and Father–mother to Family, scrubs both distinct one-time setup URLs, and preserves the
+  existing connection;
+- exact-PR-2 authorized private card hydration passes **8/8** live assertions after reloading the
+  sender to replace its stale optimistic echo with the canonical event. That remains useful proof
+  of canonical-event hydration and private-context isolation, but the required reload is now a
+  reproduced sender-lifecycle regression, not an accepted workflow. Before consent the Type selector
+  contains only `None`; explicit **Share private context** exposes House `Rent`, excludes Family
+  `Family expense`, auto-selects `Rent`, and does not ask the Father account to reconnect;
+- the extended chat → card → routed IOU draft → persisted History journey is implemented in
+  `scripts/live/journey-fanout.ts`, including nonce-exact soft-delete cleanup, but its updated-runtime
+  execution remains pending.
+
+The current IOU unit suite passes **846/846** and Rust passes **68/68**. Unit coverage is **71.49%**
+for statements and lines, **84.85%** for branches, and **86.9%** for functions. The live E2E suite
+is **56/56** under split verification: its initial **52/55** run exposed three obsolete registry
+expectations; **51** unaffected scenarios remained green, and the replacement read-only/ownership
+plus live owner-attestation registry suite passed **5/5**.
+
+Neither PR contains IOU-specific runtime behavior, identifiers, prompts, URLs, fixtures, Wasm, or
+documentation. The sender optimistic-state/identity/content-label and image-schema defects are
+generic PR 2 card/interface regressions; the corresponding manifest/attester alignment is IOU-owned.
+IOU #52 now covers hosted/CI automation and a green live run of the expanded full lifecycle, rather
+than a missing local script. Hosted OpenChat review and CI also remain release gates.
+
+## Historical executive result (status superseded by 2026-08-07 section above)
+
+The findings and remediation descriptions below remain audit evidence. Their hashes, test totals,
+deployment state, and readiness wording are point-in-time records unless repeated in the current
+supersession section.
 
 The complete application-owned IOU codebase and documentation were reviewed, together
 with only the changes authored by `ktimam` in the two local OpenChat forks and the
@@ -79,10 +257,11 @@ canister WASM, or documentation.
 This is a source and local-verification review, not a proof that no other vulnerability
 exists.
 
-## Per-chat token routing and local-profile correction — 2026-08-07 (current)
+## Historical per-chat token-routing correction — earlier 2026-08-07 checkpoint
 
-This correction supersedes every older first-use routing, QC, PR 2 head, token-test-count,
-and token-deployment statement elsewhere in this dated report. PR 1/local-model scope is
+This was the authoritative correction at the time it was written. The current-state supersession at
+the top of this report now overrides its PR 2 hash, deployment, live-QC, and remaining-work claims.
+PR 1/local-model scope is
 unchanged. PR 2 is still exactly the generic cards/external-app/chat-interface PR; the
 current setup-token changes are not a third PR and contain no IOU-specific runtime behavior.
 
@@ -565,7 +744,7 @@ subsequently upgraded as recorded in the 2026-08-06 snapshot below. It is useful
 state-preserving upgrade evidence, but it does not replace Linux PocketIC, hosted CI, or a
 disposable production-like rollout.
 
-## Current implementation and local deployment snapshot — 2026-08-06
+## Historical implementation and local deployment snapshot — 2026-08-06
 
 This section supersedes older statements elsewhere in this dated report that describe the
 IOU fixes as uncommitted, the OpenChat PRs as unreconstructed, or the backend as not deployed.
@@ -1410,6 +1589,7 @@ have their implementation and validation evidence recorded in the linked issue.
 | [#49](https://github.com/ktimam/IOU/issues/49) | Closed; key/binding invariant, legacy fail-closed migration, 53/53 Rust, 830/830 frontend, in-place backend upgrade, four relinks, and post-upgrade card context passed | OpenChat binding can drift from the authoritative consumer key |
 | [#50](https://github.com/ktimam/IOU/issues/50) | Open; failing-first regression and source fix pass, preserved-state deployment/live first-use proof pending | Raw-route hardening removed the discoverable chat-to-sheet setup journey |
 | [#51](https://github.com/ktimam/IOU/issues/51) | Open; synchronous main capture/dynamic-bootstrap fix passes focused **5/5**, Cargo **68/68**, frontend **846/846** (71 files), typecheck/build, and routing Playwright **5/5**; exact hash/push/deploy pending | Routing bearer scrub ran after asynchronous authentication initialization |
+| [#52](https://github.com/ktimam/IOU/issues/52) | Open; exact-head hydration and complete confirm → ActionInbox → routed import/ack → History lifecycle pass locally, hosted four-profile CI automation remains | Automate full OpenChat card-delivery lifecycle acceptance |
 
 Earlier #1–#7 are closed historical issues; current work did not reopen them.
 
@@ -1509,7 +1689,7 @@ Earlier #1–#7 are closed historical issues; current work did not reopen them.
 | [#91](https://github.com/ktimam/open-chat/issues/91) | Open; generic desktop `open_url` fix is committed in exact pushed PR 2 head `16080b078`; pre-rebase plugin **17/17** remains applicable by exact tree equivalence and Linux production gate exits **0**; deployment pending | Desktop external-app bridge is unimplemented |
 | [#92](https://github.com/ktimam/open-chat/issues/92) | Open; fixed and pushed in final PR 1 head `f43d2a2d5`; exact WSL `prod_test` passed in **10m36s** with byte-identical **7,656,521-byte** Wasm SHA-256 `4197ce6d…a0cfa` and zero unresolved Wllama references; deployment pending | Production build cannot resolve Wllama `?url` asset import |
 
-## Release recommendation
+## Historical release recommendation
 
 The 2026-08-07 setup-token revision is not represented by the older preserved deployment below.
 PR 2's exact pushed post-rebase head is

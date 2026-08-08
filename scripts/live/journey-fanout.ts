@@ -25,7 +25,6 @@
 //   pnpm exec tsx scripts/live/journey-fanout.ts
 import {
   chromium,
-  type Dialog,
   type Frame,
   type FrameLocator,
   type Locator,
@@ -36,6 +35,7 @@ import { Principal } from "@dfinity/principal";
 import { createRequire } from "node:module";
 import { webcrypto } from "node:crypto";
 import { readFileSync } from "node:fs";
+import { OPENCHAT_MESSAGE_TEXT_SELECTOR } from "./openChatArtifactCleanup";
 
 const require = createRequire(import.meta.url);
 const { Packr } = require("C:/Kiko/MyProjects/Blockchain/ICP/open-chat-cycle/frontend/node_modules/msgpackr");
@@ -61,6 +61,15 @@ function check(cond: boolean, label: string): void {
   if (!cond) failures++;
 }
 
+function cleanupCheck(cond: boolean, label: string): void {
+  try {
+    check(cond, label);
+  } catch (error) {
+    failures++;
+    console.error(`[cleanup] assertion reporting failed (${label}): ${(error as Error).message}`);
+  }
+}
+
 async function proposalFailureText(page: Page): Promise<string | null> {
   const toast = page.locator(".toast .message.failure").last();
   if (!(await toast.isVisible().catch(() => false))) return null;
@@ -72,6 +81,43 @@ async function proposalFailureText(page: Page): Promise<string | null> {
     .replace(/([?&](?:token|code|claim|credential)[^=]*)=[^\s&]+/gi, "$1=<redacted>")
     .replace(/\b[a-z0-9]{5}(?:-[a-z0-9]{3,5}){2,}\b/gi, "<id>")
     .slice(0, 240);
+}
+
+type ManualPromptProbe = { promptCalls: number; prompts: string[] };
+
+async function installManualPromptOverride(page: Page, exactResponse: string): Promise<void> {
+  const response = JSON.stringify(exactResponse);
+  // Browser-native source avoids tsx/esbuild injecting Node-only helpers into the prompt callback.
+  await page.evaluate(`(() => {
+    const root = globalThis;
+    const previous = root.__iouJourneyPromptProbe;
+    if (previous) window.prompt = previous.originalPrompt;
+    const state = { originalPrompt: window.prompt, promptCalls: 0, prompts: [] };
+    root.__iouJourneyPromptProbe = state;
+    window.prompt = (message) => {
+      state.promptCalls++;
+      state.prompts.push(String(message ?? ""));
+      return ${response};
+    };
+  })()`);
+}
+
+async function readManualPromptProbe(page: Page): Promise<ManualPromptProbe> {
+  return page.evaluate(`(() => {
+    const state = globalThis.__iouJourneyPromptProbe;
+    if (!state) throw new Error("manual prompt override is not installed");
+    return { promptCalls: state.promptCalls, prompts: [...state.prompts] };
+  })()`);
+}
+
+async function removeManualPromptOverride(page: Page): Promise<void> {
+  await page.evaluate(`(() => {
+    const root = globalThis;
+    const state = root.__iouJourneyPromptProbe;
+    if (!state) return;
+    window.prompt = state.originalPrompt;
+    delete root.__iouJourneyPromptProbe;
+  })()`);
 }
 
 async function agent(): Promise<HttpAgent> {
@@ -113,9 +159,7 @@ async function bucketCount(a: HttpAgent, fp: Uint8Array): Promise<number> {
   return resp.Success.actions.length;
 }
 
-// ONE CDP connection per port. Connecting twice to the same browser creates a second set of Page
-// objects; a window.prompt then reaches a page with no dialog listener on that second connection and
-// Playwright AUTO-DISMISSES it there — racing (and losing us) the prompt we meant to answer.
+// ONE CDP connection per port keeps page identity and authenticated state stable across the journey.
 const connections = new Map<number, ReturnType<typeof chromium.connectOverCDP>>();
 async function attach(port: number, urlPart: string): Promise<Page> {
   if (!connections.has(port)) connections.set(port, chromium.connectOverCDP(`http://127.0.0.1:${port}`));
@@ -186,7 +230,148 @@ type LoadedRunCard = {
   frame: FrameLocator;
   observerId: string;
   loadedFromCleanGate: boolean;
+  message: ChatMessageRef;
 };
+
+type ChatMessageRef = {
+  messageId: string;
+  messageIndex: number;
+  eventIndex: number;
+};
+
+type ExactMessageEvidence =
+  | { kind: "source"; exactText: string }
+  | { kind: "card"; observerId: string };
+
+const MESSAGE_WRAPPER_SELECTOR = '[data-id][data-index][id^="event-"]';
+
+function exactMessageWrapper(page: Page, message: ChatMessageRef): Locator {
+  return page.locator(
+    `[data-id="${message.messageId}"][data-index="${message.messageIndex}"][id="event-${message.eventIndex}"]`,
+  );
+}
+
+async function messageRefFromWrapper(wrapper: Locator, label: string): Promise<ChatMessageRef> {
+  const count = await wrapper.count();
+  if (count !== 1) throw new Error(`${label}: expected one exact message wrapper, found ${count}`);
+  const [messageId, rawMessageIndex, rawEventId] = await Promise.all([
+    wrapper.getAttribute("data-id"),
+    wrapper.getAttribute("data-index"),
+    wrapper.getAttribute("id"),
+  ]);
+  const eventMatch = /^event-(\d+)$/.exec(rawEventId ?? "");
+  if (!/^\d+$/.test(messageId ?? "") || !/^\d+$/.test(rawMessageIndex ?? "") || !eventMatch) {
+    throw new Error(`${label}: message wrapper has invalid stable coordinates`);
+  }
+  return {
+    messageId: messageId!,
+    messageIndex: Number(rawMessageIndex),
+    eventIndex: Number(eventMatch[1]),
+  };
+}
+
+async function captureMessageIdBaseline(page: Page): Promise<Set<string>> {
+  const ids = await page.locator(MESSAGE_WRAPPER_SELECTOR).evaluateAll((wrappers) => {
+    const result: string[] = [];
+    for (const wrapper of wrappers) {
+      const id = wrapper.getAttribute("data-id");
+      if (id !== null && /^\d+$/.test(id)) result.push(id);
+    }
+    return result;
+  });
+  return new Set(ids);
+}
+
+async function freshSourceCandidates(
+  page: Page,
+  exactText: string,
+  baselineIds: ReadonlySet<string>,
+): Promise<Array<ChatMessageRef & { owned: boolean }>> {
+  return page.locator(OPENCHAT_MESSAGE_TEXT_SELECTOR).evaluateAll(
+    (nodes, { expected, baseline }) => {
+      const normalizedExpected = expected.replace(/\s+/g, " ").trim();
+      const matches = new Map<string, ChatMessageRef & { owned: boolean }>();
+      for (const node of nodes as HTMLElement[]) {
+        if (
+          node.classList.contains("markdown-wrapper") &&
+          node.closest(".message_text") !== null
+        )
+          continue;
+        if (node.innerText.replace(/\s+/g, " ").trim() !== normalizedExpected) continue;
+        const wrapper = node.closest<HTMLElement>('[data-id][data-index][id^="event-"]');
+        const messageId = wrapper?.dataset.id ?? "";
+        const rawMessageIndex = wrapper?.dataset.index ?? "";
+        const eventMatch = /^event-(\d+)$/.exec(wrapper?.id ?? "");
+        if (
+          baseline.includes(messageId) ||
+          !/^\d+$/.test(messageId) ||
+          !/^\d+$/.test(rawMessageIndex) ||
+          !eventMatch
+        )
+          continue;
+        const classicOwned =
+          wrapper!.classList.contains("message") && wrapper!.classList.contains("me");
+        const mobileOwned =
+          wrapper!.classList.contains("container") &&
+          getComputedStyle(wrapper!).justifyContent === "flex-end";
+        matches.set(messageId, {
+          messageId,
+          messageIndex: Number(rawMessageIndex),
+          eventIndex: Number(eventMatch[1]),
+          owned: classicOwned || mobileOwned,
+        });
+      }
+      return [...matches.values()];
+    },
+    { expected: exactText, baseline: [...baselineIds] },
+  );
+}
+
+async function captureFreshSourceMessage(
+  page: Page,
+  exactText: string,
+  baselineIds: ReadonlySet<string>,
+  who: string,
+  timeoutMs = 15_000,
+): Promise<ChatMessageRef> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const matches = await freshSourceCandidates(page, exactText, baselineIds);
+    if (matches.length > 1) {
+      throw new Error(`[${who}] multiple fresh messages exactly matched this run; refusing ambiguity`);
+    }
+    if (matches.length === 1) {
+      if (!matches[0].owned) {
+        throw new Error(`[${who}] fresh Journey message is not rendered as the current user's message`);
+      }
+      const message: ChatMessageRef = {
+        messageId: matches[0].messageId,
+        messageIndex: matches[0].messageIndex,
+        eventIndex: matches[0].eventIndex,
+      };
+      if ((await exactMessageWrapper(page, message).count()) !== 1) {
+        throw new Error(`[${who}] fresh Journey message coordinates are not unique`);
+      }
+      return message;
+    }
+    await page.waitForTimeout(250);
+  }
+  throw new Error(`[${who}] fresh Journey message never acquired stable message coordinates`);
+}
+
+async function captureCardMessage(card: Locator, observerId: string, who: string): Promise<ChatMessageRef> {
+  const wrapper = card.locator(
+    'xpath=ancestor::*[@data-id and @data-index and starts-with(@id,"event-")][1]',
+  );
+  const message = await messageRefFromWrapper(wrapper, `[${who}] nonce-scoped card`);
+  const exactCard = exactMessageWrapper(card.page(), message).locator(
+    `.action-card[data-iou-journey-card-id="${observerId}"]`,
+  );
+  if ((await exactCard.count()) !== 1) {
+    throw new Error(`[${who}] nonce-scoped card is not uniquely contained by its captured message`);
+  }
+  return message;
+}
 
 type InboxRunLookup = {
   found: boolean;
@@ -194,6 +379,37 @@ type InboxRunLookup = {
   matched: number;
   acknowledged: number;
 };
+
+function messageRefKey(message: ChatMessageRef): string {
+  return `${message.messageId}/${message.messageIndex}/${message.eventIndex}`;
+}
+
+function rememberRunCards(
+  tracked: Map<string, LoadedRunCard>,
+  cards: readonly LoadedRunCard[],
+  who: string,
+): void {
+  for (const card of cards) {
+    const key = messageRefKey(card.message);
+    const existing = tracked.get(key);
+    if (existing && existing.observerId !== card.observerId) {
+      throw new Error(
+        `[${who}] two observed cards occupy the same stable message coordinates; refusing ambiguity`,
+      );
+    }
+    tracked.set(key, card);
+  }
+}
+
+function uniqueTrackedRunCard(
+  tracked: ReadonlyMap<string, LoadedRunCard>,
+  who: string,
+): LoadedRunCard | null {
+  if (tracked.size > 1) {
+    throw new Error(`[${who}] ${tracked.size} nonce-exact run cards were found; refusing confirmation`);
+  }
+  return tracked.values().next().value ?? null;
+}
 
 // Observe cards that are added after this point and retain each card's presentation transitions.
 // The exact sender card is identified later from the nonce inside its isolated iframe; the observer
@@ -243,6 +459,15 @@ async function observedCardTransitions(page: Page, observerId: string): Promise<
   }, observerId);
 }
 
+async function observedRunCardCount(page: Page): Promise<number> {
+  return page.evaluate(() => {
+    const root = globalThis as typeof globalThis & {
+      __iouJourneyCardObserver?: { records: Record<string, string[]> };
+    };
+    return Object.keys(root.__iouJourneyCardObserver?.records ?? {}).length;
+  });
+}
+
 async function removeNewCardObserver(page: Page): Promise<void> {
   await page
     .evaluate(() => {
@@ -268,20 +493,18 @@ async function removeNewCardObserver(page: Page): Promise<void> {
     .catch(() => {});
 }
 
-async function findAndLoadRunCard(
+async function findAndLoadRunCards(
   page: Page,
   note: string,
   who: string,
+  cleanGateIds: Set<string>,
   timeoutMs = 35_000,
   failOnProposalToast = false,
-): Promise<LoadedRunCard | null> {
-  const cleanGateIds = new Set<string>();
+): Promise<LoadedRunCard[]> {
+  const found = new Map<string, LoadedRunCard>();
+  let firstFoundAt: number | null = null;
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
-    if (failOnProposalToast) {
-      const failure = await proposalFailureText(page);
-      if (failure) throw new Error(`proposal UI failure: ${failure}`);
-    }
     const cards = page.locator(".action-card[data-iou-journey-card-id]");
     const count = await cards.count().catch(() => 0);
     for (let index = 0; index < count; index++) {
@@ -326,17 +549,35 @@ async function findAndLoadRunCard(
         values.push(await inputs.nth(input).inputValue().catch(() => ""));
       }
       if (values.includes(note)) {
-        return {
+        const message = await captureCardMessage(card, observerId, who);
+        const loaded: LoadedRunCard = {
           card,
           frame,
           observerId,
           loadedFromCleanGate: cleanGateIds.has(observerId),
+          message,
         };
+        const key = messageRefKey(message);
+        const existing = found.get(key);
+        if (existing && existing.observerId !== observerId) {
+          throw new Error(
+            `[${who}] two nonce-exact cards occupy the same stable message coordinates`,
+          );
+        }
+        found.set(key, loaded);
+        firstFoundAt ??= Date.now();
       }
+    }
+    // Continue briefly after the first match so a duplicate created by a raced retry is inventoried
+    // and cleaned instead of being hidden by an early return.
+    if (firstFoundAt !== null && Date.now() - firstFoundAt >= 800) return [...found.values()];
+    if (failOnProposalToast && found.size === 0) {
+      const failure = await proposalFailureText(page);
+      if (failure) throw new Error(`proposal UI failure: ${failure}`);
     }
     await page.waitForTimeout(400);
   }
-  return null;
+  return [...found.values()];
 }
 
 async function approveRunCardConfirmation(
@@ -374,6 +615,226 @@ async function cancelRunCard(loaded: LoadedRunCard): Promise<boolean> {
     timeout: 8_000,
   });
   return true;
+}
+
+async function visibleMatches(locator: Locator): Promise<Locator[]> {
+  const matches: Locator[] = [];
+  const count = await locator.count();
+  for (let index = 0; index < count; index++) {
+    const candidate = locator.nth(index);
+    if (await candidate.isVisible().catch(() => false)) matches.push(candidate);
+  }
+  return matches;
+}
+
+async function exactlyOneVisible(locator: Locator, label: string, timeoutMs = 5_000): Promise<Locator> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const matches = await visibleMatches(locator);
+    if (matches.length > 1) {
+      throw new Error(`${label}: expected one visible match, found ${matches.length}`);
+    }
+    if (matches.length === 1) return matches[0];
+    await locator.page().waitForTimeout(100);
+  }
+  throw new Error(`${label}: no visible match appeared`);
+}
+
+async function dismissOpenChatOverlay(page: Page): Promise<void> {
+  for (let attempt = 0; attempt < 3; attempt++) {
+    const open = await page.evaluate(() => {
+      const overlay = document.querySelector("#masked_overlay");
+      return overlay instanceof HTMLElement && overlay.classList.contains("visible");
+    });
+    if (!open) return;
+    await page.keyboard.press("Escape").catch(() => {});
+    await page.waitForTimeout(300);
+  }
+  const stillOpen = await page.locator("#masked_overlay.visible").isVisible().catch(() => false);
+  if (stillOpen) throw new Error("an existing OpenChat overlay could not be dismissed safely");
+}
+
+async function exactMessageEvidencePresent(
+  page: Page,
+  message: ChatMessageRef,
+  evidence: ExactMessageEvidence,
+): Promise<boolean> {
+  const wrapper = exactMessageWrapper(page, message);
+  const wrapperCount = await wrapper.count();
+  if (wrapperCount > 1) throw new Error(`message ${message.messageId}: stable coordinates are ambiguous`);
+  if (wrapperCount === 0) return false;
+  if (evidence.kind === "source") {
+    const expected = evidence.exactText.replace(/\s+/g, " ").trim();
+    const matches = await wrapper.locator(OPENCHAT_MESSAGE_TEXT_SELECTOR).evaluateAll(
+      (nodes, exact) => {
+        let count = 0;
+        for (const node of nodes as HTMLElement[]) {
+          if (
+            node.classList.contains("markdown-wrapper") &&
+            node.closest(".message_text") !== null
+          )
+            continue;
+          if (node.innerText.replace(/\s+/g, " ").trim() === exact) count++;
+        }
+        return count;
+      },
+      expected,
+    );
+    if (matches > 1) throw new Error(`message ${message.messageId}: source evidence is ambiguous`);
+    return matches === 1;
+  }
+
+  const cards = wrapper.locator(".action-card");
+  const cardCount = await cards.count();
+  if (cardCount > 1) throw new Error(`message ${message.messageId}: card evidence is ambiguous`);
+  if (cardCount === 0) return false;
+  const card = cards.first();
+  const currentObserverId = await card.getAttribute("data-iou-journey-card-id");
+  if (currentObserverId !== null && currentObserverId !== evidence.observerId) {
+    throw new Error(`message ${message.messageId}: observed card identity changed`);
+  }
+  const identity = await card.evaluate((node) => ({
+    title: node.querySelector(".title")?.textContent?.replace(/\s+/g, " ").trim() ?? "",
+    text: node.textContent?.replace(/\s+/g, " ").trim() ?? "",
+  }));
+  if (identity.title !== "Add to IOU" || !/Directory entry:\s*iou/i.test(identity.text)) {
+    throw new Error(`message ${message.messageId}: IOU card identity no longer matches`);
+  }
+  return true;
+}
+
+async function waitForExactEvidenceAbsent(
+  page: Page,
+  message: ChatMessageRef,
+  evidence: ExactMessageEvidence,
+): Promise<void> {
+  const deadline = Date.now() + 20_000;
+  while (Date.now() < deadline) {
+    if (!(await exactMessageEvidencePresent(page, message, evidence))) return;
+    await page.waitForTimeout(300);
+  }
+  throw new Error(`message ${message.messageId}: original evidence remained after deletion`);
+}
+
+async function openOwnedMobileMessageMenu(page: Page, message: ChatMessageRef): Promise<Locator> {
+  const wrapper = exactMessageWrapper(page, message);
+  if ((await wrapper.count()) !== 1) {
+    throw new Error(`message ${message.messageId}: exact mobile wrapper is unavailable`);
+  }
+  const ownedByAlignment = await wrapper.evaluate(
+    (node) => node.classList.contains("container") && getComputedStyle(node).justifyContent === "flex-end",
+  );
+  if (!ownedByAlignment) throw new Error(`message ${message.messageId}: mobile message is not sender-owned`);
+  const trigger = wrapper.locator(".message_bubble_wrapper > .menu-trigger");
+  if ((await trigger.count()) !== 1) {
+    throw new Error(`message ${message.messageId}: exact mobile menu trigger is ambiguous`);
+  }
+  await trigger.scrollIntoViewIfNeeded();
+  await page.waitForTimeout(800);
+
+  for (let attempt = 0; attempt < 3; attempt++) {
+    await dismissOpenChatOverlay(page);
+    await trigger.dispatchEvent("click").catch(() => {});
+    await page.waitForTimeout(500);
+    let menus = await visibleMatches(page.locator(".message_bubble_menu.second"));
+    if (menus.length === 0) {
+      const box = await trigger.boundingBox();
+      if (!box) throw new Error(`message ${message.messageId}: mobile trigger has no bounds`);
+      const session = await page.context().newCDPSession(page);
+      try {
+        const point = { x: box.x + box.width / 2, y: box.y + box.height / 2 };
+        await session.send("Input.dispatchTouchEvent", { type: "touchStart", touchPoints: [point] });
+        await page.waitForTimeout(750);
+        await session.send("Input.dispatchTouchEvent", { type: "touchEnd", touchPoints: [] });
+      } finally {
+        await session.detach().catch(() => {});
+      }
+      await page.waitForTimeout(500);
+      menus = await visibleMatches(page.locator(".message_bubble_menu.second"));
+    }
+    if (menus.length > 1) {
+      throw new Error(`message ${message.messageId}: multiple mobile message menus opened`);
+    }
+    if (menus.length === 1) {
+      if (!(await menus[0].evaluate((node) => node.classList.contains("me")))) {
+        throw new Error(`message ${message.messageId}: opened mobile menu is not sender-owned`);
+      }
+      return menus[0];
+    }
+    await page.waitForTimeout(1_200);
+  }
+  throw new Error(`message ${message.messageId}: exact mobile message menu did not open`);
+}
+
+async function deleteExactMessageViaUi(
+  page: Page,
+  message: ChatMessageRef,
+  evidence: ExactMessageEvidence,
+): Promise<void> {
+  if (!(await exactMessageEvidencePresent(page, message, evidence))) {
+    throw new Error(`message ${message.messageId}: exact deletion evidence is unavailable`);
+  }
+  await dismissOpenChatOverlay(page);
+  const wrapper = exactMessageWrapper(page, message);
+  const classic = await wrapper.evaluate((node) => node.classList.contains("message"));
+  if (classic) {
+    if (!(await wrapper.evaluate((node) => node.classList.contains("me")))) {
+      throw new Error(`message ${message.messageId}: classic message is not sender-owned`);
+    }
+    const bubble = wrapper.locator(".bubble-wrapper");
+    if ((await bubble.count()) !== 1) {
+      throw new Error(`message ${message.messageId}: exact classic bubble is ambiguous`);
+    }
+    await bubble.hover();
+    const menuIcon = await exactlyOneVisible(bubble.locator(".menu-icon"), "classic message menu");
+    await menuIcon.click({ timeout: 10_000 });
+  } else {
+    const menu = await openOwnedMobileMessageMenu(page, message);
+    const more = await exactlyOneVisible(menu.locator(".menu-btn button"), "mobile more-options button");
+    await more.click({ timeout: 10_000 });
+  }
+
+  const deleteForMe = await visibleMatches(
+    page.getByRole("menuitem", { name: "Delete for me", exact: true }),
+  );
+  if (deleteForMe.length !== 0) {
+    throw new Error(`message ${message.messageId}: UI offered Delete for me instead of sender deletion`);
+  }
+  const deleteItem = await exactlyOneVisible(
+    page.getByRole("menuitem", { name: "Delete", exact: true }),
+    "sender Delete menu item",
+  );
+  await deleteItem.click({ timeout: 10_000 });
+
+  const confirmation = page.getByRole("button", { name: "Yes please", exact: true });
+  const confirmationDeadline = Date.now() + 2_000;
+  while (Date.now() < confirmationDeadline) {
+    const confirmations = await visibleMatches(confirmation);
+    if (confirmations.length > 1) {
+      throw new Error(`message ${message.messageId}: multiple delete confirmations are visible`);
+    }
+    if (confirmations.length === 1) {
+      await confirmations[0].click({ timeout: 10_000 });
+      break;
+    }
+    if (!(await exactMessageEvidencePresent(page, message, evidence))) return;
+    await page.waitForTimeout(100);
+  }
+  await waitForExactEvidenceAbsent(page, message, evidence);
+}
+
+async function verifyDeletedAfterReload(
+  page: Page,
+  deleted: ReadonlyArray<{ message: ChatMessageRef; evidence: ExactMessageEvidence }>,
+): Promise<void> {
+  if (deleted.length === 0) return;
+  await page.reload({ waitUntil: "domcontentloaded" });
+  await page.locator(".ProseMirror").first().waitFor({ state: "visible", timeout: 20_000 });
+  for (const item of deleted) {
+    if (await exactMessageEvidencePresent(page, item.message, item.evidence)) {
+      throw new Error(`message ${item.message.messageId}: deletion did not survive reload`);
+    }
+  }
 }
 
 async function lookupInboxRun(
@@ -421,24 +882,82 @@ async function lookupInboxRun(
           ),
       );
       let acknowledged = 0;
-      if (shouldAcknowledge) {
-        for (const match of matches) {
-          const result = await inbox.acknowledgeActionInbox({
-            config,
-            identity,
-            throughId: match.id,
-            acknowledgementSecret: match.acknowledgementSecret,
-          });
-          acknowledged += result.acknowledged;
-        }
+      // A nonce should identify one envelope. Never mutate an ambiguous set: cleanup must leave
+      // duplicates intact for diagnosis rather than sweeping every partial match.
+      if (shouldAcknowledge && matches.length === 1) {
+        const match = matches[0];
+        const result = await inbox.acknowledgeActionInbox({
+          config,
+          identity,
+          throughId: match.id,
+          acknowledgementSecret: match.acknowledgementSecret,
+        });
+        acknowledged += result.acknowledged;
       }
       return {
-        found: matches.length > 0,
-        linkedSheet: linkedSheets.size === 1 ? [...linkedSheets][0] : null,
+        found: matches.length === 1,
+        linkedSheet: matches.length === 1 && linkedSheets.size === 1 ? [...linkedSheets][0] : null,
         matched: matches.length,
         acknowledged,
       };
     })(${input})`)) as InboxRunLookup;
+}
+
+async function exactHistoryRows(page: Page, exactNote: string): Promise<Locator[]> {
+  const rows = page.locator("section.history > ul > li");
+  const matches: Locator[] = [];
+  const count = await rows.count();
+  for (let index = 0; index < count; index++) {
+    const row = rows.nth(index);
+    const noteField = row.locator(".row-1 > strong");
+    if ((await noteField.count()) !== 1) continue;
+    const renderedNote = (await noteField.innerText()).replace(/\s+/g, " ").trim();
+    if (renderedNote === exactNote.replace(/\s+/g, " ").trim()) matches.push(row);
+  }
+  return matches;
+}
+
+async function exactPendingRows(page: Page, exactSummary: string): Promise<Locator[]> {
+  const section = page.locator("section.card").filter({
+    has: page.getByRole("heading", { name: /Pending from chat/i }),
+  });
+  const rows = section.locator(":scope > ul > li");
+  const matches: Locator[] = [];
+  const normalizedExpected = exactSummary.replace(/\s+/g, " ").trim();
+  const count = await rows.count();
+  for (let index = 0; index < count; index++) {
+    const row = rows.nth(index);
+    const summary = row.locator(":scope > span.small");
+    if ((await summary.count()) !== 1) continue;
+    // The OpenChat provenance cue is a nested span. Compare only the direct summary text node, which
+    // is generated from the parsed draft, against the full expected summary.
+    const renderedSummary = await summary.evaluate((node) =>
+      [...node.childNodes]
+        .filter((child) => child.nodeType === Node.TEXT_NODE)
+        .map((child) => child.textContent ?? "")
+        .join(" ")
+        .replace(/\s+/g, " ")
+        .trim(),
+    );
+    if (renderedSummary === normalizedExpected) matches.push(row);
+  }
+  return matches;
+}
+
+async function waitForUniqueExactRow(
+  page: Page,
+  findRows: () => Promise<Locator[]>,
+  label: string,
+  timeoutMs: number,
+): Promise<Locator | null> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const rows = await findRows();
+    if (rows.length > 1) throw new Error(`${label}: found ${rows.length} exact matches; refusing ambiguity`);
+    if (rows.length === 1) return rows[0];
+    await page.waitForTimeout(250);
+  }
+  return null;
 }
 
 async function cleanupIouRun(
@@ -450,12 +969,18 @@ async function cleanupIouRun(
 ): Promise<{ sheet: string | null; deletedEntries: number; acknowledged: number }> {
   await page.goto(`${IOU_BASE}/pairs`, { waitUntil: "domcontentloaded" }).catch(() => {});
   let lookup: InboxRunLookup = { found: false, linkedSheet: null, matched: 0, acknowledged: 0 };
-  for (let attempt = 0; attempt < 10 && !lookup.found && knownSheet === null; attempt++) {
+  const lookupAttempts = knownSheet === null ? 10 : 1;
+  for (let attempt = 0; attempt < lookupAttempts && lookup.matched === 0; attempt++) {
     lookup = await lookupInboxRun(page, note, false);
-    if (!lookup.found) await page.waitForTimeout(1_500);
+    if (lookup.matched === 0 && attempt + 1 < lookupAttempts) await page.waitForTimeout(1_500);
+  }
+  if (lookup.matched > 1) {
+    throw new Error(
+      `[${who}] ${lookup.matched} inbox envelopes exactly match this nonce; refusing cleanup mutation`,
+    );
   }
   const sheet = knownSheet ?? lookup.linkedSheet;
-  let deletedEntries = 0;
+  let exactEntries: Locator[] = [];
   if (sheet) {
     await page.goto(`${IOU_BASE}/sheet/${sheet}`, { waitUntil: "domcontentloaded" });
     const dialog = page.getByRole("dialog");
@@ -469,45 +994,42 @@ async function cleanupIouRun(
       }
     }
 
-    const exactEntries = page
-      .locator("section.history")
-      .locator(":scope > ul > li")
-      .filter({ hasText: note });
     if (waitForImportedEntry) {
-      await exactEntries.first().waitFor({ state: "visible", timeout: 30_000 }).catch(() => {});
-    }
-    for (let attempt = 0; attempt < 8; attempt++) {
-      const row = exactEntries.first();
-      if (!(await row.isVisible().catch(() => false))) break;
-      const remove = row.getByRole("button", { name: "delete", exact: true });
-      if (!(await remove.isVisible().catch(() => false))) {
-        throw new Error(`[${who}] exact nonce entry is visible but has no delete action`);
+      const deadline = Date.now() + 30_000;
+      while (Date.now() < deadline) {
+        exactEntries = await exactHistoryRows(page, note);
+        if (exactEntries.length !== 0) break;
+        await page.waitForTimeout(250);
       }
-      await remove.click({ timeout: 8_000 });
-      await row.waitFor({ state: "hidden", timeout: 15_000 });
-      deletedEntries++;
+    } else {
+      exactEntries = await exactHistoryRows(page, note);
+    }
+    if (exactEntries.length > 1) {
+      throw new Error(
+        `[${who}] ${exactEntries.length} History rows have this exact nonce; refusing cleanup mutation`,
+      );
     }
   }
 
   // The per-delivery acknowledgement secret authorizes removal of only this exact signed inbox
   // envelope. Do this for both users so fan-out QC does not grow either persistent bucket.
   const acknowledged = await lookupInboxRun(page, note, true);
-  if (sheet) {
-    await page.goto(`${IOU_BASE}/sheet/${sheet}`, { waitUntil: "domcontentloaded" });
-    const pending = page
-      .locator("section.card")
-      .filter({ has: page.getByRole("heading", { name: /Pending from chat/i }) })
-      .locator(":scope > ul > li")
-      .filter({ hasText: note });
-    if (await pending.first().isVisible().catch(() => false)) {
-      // Fallback for an already-rendered local echo. This remains nonce-scoped and uses the product's
-      // ordinary dismiss path; it cannot touch another user's draft.
-      await pending
-        .first()
-        .getByTitle("Dismiss without adding (for everyone on this sheet)")
-        .click({ timeout: 8_000 });
-      await pending.first().waitFor({ state: "hidden", timeout: 10_000 }).catch(() => {});
+  if (acknowledged.matched > 1) {
+    throw new Error(
+      `[${who}] ${acknowledged.matched} inbox envelopes exactly match this nonce; none were acknowledged`,
+    );
+  }
+
+  let deletedEntries = 0;
+  if (exactEntries.length === 1) {
+    const row = exactEntries[0];
+    const remove = row.getByRole("button", { name: "delete", exact: true });
+    if (!(await remove.isVisible().catch(() => false))) {
+      throw new Error(`[${who}] exact nonce entry is visible but has no delete action`);
     }
+    await remove.click({ timeout: 8_000 });
+    await row.waitFor({ state: "hidden", timeout: 15_000 });
+    deletedEntries = 1;
   }
   return { sheet, deletedEntries, acknowledged: acknowledged.acknowledged };
 }
@@ -565,7 +1087,7 @@ async function main() {
   console.log(`[env] user_index=${IDS.userIndex} inbox=${IDS.inbox} appId=${appId}`);
   console.log(`[roles] proposer=${PROPOSER.user}(oc:${PROPOSER.ocPort}) confirmer=${CONFIRMER.user}(oc:${CONFIRMER.ocPort})`);
 
-  const proposerOC = await attach(PROPOSER.ocPort, "localhost:5003");
+  let proposerOC = await attach(PROPOSER.ocPort, "localhost:5003");
   const confirmerOC = await attach(CONFIRMER.ocPort, "localhost:5003");
   const proposerIOU = await attach(PROPOSER.iouPort, "127.0.0.1:3000");
   const confirmerIOU = await attach(CONFIRMER.iouPort, "127.0.0.1:3000");
@@ -645,29 +1167,27 @@ async function main() {
     direction: "credit",
     note,
   });
-  let previousManualExtract: string | null | undefined;
-  let manualExtractTouched = false;
+  let proposerQcPage: Page | null = null;
   let proposerObserverInstalled = false;
   let confirmerObserverInstalled = false;
-  let dialogListenerInstalled = false;
+  let promptOverrideInstalled = false;
   let navigationListenerInstalled = false;
   let senderMainFrameNavigations = 0;
+  let sourceBaselineIds: Set<string> | null = null;
+  let sourceSendSucceeded = false;
+  let sourceMessage: ChatMessageRef | null = null;
   let senderCard: LoadedRunCard | null = null;
   let confirmerCard: LoadedRunCard | null = null;
+  const senderRunCards = new Map<string, LoadedRunCard>();
+  const confirmerRunCards = new Map<string, LoadedRunCard>();
+  const senderCleanGateIds = new Set<string>();
+  const confirmerCleanGateIds = new Set<string>();
   let confirmerLinkedSheet: string | null = null;
   let confirmationAttempted = false;
   let entrySubmissionAttempted = false;
   let deliveryObserved = false;
   let journeyBodyCompleted = false;
   const documentMarker = `iou-card-journey-${nonce}`;
-  const onDialog = (d: Dialog) => {
-    const msg = d.message();
-    const reply = /JSON/i.test(msg) ? extraction : "1";
-    console.log(`[${PROPOSER.user}] extraction/app dialog -> ${reply.slice(0, 50)}`);
-    d.accept(reply).catch(() =>
-      console.log(`[${PROPOSER.user}] dialog accept raced - will retry propose`),
-    );
-  };
   const onSenderNavigation = (frame: Frame) => {
     if (frame === proposerOC.mainFrame()) senderMainFrameNavigations++;
   };
@@ -676,11 +1196,15 @@ async function main() {
 
   // 4. The proposer sends a message + proposes via the DETERMINISTIC manual-JSON prompt.
   // Issue 1 test seam: with no on-device model, REAL users are now guided to set one up instead of a
-  // raw JSON prompt. The automated journey drives the deterministic manual-JSON path, so it OPTS IN
-  // to the manual prompt by setting oc:manualExtract="1" on the proposer's OC page before proposing.
-  previousManualExtract = await proposerOC.evaluate(() => localStorage.getItem("oc:manualExtract"));
-  await proposerOC.evaluate(() => localStorage.setItem("oc:manualExtract", "1"));
-  manualExtractTouched = true;
+  // raw JSON prompt. The automated journey opts in only on a temporary tab whose URL carries the
+  // one-shot QC query. The user's normal OpenChat tab and persistent storage are never modified.
+  const regularProposerPage = proposerOC;
+  const qcUrl = new URL(regularProposerPage.url());
+  qcUrl.searchParams.set("manualExtract", "1");
+  proposerQcPage = await regularProposerPage.context().newPage();
+  await proposerQcPage.goto(qcUrl.toString(), { waitUntil: "domcontentloaded" });
+  await proposerQcPage.waitForTimeout(2_500);
+  proposerOC = proposerQcPage;
   await installNewCardObserver(proposerOC, `sender-${nonce}`);
   proposerObserverInstalled = true;
   await installNewCardObserver(confirmerOC, `recipient-${nonce}`);
@@ -691,8 +1215,11 @@ async function main() {
   }, documentMarker);
   proposerOC.on("framenavigated", onSenderNavigation);
   navigationListenerInstalled = true;
-  proposerOC.on("dialog", onDialog);
-  dialogListenerInstalled = true;
+  // Only the disposable manualExtract tab replaces the browser primitive. The product's ordinary
+  // runProposeFlow still calls parseManualExtractionPrompt; this override merely returns its exact
+  // deterministic JSON synchronously so Playwright cannot race and auto-dismiss the native prompt.
+  await installManualPromptOverride(proposerOC, extraction);
+  promptOverrideInstalled = true;
   // Dismiss any open modal/sheet overlay first (a leftover #masked_overlay — e.g. an open chat menu
   // from a prior aborted run — silently intercepts ALL pointer events on the v2 tree).
   for (let i = 0; i < 3; i++) {
@@ -705,13 +1232,24 @@ async function main() {
     await proposerOC.locator("#masked_overlay").click({ position: { x: 10, y: 10 }, timeout: 3000 }).catch(() => {});
     await proposerOC.waitForTimeout(500);
   }
+  sourceBaselineIds = await captureMessageIdBaseline(proposerOC);
   const composer = proposerOC.locator(".ProseMirror").first();
   await composer.waitFor({ timeout: 15000 });
   await composer.click();
   await proposerOC.keyboard.type(text);
   await proposerOC.keyboard.press("Enter");
+  sourceSendSucceeded = true;
   console.log(`[${PROPOSER.user}] sent: ${text}`);
-  await proposerOC.waitForTimeout(2500);
+  sourceMessage = await captureFreshSourceMessage(
+    proposerOC,
+    text,
+    sourceBaselineIds,
+    PROPOSER.user,
+  );
+  check(
+    true,
+    `${PROPOSER.user} fresh Journey source is sender-owned and captured as message ${sourceMessage.messageId}/${sourceMessage.messageIndex}/${sourceMessage.eventIndex}`,
+  );
 
   // The propose entry is the message menu ("Propose action"): hover the just-sent bubble to reveal
   // its menu icon, open it, click the item — the manual-JSON prompt then fires and the dialog
@@ -737,58 +1275,78 @@ async function main() {
   const isV2 = (await proposerOC.locator(".bubble-wrapper").count()) === 0;
   console.log(`[${PROPOSER.user}] propose UI tree: ${isV2 ? "v2 (mobile)" : "v1 (classic)"}`);
   let posted = false;
+  let proposalCardObserved = false;
   for (let attempt = 1; attempt <= 3 && !posted; attempt++) {
     // Each attempt is fully fenced: any step timing out must fall through to the NEXT attempt, not
     // abort the run (a thrown click timeout previously killed the whole journey on a flaky menu).
     try {
+      proposalCardObserved ||= (await observedRunCardCount(proposerOC)) > 0;
+      if (!proposalCardObserved) {
       await proposerOC.locator(".toast .close").last().click({ timeout: 1_000 }).catch(() => {});
       if (isV2) {
-        const autoFix = proposerOC.locator('button:has(path[d^="M7.5,5.6"])').first(); // AutoFix icon
-        // Open the v2 action sheet, then click the AutoFix item. The gesture depends on the device:
-        // MenuTrigger only wires the longpress action when `isTouchDevice`; on a NON-touch device
-        // (this harness's desktop Chrome at a narrow width) a long press is just a click, and a click
-        // must NOT open the menu — that was the bug where opening a chat also opened its context menu
-        // — so the desktop equivalent is a RIGHT-CLICK (oncontextmenu). Try right-click first and keep
-        // the long press as the fallback for a genuinely touch-enabled run.
-        // The v2 MenuTrigger also suppresses long-press during the SCROLL cooldown (longpressCooldown
-        // = scrollStatus.isCooldown) — and the just-sent message auto-scrolls the chat. Let the scroll
-        // settle before pressing, and back off between retries.
-        await proposerOC.waitForTimeout(3000);
-        let sheetOpen = false;
-        for (let press = 0; press < 3 && !sheetOpen; press++) {
-          const msg = proposerOC.locator(".message_text").filter({ hasText: text }).last();
-          // Raw mouse coords do NOT auto-scroll (locator.hover/click do) — as the chat grows, the
-          // last message sits above/below the viewport and presses land at negative Y. Scroll first.
-          await msg.scrollIntoViewIfNeeded().catch(() => {});
-          await proposerOC.waitForTimeout(800);
-          await msg.click({ button: "right", timeout: 6000 }).catch(() => {});
-          sheetOpen = await autoFix.waitFor({ state: "visible", timeout: 4000 }).then(() => true).catch(() => false);
-          if (!sheetOpen) {
-            const box = await msg.boundingBox();
-            if (!box) throw new Error("v2: no message box");
-            await proposerOC.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
-            await proposerOC.mouse.down();
-            await proposerOC.waitForTimeout(900);
-            await proposerOC.mouse.up();
-            sheetOpen = await autoFix.waitFor({ state: "visible", timeout: 4000 }).then(() => true).catch(() => false);
-          }
-          if (!sheetOpen) await proposerOC.waitForTimeout(1500); // let any scroll cooldown lapse
+        const ownedMenu = await openOwnedMobileMessageMenu(proposerOC, sourceMessage!);
+        const autoFix = await exactlyOneVisible(
+          ownedMenu.locator('button:has(path[d^="M7.5,5.6"])'),
+          "sender-owned Propose action",
+        );
+        // openOwnedMobileMessageMenu already opened the exact sender-owned message's v2 sheet using
+        // its stable wrapper and the device-appropriate gesture; do not run a second gesture path.
+        proposalCardObserved ||= (await observedRunCardCount(proposerOC)) > 0;
+        if (proposalCardObserved) {
+          throw new Error("a card appeared while opening the v2 action sheet; refusing another Propose click");
         }
-        if (!sheetOpen) throw new Error("v2: action sheet never opened");
         await autoFix.click({ timeout: 8000 });
       } else {
-        const bubble = proposerOC.locator(".bubble-wrapper").filter({ hasText: text }).last();
+        const wrapper = exactMessageWrapper(proposerOC, sourceMessage!);
+        if (!(await wrapper.evaluate((node) => node.classList.contains("me")))) {
+          throw new Error("classic Journey source is not sender-owned");
+        }
+        const bubble = wrapper.locator(".bubble-wrapper");
+        if ((await bubble.count()) !== 1) throw new Error("classic Journey source bubble is ambiguous");
         await bubble.hover();
         await proposerOC.waitForTimeout(500);
-        await bubble.locator(".menu-icon").first().click({ timeout: 12000 });
-        await proposerOC.getByText("Propose action", { exact: true }).click({ timeout: 12000 });
+        const menuIcon = await exactlyOneVisible(bubble.locator(".menu-icon"), "classic source menu");
+        await menuIcon.click({ timeout: 12000 });
+        const propose = await exactlyOneVisible(
+          proposerOC.getByText("Propose action", { exact: true }),
+          "classic sender-owned Propose action",
+        );
+        proposalCardObserved ||= (await observedRunCardCount(proposerOC)) > 0;
+        if (proposalCardObserved) {
+          throw new Error("a card appeared while opening the classic menu; refusing another Propose click");
+        }
+        await propose.click({ timeout: 12000 });
       }
       console.log(`[${PROPOSER.user}] proposed (attempt ${attempt}, manual JSON — no model)`);
-      senderCard ??= await findAndLoadRunCard(proposerOC, note, PROPOSER.user, 18_000, true);
+      }
+      if (proposalCardObserved) {
+        console.log(
+          `[${PROPOSER.user}] an observed card already exists; attempt ${attempt} only waits and never clicks Propose again`,
+        );
+      }
+      const foundSenderCards = await findAndLoadRunCards(
+        proposerOC,
+        note,
+        PROPOSER.user,
+        senderCleanGateIds,
+        18_000,
+        true,
+      );
+      rememberRunCards(senderRunCards, foundSenderCards, PROPOSER.user);
+      proposalCardObserved ||= (await observedRunCardCount(proposerOC)) > 0;
+      senderCard = uniqueTrackedRunCard(senderRunCards, PROPOSER.user);
       if (senderCard) {
         // A sender-side card proves the post succeeded. Do not post a duplicate merely because the
         // other browser is still catching up; wait for its authoritative hydration instead.
-        confirmerCard ??= await findAndLoadRunCard(confirmerOC, note, CONFIRMER.user, 35_000);
+        const foundConfirmerCards = await findAndLoadRunCards(
+          confirmerOC,
+          note,
+          CONFIRMER.user,
+          confirmerCleanGateIds,
+          35_000,
+        );
+        rememberRunCards(confirmerRunCards, foundConfirmerCards, CONFIRMER.user);
+        confirmerCard = uniqueTrackedRunCard(confirmerRunCards, CONFIRMER.user);
       }
       posted = senderCard !== null && confirmerCard !== null;
       if (!posted) {
@@ -797,6 +1355,7 @@ async function main() {
       }
     } catch (e) {
       console.log(`[${PROPOSER.user}] propose attempt ${attempt} failed: ${(e as Error).message.slice(0, 90)}`);
+      proposalCardObserved ||= (await observedRunCardCount(proposerOC).catch(() => 0)) > 0;
     }
     if (!posted) {
       // Clear any leftover sheet/overlay before retrying.
@@ -804,10 +1363,36 @@ async function main() {
       await proposerOC.locator("#masked_overlay").click({ position: { x: 10, y: 10 }, timeout: 2000 }).catch(() => {});
       await proposerOC.waitForTimeout(1000);
     }
-    if (senderCard && !posted) break;
+  }
+  senderCard = uniqueTrackedRunCard(senderRunCards, PROPOSER.user);
+  confirmerCard = uniqueTrackedRunCard(confirmerRunCards, CONFIRMER.user);
+  posted = senderCard !== null && confirmerCard !== null;
+  const promptProbe = await readManualPromptProbe(proposerOC);
+  const promptMessage = promptProbe.prompts[0] ?? "";
+  console.log(
+    `[${PROPOSER.user}] manual extraction prompt calls=${promptProbe.promptCalls}, message=${JSON.stringify(promptMessage.slice(0, 160))}`,
+  );
+  const exactlyOnePrompt = promptProbe.promptCalls === 1 && promptProbe.prompts.length === 1;
+  const isExtractionPrompt = exactlyOnePrompt && /JSON/i.test(promptMessage);
+  check(exactlyOnePrompt, `runProposeFlow opened exactly one manual extraction prompt`);
+  check(isExtractionPrompt, `parseManualExtractionPrompt received the expected JSON prompt`);
+  if (!exactlyOnePrompt || !isExtractionPrompt) {
+    throw new Error("manual extraction prompt count/message did not match this run");
   }
   check(posted, `the nonce-scoped action card loaded through the explicit gate on both sides`);
   if (!posted) throw new Error("card never posted");
+
+  const sameCardMessage =
+    senderCard!.message.messageId === confirmerCard!.message.messageId &&
+    senderCard!.message.messageIndex === confirmerCard!.message.messageIndex &&
+    senderCard!.message.eventIndex === confirmerCard!.message.eventIndex;
+  const cardFollowsSource =
+    sourceMessage !== null && senderCard!.message.messageIndex > sourceMessage.messageIndex;
+  check(sameCardMessage, "sender and confirmer resolved the nonce-scoped card to the same stable message");
+  check(cardFollowsSource, "the captured card message follows this run's captured Journey source");
+  if (!sameCardMessage || !cardFollowsSource) {
+    throw new Error("nonce-scoped card message coordinates did not cross-check; refusing confirmation");
+  }
 
   check(senderCard!.loadedFromCleanGate, "sender opened this new card through Load app card");
   check(confirmerCard!.loadedFromCleanGate, "recipient opened this new card through Load app card");
@@ -889,28 +1474,27 @@ async function main() {
   await confirmerIOU.goto(`${IOU_BASE}/sheet/${confirmerLinkedSheet}`, {
     waitUntil: "domcontentloaded",
   });
-  const pendingSection = confirmerIOU.locator("section.card").filter({
-    has: confirmerIOU.getByRole("heading", { name: /Pending from chat/i }),
-  });
-  const pendingCard = pendingSection.locator(":scope > ul > li").filter({
-    hasText: note,
-  }).first();
+  const pendingSummary = `IOU 350.00 EGP \u00b7 owed to you \u00b7 ${note}`;
   // Let SheetPage's authenticated ActionInbox effect finish. Repeated short reloads cancel that
   // effect and can starve a healthy poll forever; use one uninterrupted wait, then one fallback
   // reload for a genuinely missed mount.
-  let pendingVisible = await pendingCard
-    .waitFor({ state: "visible", timeout: 30_000 })
-    .then(() => true)
-    .catch(() => false);
-  if (!pendingVisible) {
+  let pendingCard = await waitForUniqueExactRow(
+    confirmerIOU,
+    () => exactPendingRows(confirmerIOU, pendingSummary),
+    "pending IOU draft",
+    30_000,
+  );
+  if (pendingCard === null) {
     await confirmerIOU.reload({ waitUntil: "domcontentloaded" });
-    pendingVisible = await pendingCard
-      .waitFor({ state: "visible", timeout: 30_000 })
-      .then(() => true)
-      .catch(() => false);
+    pendingCard = await waitForUniqueExactRow(
+      confirmerIOU,
+      () => exactPendingRows(confirmerIOU, pendingSummary),
+      "pending IOU draft after reload",
+      30_000,
+    );
   }
-  check(pendingVisible, `this run's nonce-scoped draft appears under Pending from chat`);
-  if (!pendingVisible) throw new Error("this run's pending IOU draft did not render");
+  check(pendingCard !== null, `this run's exact draft summary appears under Pending from chat`);
+  if (pendingCard === null) throw new Error("this run's pending IOU draft did not render");
 
   await pendingCard.getByRole("button", { name: /Review & add/i }).click({ timeout: 10000 });
   const entryDialog = confirmerIOU.getByRole("dialog");
@@ -943,45 +1527,100 @@ async function main() {
   entrySubmissionAttempted = true;
   await entryDialog.getByRole("button", { name: "Add entry", exact: true }).click({ timeout: 10000 });
   await entryDialog.waitFor({ state: "hidden", timeout: 30000 });
-  const history = confirmerIOU.locator("section.history");
-  const createdEntry = history.locator(":scope > ul > li").filter({ hasText: note }).first();
-  await createdEntry.waitFor({ state: "visible", timeout: 30000 });
+  const createdEntry = await waitForUniqueExactRow(
+    confirmerIOU,
+    () => exactHistoryRows(confirmerIOU, note),
+    "created History entry",
+    30_000,
+  );
+  if (createdEntry === null) throw new Error("the exact submitted History entry did not render");
   check(await createdEntry.isVisible(), `the submitted entry is present in .history with nonce ${nonce}`);
   check(!(await pendingCard.isVisible().catch(() => false)), "the consumed Pending from chat card is gone");
   journeyBodyCompleted = true;
   } finally {
-    if (dialogListenerInstalled) proposerOC.off("dialog", onDialog);
-    if (navigationListenerInstalled) proposerOC.off("framenavigated", onSenderNavigation);
+    try {
+    try {
+      if (navigationListenerInstalled) proposerOC.off("framenavigated", onSenderNavigation);
+    } catch (error) {
+      failures++;
+      console.error(`[cleanup] navigation-listener teardown failed: ${(error as Error).message}`);
+    }
 
-    if (manualExtractTouched) {
-      await proposerOC
-        .evaluate((previous) => {
-          if (previous === null) localStorage.removeItem("oc:manualExtract");
-          else localStorage.setItem("oc:manualExtract", previous);
-        }, previousManualExtract ?? null)
-        .catch((error) => {
-          failures++;
-          console.error(`[cleanup] could not restore oc:manualExtract: ${(error as Error).message}`);
-        });
+    // Enter may have succeeded even if the immediate coordinate capture then failed. Recover only a
+    // unique sender-owned exact-text message that was absent from the pre-send baseline; ambiguity is
+    // reported and left untouched.
+    if (sourceSendSucceeded && sourceMessage === null && sourceBaselineIds !== null) {
+      try {
+        sourceMessage = await captureFreshSourceMessage(
+          proposerOC,
+          text,
+          sourceBaselineIds,
+          PROPOSER.user,
+          3_000,
+        );
+        console.log(`[cleanup] recovered exact Journey source message ${sourceMessage.messageId}`);
+      } catch (error) {
+        failures++;
+        console.error(`[cleanup] exact Journey source recovery failed: ${(error as Error).message}`);
+      }
     }
 
     // A failed run must not leave its still-pending chat action behind. Re-identify only among cards
     // added after this run's observer was installed, then cancel only the card whose isolated inputs
     // carry this exact nonce.
-    if (!deliveryObserved && proposerObserverInstalled) {
+    if (proposerObserverInstalled) {
       try {
-        senderCard ??= await findAndLoadRunCard(proposerOC, note, PROPOSER.user, 5_000);
-        if (senderCard) {
-          const cancelled = await cancelRunCard(senderCard);
-          console.log(
-            cancelled
-              ? `[cleanup] cancelled only the nonce-scoped pending OpenChat card`
-              : `[cleanup] nonce card was no longer cancellable`,
-          );
-        }
+        rememberRunCards(
+          senderRunCards,
+          await findAndLoadRunCards(
+            proposerOC,
+            note,
+            PROPOSER.user,
+            senderCleanGateIds,
+            5_000,
+          ),
+          PROPOSER.user,
+        );
       } catch (error) {
         failures++;
-        console.error(`[cleanup] OpenChat card cleanup failed: ${(error as Error).message}`);
+        console.error(`[cleanup] OpenChat sender-card inventory failed: ${(error as Error).message}`);
+      }
+    }
+    if (confirmerObserverInstalled) {
+      try {
+        rememberRunCards(
+          confirmerRunCards,
+          await findAndLoadRunCards(
+            confirmerOC,
+            note,
+            CONFIRMER.user,
+            confirmerCleanGateIds,
+            5_000,
+          ),
+          CONFIRMER.user,
+        );
+      } catch (error) {
+        failures++;
+        console.error(`[cleanup] OpenChat recipient-card inventory failed: ${(error as Error).message}`);
+      }
+    }
+    if (!deliveryObserved) {
+      for (const trackedCard of [...senderRunCards.values()].sort(
+        (left, right) => right.message.messageIndex - left.message.messageIndex,
+      )) {
+        try {
+          const cancelled = await cancelRunCard(trackedCard);
+          console.log(
+            cancelled
+              ? `[cleanup] cancelled nonce-scoped pending OpenChat card ${trackedCard.message.messageId}`
+              : `[cleanup] nonce card ${trackedCard.message.messageId} was no longer cancellable`,
+          );
+        } catch (error) {
+          failures++;
+          console.error(
+            `[cleanup] OpenChat card ${trackedCard.message.messageId} cancellation failed: ${(error as Error).message}`,
+          );
+        }
       }
     }
 
@@ -1022,12 +1661,13 @@ async function main() {
     }
 
     if (journeyBodyCompleted) {
-      check(
+      cleanupCheck(
         confirmerCleanup?.deletedEntries === 1,
         `cleanup soft-deleted exactly this run's imported History entry`,
       );
     }
     if (deliveryObserved) {
+      try {
       let finalBuckets = {
         proposer: await bucketCount(a, fpProposer),
         confirmer: await bucketCount(a, fpConfirmer),
@@ -1044,20 +1684,104 @@ async function main() {
           confirmer: await bucketCount(a, fpConfirmer),
         };
       }
-      check(
+      cleanupCheck(
         finalBuckets.proposer === before.proposer && finalBuckets.confirmer === before.confirmer,
         `cleanup returned both action-inbox buckets to their pre-run counts`,
       );
+      } catch (error) {
+        failures++;
+        console.error(`[cleanup] action-inbox bucket verification failed: ${(error as Error).message}`);
+      }
     }
 
-    if (proposerObserverInstalled) await removeNewCardObserver(proposerOC);
-    if (confirmerObserverInstalled) await removeNewCardObserver(confirmerOC);
-    await proposerOC
-      .evaluate((marker) => {
-        const root = globalThis as typeof globalThis & { __iouJourneyDocumentMarker?: string };
-        if (root.__iouJourneyDocumentMarker === marker) delete root.__iouJourneyDocumentMarker;
-      }, documentMarker)
-      .catch(() => {});
+    // Remove every uniquely nonce-proven card message before the exact full-text source. Normal
+    // OpenChat sender UI is used so backend authorization remains identical to a real user deletion.
+    const proposerDeleted: Array<{
+      message: ChatMessageRef;
+      evidence: ExactMessageEvidence;
+    }> = [];
+    const deletedCardKeys = new Set<string>();
+    for (const trackedCard of [...senderRunCards.values()].sort(
+      (left, right) => right.message.messageIndex - left.message.messageIndex,
+    )) {
+      const evidence: ExactMessageEvidence = {
+        kind: "card",
+        observerId: trackedCard.observerId,
+      };
+      try {
+        await deleteExactMessageViaUi(proposerOC, trackedCard.message, evidence);
+        proposerDeleted.push({ message: trackedCard.message, evidence });
+        deletedCardKeys.add(messageRefKey(trackedCard.message));
+        cleanupCheck(true, `cleanup deleted exact OpenChat card message ${trackedCard.message.messageId}`);
+      } catch (error) {
+        failures++;
+        console.error(
+          `[cleanup] exact OpenChat card ${trackedCard.message.messageId}/${trackedCard.message.messageIndex}/${trackedCard.message.eventIndex} was not deleted: ${(error as Error).message}`,
+        );
+      }
+    }
+    if (sourceMessage !== null) {
+      const evidence: ExactMessageEvidence = { kind: "source", exactText: text };
+      try {
+        await deleteExactMessageViaUi(proposerOC, sourceMessage, evidence);
+        proposerDeleted.push({ message: sourceMessage, evidence });
+        cleanupCheck(true, `cleanup deleted exact Journey source message ${sourceMessage.messageId}`);
+      } catch (error) {
+        failures++;
+        console.error(
+          `[cleanup] exact Journey source ${sourceMessage.messageId}/${sourceMessage.messageIndex}/${sourceMessage.eventIndex} was not deleted: ${(error as Error).message}`,
+        );
+      }
+    }
+
+    if (proposerDeleted.length > 0) {
+      try {
+        await verifyDeletedAfterReload(proposerOC, proposerDeleted);
+        cleanupCheck(true, "exact OpenChat message deletions survived proposer reload");
+      } catch (error) {
+        failures++;
+        console.error(`[cleanup] proposer reload verification failed: ${(error as Error).message}`);
+      }
+    }
+    const confirmerDeleted = [...confirmerRunCards.entries()]
+      .filter(([key]) => deletedCardKeys.has(key))
+      .map(([, card]) => ({
+        message: card.message,
+        evidence: { kind: "card", observerId: card.observerId } as ExactMessageEvidence,
+      }));
+    if (confirmerDeleted.length > 0) {
+      try {
+        await verifyDeletedAfterReload(confirmerOC, confirmerDeleted);
+        cleanupCheck(true, "exact card deletion propagated to the confirmer and survived reload");
+      } catch (error) {
+        failures++;
+        console.error(`[cleanup] confirmer reload verification failed: ${(error as Error).message}`);
+      }
+    }
+
+    } finally {
+      // This teardown is deliberately nested: no cleanup/query/delete failure may retain listeners,
+      // MutationObservers, the document marker, or the temporary manual-extraction tab.
+      try {
+        if (navigationListenerInstalled) proposerOC.off("framenavigated", onSenderNavigation);
+      } catch (error) {
+        console.error(`[teardown] navigation listener detach failed: ${(error as Error).message}`);
+      }
+      if (promptOverrideInstalled) {
+        await removeManualPromptOverride(proposerOC).catch((error) =>
+          console.error(`[teardown] manual prompt restore failed: ${(error as Error).message}`),
+        );
+      }
+      if (proposerObserverInstalled) await removeNewCardObserver(proposerOC).catch(() => {});
+      if (confirmerObserverInstalled) await removeNewCardObserver(confirmerOC).catch(() => {});
+      await proposerOC
+        .evaluate((marker) => {
+          const root = globalThis as typeof globalThis & { __iouJourneyDocumentMarker?: string };
+          if (root.__iouJourneyDocumentMarker === marker) delete root.__iouJourneyDocumentMarker;
+        }, documentMarker)
+        .catch(() => {});
+      await proposerQcPage?.close().catch(() => {});
+    }
   }
 
   if (failures > 0) {

@@ -79,6 +79,8 @@ export function registryService() {
     Success: IDL.Record({ matches: IDL.Vec(AiAppRegistration), total: IDL.Nat32 }),
     TermTooShort: IDL.Nat8,
     TermTooLong: IDL.Nat8,
+    InvalidPageSize: IDL.Nat8,
+    ResponseTooLarge: IDL.Nat32,
     Error: OCError,
   });
   const DeleteArgs = IDL.Record({ name: IDL.Text });

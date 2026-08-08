@@ -6,7 +6,19 @@
 //   envelope decrypts to the EDITED object.
 // Roles: proposer+confirmer manager OC :9241; deposit read on father IOU :9231 (fan-out gives both
 // members the envelope). Exit 1 on any failed assertion.
-import { chromium, type Page } from "@playwright/test";
+import { chromium, type Locator, type Page } from "@playwright/test";
+import {
+  ActionInboxArtifactScope,
+  finalizeActionInboxArtifactCleanup,
+} from "./actionInboxArtifactCleanup";
+import {
+  finalizeOpenChatArtifactCleanup,
+  OpenChatArtifactScope,
+} from "./openChatArtifactCleanup";
+import {
+  armManualExtractForCurrentUrl,
+  TemporaryTabScope,
+} from "./temporaryBrowserTab";
 
 let failures = 0;
 function check(c: boolean, l: string): void { console.log(`${c ? "✅" : "❌"} ${l}`); if (!c) failures++; }
@@ -38,41 +50,68 @@ async function inboxDrafts(p: Page): Promise<Record<string, unknown>[]> {
 }
 
 async function main() {
-  const oc = await ocPage(9241);
-  const fatherIou = await iouPage(9231);
-
-  // Fresh code + no model + manual seam
-  await oc.evaluate(`(async () => { try { const w = await import('/src/utils/webInference.ts'); if (w.clearWebModel) await w.clearWebModel(); } catch {} localStorage.removeItem('openchat_web_model_url'); try{indexedDB.deleteDatabase('openchat_web_model');}catch{} localStorage.setItem('oc:manualExtract','1'); })()`).catch(()=>{});
-  await oc.reload({ waitUntil: "domcontentloaded" }); await oc.waitForTimeout(3000);
-  await oc.goto("http://localhost:5003/chats", { waitUntil: "domcontentloaded" }); await oc.waitForTimeout(2500);
+  const sourceOc = await ocPage(9241);
+  const sourceFatherIou = await iouPage(9231);
+  const sourceManagerIou = sourceOc
+    .context()
+    .pages()
+    .find((page) => page.url().includes("3000"));
+  if (!sourceManagerIou) throw new Error("manager IOU page is unavailable");
+  const tabs = new TemporaryTabScope();
+  const failuresBefore = failures;
+  let artifactScope: OpenChatArtifactScope | undefined;
+  let inboxScope: ActionInboxArtifactScope | undefined;
+  let primaryFailed = false;
+  try {
+  const oc = await tabs.open(sourceOc, "http://localhost:5003/chats", {
+    manualExtract: true,
+  });
+  const fatherIou = await tabs.open(sourceFatherIou, "http://127.0.0.1:3000/pairs");
+  const managerIou = await tabs.open(sourceManagerIou, "http://127.0.0.1:3000/pairs");
+  await oc.waitForTimeout(2500);
   await oc.locator(".chat-summary, .chat_summary").filter({ hasText: /father/i }).first().click({ timeout: 12000 });
   await oc.waitForTimeout(2500);
-  await oc.evaluate(`localStorage.setItem("oc:manualExtract","1")`);
+  await armManualExtractForCurrentUrl(oc);
 
   // 1. Propose — extraction 350 EGP credit
   const n = Date.now() % 100000;
-  const ex = JSON.stringify({ kind: "iou", amount: 350, currency: "EGP", direction: "credit", note: `edit ${n}` });
+  const note = `edit ${n}`;
+  const sourceText = `${note}: cleaning 350 EGP`;
+  artifactScope = new OpenChatArtifactScope(oc, "edited app-card live proof");
+  await artifactScope.begin();
+  artifactScope.expectExactText(sourceText);
+  artifactScope.expectCardInputs([note]);
+  const ex = JSON.stringify({ kind: "iou", amount: 350, currency: "EGP", direction: "credit", note });
   const h = (d: import("@playwright/test").Dialog) => { void d.accept(/JSON/i.test(d.message()) ? ex : "1").catch(()=>{}); };
   oc.on("dialog", h);
-  const composer = oc.locator(".ProseMirror").first();
-  await composer.click({ timeout: 10000 }); await oc.keyboard.type(`edit ${n}: cleaning 350 EGP`); await oc.keyboard.press("Enter");
-  await oc.waitForTimeout(2500);
-  const bubble = oc.locator(".bubble-wrapper").first();
-  await bubble.hover().catch(()=>{}); await oc.waitForTimeout(400);
-  await bubble.locator(".menu-icon").first().click({ timeout: 12000 }).catch(()=>{});
-  await oc.getByText("Propose action", { exact: true }).click({ timeout: 12000 }).catch(()=>{});
-  await oc.waitForTimeout(4000);
-  oc.off("dialog", h);
+  try {
+    const composer = oc.locator(".ProseMirror").first();
+    await composer.click({ timeout: 10000 }); await oc.keyboard.type(sourceText); await oc.keyboard.press("Enter");
+    await oc.waitForTimeout(2500);
+    const bubble = oc.locator(".bubble-wrapper").first();
+    await bubble.hover().catch(()=>{}); await oc.waitForTimeout(400);
+    await bubble.locator(".menu-icon").first().click({ timeout: 12000 }).catch(()=>{});
+    await oc.getByText("Propose action", { exact: true }).click({ timeout: 12000 }).catch(()=>{});
+    await oc.waitForTimeout(4000);
+  } finally {
+    oc.off("dialog", h);
+  }
 
   // 2. Find THIS run's card among any stale pending ones — the one whose iframe prefills our note.
   await oc.waitForTimeout(2500);
   const candidates = await oc.locator(".action-card:not(.collapsed):has(iframe)").all();
-  let card = candidates[candidates.length - 1];
+  let card: Locator | undefined;
   for (const c of candidates) {
-    const body = await c.frameLocator("iframe").locator("body").innerText().catch(() => "");
-    if (body.includes(`edit ${n}`)) { card = c; break; }
+    const inputs = c.frameLocator("iframe").locator("input");
+    const values: string[] = [];
+    for (let index = 0; index < await inputs.count().catch(() => 0); index++) {
+      values.push(await inputs.nth(index).inputValue().catch(() => ""));
+    }
+    if (values.includes(note)) { card = c; break; }
   }
   check(!!card, "this run's app-card iframe found (prefilled with our note)");
+  if (!card) throw new Error("this run's app-card iframe was not found");
+  await artifactScope.trackExactCard(card, [note]);
   const frame = card.frameLocator("iframe");
   // Edit to a RUN-UNIQUE amount so the deposit is unambiguously identifiable.
   const editAmount = 700000 + n; // e.g. 722034 — recognizably not the 350 extraction
@@ -86,6 +125,27 @@ async function main() {
   check(amtNow === String(editAmount), `amount edited to ${editAmount} in the card (got "${amtNow}")`);
 
   // 3. Add to IOU (confirm) inside the iframe
+  inboxScope = new ActionInboxArtifactScope(
+    [
+      { label: "father", page: fatherIou },
+      { label: "manager", page: managerIou },
+    ],
+    {
+      shape: "single",
+      entries: [
+        {
+          kind: "iou",
+          amount: editAmount,
+          currency: "USD",
+          direction: "debt",
+          note,
+        },
+      ],
+    },
+    "edited app-card live proof",
+  );
+  await inboxScope.begin();
+  inboxScope.arm();
   await frame.getByRole("button", { name: /Add to IOU/i }).click({ timeout: 10000 });
   await oc.waitForTimeout(6000);
   // the card should flip to confirmed (or at least leave pending)
@@ -106,8 +166,37 @@ async function main() {
     check(String((mine as any).direction) === "debt", `its direction = EDITED debt (not credit) — got ${(mine as any).direction}`);
   }
 
-  if (failures > 0) { console.error(`\nEDIT-DEPOSIT VERIFY FAILED — ${failures}`); process.exit(1); }
+  if (failures > 0) throw new Error(`EDIT-DEPOSIT VERIFY FAILED — ${failures}`);
   console.log(`\n🏁 EDITED card values are DEPOSITED on-chain: extraction 350/EGP/credit → edited ${editAmount}/USD/debt`);
-  process.exit(0);
+  } catch (error) {
+    primaryFailed = true;
+    throw error;
+  } finally {
+    const primaryInFlight = primaryFailed || failures > failuresBefore;
+    let cleanupFailure: unknown;
+    try {
+      await finalizeActionInboxArtifactCleanup(
+        inboxScope,
+        primaryInFlight,
+        "edited app-card live proof",
+      );
+    } catch (error) {
+      cleanupFailure = error;
+    }
+    try {
+      await finalizeOpenChatArtifactCleanup(
+        artifactScope,
+        primaryInFlight || cleanupFailure !== undefined,
+        "edited app-card live proof",
+      );
+    } catch (error) {
+      cleanupFailure ??= error;
+    } finally {
+      await tabs.close();
+    }
+    if (cleanupFailure !== undefined && !primaryInFlight) throw cleanupFailure;
+  }
 }
-main().catch((e)=>{ console.error("FAILED:", e?.message ?? e); process.exit(1); });
+main()
+  .then(() => process.exit(0))
+  .catch((e)=>{ console.error("FAILED:", e?.message ?? e); process.exit(1); });

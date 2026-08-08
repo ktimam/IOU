@@ -9,7 +9,19 @@
 // Manual seam supplies a deterministic no-currency extraction. Proposer+confirmer manager (v1 :9241);
 // deposit read on father IOU :9231 (fan-out gives both members the envelope). Exit 1 on any failure.
 //   pnpm exec tsx scripts/live/verify-default-currency.ts
-import { chromium, type Page } from "@playwright/test";
+import { chromium, type Locator, type Page } from "@playwright/test";
+import {
+  ActionInboxArtifactScope,
+  finalizeActionInboxArtifactCleanup,
+} from "./actionInboxArtifactCleanup";
+import {
+  finalizeOpenChatArtifactCleanup,
+  OpenChatArtifactScope,
+} from "./openChatArtifactCleanup";
+import {
+  armManualExtractForCurrentUrl,
+  TemporaryTabScope,
+} from "./temporaryBrowserTab";
 
 let failures = 0;
 function check(cond: boolean, label: string): void {
@@ -42,33 +54,53 @@ async function inboxDrafts(p: Page): Promise<Record<string, unknown>[]> {
 }
 
 async function main() {
-  const oc = await ocPage(9241);
-  const fatherIou = await iouPage(9231);
-
-  // Fresh code + no model + manual seam.
-  await oc.evaluate(`(async () => { try { const w = await import('/src/utils/webInference.ts'); if (w.clearWebModel) await w.clearWebModel(); } catch {} localStorage.removeItem('openchat_web_model_url'); try{indexedDB.deleteDatabase('openchat_web_model');}catch{} localStorage.setItem('oc:manualExtract','1'); })()`).catch(() => {});
-  await oc.reload({ waitUntil: "domcontentloaded" }); await oc.waitForTimeout(3000);
-  await oc.goto("http://localhost:5003/chats", { waitUntil: "domcontentloaded" }); await oc.waitForTimeout(2500);
+  const sourceOc = await ocPage(9241);
+  const sourceFatherIou = await iouPage(9231);
+  const sourceManagerIou = sourceOc
+    .context()
+    .pages()
+    .find((page) => page.url().includes("3000"));
+  if (!sourceManagerIou) throw new Error("manager IOU page is unavailable");
+  const tabs = new TemporaryTabScope();
+  const failuresBefore = failures;
+  let artifactScope: OpenChatArtifactScope | undefined;
+  let inboxScope: ActionInboxArtifactScope | undefined;
+  let primaryFailed = false;
+  try {
+  const oc = await tabs.open(sourceOc, "http://localhost:5003/chats", {
+    manualExtract: true,
+  });
+  const fatherIou = await tabs.open(sourceFatherIou, "http://127.0.0.1:3000/pairs");
+  const managerIou = await tabs.open(sourceManagerIou, "http://127.0.0.1:3000/pairs");
+  await oc.waitForTimeout(2500);
   await oc.locator(".chat-summary, .chat_summary").filter({ hasText: /father/i }).first().click({ timeout: 12000 });
   await oc.waitForTimeout(2500);
-  await oc.evaluate(`localStorage.setItem("oc:manualExtract","1")`);
+  await armManualExtractForCurrentUrl(oc);
 
   // 1. Propose a NO-CURRENCY extraction with a run-unique amount so the deposit is identifiable.
   const n = Date.now() % 100000;
   const uniqAmt = 130000 + n;
   const note = `nocur ${n}`;
+  const sourceText = `${note}: paid for groceries`;
+  artifactScope = new OpenChatArtifactScope(oc, "default-currency app-card live proof");
+  await artifactScope.begin();
+  artifactScope.expectExactText(sourceText);
+  artifactScope.expectCardInputs([note, String(uniqAmt)]);
   const ex = JSON.stringify({ kind: "iou", amount: uniqAmt, direction: "credit", note });
   const h = (d: import("@playwright/test").Dialog) => { void d.accept(/JSON/i.test(d.message()) ? ex : "1").catch(() => {}); };
   oc.on("dialog", h);
-  const composer = oc.locator(".ProseMirror").first();
-  await composer.click({ timeout: 10000 }); await oc.keyboard.type(`${note}: paid for groceries`); await oc.keyboard.press("Enter");
-  await oc.waitForTimeout(2500);
-  const bubble = oc.locator(".bubble-wrapper").first();
-  await bubble.hover().catch(() => {}); await oc.waitForTimeout(400);
-  await bubble.locator(".menu-icon").first().click({ timeout: 12000 }).catch(() => {});
-  await oc.getByText("Propose action", { exact: true }).click({ timeout: 12000 }).catch(() => {});
-  await oc.waitForTimeout(4000);
-  oc.off("dialog", h);
+  try {
+    const composer = oc.locator(".ProseMirror").first();
+    await composer.click({ timeout: 10000 }); await oc.keyboard.type(sourceText); await oc.keyboard.press("Enter");
+    await oc.waitForTimeout(2500);
+    const bubble = oc.locator(".bubble-wrapper").first();
+    await bubble.hover().catch(() => {}); await oc.waitForTimeout(400);
+    await bubble.locator(".menu-icon").first().click({ timeout: 12000 }).catch(() => {});
+    await oc.getByText("Propose action", { exact: true }).click({ timeout: 12000 }).catch(() => {});
+    await oc.waitForTimeout(4000);
+  } finally {
+    oc.off("dialog", h);
+  }
 
   // 2. The no-currency message STILL posts a card (gate passes). Find THIS run's card among any stale
   //    ones by matching our unique note+amount in the iframe's input VALUES (notes/amounts live in
@@ -77,6 +109,7 @@ async function main() {
   await oc.waitForTimeout(2500);
   const candidates = await oc.locator(".action-card:not(.collapsed):has(iframe)").all();
   check(candidates.length > 0, "a NO-CURRENCY message POSTS a card (currency no longer required at the gate)");
+  let card: Locator | null = null;
   let frame: ReturnType<typeof oc.frameLocator> | null = null;
   for (const c of candidates) {
     const f = c.frameLocator("iframe");
@@ -84,10 +117,12 @@ async function main() {
     const cnt = await inputs.count().catch(() => 0);
     const vals: string[] = [];
     for (let i = 0; i < cnt; i++) vals.push(await inputs.nth(i).inputValue().catch(() => ""));
-    if (vals.some((v) => v.includes(note)) && vals.some((v) => v === String(uniqAmt))) { frame = f; break; }
+    if (vals.includes(note) && vals.includes(String(uniqAmt))) { card = c; frame = f; break; }
   }
   check(!!frame, `this run's app-card iframe found (note "${note}" + amount ${uniqAmt} in inputs)`);
-  if (!frame) { process.exit(1); }
+  if (!frame) throw new Error("this run's no-currency app-card iframe was not found");
+  if (!card) throw new Error("this run's exact no-currency card wrapper was not found");
+  await artifactScope.trackExactCard(card, [note, String(uniqAmt)]);
 
   // 3. The card DEFERS currency: its currency <select> is on "Default" ("") — it did NOT invent USD.
   const currencySelect = frame.locator("select").first();
@@ -95,6 +130,27 @@ async function main() {
   check(curVal === "", `the card's currency defaults to "Default currency" ("") — got "${curVal}" (no invented USD)`);
 
   // 4. Confirm leaving currency on Default → the deposit omits currency.
+  inboxScope = new ActionInboxArtifactScope(
+    [
+      { label: "father", page: fatherIou },
+      { label: "manager", page: managerIou },
+    ],
+    {
+      shape: "single",
+      entries: [
+        {
+          kind: "iou",
+          amount: uniqAmt,
+          currency: null,
+          direction: "credit",
+          note,
+        },
+      ],
+    },
+    "default-currency app-card live proof",
+  );
+  await inboxScope.begin();
+  inboxScope.arm();
   await frame.getByRole("button", { name: /Add to IOU/i }).click({ timeout: 10000 });
   await oc.waitForTimeout(6000);
 
@@ -112,8 +168,37 @@ async function main() {
     check(!hasCur, "the deposited draft OMITS currency (the IOU app fills prefs.defaultCurrency at import)");
   }
 
-  if (failures > 0) { console.error(`\nDEFAULT-CURRENCY VERIFY FAILED — ${failures} assertion(s)`); process.exit(1); }
+  if (failures > 0) throw new Error(`DEFAULT-CURRENCY VERIFY FAILED — ${failures} assertion(s)`);
   console.log("\n🏁 DEFAULT-CURRENCY (app-card): no-currency message → card posts, defers currency to the IOU default → deposit omits currency");
-  process.exit(0);
+  } catch (error) {
+    primaryFailed = true;
+    throw error;
+  } finally {
+    const primaryInFlight = primaryFailed || failures > failuresBefore;
+    let cleanupFailure: unknown;
+    try {
+      await finalizeActionInboxArtifactCleanup(
+        inboxScope,
+        primaryInFlight,
+        "default-currency app-card live proof",
+      );
+    } catch (error) {
+      cleanupFailure = error;
+    }
+    try {
+      await finalizeOpenChatArtifactCleanup(
+        artifactScope,
+        primaryInFlight || cleanupFailure !== undefined,
+        "default-currency app-card live proof",
+      );
+    } catch (error) {
+      cleanupFailure ??= error;
+    } finally {
+      await tabs.close();
+    }
+    if (cleanupFailure !== undefined && !primaryInFlight) throw cleanupFailure;
+  }
 }
-main().catch((e) => { console.error("FAILED:", e?.message ?? e); process.exit(1); });
+main()
+  .then(() => process.exit(0))
+  .catch((e) => { console.error("FAILED:", e?.message ?? e); process.exit(1); });

@@ -25,6 +25,8 @@ jobs:
       - run: pnpm audit:deps
       - run: pnpm typecheck
       - run: pnpm test:coverage
+      - run: pnpm exec playwright install --with-deps chromium
+      - run: pnpm test:ui -- test/ui/openchatCard.ui.spec.ts
       - run: pnpm build
       - run: cargo test --all-targets
       - run: cargo install cargo-audit --locked --version 0.22.2

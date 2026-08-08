@@ -9,6 +9,7 @@
 //      bare "/ai" produces the "prompt required" toast instead of sending literal text.
 // Exit 1 on any failed assertion.
 import { chromium, type Page } from "@playwright/test";
+import { OPENCHAT_MESSAGE_TEXT_SELECTOR } from "./openChatArtifactCleanup";
 
 let failures = 0;
 function check(cond: boolean, label: string): void {
@@ -197,7 +198,7 @@ async function stageD_v2AiCommand(): Promise<void> {
   const txt = await bodyText(p);
   check(/Type a prompt after \/ai/i.test(txt), "bare '/ai' shows the 'Type a prompt after /ai' toast");
   const literalSent = await p
-    .locator(".message_text")
+    .locator(OPENCHAT_MESSAGE_TEXT_SELECTOR)
     .filter({ hasText: /^\/ai$/ })
     .last()
     .isVisible()

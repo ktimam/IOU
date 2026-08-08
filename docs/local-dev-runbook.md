@@ -5,7 +5,98 @@ propose → confirm → deposit → import journey. This is the IOU-specific hal
 replica/canisters/frontend/exe are brought up separately (see
 `open-chat-cycle/LOCAL-DEV.md`).
 
-## Choose the startup path
+## Current supported recovered state — 2026-08-07
+
+The current environment is **not** the former six-subnet `dfx` topology. Its authoritative state
+directory is `/home/kiko/openchat-cycle-recovered-supported-20260807`, restored with
+`SubnetStateConfig::FromPath` for exactly three intact subnets: NNS, Internet Identity, and System.
+It passed a clean PocketIC instance deletion/checkpoint and strict reopen with
+`incomplete_state: null`, preserving canister ids and application state.
+
+The saved six-subnet topology cannot be reopened safely: its SNS/System cross-subnet counters are
+inconsistent. Against the current recovered state, **do not run** normal `dfx start`, `dfx stop`,
+the old six-subnet `local-up.sh`, or any helper that assumes `.dfx/network/local/state` is the live
+state. Keep the untouched pre-recovery backup at
+`/home/kiko/openchat-cycle-preserved-pre-pr2-20260807/.dfx` as evidence; do not promote it back into
+service.
+
+For a controlled restart:
+
+1. Address the exact live PocketIC instance through its control port. Request stop progress, delete
+   that instance, and wait until it reports `Deleted` before terminating its exact parent process.
+2. Reopen the external recovered state with the reviewed three-subnet configuration (NNS, II, and
+   System all `FromPath`) and the local HTTP gateway on `127.0.0.1:8080`.
+3. Fail closed unless the response identifies the expected three subnets, preserves the known
+   canister ids, and reports `incomplete_state: null`.
+4. Recheck frontend health, UserIndex/LocalUserIndex metrics, child versions, rollout queues, the
+   app registration, and all four durable signed-in browser profiles before accepting the restart.
+
+### Verified wrapper acceptance
+
+The checked-in IOU-local wrapper `scripts/live/pocketic-recovered.ps1` was safety-reviewed and then
+ran two complete clean `stop` → checkpoint → strict `start`/reopen → `status` cycles. On every
+reopen it dynamically parsed the new PocketIC instance id, control port, and exact PID instead of
+reusing stale metadata. It then revalidated all three recovered subnets and seven deployed
+canisters. Cycle 2 left exact PR 2 head `001a1e298` healthy; the preserved state retained routing
+**17/17**, Type isolation **12/12**, and card hydration **8/8** across the restarts.
+
+Do not turn this acceptance into a cleanup claim. The optional extra cleanup gate was rejected, so
+the obsolete six-subnet state and remaining WSL artifacts are still deliberately preserved. An
+earlier narrowly targeted cleanup of rebuildable debug/build artifacts recovered about **46.8 GiB**.
+
+The exact deployed PR 2 source is
+`001a1e29881f340705444a9e11e96a54bc3eac9c`. Current versions are:
+
+| Component | Current version | Deployment note |
+|---|---:|---|
+| UserIndex | `0.0.9` | exact PR 2 artifact deployed |
+| LocalUserIndex | `0.0.5` | exact PR 2 artifact deployed |
+| User children | `0.0.3` | all four user canisters upgraded |
+| Private Group instance | `0.0.4` | exact PR 2 artifact deployed |
+| Community child template | `0.0.4` | published; this fixture has no Community instance |
+| GroupIndex | unchanged | not deployed or upgraded in this rollout |
+
+The rollout queues are clear. PR 2 passes **990/990 frontend tests across 70 files**, the
+nine-package backend matrix, both TypeScript checks, ESLint, Prettier, `cargo fmt`, and exact Linux
+`prod_test`. PR 1 remains at
+`f43d2a2d53f2c9f8a3086104a356d4d3a315858a` with its focused **145/145**, typecheck, and exact
+WSL `prod_test` evidence.
+
+Live acceptance proves account-scoped Type isolation (**12/12**) and recreated-account-safe Father
+per-chat House/Family routing (**17/17**); the routing test dynamically discovers the current two
+distinct sheet ids. Exact-PR-2 private card hydration also passes **8/8** after reloading the sender
+optimistic echo: before consent the selector has only `None`, then explicit **Share private context**
+exposes House `Rent`, excludes Family `Family expense`, auto-selects `Rent`, and does not reconnect.
+That reload is now recognized as a sender optimistic-state/identity regression, so this is
+canonical-event evidence rather than acceptance of the no-reload product path.
+
+The current IOU gates are unit **846/846**, Rust **68/68**, and live E2E **56/56** under split
+verification. The initial live run was **52/55** because three registry expectations were obsolete;
+**51** unaffected scenarios remained green, and the replacement read-only/ownership plus live
+owner-attestation registry suite passes **5/5**. Unit coverage is **71.49%** for statements/lines,
+**84.85%** for branches, and **86.9%** for functions.
+
+### Working-tree correction awaiting coordinated rollout — 2026-08-07
+
+Do not treat the pushed/deployed `001a1e298` totals above as evidence for the following candidates.
+The current PR 2 working tree reconciles successful provenance-backed sends immediately, re-resolves
+and preserves authoritative app identity, hides the stale untrusted-content labels on attested cards,
+and keeps unattested cards actionless. Its image path also requires explicit `acceptsImage: true`
+and enforces the manifest's bounds and safe formats. IOU's matching manifest aligns half-minor-unit
+amount rounding, the safe upper bound, ASCII-uppercase currency, real calendar dates, and bounded
+NUL-free note/message with the app attester.
+
+The extended `scripts/live/journey-fanout.ts` now drives chat send → iframe **Add to IOU** → exact
+routed **Pending from chat**/**Review & add** → prefilled `EntryForm` submission → persisted
+**History**, followed by nonce-exact soft-delete cleanup. These source/test changes still require
+focused/full green gates, exact commits and pushes, manifest/binding rollout, and a live run before
+they can be called deployed or verified.
+
+## Historical startup paths (not for the current recovered state)
+
+The procedures below predate the supported three-subnet recovery. They remain useful as design and
+intentional fresh-reset reference, but their hashes, versions, deployment status, and six-subnet
+control commands are superseded by the section above.
 
 There are two intentionally different workflows:
 
@@ -177,7 +268,7 @@ durable outbox remain available.
 
 | Piece | Where | Notes |
 |-------|-------|-------|
-| OpenChat replica + canisters | WSL dfx, `:8080` | user_index, local_user_index, II (`qhbym`), … |
+| OpenChat replica + canisters | recovered PocketIC, `:8080` | supported NNS + II + System `FromPath` topology; not the old six-subnet dfx state |
 | `iou_backend` | **co-deployed on :8080** | MUST be on OpenChat's replica so `publish_ai_app`'s c2c `c2c_verify_ai_app_v2` can reach it. |
 | `action_inbox` (per-app) | **co-deployed on :8080** | IOU's OWN inbox, `inbox_canister_id` in the manifest. NOT the global inbox (there is none locally). |
 | IOU dev app | **Windows** node, `:3000` | IOU's `node_modules` is win32 — `pnpm`/`vite`/`tsx` FAIL under WSL. |
@@ -192,6 +283,10 @@ replica for normal restarts. After an intentional `--clean`, archive the stale
 discard an existing canister identity automatically.
 
 ## Bring-up steps
+
+> **Intentional fresh reset only.** Do not use this section to restart the current recovered
+> three-subnet environment. Use the controlled PocketIC lifecycle above. A fresh reset recreates
+> canisters and may recreate the four durable accounts/keys; that is a destructive, separate choice.
 
 0. **OpenChat first.** Replica + canisters up on `:8080`, frontend on `:5003`, exe running
    (`open-chat-cycle/LOCAL-DEV.md`).
@@ -250,6 +345,16 @@ discard an existing canister identity automatically.
    Registration is UNPUBLISHED until this — an unpublished app is owner-only and does NOT show in
    other users' group Apps lists or the directory.
 
+   > **Manifest-change handoff (2026-08-07):** re-registering after a schema/action change advances
+   > the app revision. Do not run card QC with the new frontend/manifest and the old exact-revision
+   > IOU/user bindings. Capture the new registration read-back, install the newly generated
+   > `verification-binding.did` on `iou_backend`, confirm publication and exact app id/revision, then
+   > refresh or relink father, mother, child, and property manager **sequentially**. Verify each user's
+   > authoritative consumer key and revision before moving to the next profile. Only after all four
+   > connections are current should the no-reload card, image proposal, and full fan-out/import
+   > journey be accepted. A stale revision should fail closed; repeated Connect prompts in that
+   > mixed-version window are not valid product QC.
+
 3. **Start the IOU app** (Windows node):
    ```sh
    cd /c/Kiko/MyProjects/IOU && node ./node_modules/vite/bin/vite.js --host 127.0.0.1 --port 3000 --strictPort
@@ -262,6 +367,22 @@ discard an existing canister identity automatically.
 
 ## Client-side gotchas (these are where the journey silently "does nothing")
 
+- **A just-sent card that says unverified or has no action until reload is the PR 2 optimistic-send
+  reconciliation defect.** Reloading proves only that the canonical backend event is valid. The
+  corrected build must make the successful provenance-backed sender card verified/actionable
+  immediately and must strip send-only proof, recipient-key, payload, and inbox-routing material
+  from the stored event. Do not accept reload as the workaround.
+- **`Directory binding only; card content is untrusted` / `Untrusted card text` on an attested card
+  is stale PR 2 UI state, not an IOU attester verdict.** In the corrected build those labels render
+  only when content attestation is absent, and that genuinely unattested card stays actionless.
+  Also require authoritative app identity to survive iframe reset and to re-resolve when the card
+  transitions from optimistic to backend-attested state.
+- **An image proposal can fail while a text proposal works when the manifest and app attester
+  disagree.** Require explicit `acceptsImage: true`; then compare the registered schema read-back
+  with IOU's attester boundary: amount `0.005` through the safe maximum, three ASCII-uppercase
+  currency characters, a real `YYYY-MM-DD` calendar date, and code-point-bounded NUL-free text.
+  Re-registering these constraints changes the revision, so complete the binding/relink handoff
+  above before diagnosing the new image path.
 - **Hard-reload the IOU tab (Ctrl+Shift+R) after any `.env.local` change.** Vite bakes
   `import.meta.env.VITE_*` at load; a stale tab keeps the OLD `user_index` and pairing 500s with
   *"Canister <old id> has no update method 'c2c_claim_ai_app_link_code'"*.

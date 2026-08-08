@@ -7,6 +7,11 @@
 //      JSON prompt must NOT appear, and the action card must post.
 // Exit 1 on any failed assertion.
 import { chromium } from "@playwright/test";
+import {
+  exactOpenChatMessageWrapper,
+  OPENCHAT_MESSAGE_TEXT_SELECTOR,
+  OpenChatArtifactScope,
+} from "./openChatArtifactCleanup";
 
 let failures = 0;
 function check(cond: boolean, label: string): void {
@@ -33,7 +38,7 @@ async function main() {
   await p.waitForTimeout(2000);
 
   // ── 2. The chooser ALWAYS lists the catalog now — with the current model marked when attached ──
-  const screen = await p.evaluate(`document.body.innerText.replace(/\\s+/g,' ')`);
+  const screen = await p.evaluate<string>(`document.body.innerText.replace(/\\s+/g,' ')`);
   const already = /Current|Model: .*Gemma 3 1B.*(attached|loaded)/i.test(screen);
   check(/Gemma 3 1B/.test(screen), "chooser lists Gemma 3 1B (default)");
   check(/Qwen2.5 1.5B/.test(screen), "chooser lists Qwen2.5 1.5B");
@@ -50,7 +55,7 @@ async function main() {
     let attached = false;
     for (let i = 0; i < 240 && !attached; i++) {
       await p.waitForTimeout(5000);
-      const t = await p.evaluate(`document.body.innerText.replace(/\\s+/g,' ')`);
+      const t = await p.evaluate<string>(`document.body.innerText.replace(/\\s+/g,' ')`);
       const prog = /Downloading .*?(\d+)%/.exec(t)?.[1];
       if (prog !== undefined && i % 6 === 0) console.log(`[e2e] download ${prog}%`);
       if (/Model: .*(attached|loaded)/i.test(t)) attached = true;
@@ -85,6 +90,8 @@ async function main() {
     await p.waitForTimeout(500);
   }
   const text = `Web model check ${Date.now() % 100000}: I paid 120 EGP for groceries`;
+  const artifactScope = new OpenChatArtifactScope(p, "browser-model e2e source capture");
+  await artifactScope.begin();
   const composer = p.locator(".ProseMirror").first();
   await composer.waitFor({ timeout: 15000 });
   await composer.click();
@@ -92,15 +99,18 @@ async function main() {
   await p.keyboard.press("Enter");
   console.log(`[e2e] sent: ${text}`);
   await p.waitForTimeout(4000);
+  const sourceMessage = await artifactScope.waitForExactTextMessage(text);
+  const sourceText = exactOpenChatMessageWrapper(p, sourceMessage)
+    .locator(OPENCHAT_MESSAGE_TEXT_SELECTOR)
+    .first();
 
   // v2 propose: long-press (click) the message → AutoFix icon in the sheet.
   const autoFix = p.locator('button:has(path[d^="M7.5,5.6"])').first();
   let sheetOpen = false;
   for (let press = 0; press < 3 && !sheetOpen; press++) {
-    const msg = p.locator(".message_text").last();
-    await msg.scrollIntoViewIfNeeded().catch(() => {});
+    await sourceText.scrollIntoViewIfNeeded().catch(() => {});
     await p.waitForTimeout(800);
-    const box = await msg.boundingBox();
+    const box = await sourceText.boundingBox();
     if (!box) throw new Error("no message box");
     await p.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
     await p.mouse.down();

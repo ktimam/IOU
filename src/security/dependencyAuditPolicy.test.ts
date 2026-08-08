@@ -31,6 +31,21 @@ describe('dependency audit policy', () => {
     expect(lockfile).not.toMatch(/hono@4\.12\.(?:[0-9]|[12][0-9]|3[0-3]):/);
   });
 
+  it('keeps nanoid on the patched side of GHSA-2v37-7h3g-55p8', () => {
+    const workspace = readFileSync(
+      new URL('../../pnpm-workspace.yaml', import.meta.url),
+      'utf8',
+    );
+    const lockfile = readFileSync(
+      new URL('../../pnpm-lock.yaml', import.meta.url),
+      'utf8',
+    );
+
+    expect(workspace).toMatch(/^\s+nanoid:\s+3\.3\.17\s*$/m);
+    expect(lockfile).toContain('nanoid@3.3.17:');
+    expect(lockfile).not.toMatch(/nanoid@3\.3\.(?:[0-9]|1[0-6]):/);
+  });
+
   it('rejects a command failure disguised as JSON with no advisory map', () => {
     expect(() =>
       assertValidAuditExecution(1, { error: { message: 'registry unavailable' } }),

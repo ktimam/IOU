@@ -3,7 +3,53 @@
 Known-but-unfixed things, so they stop living in chat history. Each entry says what it is, how to
 see it, and what "done" means — enough to pick up cold.
 
-Last updated: 2026-08-07.
+Last updated: 2026-08-08.
+
+## Current status supersession — 2026-08-07
+
+This section overrides older hashes, deployment-pending wording, and live-QC claims below.
+
+- OpenChat PR 1 is pushed at `f43d2a2d53f2c9f8a3086104a356d4d3a315858a`.
+- OpenChat PR 2 is pushed at `001a1e29881f340705444a9e11e96a54bc3eac9c` and passes the
+  exact frontend **990/990 across 70 files**, nine-package backend matrix, typechecks, ESLint,
+  Prettier, `cargo fmt`, and Linux `prod_test` gates.
+- Exact PR 2 artifacts are deployed on the recovered three-subnet PocketIC state: UserIndex
+  `0.0.9`, LocalUserIndex `0.0.5`, four User children `0.0.3`, the private Group `0.0.4`, and the
+  Community template `0.0.4`. There is no Community instance. GroupIndex was not deployed or
+  upgraded in this rollout.
+- The recreated-account-safe Father two-chat/two-sheet routing journey dynamically discovers the
+  current distinct House and Family ids and passes **17/17**. The disposable account-scoped Type
+  isolation journey passes **12/12**.
+- Exact-PR-2 private card hydration passes **8/8** only after reloading the sender optimistic echo.
+  That proves canonical-event hydration, but the reload exposed a real PR 2 sender-state/identity
+  regression: the just-sent card could remain unverified and actionless. The candidate reconciliation,
+  identity lifecycle, and content-label fixes are in tree; exact commit/push/deploy/live QC remain
+  pending.
+- `scripts/live/journey-fanout.ts` now implements chat send → in-card **Add to IOU** → routed
+  **Pending from chat**/**Review & add** → prefilled `EntryForm` → persisted **History** → exact
+  nonce soft-delete cleanup. It has not yet been counted as a passing updated-runtime run. IOU #52
+  therefore tracks execution plus hosted/CI placement, not a missing local journey.
+- Image proposal schema/attester alignment is fixed in the working trees: explicit `acceptsImage`,
+  amount/string bounds, safe formats, valid calendar dates, ASCII-uppercase currency, NUL-free
+  text, and the `0.005` half-minor-unit boundary. Focused/full gates and live image QC are pending.
+- The changed manifest must be re-registered, producing a new revision. Install the matching exact
+  IOU verifier binding and refresh/relink father, mother, child, and property manager sequentially
+  before live QC; their existing bindings are revision-pinned and should fail closed when stale.
+- Current IOU verification is unit **846/846**, Rust **68/68**, and live E2E **56/56** under split
+  verification. The initial **52/55** exposed three obsolete registry expectations; **51**
+  unaffected scenarios remained green, and the replacement read-only/ownership plus live
+  owner-attestation registry suite passed **5/5**. Unit coverage is **71.49%** statements/lines,
+  **84.85%** branches, and **86.9%** functions.
+- Restart/recovery work must use the supported NNS + Internet Identity + System `FromPath` PocketIC
+  state. The old normal six-subnet `dfx` flow must not be used.
+- The safety-reviewed IOU-local `scripts/live/pocketic-recovered.ps1` wrapper completed two clean
+  stop/checkpoint/strict-reopen/status cycles. Each reopen dynamically parsed its instance id,
+  control port, and exact PID and revalidated the full three-subnet topology plus seven deployed
+  canisters. Exact PR 2 `001a1e298` was healthy after cycle 2, with post-restart routing **17/17**,
+  Type isolation **12/12**, and card hydration **8/8** retained.
+- The optional extra cleanup gate was rejected. The obsolete six-subnet state and remaining WSL
+  artifacts were **not** deleted and remain preserved. Earlier bounded debug/build cleanup recovered
+  about **46.8 GiB**.
 
 ---
 
@@ -14,8 +60,8 @@ registration. The public rules, response schema, and card rows contain no privat
 matching now happens locally after import against only the linked account. Unit coverage and the
 live registry E2E assert that even a deliberately supplied private roster is absent on read-back.
 
-**Private display follow-up (implemented and tested locally; production activation pending).** IOU now
-supports the missing R1 path without reopening R2: after authorized private hydration, its
+**Private display follow-up (implemented in source; exact-head integrated hydration still open).**
+IOU supports the missing R1 path without reopening R2: after authorized private hydration, its
 credentialless card iframe displays an `Account type` selector and the read-only card displays the
 selected saved Type. It decrypts only the linked sheet's type roster in iframe memory and returns
 the selection as an AES-GCM reference bound to sheet, chat, message and row. Before private hydration
@@ -30,12 +76,17 @@ sandboxed iframe. IOU now implements both exact app-canister attesters, independ
 the portable card hash, rejects unknown/duplicate/plaintext Type fields, and accepts a Type only
 as a structurally valid opaque encrypted `template_ref` tied to the current linked active sheet.
 The OpenChat backend/frontend candidate implements the generic transport, final grant and click-only
-capability bridge. The preserved local test-mode child and frontend switches were enabled and the
-authorized House card displayed `Rent` without exposing it in other accounts or public state.
-Production remains disabled. Activation still requires the non-empty legacy-inbox
+capability bridge. An older local checkpoint displayed `Rent` in an authorized House card, but that
+is historical evidence, not acceptance for exact PR 2 head `001a1e298`. Current exact-head live
+verification now proves account isolation **12/12**, per-chat routing **17/17**, and card hydration
+**8/8**. The card result required reloading the sender optimistic echo; it then proved `None` before
+consent and, after explicit private-context sharing, House `Rent` without Family `Family expense` or
+a reconnect. The remaining IOU #52 work is hosted automation and full delivery/import/ack coverage,
+not a reproduced hydration defect. Production remains disabled.
+Activation also requires the non-empty legacy-inbox
 drain/export/reinstall decision, durable confirmation-saga recovery, snapshot-rollback key reseed,
 a retired-key erasure threat model, strict generated-contract parity, Linux PocketIC coverage, a
-disposable live backend upgrade, and the four-profile isolation matrix. The local card result is
+disposable live backend upgrade, and the four-profile isolation matrix. The historical card result is
 not a reason to republish the roster.
 
 The cross-repo ActionInbox wire is synchronized at the source level: authoritative UserIndex signs
@@ -133,7 +184,49 @@ current is not.
 
 ---
 
-## 4. Live harnesses leave the `oc:manualExtract` seam ON
+## 4. Live harnesses leave the `oc:manualExtract` seam ON -- **fixed, pushed, and live-verified; hosted gate pending**
+
+**Root cause proved 2026-08-08.** OpenChat commit `1219b8a21` deliberately moved the manual-QC
+prompt ahead of an available on-device model. Several IOU live scripts had meanwhile persisted
+`localStorage["oc:manualExtract"] = "1"` in the real manager profile and some deleted that
+profile's downloaded model without restoring it. A second defect made prompt **Cancel** return the
+same `undefined` value as "QC seam disabled"; with a model available, Cancel therefore fell through
+to inference and posted another card. The mobile tree also lacked the classic tree's in-flight
+Propose guard.
+
+The Claude-era tests were not deleted. Git history still contains
+`scripts/live/verify-nomodel-guide.ts` (introduced by `f55f327`),
+`test/ui/openchatCard.ui.spec.ts` (`2f55de4`), `test/ui/openchat.ui.spec.ts` (`c76acbf`),
+and `scripts/live/journey-fanout.ts`. The coverage hole was structural: the live scripts are
+standalone signed-in checks, IOU CI did not invoke `pnpm test:ui`, the IOU Playwright files do not
+click OpenChat's real Propose menu, and `1219b8a21` replaced the OpenChat unit expectation that
+would have rejected this precedence change.
+
+**Pushed correction.** OpenChat now ignores the stale persistent flag and accepts the manual seam
+only from the temporary tab's `?manualExtract=1` query. Cancel has a distinct sentinel and returns
+before model inference or posting; malformed and wrong-shaped JSON abort; desktop has a real
+multi-action chooser; and both desktop and mobile use one shared single-flight boundary with visible
+progress. IOU live harnesses use disposable signed-in tabs, close them in `finally`,
+and no longer clear/download/delete a user's model or mutate the persistent seam. The full Journey
+harness also owns and deletes only its exact nonce-scoped source/card IDs.
+
+**Evidence and remaining gate.** The manager profile was verified live with
+`canInferOnDevice() === true`, no persistent flag, one isolated JSON prompt, and **zero cards**
+after Cancel. Eight reviewed test/duplicate cards and ten anchored `Journey ...` sources were
+removed through ordinary OpenChat Delete actions; `owe 200` and unrelated messages were retained.
+The deterministic OpenChat spec is part of standard OpenChat PR CI. IOU CI now installs Chromium
+and requires all 18 existing `openchatCard.ui.spec.ts` cases. The signed-in browser checks are now
+named `pnpm test:live:openchat:propose` and `pnpm test:live:openchat:journey`, but a hosted
+four-profile/live-canister job remains an explicit release gap under IOU #52.
+
+OpenChat PR 2 commit `cb6bc72b6` contains the generic correction. Its focused tests pass
+**77/77**, its full frontend suite passes **1,035/1,035 across 75 files**, and the complete local
+manager-to-father journey passes through one attested card, **Add to IOU**, routed
+**Pending from chat**, **Review & add**, and the exact 350 EGP **History** entry. Exact teardown and
+post-reload absence checks pass.
+
+> The reproduction and original done-when text below are retained as historical evidence; the
+> persistent-state part is superseded by the query-only/disposable-tab design above.
 
 **What.** `scripts/live/verify-app-card-multi.ts` (:49, :54), `verify-app-card-edit.ts` (:39, :44)
 and others set `localStorage["oc:manualExtract"] = "1"` in the OpenChat profile and never clear it.
@@ -150,7 +243,33 @@ the manager profile behaved differently from every other one.
 
 ---
 
-## 5. Propose returns `unavailable` with the manual seam answered
+## 5. PR 2 ActionCard sender/identity/content state — **fixed and live-verified; hosted gate pending**
+
+**2026-08-07 correction.** With the deployed PR 2 head and all four local feature switches enabled,
+the live private-card journey passed **8/8** only after reloading the sender so its optimistic echo
+was replaced by the canonical event. Before consent the selector contained only `None`; explicit
+**Share private context** exposed House `Rent`, excluded Family `Family expense`, auto-selected
+`Rent`, and did not reconnect. Those assertions remain valid canonical-event/privacy evidence, but
+the reload is a reproduced defect: the just-sent card could remain unverified and actionless.
+
+**Fixed and pushed.** PR 2 now reconciles a successful provenance-backed send into verified local
+state and removes send-only proof/key/routing material from the stored event. Exact app identity is
+reactively re-resolved across optimistic-to-backend state changes and retained across iframe-session
+reset. The stale `Directory binding only; card content is untrusted` and `Untrusted card text`
+labels render only for genuinely unattested cards; those cards remain actionless. Focused
+failing-first tests are present at PR 2 commit `cb6bc72b6`. The complete local journey observed
+the exact sender card transition from optimistic/unverified to directory-bound and actionable
+without navigation or reload, and the attested card displayed neither stale untrusted label.
+Hosted review/CI and production rollout remain pending.
+
+**Expanded QC passed locally.** `scripts/live/journey-fanout.ts` now continues past the two inbox-count
+assertions: it resolves the confirmer's exact routed sheet, checks the nonce under **Pending from
+chat**, presses **Review & add**, verifies/submits the prefilled `EntryForm`, confirms the entry in
+**History**, and soft-deletes exactly that nonce. The updated-runtime signed-in journey passes;
+only hosted four-profile CI placement remains open under IOU #52.
+
+**Historical observation.** The following describes the earlier frontend/flag state that motivated
+the investigation; do not use it as the current reproduction.
 
 **What.** On the local env, proposing in the manager profile (CDP 9241) returns `unavailable` and
 posts NO card, even with `oc:manualExtract=1` and its JSON prompt answered with a valid extraction.
@@ -252,3 +371,38 @@ the marker in the product and watching the test still pass.
 
 Related trap, still true: **`pnpm exec tsc --noEmit` does not typecheck `test/ui`** — `tsconfig.json`
 has `"include": ["src"]`. Playwright specs are unprotected by the repo typecheck; check them directly.
+
+---
+
+## 7. Image proposal schema and app-attester mismatch — **fixed in tree; verification pending**
+
+**What reproduced.** An image/model extraction could include malformed optional fields that passed
+OpenChat's shallow schema post-pass but were rejected by IOU's exact app attester. The result was an
+unavailable proposal or an untrusted/actionless card even though a valid amount was present.
+
+**In-tree resolution.** Generic PR 2 now accepts image input only when the action explicitly sets
+`acceptsImage: true` and enforces declared numeric bounds, Unicode code-point string bounds, valid
+calendar dates, and deterministic allowlisted formats. IOU's manifest and generated registration
+mirror the canister boundary: `0.005` minimum major amount, safe integer-derived maximum, exactly
+three ASCII-uppercase currency characters, actual `YYYY-MM-DD` dates, and bounded NUL-free
+note/message. Invalid optional OCR fields are removed before attestation; the canister still rejects
+any invalid exact payload that reaches it.
+
+**Done when** focused and full IOU/OpenChat gates pass at exact commits, the changed manifest is
+registered with its matching verifier binding, all affected revision-pinned user bindings are
+refreshed, and both image and text proposal browser journeys pass without weakening text behavior.
+
+---
+
+## 8. Manifest revision and four-user binding handoff — **rollout pending**
+
+**What.** The schema correction changes the registered manifest. Re-registration advances the app
+revision, while IOU's verifier and each father/mother/child/property-manager connection are pinned to
+an exact revision. Testing a new frontend/manifest against old bindings is expected to fail closed
+and can be misdiagnosed as another card defect.
+
+**Done when** the updated manifest is re-registered, its newly generated exact-revision binding is
+installed on `iou_backend`, publication/directory read-back matches, and each of the four users is
+refreshed or relinked sequentially without replacing the authoritative consumer key. Only then run
+the no-reload card checks, image proposal, and expanded `journey-fanout.ts`. Record the resulting
+revision, commit hashes, test totals, and live result before marking this item deployed/verified.

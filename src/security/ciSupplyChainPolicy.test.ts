@@ -31,4 +31,13 @@ describe('CI supply-chain policy', () => {
     );
     expect(workflow).not.toMatch(/cargo audit\s*(?:#.*)?$/m);
   });
+
+  it('keeps the OpenChat card browser regressions in the required CI gate', () => {
+    expect(workflow).toContain(
+      'pnpm exec playwright install --with-deps chromium',
+    );
+    expect(workflow).toContain(
+      'pnpm test:ui -- test/ui/openchatCard.ui.spec.ts',
+    );
+  });
 });

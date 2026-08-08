@@ -1,5 +1,52 @@
 # Linking IOU to OpenChat (one tap)
 
+## Current local contract — 2026-08-07
+
+IOU and OpenChat are co-deployed on the **same PocketIC replica** at the configured local IC
+origin. The OpenChat frontend and the IOU frontend are separate web processes, but cross-canister
+registration, setup-token redemption, card attestation, and delivery require their canisters to
+share the replica. Do not point IOU at a separate `dfx` replica.
+
+The OpenChat source boundary remains two generic changes: PR 1 (local models) is pushed at
+`f43d2a2d53f2c9f8a3086104a356d4d3a315858a`; PR 2 (cards and external-app/chat interfaces) is
+pushed at `001a1e29881f340705444a9e11e96a54bc3eac9c`. PR 2 passes **990/990 frontend tests across
+70 files**, the nine-package backend matrix, frontend and agent typechecks, ESLint, Prettier,
+`cargo fmt`, and exact Linux `prod_test`.
+
+Linking has two independent lifecycles:
+
+- each user connects their IOU account to their OpenChat app key once per account/key lifecycle;
+- each individual chat is routed separately from that chat's own settings page via **AI apps →
+  Open setup**. Each launch has a different one-time URL token, and the signed-in IOU user selects
+  that chat's account/sheet under **Settings → Chat routing**.
+
+Direct chats, groups, and community channels use the same generic opaque-handle contract. The
+recreated-account-safe Father acceptance dynamically discovers the current distinct House and
+Family sheet ids, routes Father–manager to House and Father–mother to Family, and passes **17/17**
+assertions, including distinct setup URLs, synchronous URL scrubbing, preserved connection state,
+and distinct backend mappings. Account-scoped Type isolation separately passes **12/12** live
+assertions.
+
+Exact-PR-2 private card hydration passes **8/8** live assertions after reloading the sender to
+replace its optimistic echo with the canonical event. Before consent the selector contains only
+`None`. Explicit **Share private context** exposes House `Rent`, excludes Family `Family expense`,
+auto-selects `Rent`, and does not reconnect. This is no longer a reproduced product failure; IOU #52
+tracks hosted/CI automation and the still-missing complete confirm → ActionInbox → import/ack proof.
+
+Current IOU verification is unit **846/846**, Rust **68/68**, and live E2E **56/56** under split
+verification. The initial live run was **52/55** because three registry expectations had become
+obsolete; **51** unaffected scenarios remained green, and the replacement read-only/ownership plus
+live owner-attestation registry suite passed **5/5**. Unit coverage is **71.49%** statements/lines,
+**84.85%** branches, and **86.9%** functions.
+
+The safety-reviewed IOU-local recovered-PocketIC wrapper completed two clean
+stop/checkpoint/strict-reopen/status cycles. Each reopen dynamically parsed its instance id,
+control port, and exact PID and revalidated the full three-subnet topology plus seven deployed
+canisters. Exact PR 2 `001a1e298` remained healthy after cycle 2, and the **17/12/8** routing,
+Type-isolation, and card checks persisted. The rejected extra cleanup gate was not run: obsolete
+six-subnet state and remaining WSL artifacts remain preserved. Earlier bounded cleanup recovered
+about **46.8 GiB**.
+
 IOU registers itself with OpenChat as an **AI app**: one manifest carrying the app name,
 description, and its single action (the extraction prompt, response schema, confirm-card layout
 and rules — the same definition `docs/openchat-registration.json` encodes). Once registered, a
@@ -9,7 +56,7 @@ manifest uses per-user delivery keys — no key material either.
 The manifest sets **`per_user_keys=true`** (multi-user delivery): OpenChat delivers each user's
 confirmed actions encrypted to **that user's own** registered key, not to a single app-level key.
 Registering the app (this page) stays an **admin** task done once; each *user* additionally pairs
-their own key once via a high-entropy claim token — see
+their own key once per account/key lifecycle via a high-entropy claim token — see
 [Per-user delivery keys](#per-user-delivery-keys-the-claim-token) below.
 
 There are two ways to register — both share the exact same candid wire encoding
@@ -38,8 +85,9 @@ VITE_OC_USER_INDEX_CANISTER_ID=<openchat user_index canister id>   # required
 VITE_OC_IC_URL=http://127.0.0.1:8080                               # optional; this is the default
 ```
 
-Note the OpenChat user_index runs on a **different replica** than IOU's own backend — that's why
-it has its own host var (do not point it at IOU's `VITE_DFX_PORT` replica).
+The OpenChat UserIndex and IOU backend run on the **same local PocketIC replica**. The separate
+variable names identify different canisters and frontend configuration; they do not imply a second
+replica. Both origins must resolve to the shared local IC gateway.
 
 Identity: the button registers as the signed-in identity when you're signed in (keeping the
 (owner, name) upsert key stable across taps), and falls back to anonymous when signed out — a
@@ -103,15 +151,18 @@ pnpm register:openchat -- --key-file consumer-key.pem
 
 ## Enable the app in a chat
 
-In OpenChat, a **group** owner or admin opens the chat's settings, finds the **Apps** section and
-toggles **IOU** on (Phase A covers group chats only). From then on, members of that chat can tap a
-message -> **Propose action**, review the confirm card, and on confirm an encrypted entry draft is
-delivered to the IOU action inbox — pull it from **Settings -> Action inbox** in the IOU app.
+In OpenChat, open the individual direct chat, group, or community channel's settings, find the
+**Apps** section, and enable **IOU** when the conversation's permissions allow it. Members can then
+propose an action from a message. Routing that conversation to an IOU sheet is a separate operation:
+from the same chat settings page use **AI apps → Open setup**, then choose the account/sheet in IOU's
+**Settings → Chat routing** page. Do this independently for every chat that should use a different
+sheet.
 
 ## Per-user delivery keys: the claim token
 
 With `per_user_keys=true`, every user gets their confirmed actions encrypted to **their own**
-key — so each user pairs their IOU account with OpenChat **once, ever**:
+key — so each user pairs their IOU account with OpenChat once per IOU account/OpenChat app-key
+lifecycle (reconnect after an explicit disconnect, key replacement, or account change):
 
 1. In OpenChat, propose an action from a chat where IOU is enabled. If your key isn't paired yet,
    OpenChat shows a **64-character, 256-bit claim token** (single-use, valid for 10 minutes).
@@ -215,9 +266,9 @@ bridge rotation by temporarily accepting an unpinned remote key.
 ## Delivery provenance and the chat → sheet mapping
 
 The v4 envelope makes every confirmed action carry **delivery provenance** inside the encrypted
-plaintext: the source chat (`"group:<chat canister principal>"` or
-`"channel:<community principal>:<channel id>"`), message/thread identity, confirming user and
-timestamp, exact app/action revision and content hash, and confirmation-lease generation. The
+plaintext: an app-scoped opaque source-chat handle for a direct chat, group, or community channel;
+message/thread identity; confirming user and timestamp; exact app/action revision and content hash;
+and confirmation-lease generation. Raw chat coordinates are not exposed to IOU routing URLs. The
 original final payload is preserved as canonical unpadded base64url bytes, together with a
 recipient-only acknowledgement secret. OpenChat's dedicated UserIndex key signs the complete v4
 outer record. The domain-separated preimage binds signature version and purpose, signing-key id,
@@ -307,7 +358,13 @@ Community-channel minting also enforces current community membership and the tar
 visibility/membership rule, including exact private-channel membership. In this contract,
 \"verified member\" describes current membership state, not KYC or identity verification.
 
-The reviewed source status is exact as of 2026-08-07. PR 1's final pushed head is
+### Historical pre-deployment evidence (superseded later on 2026-08-07)
+
+The following hashes, counts, and "pending" statements record the checkpoint before exact PR 2
+head `001a1e29881f340705444a9e11e96a54bc3eac9c` was tested and deployed. Keep them for audit
+provenance only; the current local contract at the top of this document is authoritative.
+
+The reviewed source status at that earlier checkpoint was: PR 1's final pushed head is
 `f43d2a2d53f2c9f8a3086104a356d4d3a315858a`. OpenChat #92 is fixed and pushed. Five
 focused web/model/on-device files pass **145/145**, typecheck reports **0 errors**, and the exact
 WSL `prod_test` completed in **10m36s**. The emitted Wllama Wasm is byte-identical to its source
