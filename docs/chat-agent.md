@@ -241,6 +241,16 @@ card across members:
 
 #### Three UX fixes: no-model guide + multi-entry cards + default currency — BUILT 2026-07-23
 
+> **Superseded multi-import design — 2026-08-09.** The partial-survivor/per-entry write path below
+> is historical. A current verified OpenChat array fails closed if any row cannot be consumed. One
+> attested stored array renders one host-owned classic card; IOU reviews all rows in one
+> `BatchConfirmModal` and commits 1..32 rows atomically through one receipt-backed
+> `add_entry_batch`. Public rows are Amount, Currency, Type, Direction, Date, and Note. Saved type
+> remains private and resolves row-locally against only the linked sheet during IOU import/review.
+> The default-currency behavior described below remains current: unsupported model-invented text
+> currency is stripped before the card, an absent currency stays absent until IOU import applies the
+> user's default, and an explicitly evidenced currency wins.
+
 Three fixes to the confirmable-action pipeline. The **wire seam** is `confirmPayload` (OpenChat) ==
 IOU's decrypted `p.draft`: it is now EITHER a single-entry JSON OBJECT (unchanged, byte-identical for
 1 entry) OR a top-level JSON ARRAY `[EntryDraft, …]` for multiple entries. A bare array is the multi

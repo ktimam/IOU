@@ -1,13 +1,20 @@
 # IOU and OpenChat fork security review — 2026-08-01
 
-## Trusted-card, batch, and Type/Date supersession — 2026-08-08
+## Trusted-card, batch, and Type/Date supersession — 2026-08-09
 
-This is the authoritative source-state update for the latest card work. It supersedes older passages
+This is the authoritative rollout-state update for the latest card work. It supersedes older passages
 below that describe **Load app card**, **Share private context**, an in-frame confirmation button, or
 a second approval screen as mandatory steps for an exact, trusted, already-paired recipient. Those
-passages remain dated evidence for the previously deployed flow. The candidate described here has
-passed its final source/aggregate gates but is **not yet committed, pushed, registered, deployed,
-restarted, or exercised through the signed-in single-, multi-entry, and image-only journeys**.
+passages remain dated evidence for previously deployed flows. The IOU rollout implementation is
+pushed at `187f96c8852da70c924c53dd627531f9456b60c4`. The backend was upgraded
+state-preservingly at schema 18 with Wasm SHA-256
+`6fc498e128b2495fd9f30a7de6a75b9807ecc6a89cc05806287009bd4f111088`. App #1 is published as
+revision `1786228558496` with manifest SHA-256
+`7b735779b229bfe6096f78f04a21fe60a1dc1533428c5db0873174c23d869da7`; the father, mother, child,
+and property-manager links are current. OpenChat PR 2 is pushed at
+`75adbaa780c117328146aa67ec5770ebe328ca34`. The signed-in routed-Type, deterministic single-entry,
+atomic multi-entry, and no-caption real-image journeys all pass through their exact cleanup
+boundaries.
 
 ### Trusted cards return to values-first confirmation
 
@@ -50,7 +57,9 @@ a deliberate fail-closed stop after insecure hidden public array transport was r
 uses the already-attested stored confirmation payload instead: an extraction array creates one
 message/card, one provenance record, and one exact backend-stored JSON array. The public card contains
 only host-rendered `Entry 1` … `Entry N` summaries whose fields are labeled in manifest order. IOU's
-rows include Amount, Currency, Type, Direction, Date, Note, and Message when present. No hidden
+rows include Amount, Currency, Type, Direction, Date, and Note when present. The bounded source
+`message` remains in the exact stored payload when applicable but is deliberately not a public row.
+No hidden
 `__oc_` row, capability, recipient key, or exact private array is exposed in public card content.
 
 Multi-entry cards deliberately use the classic OpenChat-owned renderer rather than an app iframe.
@@ -80,32 +89,44 @@ from initial render in single- and multi-entry cards. `Saved type` is an account
 such as `Rent`. Its name, id, and keywords remain absent from the public manifest, rows, message,
 URL, and logs.
 
-For an authorized paired card, IOU decrypts only the roster belonging to the sheet linked to that
-chat and automatically restores `Saved type` inside the same isolated card without another
-Load/Share gesture. Only an encrypted `template_ref` can leave the frame in the click-collected
-confirmation payload; the plaintext saved-type id/name/keywords never become public card content.
-Batch matching uses row-local evidence rather than the batch-wide source message, so two entries
-cannot accidentally select the same saved type. Route/context revocation clears the private
-selection, and late hydration from an old sheet/context is discarded. Import fallback uses the same
-row-local rule. If an explicit saved-type id collides with another type's display name, resolution
-fails closed instead of selecting by the ambiguous name.
+For an authorized paired **single-entry editable card**, IOU decrypts only the roster belonging to
+the sheet linked to that chat and automatically restores `Saved type` inside the same isolated card
+without another Load/Share gesture. OpenChat keeps Add disabled until the exact capability-bound
+hydration-ready acknowledgement arrives. Only an encrypted `template_ref` can leave the frame in
+the click-collected confirmation payload; plaintext saved-type id/name/keywords never become public
+card content. Multi-entry cards stay in the classic stored-payload renderer and resolve Saved type
+row-locally during IOU import/review, not inside OpenChat before confirmation. Route/context
+revocation clears private selection, late hydration from an old sheet/context is discarded, and an
+explicit saved-type id/display-name collision fails closed.
+
+For image-only model output, IOU opts `message` and `date` out before the card is built. Repeated
+controlled Qwen runs invented unrelated dates even after the host “Today” anchor and literal date
+examples were removed. A single image card therefore exposes a blank editable Date; a classic
+multi-image import resolves/defaults each Date and displays it in IOU's review summary before the
+atomic add. This is a deterministic value/import correctness policy, not pixel-level OCR proof.
 
 ### Image-only live-harness boundary
 
-The candidate live harness sends an attached image as the complete chat message: the composer body
-is empty and no visible caption or duplicate text accompanies the image. It hashes the processed
-draft bytes with SHA-256 and records their byte length and normalized MIME type, waits for the fresh
-sender-owned uploaded HTTP(S) attachment, fetches its bytes, and requires all three values to match.
-It binds the source to stable message coordinates and revalidates the exact image bytes immediately
-before Propose and Delete. The run nonce is written into the editable card Note only after image
-extraction; it is not sent to the model as chat text.
+The accepted image journey sends the attachment as the complete chat message: the composer is empty
+and no caption or duplicate text accompanies it. A scoped `URL.createObjectURL` receipt captures the
+exact processed draft Blob before selection, then binds its SHA-256, byte length, normalized MIME,
+decoded preview, and exact draft URL/footer to cleanup. After Send, the harness binds only a fresh
+sender-owned image beyond the pre-send stable-coordinate boundary, waits through transient
+`blob:`/`data:` states for the decoded HTTP(S) attachment, and requires exact uploaded-byte equality.
+Those bytes are revalidated before Propose and Delete. Cleanup accepts only the nonce-bound card and
+exact source coordinates; a URL change is never deletion proof, and the tombstone must survive
+settle/reload.
 
-Cleanup admits a card only after its verified iframe exposes that exact nonce. It otherwise leaves
-the uncertain artifact for diagnosis. Image deletion is proven only by wrapper absence or an
-explicit deleted tombstone after reload; an attachment URL change is not deletion evidence. The
-focused image/source/cleanup policy set passes **40/40**.
+The final signed-in Qwen3-VL run passed with the 24,925-byte PNG whose SHA-256 is
+`906f19f17f6c2d9cf8120f800c7e9f85f574a2104e97aded92f6d9a4c61160da`. It used zero manual JSON
+prompts, produced exactly one `iou` entry for 350 EGP in the `credit` direction, and showed a blank
+editable Date. One host Add produced only the confirmer delivery, then linked Pending, Review & add,
+History, inbox/entry cleanup, and exact card/source deletion all passed. Image-only `message` and
+Date are deliberately omitted from the model candidate: generated message text is not source proof,
+and repeated Qwen runs invented unrelated dates. This is a deterministic correctness policy, not a
+claim that the frontend cryptographically proves which fields are visible in pixels.
 
-### Failing-first and current focused evidence
+### Current rollout and verification evidence
 
 - The final host-owned one-click collection/submit coverage passes **103/103** in its focused OpenChat
   set. It includes no-second-click, unsolicited/legacy/wrong-source/replay/stale/timeout rejection,
@@ -114,22 +135,33 @@ focused image/source/cleanup policy set passes **40/40**.
   then passed **182/182** after the stored-payload implementation and boundary corrections.
 - IOU's initial Type visibility coverage failed **7** cases; row-local batch matching then failed
   **5** focused cases and manifest/Date parity failed **2** before their respective fixes.
-- IOU's focused card/import/security set passes **88/88**, both IOU TypeScript projects pass
-  typecheck, and the complete candidate Rust suite passes **81/81**, including receipt cleanup and
-  account-isolation coverage.
-- Final aggregate gates pass: OpenChat **1,079/1,079** across 76 files with both frontend TypeScript
-  projects green; IOU **984/984** across 80 files, **20/20** real-browser card tests, both TypeScript
-  projects, and the production frontend build.
-- The new live-canister batch E2E is intentionally red against the still-deployed old backend: its
-  first authenticated `add_entry_batch` call is rejected by the old `inspect_message` whitelist.
-  That is exact evidence that an in-place backend upgrade is required, not evidence that the source
-  candidate failed. Candidate live green remains pending until that state-preserving upgrade.
+- IOU's final frontend aggregate passes **1,063/1,063 across 80 files**. Both TypeScript projects,
+  the strict ten-live-script TypeScript gate, the production build, and `git diff --check` pass;
+  Rust passes **83/83**.
+- The IOU rollout implementation `187f96c` is pushed. The backend is upgraded in place at schema 18 with Wasm SHA-256
+  `6fc498e128b2495fd9f30a7de6a75b9807ecc6a89cc05806287009bd4f111088`; app #1 revision
+  `1786228558496` and manifest hash
+  `7b735779b229bfe6096f78f04a21fe60a1dc1533428c5db0873174c23d869da7` are published, the exact
+  verifier binding is active, and all four account links are current.
+- The routed card journey is green for public `Type`/`Date`, linked-sheet-only `Saved type`,
+  values-first rendering, logo, exact URL, no load/share/protocol wall, durable Cancel, and cleanup.
+- The deterministic single-entry manager-to-father journey is green through verified card,
+  one host Add, confirmer-only delivery, routed Pending, Review, History, and exact cleanup.
+- The isolated multi-entry journey is green after fixing the native-prompt acceptance race,
+  repeated Sheet-page reloads that starved the ActionInbox effect, and a fixture-evidence mismatch.
+  In the mismatched run the source said only “two fees,” so the deployed policy correctly stripped
+  unsupported EGP/USD claims; the harness ignored the otherwise valid currency-less card, then the
+  exact source/card were cancelled/deleted and reload-proven. The corrected source states both
+  currencies and proves exactly **one prompt, one two-entry card, one Add click, confirmer +1
+  delivery, two History rows, and exact cleanup**.
+- The no-caption real-image journey is green through exact uploaded bytes, one model candidate/card,
+  one host Add, routed IOU import/History, and exact cleanup.
+- OpenChat PR 2 is clean and pushed at `75adbaa78`; its focused action/card suites and Svelte
+  typecheck are green with **0 errors** (baseline warnings remain).
 
-These are source gates, not deployment evidence. Still pending are the IOU state-preserving backend
-upgrade for the revised attester, registration of the no-disclosure Type/Date manifest, exact verifier
-binding, relinking father/mother/child/property-manager to the new revision, one controlled frontend
-restart, signed-in single- and multi-entry delivery/import/History/cleanup journeys, and the final
-commits/pushes. Until those steps pass, the currently running revision remains the older behavior.
+Hosted four-profile automation and PR review/merge remain as follow-ups. The implementation commits,
+backend upgrade, app publication, exact binding, four links, aggregate gates, and signed-in
+routed/single/multi/real-image local journeys are complete.
 
 Tracking: [OpenChat #105](https://github.com/ktimam/open-chat/issues/105) covers trusted-card
 auto-load and one host-owned confirmation, [OpenChat #106](https://github.com/ktimam/open-chat/issues/106)
@@ -148,8 +180,8 @@ This historical addendum records the post-reboot stability work and that revisio
 acceptance evidence.
 It does not change the two-PR boundary: local-model work remains PR 1, while every OpenChat change
 described here is generic external-app/card interface work in PR 2. At this checkpoint, the PR 2
-frontend change was pushed at `2ff6ad73b50f4aa8d73c9b56ca0e722c933ba8f0`; the newer source
-candidate is documented above.
+frontend change was pushed at `2ff6ad73b50f4aa8d73c9b56ca0e722c933ba8f0`; the superseding
+rollout is documented above.
 
 ### Vite CPU and external GlassWire diagnosis
 
@@ -185,8 +217,8 @@ processes, and update when the applicable GlassWire release is acceptable.
 The pushed `2ff6ad73b50f4aa8d73c9b56ca0e722c933ba8f0` checkpoint reduced the former recipient gate to
 closed details and a load action. That was a presentation-only intermediate state, registered locally
 as revision `1786188022801`, and its focused presentation evidence remains **62/62** (**66/66**
-combined). It is superseded by the trusted auto-render, persistent-pairing, and URL-only source
-candidate documented at the top of this report; do not use this checkpoint as the current UX or
+combined). It is superseded by the trusted auto-render, persistent-pairing, and URL-only rollout
+documented at the top of this report; do not use this checkpoint as the current UX or
 deployment claim.
 
 ### Forced-reboot recovery and browser-profile harness
@@ -212,7 +244,7 @@ covers unique configured ports, occupied/free binds,
 and a bounded stalled probe, and the father, mother, child, and manager sessions were restored in
 their intended browser profiles.
 
-### Historical image journey at the deployed revision (new candidate rerun pending)
+### Historical image journey at revision 1786188022801 (superseded by the current no-caption pass)
 
 The deterministic pre-candidate image journey passed the complete manager-to-father boundary with real
 image bytes: exactly one source and card, in-place optimistic-to-attested reconciliation, automatic
@@ -225,9 +257,9 @@ Before the IOU prompt correction, one receipt with one visible amount caused Qwe
 competing ledger interpretations (`settlement` and `iou`). OpenChat correctly refused the
 multi-action result and posted no card. The same model, adapter, and image returned one object with
 a minimal one-object prompt, isolating the duplication to the IOU prompt rather than duplicated
-image/text input or duplicate inference calls. The corrected prompt requires one object for one
-visible transaction and requires the model's `message` field to retain the shortest exact visible
-amount/currency evidence.
+image/text input or duplicate inference calls. The current schema requires one object for one
+visible transaction, makes model-authored `message` optional, and strips it for image-only input;
+the exact uploaded bytes and user-reviewed public fields are the acceptance evidence instead.
 
 An earlier hardened run then failed closed on an ambiguous `CREDIT` fixture and exposed a detached
 Delete-menu render race. The source now retries only that recognized churn after revalidating the
@@ -235,15 +267,14 @@ same stable message, exact evidence, and sender ownership. The later final run, 
 revision `1786188022801`, selected Qwen3-VL, opened **zero** manual JSON prompts, and produced one
 trusted sender-owned card with `settlement`, `350`, `EGP`, `credit`, and exact visible evidence
 `PAID: 350 EGP`. That historical run used a visible neutral caption only to identify/clean the test
-artifact; it was not supplied to image inference. The current candidate sends no caption at all, as
-described in the authoritative image-only section above. The journey completed its then-current recipient gate → **Add to IOU** →
+artifact; it was not supplied to image inference. The superseding current journey sent no caption
+and is recorded in the authoritative image-only section above. The historical journey completed its then-current recipient gate → **Add to IOU** →
 father-only delivery → routed **Pending from chat** → **Review & add** → 350 EGP **History** plus
 exact entry/inbox/card/source cleanup after reload.
 
-The final IOU unit gate passes **929/929 across 79 files**. The focused behavior/policy suites, both
-TypeScript projects, and `git diff --check` pass. The exact pushed OpenChat PR 2 head passes
-**1,053/1,053 across 76 files** and Svelte typecheck reports zero
-errors (baseline warnings remain).
+At that historical checkpoint the IOU unit gate passed **929/929 across 79 files** and the then
+pushed OpenChat head passed **1,053/1,053 across 76 files**. Those counts are retained only as dated
+regression evidence; the current results are recorded in the authoritative rollout section above.
 
 The reproducible defects and remaining operations work are tracked in
 [IOU #57](https://github.com/ktimam/IOU/issues/57) (Vite watcher CPU),
@@ -1885,16 +1916,16 @@ have their implementation and validation evidence recorded in the linked issue.
 | [#49](https://github.com/ktimam/IOU/issues/49) | Closed; key/binding invariant, legacy fail-closed migration, 53/53 Rust, 830/830 frontend, in-place backend upgrade, four relinks, and post-upgrade card context passed | OpenChat binding can drift from the authoritative consumer key |
 | [#50](https://github.com/ktimam/IOU/issues/50) | Closed; failing-first regression, source fix, preserved-state first-use routing, and live journey pass | Raw-route hardening removed the discoverable chat-to-sheet setup journey |
 | [#51](https://github.com/ktimam/IOU/issues/51) | Closed; synchronous main capture/dynamic-bootstrap fix and focused/build/routing gates pass | Routing bearer scrub ran after asynchronous authentication initialization |
-| [#52](https://github.com/ktimam/IOU/issues/52) | Open; the prior exact-head confirm → ActionInbox → routed import/ack → History lifecycle passed locally; the new one-click single/multi/image-only candidate rerun and hosted four-profile CI automation remain | Automate full OpenChat card-delivery lifecycle acceptance |
+| [#52](https://github.com/ktimam/IOU/issues/52) | Open; routed-Type, deterministic single-entry, isolated two-entry, and no-caption real-image one-click lifecycles pass locally through History and exact cleanup; hosted four-profile CI automation remains | Automate full OpenChat card-delivery lifecycle acceptance |
 | [#53](https://github.com/ktimam/IOU/issues/53) | Closed; manifest/attester alignment, focused frontend/Rust coverage, active registration read-back, and full signed-in image lifecycle pass | Image-card schema admitted values rejected by the IOU attester |
 | [#54](https://github.com/ktimam/IOU/issues/54) | Closed; IOU-only parser fix rejects year zero and focused parser/schema tests pass | Direct draft import accepted year-zero dates |
 | [#55](https://github.com/ktimam/IOU/issues/55) | Closed; IOU-only safe-minor-unit fix rejects unsafe/overflow results and focused parser tests pass | Direct draft amount conversion accepted unsafe or infinite minor units |
 | [#56](https://github.com/ktimam/IOU/issues/56) | Closed; failing-first policy hard-caps Propose at one click, extends observation to 60 seconds, and the controlled image lifecycle creates/cleans one source and card | Live journey could retry Propose and create duplicate test cards |
-| [#60](https://github.com/ktimam/IOU/issues/60) | Open; the image-only/no-manual harness binds processed and uploaded bytes by SHA-256/length/MIME and its focused source/cleanup policy passes **40/40**; real-model candidate rerun remains | Real vision-model image acceptance without a manual seam or visible caption |
-| [#61](https://github.com/ktimam/IOU/issues/61) | Open; Type/Date, row-local Saved-type hydration, revocation, and stale-load source tests pass; backend/manifest rollout, live journeys, commit, and push pending | Type/Date card visibility and private Saved-type lifecycle |
-| [#62](https://github.com/ktimam/IOU/issues/62) | Open; redundant IOU disclosure removed and manifest/attester source tests pass; registration, backend rollout, live journey, commit, and push pending | Redundant IOU card disclosure |
-| [#63](https://github.com/ktimam/IOU/issues/63) | Open; receipt-backed 1..32-row `add_entry_batch`, client routing, rollback/replay/access tests, and Rust **81/81** pass in source; the old deployed backend is red at its exact `inspect_message` whitelist and candidate live green requires the pending in-place upgrade | Atomic OpenChat batch import and outcome-unknown retry |
-| [#64](https://github.com/ktimam/IOU/issues/64) | Open; explicit saved-type id/display-name collisions fail closed in source tests; final aggregate and live rollout remain pending | Saved-type id/name collision can select the wrong account type |
+| [#60](https://github.com/ktimam/IOU/issues/60) | Open; the no-caption real-image journey proves exact processed/uploaded bytes, zero manual prompts, one reviewed 350 EGP card/Add/import, and exact cleanup; hosted automation remains | Real vision-model image acceptance without a manual seam or visible caption |
+| [#61](https://github.com/ktimam/IOU/issues/61) | Open; Type/Date and single-card linked-sheet Saved-type hydration are deployed at app revision `1786228558496`, all four links are current, routed acceptance passes, and the final frontend/Rust aggregates are green | Type/Date card visibility and private Saved-type lifecycle |
+| [#62](https://github.com/ktimam/IOU/issues/62) | Open; redundant IOU disclosure is removed and routed acceptance proves logo/values/exact URL without load/share/protocol prose; final aggregates are green | Redundant IOU card disclosure |
+| [#63](https://github.com/ktimam/IOU/issues/63) | Open; receipt-backed `add_entry_batch` is deployed state-preservingly and the isolated two-entry journey proves one prompt/card/Add/delivery, two History rows, and exact cleanup; final aggregates are green | Atomic OpenChat batch import and outcome-unknown retry |
+| [#64](https://github.com/ktimam/IOU/issues/64) | Open; id/display-name collisions fail closed in tests, routed Saved-type acceptance passes, and final aggregates are green | Saved-type id/name collision can select the wrong account type |
 
 Earlier #1–#7 are closed historical issues; current work did not reopen them.
 
@@ -1955,14 +1986,14 @@ Earlier #1–#7 are closed historical issues; current work did not reopen them.
 | [#51](https://github.com/ktimam/open-chat/issues/51) | Closed; persisted lifecycle/entropy design and recovery evidence accepted | Snapshot rollback reuses security material |
 | [#52](https://github.com/ktimam/open-chat/issues/52) | Open; lifecycle cleanup/caps fixed, upgrade/load proof pending | Capability revocation/retention/quotas |
 | [#53](https://github.com/ktimam/open-chat/issues/53) | Open; gated in tree | Direct-chat frontend/backend mismatch |
-| [#54](https://github.com/ktimam/open-chat/issues/54) | Open; owner approved, exact one-time contract and private account-local `Rent` selection passed locally; newer durable-pairing auto-request candidate is source-green, live gate pending | Generic private-context capability |
+| [#54](https://github.com/ktimam/open-chat/issues/54) | Open; owner approved, capability-bound paired single-card hydration, account-local `Rent` selection, one-click Add, and exact error/revocation recovery pass source and routed signed-in gates; hosted review remains | Generic private-context capability |
 | [#55](https://github.com/ktimam/open-chat/issues/55) | Open; four-account Type isolation and House-only card routing passed locally; broader release proof remains | Four-account test-mode ownership isolation |
 | [#56](https://github.com/ktimam/open-chat/issues/56) | Open; bounded exact/page APIs and compatibility cap fixed in tree, clean app validation/live upgrade pending | Unbounded app-directory query |
 | [#57](https://github.com/ktimam/open-chat/issues/57) | Open; count cap fixed, dangling cleanup pending | Unbounded/dangling per-chat app grants |
 | [#58](https://github.com/ktimam/open-chat/issues/58) | Open; app-private subject/selector and opaque-handle boundary fixed in tree, Linux/live proof pending | Cross-app identity/key correlation |
 | [#59](https://github.com/ktimam/open-chat/issues/59) | Open; gated in tree | Unusable card/no-inbox candidates |
 | [#60](https://github.com/ktimam/open-chat/issues/60) | Open; aggregate/prototype/schema limits fixed in tree and focused tests pass, live upgrade pending | Schema/rule/prototype/approval bounds |
-| [#61](https://github.com/ktimam/open-chat/issues/61) | Open; fixed in tree, live proof pending | Published revision differs from verifier vow |
+| [#61](https://github.com/ktimam/open-chat/issues/61) | Open; exact verifier binding is active at published app revision `1786228558496`, and routed/single/image/multi signed-in gates pass; hosted review remains | Published revision differs from verifier vow |
 | [#62](https://github.com/ktimam/open-chat/issues/62) | Open; pre-await attempts/in-flight throttles and failure-adjacent tests pass in tree, PocketIC pending | Pre-quota card-attestation C2C amplification |
 | [#63](https://github.com/ktimam/open-chat/issues/63) | Open; fixed in tree, PocketIC pending | LUI child authority not rechecked after await |
 | [#64](https://github.com/ktimam/open-chat/issues/64) | Open; fixed in tree, PocketIC pending | Post-await caller is callee, not ingress user |
@@ -1998,8 +2029,8 @@ Earlier #1–#7 are closed historical issues; current work did not reopen them.
 | [#101](https://github.com/ktimam/open-chat/issues/101) | Closed; attested isolated frames use neutral copy and genuine trust warnings remain | Fully attested cards were labeled untrusted |
 | [#102](https://github.com/ktimam/open-chat/issues/102) | Closed; generic image sanitizer/gate coverage, IOU schema/attester coverage, active manifest read-back, and complete signed-in image lifecycle pass | Image proposals forwarded schema-invalid fields into exact app attestation |
 | [#103](https://github.com/ktimam/open-chat/issues/103) | Closed for the prior proposer-only auto-load checkpoint; #105 now tracks the superseding exact-trusted/pairing behavior | Freshly proposed attested cards required redundant external-origin consent |
-| [#105](https://github.com/ktimam/open-chat/issues/105) | Reopened; exact-trusted auto-render, durable-pairing context hydration, and sole host-owned one-click collection/direct submit pass **103/103** focused tests and the **1,079/1,079** aggregate; live journey, commit, and push pending | Trusted cards required load/share and a redundant second confirmation |
-| [#106](https://github.com/ktimam/open-chat/issues/106) | Open; one host-rendered card and one stored-payload confirmation for the exact multi-entry array pass the aggregate source gates; live journey, commit, and push pending | Multiple action entries failed without an external exact-payload endpoint |
+| [#105](https://github.com/ktimam/open-chat/issues/105) | Reopened; exact-trusted values-first rendering, capability-bound Saved-type hydration, and one host Add pass routed, deterministic, and real-image signed-in journeys. PR 2 is clean and pushed at `75adbaa78` | Trusted cards required load/share and a redundant second confirmation |
+| [#106](https://github.com/ktimam/open-chat/issues/106) | Open; the isolated two-entry journey proves one prompt, one host-rendered card, one Add, one confirmer delivery, two History rows, and exact cleanup. PR 2 is clean and pushed at `75adbaa78` | Multiple action entries failed without an external exact-payload endpoint |
 
 ## Historical release recommendation
 
