@@ -390,31 +390,84 @@ async function exactArtifactDeletionProven(
 
 async function deleteExactArtifact(page: Page, artifact: TrackedArtifact): Promise<boolean> {
   if (!(await evidencePresent(page, artifact))) return false;
-  const wrapper = exactOpenChatMessageWrapper(page, artifact.message);
-  if (!(await senderOwned(wrapper))) {
-    throw new Error(`${messageKey(artifact.message)}: artifact is no longer sender-owned`);
-  }
-  if (await wrapper.evaluate((node) => node.classList.contains("message"))) {
-    await openExactOwnedClassicOpenChatMessageMenu(page, wrapper);
-  } else {
-    const menu = await openOwnedMobileMenu(page, wrapper);
-    await (await exactlyOneVisible(menu.locator(".menu-btn button"), "mobile more menu")).click({
-      timeout: 10_000,
-    });
-  }
+  const maxDeleteDispatchAttempts = 3;
+  let deleteDispatched = false;
+  for (let attempt = 0; attempt < maxDeleteDispatchAttempts; attempt++) {
+    const wrapper = exactOpenChatMessageWrapper(page, artifact.message);
+    const observed = await messageRefFromWrapper(wrapper, "exact sender deletion target");
+    if (
+      !sameMessageCoordinates(observed, artifact.message) ||
+      !(await evidencePresent(page, artifact)) ||
+      !(await senderOwned(wrapper))
+    ) {
+      throw new Error(`${messageKey(artifact.message)}: artifact is no longer the exact owned target`);
+    }
 
-  if (
-    (await visibleMatches(page.getByRole("menuitem", { name: "Delete for me", exact: true })))
-      .length > 0
-  ) {
-    throw new Error(`${messageKey(artifact.message)}: refusing Delete for me`);
+    try {
+      if (await wrapper.evaluate((node) => node.classList.contains("message"))) {
+        await openExactOwnedClassicOpenChatMessageMenu(page, wrapper);
+      } else {
+        const menu = await openOwnedMobileMenu(page, wrapper);
+        await (
+          await exactlyOneVisible(menu.locator(".menu-btn button"), "mobile more menu")
+        ).click({ timeout: 10_000 });
+      }
+
+      const deleteMenuDeadline = Date.now() + 10_000;
+      while (Date.now() < deleteMenuDeadline) {
+        const deleteForMe = await visibleMatches(
+          page.getByRole("menuitem", { name: "Delete for me", exact: true }),
+        );
+        if (deleteForMe.length > 0) {
+          throw new Error(`${messageKey(artifact.message)}: refusing Delete for me`);
+        }
+        const senderDeletes = await visibleMatches(
+          page.getByRole("menuitem", { name: "Delete", exact: true }),
+        );
+        if (senderDeletes.length > 1) {
+          throw new Error(`${messageKey(artifact.message)}: sender Delete is ambiguous`);
+        }
+        if (senderDeletes.length === 1) {
+          const senderDelete = senderDeletes[0];
+          await senderDelete.dispatchEvent("click", undefined, { timeout: 2_000 });
+          deleteDispatched = true;
+          break;
+        }
+        await page.waitForTimeout(100);
+      }
+      if (!deleteDispatched) {
+        throw new Error(`${messageKey(artifact.message)}: sender Delete did not appear`);
+      }
+      break;
+    } catch (error) {
+      const retryEvidencePresent = await evidencePresent(page, artifact);
+      if (!retryEvidencePresent) {
+        if (await exactArtifactDeletionProven(page, artifact.message)) return true;
+        throw error;
+      }
+      const retryWrapper = exactOpenChatMessageWrapper(page, artifact.message);
+      const retryObserved = await messageRefFromWrapper(
+        retryWrapper,
+        "rerendered exact sender deletion target",
+      );
+      const transientPortalRerender =
+        /detached|not attached|element was removed|Timeout 2000ms exceeded/i.test(
+          error instanceof Error ? error.message : String(error),
+        );
+      if (
+        attempt + 1 >= maxDeleteDispatchAttempts ||
+        !transientPortalRerender ||
+        !sameMessageCoordinates(retryObserved, artifact.message) ||
+        !(await senderOwned(retryWrapper))
+      ) {
+        throw error;
+      }
+      await page.waitForTimeout(250);
+    }
   }
-  await (
-    await exactlyOneVisible(
-      page.getByRole("menuitem", { name: "Delete", exact: true }),
-      "sender Delete menu item",
-    )
-  ).click({ timeout: 10_000 });
+  if (!deleteDispatched) {
+    throw new Error(`${messageKey(artifact.message)}: sender Delete retry limit exhausted`);
+  }
 
   const confirmation = page.getByRole("button", { name: "Yes please", exact: true });
   const deadline = Date.now() + 2_000;

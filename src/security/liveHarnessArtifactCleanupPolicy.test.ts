@@ -211,6 +211,39 @@ describe("live card harness artifact-cleanup policy", () => {
     expect(cancellationFallback).toBeGreaterThan(cancelClick);
   });
 
+  it("the routed private-type proof waits for paired hydration and cancels its exact card on failure", () => {
+    const source = liveHarness("verify-routed-card-types.ts");
+    expect(source).toContain("const HOST_ADD_HYDRATION_TIMEOUT_MS = 65_000");
+    const readiness = source.indexOf("async function waitForRoutedHostAddEnabled(");
+    const readinessDeadline = source.indexOf("HOST_ADD_HYDRATION_TIMEOUT_MS", readiness);
+    const readinessPoll = source.indexOf("await add.isEnabled()", readinessDeadline);
+    const use = source.indexOf("await waitForRoutedHostAddEnabled(loaded, add)", readinessPoll);
+    const enabledAssertion = source.indexOf(
+      '"the verified sender card has one host-owned action without reload"',
+      use,
+    );
+    const retainedCard = source.indexOf("cleanupCard = { loaded, message: cardMessage }");
+    const failedCleanup = source.indexOf("if (!innerSucceeded && cleanupCard !== null)");
+    const promptFinalize = source.lastIndexOf("await finalizePromptOverride().catch", failedCleanup);
+    const exactCancel = source.indexOf(
+      "await cancelExactTrackedCardIfPending(page, cleanupCard.message)",
+      failedCleanup,
+    );
+    const sharedCleanup = source.indexOf("await finalizeOpenChatArtifactCleanup(", exactCancel);
+
+    expect(readiness).toBeGreaterThanOrEqual(0);
+    expect(readinessDeadline).toBeGreaterThan(readiness);
+    expect(readinessPoll).toBeGreaterThan(readinessDeadline);
+    expect(use).toBeGreaterThan(readinessPoll);
+    expect(enabledAssertion).toBeGreaterThan(use);
+    expect(retainedCard).toBeGreaterThanOrEqual(0);
+    expect(promptFinalize).toBeGreaterThan(retainedCard);
+    expect(failedCleanup).toBeGreaterThan(retainedCard);
+    expect(failedCleanup).toBeGreaterThan(promptFinalize);
+    expect(exactCancel).toBeGreaterThan(failedCleanup);
+    expect(sharedCleanup).toBeGreaterThan(exactCancel);
+  });
+
   it("the routed private-type proof clears a fresh-tab startup overlay before clicking a chat", () => {
     const source = liveHarness("verify-routed-card-types.ts");
     const helper = source.indexOf("async function dismissBlockingOpenChatOverlays(");
@@ -373,7 +406,7 @@ describe("live card harness artifact-cleanup policy", () => {
   it("the shared helper clears blocking overlays before every exact-artifact menu attempt", () => {
     const source = liveHarness("openChatArtifactCleanup.ts");
     const exactEvidence = source.indexOf("if (!(await evidencePresent(page, artifact))) return false");
-    const senderGuard = source.indexOf("if (!(await senderOwned(wrapper)))", exactEvidence);
+    const senderGuard = source.indexOf("!(await senderOwned(wrapper))", exactEvidence);
     const classicOpen = source.indexOf(
       "await openExactOwnedClassicOpenChatMessageMenu(page, wrapper)",
       senderGuard,
@@ -434,6 +467,22 @@ describe("live card harness artifact-cleanup policy", () => {
     expect(responsiveHidden).toBeGreaterThan(stillAttached);
     expect(fallbackClick).toBeGreaterThan(responsiveHidden);
     expect(source).not.toContain('page.locator(".menu-icon")');
+  });
+
+  it("dispatches sender Delete before its portal rerenders and retries only the exact owned target", () => {
+    const source = liveHarness("openChatArtifactCleanup.ts");
+    const deletion = source.slice(
+      source.indexOf("async function deleteExactArtifact("),
+      source.indexOf("function sameMessageCoordinates("),
+    );
+    expect(deletion).toContain("const maxDeleteDispatchAttempts = 3");
+    expect(deletion).toContain("for (let attempt = 0; attempt < maxDeleteDispatchAttempts; attempt++)");
+    expect(deletion).toContain('senderDelete.dispatchEvent("click", undefined, { timeout: 2_000 })');
+    expect(deletion).not.toContain("senderDelete.click(");
+    expect(deletion).toContain("await exactArtifactDeletionProven(page, artifact.message)");
+    expect(deletion).toContain("await evidencePresent(page, artifact)");
+    expect(deletion).toContain("await senderOwned(retryWrapper)");
+    expect(deletion).toContain("sameMessageCoordinates(retryObserved, artifact.message)");
   });
 
   it("the responsive classic fallback rechecks overlays and retains sender-only deletion", () => {

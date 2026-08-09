@@ -37,6 +37,9 @@ const FATHER_OPENCHAT_PORT = Number(
   process.env.FATHER_OPENCHAT_PORT || CDP_PORTS.fatherOpenChat,
 );
 const OPENCHAT_URL = process.env.OPENCHAT_URL || "http://localhost:5003";
+// Public card fields render before a paired viewer completes two bounded private-context phases:
+// the host capability mint and the IOU frame's redeem/decrypt/hydration acknowledgement.
+const HOST_ADD_HYDRATION_TIMEOUT_MS = 65_000;
 
 function check(condition: boolean, label: string): void {
   if (!condition) throw new Error(label);
@@ -246,6 +249,75 @@ async function waitForExactCardCancellation(
   await cancelled.waitFor({ state: "visible", timeout: 30_000 });
 }
 
+async function waitForRoutedHostAddEnabled(
+  loaded: LoadedRunCard,
+  add: Locator,
+  timeoutMs = HOST_ADD_HYDRATION_TIMEOUT_MS,
+): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (await add.isEnabled().catch(() => false)) return;
+    await loaded.card.page().waitForTimeout(Math.min(250, Math.max(1, deadline - Date.now())));
+  }
+  if (await add.isEnabled().catch(() => false)) return;
+
+  const hostStatuses = await loaded.card.getByRole("status").allInnerTexts().catch(() => []);
+  const hostAlerts = await loaded.card.getByRole("alert").allInnerTexts().catch(() => []);
+  const appSignals = await loaded.frame
+    .locator('[role="status"], [role="alert"]')
+    .allInnerTexts()
+    .catch(() => []);
+  const restore = loaded.card.getByRole("button", { name: "Restore app data", exact: true });
+  const restoreCount = await restore.count().catch(() => 0);
+  const restoreState =
+    restoreCount === 1
+      ? `${(await restore.isVisible().catch(() => false)) ? "visible" : "hidden"}/${
+          (await restore.isEnabled().catch(() => false)) ? "enabled" : "disabled"
+        }`
+      : `${restoreCount} matches`;
+  const summarize = (values: string[]): string =>
+    values.length === 0
+      ? "none"
+      : values
+          .map((value) =>
+            value
+              .replace(/\s+/g, " ")
+              .replace(/([?&](?:token|code|claim|credential)[^=]*)=[^\s&]+/gi, "$1=<redacted>")
+              .replace(/\b[a-z0-9]{5}(?:-[a-z0-9]{3,5}){2,}\b/gi, "<id>")
+              .slice(0, 160),
+          )
+          .slice(0, 4)
+          .join(" | ");
+  throw new Error(
+    `paired host Add did not become ready within ${timeoutMs}ms; ` +
+      `hostStatus=${summarize(hostStatuses)} hostAlert=${summarize(hostAlerts)} ` +
+      `appSignals=${summarize(appSignals)} restore=${restoreState}`,
+  );
+}
+
+async function cancelExactTrackedCardIfPending(
+  page: Page,
+  message: OpenChatMessageRef,
+): Promise<boolean> {
+  const wrapper = exactOpenChatMessageWrapper(page, message);
+  if ((await wrapper.count()) !== 1) {
+    throw new Error("the exact tracked card wrapper is unavailable or ambiguous during cleanup");
+  }
+  const card = wrapper.locator(".action-card");
+  if ((await card.count()) !== 1) return false;
+  if (await card.locator(".state-cancelled").isVisible().catch(() => false)) return false;
+  const cancel = card.getByRole("button", { name: "Cancel", exact: true });
+  if ((await cancel.count()) !== 1 || !(await cancel.isVisible().catch(() => false))) return false;
+  const deadline = Date.now() + 10_000;
+  while (!(await cancel.isEnabled().catch(() => false)) && Date.now() < deadline) {
+    await page.waitForTimeout(100);
+  }
+  if (!(await cancel.isEnabled().catch(() => false))) return false;
+  await cancel.click({ timeout: 10_000 });
+  await waitForExactCardCancellation(page, message, cancel);
+  return true;
+}
+
 async function openProposeAction(page: Page, message: OpenChatMessageRef): Promise<Locator> {
   const wrapper = exactOpenChatMessageWrapper(page, message);
   if ((await wrapper.count()) !== 1) throw new Error("exact source wrapper is unavailable");
@@ -367,6 +439,8 @@ async function main(): Promise<void> {
   let navigationListenerInstalled = false;
   let promptOverride: Awaited<ReturnType<typeof installManualPromptOverride>> | null = null;
   let mainFrameNavigations = 0;
+  let cleanupCard: { loaded: LoadedRunCard; message: OpenChatMessageRef } | null = null;
+  let innerSucceeded = false;
   const finalizePromptOverride = async (): Promise<void> => {
     if (!promptOverride) return;
     let failure: unknown;
@@ -408,6 +482,7 @@ async function main(): Promise<void> {
     check(loaded !== null, "the nonce-scoped sender card became directory-bound and loaded automatically");
     if (!loaded) throw new Error("this run's exact sender card never became actionable");
     const cardMessage = await artifactScope.trackExactCard(loaded.card, [note]);
+    cleanupCard = { loaded, message: cardMessage };
 
     const transitions = await observedTransitions(page, loaded.observerId);
     const sawOptimistic = transitions.some((value) => value.includes("Unverified card binding"));
@@ -430,6 +505,7 @@ async function main(): Promise<void> {
 
     const add = loaded.card.getByRole("button", { name: "Add to IOU", exact: true });
     await add.waitFor({ state: "visible", timeout: 20_000 });
+    await waitForRoutedHostAddEnabled(loaded, add);
     check(await add.isEnabled(), "the verified sender card has one host-owned action without reload");
     check(
       (await loaded.frame.getByRole("button").count()) === 0,
@@ -495,11 +571,26 @@ async function main(): Promise<void> {
     await waitForExactCardCancellation(page, cardMessage, cancel);
     check(true, "the exact proof card was cancelled before message cleanup");
     console.log("ROUTED CARD TYPE LIVE VERIFY PASSED");
+    innerSucceeded = true;
   } finally {
     let promptTeardownFailure: unknown;
     await finalizePromptOverride().catch((error) => {
       promptTeardownFailure = error;
     });
+    if (!innerSucceeded && cleanupCard !== null) {
+      try {
+        const cancelled = await cancelExactTrackedCardIfPending(page, cleanupCard.message);
+        console.log(
+          cancelled
+            ? `[cleanup] cancelled exact pending routed card ${cleanupCard.message.messageId}`
+            : `[cleanup] exact routed card ${cleanupCard.message.messageId} was no longer cancellable`,
+        );
+      } catch (error) {
+        console.error(
+          `[cleanup] exact routed-card cancellation failed: ${error instanceof Error ? error.message : String(error)}`,
+        );
+      }
+    }
     if (navigationListenerInstalled) page.off("framenavigated", onNavigation);
     if (observerInstalled) await removeNewCardObserver(page);
     await page
