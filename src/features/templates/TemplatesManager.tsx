@@ -159,9 +159,9 @@ export function TemplatesManager({
         txnType === "iou" && feeFixed && feeFixedCurrency ? feeFixedCurrency : undefined,
       schedule,
       note: note.trim() || undefined,
-      // Split the comma list into trigger words; drop empties and any >64 chars, cap at 50 — the
-      // OpenChat register_ai_app validator rejects a manifest with an over-long keyword or too many
-      // mappings, and this rule feeds one keyword_map mapping per template.
+      // Split the comma list into private matching words; drop empties and any >64 chars, cap at 50.
+      // These remain E2E-encrypted account data. A separately consented, chat-bound private matcher
+      // may use them to suggest IOU; they are never serialized into OpenChat's public app manifest.
       keywords: keywords.trim()
         ? keywords
             .split(",")
@@ -521,7 +521,13 @@ export function TemplatesManager({
               placeholder="reservation, deposit, booking"
             />
             <span className="muted small">
-              Comma-separated. A chat message matching one is routed to this type via OpenChat.
+              Comma-separated and encrypted with this account. The type name is not an automatic
+              trigger; add the name here too if you want it to match. In OpenChat, connect IOU for a
+              direct chat; for a group or channel, connect IOU and have an admin enable it there. Then
+              link that exact chat to this IOU account and enable private Saved-type triggers. Keep
+              auto-propose suggestions on and that chat unmuted. A match suggests IOU for new text
+              messages observed while that chat is open, and privately selects this Saved type
+              without publishing its name or trigger words.
             </span>
           </label>
         </div>

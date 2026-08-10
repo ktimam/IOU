@@ -93,7 +93,7 @@ export function hydrateSavedTypeForCard(
   state: CardFormState,
   raw: unknown,
   templates: TxnTemplate[],
-  options: { evidence?: "full" | "row-local" } = { evidence: "row-local" },
+  options: { evidence?: "full" | "row-local" } = { evidence: "full" },
 ): CardFormState {
   if (state.templateId && templates.some((template) => template.id === state.templateId)) {
     return state;
@@ -102,7 +102,7 @@ export function hydrateSavedTypeForCard(
     ? state
     : { ...state, templateId: undefined };
   const matched = matchTemplateForDraft(templates, raw, {
-    evidence: options.evidence ?? "row-local",
+    evidence: options.evidence ?? "full",
   });
   return matched ? { ...containedState, templateId: matched.id } : containedState;
 }
@@ -134,9 +134,81 @@ export function privateLoadMatchesCurrent(
   );
 }
 
-type CardTypesState =
+export type CardTypesState =
   | { kind: "waiting" | "loading" | "ready" }
   | { kind: "error"; message: string };
+
+// ResizeObserver can fire once for each React/layout phase in a single logical card transition
+// (public init, private-context loading, roster hydration). Reporting every intermediate height makes
+// the host iframe visibly bounce. Wait for a short quiet window, then publish only the final changed
+// height. This does not delay card data or confirmation readiness; it affects presentation only.
+export const CARD_RESIZE_SETTLE_MS = 80;
+
+export function createCoalescedCardResizeReporter(
+  measure: () => number,
+  report: (height: number) => void,
+  settleMs = CARD_RESIZE_SETTLE_MS,
+): { schedule: () => void; dispose: () => void } {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  let lastHeight = -1;
+  let disposed = false;
+
+  const schedule = () => {
+    if (disposed) return;
+    if (timer !== undefined) clearTimeout(timer);
+    timer = setTimeout(() => {
+      timer = undefined;
+      if (disposed) return;
+      const height = Math.ceil(measure());
+      if (!Number.isFinite(height) || height <= 0 || height === lastHeight) return;
+      lastHeight = height;
+      report(height);
+    }, Math.max(0, settleMs));
+  };
+
+  return {
+    schedule,
+    dispose: () => {
+      disposed = true;
+      if (timer !== undefined) clearTimeout(timer);
+      timer = undefined;
+    },
+  };
+}
+
+/** Keep the loading-to-ready transition on one reserved line so hydration does not resize the card. */
+export function CardTypesStatus({ state }: { state: CardTypesState }) {
+  const loading = state.kind === "loading";
+  const error = state.kind === "error";
+  const idle = !loading && !error;
+  return (
+    <div
+      data-card-types-status
+      role={error ? "status" : undefined}
+      aria-hidden={idle ? true : undefined}
+      style={{
+        minHeight: "0.9rem",
+        lineHeight: "0.9rem",
+        fontSize: "0.75rem",
+        color: "var(--text-dim)",
+        marginTop: 8,
+      }}
+    >
+      {loading ? (
+        <span
+          style={{
+            display: "block",
+            overflow: "hidden",
+            textOverflow: "ellipsis",
+            whiteSpace: "nowrap",
+          }}
+        >
+          Loading this account's saved types…
+        </span>
+      ) : error ? state.message : "\u00a0"}
+    </div>
+  );
+}
 
 type DeferredCollectionChallenge = Readonly<{
   frameNonce: string;
@@ -735,23 +807,30 @@ export function OpenChatCardPage() {
     );
   }, [appCurrency]);
 
-  // Size the host iframe to content: post the border-box height whenever it
-  // changes (ResizeObserver fires once on observe, giving the initial height).
+  // Size the host iframe to settled initialized content. The short quiet window coalesces React's
+  // public-init/private-hydration layout burst so the host never animates through transient heights.
+  // Before init there are no authoritative values to size or reveal, so do not report the empty
+  // read-only placeholder at all.
+  const cardInitialized = ctx !== null;
   useEffect(() => {
+    if (!cardInitialized) return;
     const el = rootRef.current;
     if (!el || typeof ResizeObserver === "undefined") return;
-    let last = -1;
-    const ro = new ResizeObserver(() => {
-      const h = Math.ceil(el.getBoundingClientRect().height);
-      if (h !== last && h > 0) {
-        last = h;
+    const reporter = createCoalescedCardResizeReporter(
+      () => el.getBoundingClientRect().height,
+      (height) => {
         const frameNonce = frameNonceRef.current;
-        if (frameNonce) post(buildResize(frameNonce, h));
-      }
-    });
+        if (frameNonce) post(buildResize(frameNonce, height));
+      },
+    );
+    const ro = new ResizeObserver(reporter.schedule);
     ro.observe(el);
-    return () => ro.disconnect();
-  }, [post]);
+    reporter.schedule();
+    return () => {
+      ro.disconnect();
+      reporter.dispose();
+    };
+  }, [post, cardInitialized]);
 
   const currencyOptions = useMemo(
     // Selected currency first, then USD/EUR/GBP, then the rest; fold the current
@@ -830,19 +909,7 @@ export function OpenChatCardPage() {
           boxShadow: "0 1px 3px rgba(0,0,0,0.35)",
         }}
       >
-        {typesState.kind === "loading" && (
-          <div style={{ fontSize: "0.75rem", color: "var(--text-dim)", marginTop: 8 }}>
-            Loading this account's saved types…
-          </div>
-        )}
-        {typesState.kind === "error" && (
-          <div
-            role="status"
-            style={{ fontSize: "0.75rem", color: "var(--text-dim)", marginTop: 8 }}
-          >
-            {typesState.message}
-          </div>
-        )}
+        <CardTypesStatus state={typesState} />
 
         {multi ? (
           readonly ? (

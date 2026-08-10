@@ -439,6 +439,34 @@ type OpenChatCardContextResult = variant {
     KeyUnavailable;
 };
 
+type OpenChatPrivateMatchContext = record {
+    sheet_id : text;
+    context_version : nat16;
+    app_subject : blob;
+    chat_handle : blob;
+    message_handle : blob;
+    app_id : nat32;
+    app_revision : nat64;
+    action_id : text;
+    source_binding : blob;
+    vetkd_public_key : blob;
+    encrypted_vet_key : blob;
+    templates_a_enc : opt blob;
+    templates_a_iv : opt blob;
+    templates_b_enc : opt blob;
+    templates_b_iv : opt blob;
+};
+
+type OpenChatPrivateMatchContextResult = variant {
+    Success : OpenChatPrivateMatchContext;
+    NotConfigured;
+    InvalidCapability;
+    NotLinked;
+    ChatNotLinked;
+    NotAuthorized;
+    KeyUnavailable;
+};
+
 service : {
     // Phase 1
     whoami : () -> (opt text) query;
@@ -534,4 +562,5 @@ service : {
     disconnect_openchat : (text, vec nat8, nat64) -> (DisconnectOpenChatResult);
     claim_openchat_chat_route : (text) -> (ClaimOpenChatChatRouteResult);
     openchat_card_context : (vec nat8, text, vec nat8) -> (OpenChatCardContextResult);
+    openchat_private_match_context : (vec nat8, text, vec nat8) -> (OpenChatPrivateMatchContextResult);
 }

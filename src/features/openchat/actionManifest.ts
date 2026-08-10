@@ -69,11 +69,16 @@ export type IouAppSurface = {
 export function resolvePublicOrigin(): string {
   const viteEnv = (import.meta as { env?: Record<string, unknown> }).env;
   const fromVite =
-    typeof viteEnv?.VITE_PUBLIC_ORIGIN === "string" ? viteEnv.VITE_PUBLIC_ORIGIN : undefined;
-  const nodeEnv = (globalThis as { process?: { env?: Record<string, string | undefined> } })
-    .process?.env;
+    typeof viteEnv?.VITE_PUBLIC_ORIGIN === "string"
+      ? viteEnv.VITE_PUBLIC_ORIGIN
+      : undefined;
+  const nodeEnv = (
+    globalThis as { process?: { env?: Record<string, string | undefined> } }
+  ).process?.env;
   const fromNode = nodeEnv?.OC_APP_PUBLIC_ORIGIN;
-  return (fromVite ?? fromNode ?? "http://127.0.0.1:3000").trim().replace(/\/+$/, "");
+  return (fromVite ?? fromNode ?? "http://127.0.0.1:3000")
+    .trim()
+    .replace(/\/+$/, "");
 }
 
 // The IOU app icon OpenChat's directory renders, inlined as a base64 data: URI (favicon.svg) so
@@ -153,10 +158,12 @@ Each object may contain these fields:
 - "amount": the amount in major currency units, as a JSON number (never a string).
 - "currency": the 3-letter ISO currency code. OPTIONAL - omit it when the message states no
   currency; IOU then uses the user's default currency.
-- "direction": phrases such as "owed to you", "you are owed", "due to you", or "payable to you"
-  mean "credit". Phrases such as "you owe", "owed by you", "due from you", or "payable by you"
-  mean "debt". Output the literal JSON value "credit" or "debt"; never copy a source phrase into
-  "direction". Keep the source's viewpoint; do not invert it.
+- "direction": phrases such as "owed to you", "you are owed", "you owe me", "due to you", or
+  "payable to you" mean "credit". Phrases such as "I owe", "we owe", "owed by you", "due from
+  you", or "payable by you" mean "debt". Output the literal JSON value "credit" or "debt"; never
+  copy a source phrase into "direction". The bare shorthand "owe 200 uber" means "debt" unless a
+  more specific phrase such as "owe me" says the other person owes the sender.
+  Keep the source's viewpoint; do not invert it.
 - "date": the transaction or due date as YYYY-MM-DD, but only when the source itself contains a
   date or an explicit relative-date phrase. A host calendar anchor, when supplied for text input,
   is reference context only for resolving relative phrases. Never output today's date unless the
@@ -181,19 +188,29 @@ export const IOU_MAX_MAJOR_AMOUNT = Number.MAX_SAFE_INTEGER / 100;
 // Optional plain-text evidence vocabulary for currencies whose normalized ISO value may differ
 // from the literal source token. OpenChat uses this only because the currency schema opts into the
 // generic text-evidence policy; image-only extraction is unaffected.
-export const IOU_CURRENCY_EVIDENCE_MAP: { value: string; keywords: string[] }[] = [
-  { value: "USD", keywords: ["$", "dollar", "dollars", "US dollar", "US dollars"] },
+export const IOU_CURRENCY_EVIDENCE_MAP: {
+  value: string;
+  keywords: string[];
+}[] = [
+  {
+    value: "USD",
+    keywords: ["$", "dollar", "dollars", "US dollar", "US dollars"],
+  },
   { value: "GBP", keywords: ["£", "pound sterling", "pounds sterling"] },
   { value: "EUR", keywords: ["€", "euro", "euros"] },
   { value: "JPY", keywords: ["¥", "yen"] },
   { value: "INR", keywords: ["₹", "rupee", "rupees"] },
-  { value: "EGP", keywords: ["E£", "Egyptian pound", "Egyptian pounds", "ج.م"] },
+  {
+    value: "EGP",
+    keywords: ["E£", "Egyptian pound", "Egyptian pounds", "ج.م"],
+  },
 ];
 
 // Extraction rules registered alongside the prompt (OpenChat's generic rules engine executes
 // them; the keywords/values here are IOU's data). "override" keyword_map + normalize run in the
-// deterministic post-pass, so IOU's own type vocabulary and numeric forms like "26k" are policy,
-// not inference.
+// deterministic post-pass, so IOU's neutral transaction-intent vocabulary and numeric forms like
+// "26k" are policy, not inference. Saved-type names/keywords are private account data and must
+// never appear here merely to make that type trigger a proposal.
 export const IOU_EXTRACTION_RULES: AiActionRule[] = [
   {
     kind: "keyword_map",
@@ -203,9 +220,6 @@ export const IOU_EXTRACTION_RULES: AiActionRule[] = [
       {
         value: "iou",
         keywords: [
-          "reservation",
-          "booking",
-          "rent",
           "due",
           "owed",
           "owes",
@@ -213,7 +227,7 @@ export const IOU_EXTRACTION_RULES: AiActionRule[] = [
           // omitted because keywords were matched as raw SUBSTRINGS, where "owe" fires on "power",
           // "shower" and "flower"; OpenChat now matches keywords on WORD BOUNDARIES, so it is safe and
           // a message that just says "owe …" finally gets a suggestion. The pronoun phrasings below
-          // are now redundant for matching but kept: they are also read as the type vocabulary.
+          // are redundant for matching but remain explicit, neutral ledger-intent cues.
           "owe",
           "i owe",
           "you owe",
@@ -241,11 +255,30 @@ export const IOU_EXTRACTION_RULES: AiActionRule[] = [
     map: [
       {
         value: "credit",
-        keywords: ["owed to you", "you are owed", "due to you", "payable to you"],
+        keywords: [
+          "owed to you",
+          "you are owed",
+          "due to you",
+          "payable to you",
+          "you owe",
+          "owe me",
+          "owes me",
+        ],
       },
       {
         value: "debt",
-        keywords: ["you owe", "owed by you", "due from you", "payable by you"],
+        keywords: [
+          "i owe",
+          "we owe",
+          "owe you",
+          "owe him",
+          "owe her",
+          "owe them",
+          "owed by you",
+          "due from you",
+          "payable by you",
+          "owe",
+        ],
       },
     ],
   },
@@ -269,8 +302,7 @@ export const IOU_EXTRACTION_RULES: AiActionRule[] = [
   { kind: "instruction", text: "Amounts like '26k' mean 26000." },
   {
     kind: "instruction",
-    text:
-      'FINAL FORMAT CHECK: map visible phrases like "OWED TO YOU" to exactly "direction":"credit" and "YOU OWE" to exactly "direction":"debt"; never use the phrase itself as the value. Any host calendar anchor is reference only: remove "date" unless the source visibly states a date or relative-date phrase. One transaction must be one object, never an array.',
+    text: 'FINAL FORMAT CHECK: map visible phrases like "YOU OWE ME" to exactly "direction":"credit" and "I OWE YOU" to exactly "direction":"debt"; bare shorthand like "OWE 200 UBER" means "debt"; never use the phrase itself as the value. Any host calendar anchor is reference only: remove "date" unless the source visibly states a date or relative-date phrase. One transaction must be one object, never an array.',
   },
 ];
 
@@ -310,7 +342,6 @@ export const iouActionManifest: IouActionManifest = {
         minLength: 10,
         maxLength: 10,
         format: "date",
-        "x-openchat-omit-for-image-only": true,
       },
       note: { type: "string", maxLength: 4_096, format: "utf8-no-nul" },
       // Declared so conformToSchema keeps it — an undeclared key is dropped before the card is built.
@@ -395,14 +426,29 @@ export const iouActionManifest: IouActionManifest = {
       url: `${resolvePublicOrigin()}/openchat/card`,
       display: "sheet",
     },
+    // "private_match": an invisible, credentialless matcher frame. OpenChat sends one exact NEW
+    // message only after separate per-chat user consent and a fresh transport-key-bound capability.
+    // The frame decrypts only the linked sheet's roster and returns a boolean; no Saved-type
+    // name/id/keyword/count is registered or posted back to OpenChat.
+    {
+      kind: "private_match",
+      url: `${resolvePublicOrigin()}/openchat/private-match`,
+      display: "sheet",
+    },
   ],
 };
 
 // ── Private template compatibility boundary ────────────────────────────────────────────────────
 // Account types are private E2E data. OpenChat's manifest is public and user-global, so values
 // accepted by these compatibility helpers are never serialized into the manifest.
-// Matching happens locally after import against only the linked account.
-export type ManifestTemplate = { id: string; name: string; keywords?: string[] };
+// Matching happens privately against only the account linked to that chat. With the separate
+// per-chat private-trigger consent enabled, an isolated matcher may use those encrypted values to
+// suggest IOU; this public manifest still cannot see or publish them.
+export type ManifestTemplate = {
+  id: string;
+  name: string;
+  keywords?: string[];
+};
 
 /** Public rule set for registration; private account templates are deliberately ignored. */
 export function buildIouRules(_templates: ManifestTemplate[]): AiActionRule[] {
@@ -411,7 +457,9 @@ export function buildIouRules(_templates: ManifestTemplate[]): AiActionRule[] {
 }
 
 /** Public output schema; it contains no fields derived from private account templates. */
-export function buildIouOutputSchema(_templates: ManifestTemplate[]): Record<string, unknown> {
+export function buildIouOutputSchema(
+  _templates: ManifestTemplate[],
+): Record<string, unknown> {
   const schema = JSON.parse(JSON.stringify(iouActionManifest.outputSchema)) as {
     properties: Record<string, unknown>;
     [k: string]: unknown;

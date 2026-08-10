@@ -13,62 +13,140 @@ import registration from "../../../docs/openchat-registration.json";
 
 describe("private account templates", () => {
   const templates = [
-    { id: "z9-abc123", name: "Reservation", keywords: ["private-reservation-trigger"] },
+    {
+      id: "z9-abc123",
+      name: "Reservation",
+      keywords: ["private-reservation-trigger"],
+    },
     { id: "y8-def456", name: "No Triggers", keywords: [] },
   ];
 
   it("never serializes template names or keywords into public rules", () => {
     const rules = buildIouRules(templates);
-    const km = rules.find((r) => r.kind === "keyword_map" && r.field === "template");
+    const km = rules.find(
+      (r) => r.kind === "keyword_map" && r.field === "template",
+    );
     expect(km).toBeUndefined();
     expect(JSON.stringify(rules)).not.toContain("Reservation");
     expect(JSON.stringify(rules)).not.toContain("private-reservation-trigger");
+  });
+
+  it("uses only neutral ledger-intent cues for public kind matching", () => {
+    const publicKindRule = buildIouRules([]).find(
+      (rule) => rule.kind === "keyword_map" && rule.field === "kind",
+    );
+    expect(publicKindRule?.kind).toBe("keyword_map");
+    if (!publicKindRule || publicKindRule.kind !== "keyword_map") return;
+
+    const publicIouKeywords = publicKindRule.map.find(
+      (entry) => entry.value === "iou",
+    )?.keywords;
+    expect(publicIouKeywords).toEqual([
+      "due",
+      "owed",
+      "owes",
+      "owe",
+      "i owe",
+      "you owe",
+      "we owe",
+      "they owe",
+      "owe me",
+      "owe you",
+      "owe him",
+      "owe her",
+      "owe them",
+      "instalment",
+      "installment",
+    ]);
+
+    // These are plausible private Saved-type names, not evidence of ledger intent by themselves.
+    // They must not become public triggers simply because one account happens to use that type.
+    expect(publicIouKeywords).not.toEqual(
+      expect.arrayContaining([
+        "reservation",
+        "booking",
+        "rent",
+        "school",
+        "family expense",
+      ]),
+    );
+
+    const documentedRules =
+      registration.rules as typeof iouActionManifest.rules;
+    const documentedKindRule = documentedRules.find(
+      (rule) => rule.kind === "keyword_map" && rule.field === "kind",
+    );
+    expect(documentedKindRule).toEqual(publicKindRule);
   });
 
   it("does not combine every account's types into one public per-user roster", () => {
     // Reproduces the former cross-account roster: neither account's private
     // values may appear in a public, user-global OpenChat manifest.
     const twoAccounts = [
-      { id: "house-1", name: "Reservation", keywords: ["reservation", "booking"] }, // House account
+      {
+        id: "house-1",
+        name: "Reservation",
+        keywords: ["reservation", "booking"],
+      }, // House account
       { id: "child-1", name: "Allowance", keywords: ["allowance"] }, // the child account
     ];
     const rules = buildIouRules(twoAccounts);
-    const km = rules.find((r) => r.kind === "keyword_map" && r.field === "template");
+    const km = rules.find(
+      (r) => r.kind === "keyword_map" && r.field === "template",
+    );
     expect(km).toBeUndefined();
     // The vision path must not receive a private roster instruction either.
-    const roster = rules.find((r) => r.kind === "instruction" && /saved types/.test(r.text));
+    const roster = rules.find(
+      (r) => r.kind === "instruction" && /saved types/.test(r.text),
+    );
     expect(roster).toBeUndefined();
     expect(JSON.stringify(rules)).not.toContain("Reservation");
     expect(JSON.stringify(rules)).not.toContain("Allowance");
   });
 
   it("never advertises a template field sourced from private account data", () => {
-    expect((buildIouOutputSchema(templates).properties as Record<string, unknown>).template).toBeUndefined();
+    expect(
+      (buildIouOutputSchema(templates).properties as Record<string, unknown>)
+        .template,
+    ).toBeUndefined();
     // No routable templates -> no `template` property (nothing would ever set it).
     expect(
-      (buildIouOutputSchema([{ id: "x", name: "X", keywords: [] }]).properties as Record<string, unknown>)
-        .template,
+      (
+        buildIouOutputSchema([{ id: "x", name: "X", keywords: [] }])
+          .properties as Record<string, unknown>
+      ).template,
     ).toBeUndefined();
   });
 
   it("publishes the safe transaction kind as Type without publishing saved account types", () => {
-    expect(iouActionManifest.card.fields).toContainEqual({ key: "kind", label: "Type" });
+    expect(iouActionManifest.card.fields).toContainEqual({
+      key: "kind",
+      label: "Type",
+    });
 
     const publicCard = JSON.stringify(iouActionManifest.card);
     expect(publicCard).not.toContain("Reservation");
     expect(publicCard).not.toContain("private-reservation-trigger");
-    expect(iouActionManifest.card.fields.map((field) => field.key)).not.toContain("template");
-    expect(iouActionManifest.card.fields.map((field) => field.key)).not.toContain("template_ref");
+    expect(
+      iouActionManifest.card.fields.map((field) => field.key),
+    ).not.toContain("template");
+    expect(
+      iouActionManifest.card.fields.map((field) => field.key),
+    ).not.toContain("template_ref");
   });
 
   it("keeps the TS card fields byte-for-field aligned with the documented and registered rows", async () => {
-    const documented = (registration as {
-      card: { rows: { label: string; valueKey: string }[] };
-    }).card.rows.map((row) => ({ key: row.valueKey, label: row.label }));
+    const documented = (
+      registration as {
+        card: { rows: { label: string; valueKey: string }[] };
+      }
+    ).card.rows.map((row) => ({ key: row.valueKey, label: row.label }));
     const { buildManifestWire } = await import("./registerAiApp");
-    const registered = (buildManifestWire("") as unknown as {
-      actions: { card: { rows: { field: string; label: string }[] } }[];
-    }).actions[0].card.rows.map((row) => ({ key: row.field, label: row.label }));
+    const registered = (
+      buildManifestWire("") as unknown as {
+        actions: { card: { rows: { field: string; label: string }[] } }[];
+      }
+    ).actions[0].card.rows.map((row) => ({ key: row.field, label: row.label }));
 
     expect(iouActionManifest.card.fields).toEqual(documented);
     expect(iouActionManifest.card.fields).toEqual(registered);
@@ -99,36 +177,53 @@ describe("invalid attested-card guardrails", () => {
       "kind",
       "direction",
     ]);
-    expect(buildIouOutputSchema([]).required as string[]).not.toContain("currency");
-    expect(buildIouOutputSchema([]).required as string[]).not.toContain("message");
+    expect(buildIouOutputSchema([]).required as string[]).not.toContain(
+      "currency",
+    );
+    expect(buildIouOutputSchema([]).required as string[]).not.toContain(
+      "message",
+    );
   });
 
   it("schema starts at the exact value that rounds to one minor unit", () => {
-    const amount = (iouActionManifest.outputSchema.properties as Record<string, unknown>)
-      .amount as Record<string, unknown>;
+    const amount = (
+      iouActionManifest.outputSchema.properties as Record<string, unknown>
+    ).amount as Record<string, unknown>;
     expect(amount.type).toBe("number");
     expect(amount.minimum).toBe(IOU_MIN_MAJOR_AMOUNT);
     expect(amount.exclusiveMinimum).toBeUndefined();
     // Survives the deep clone into the registered (template-enriched) schema too.
-    const enriched = (buildIouOutputSchema([]).properties as Record<string, unknown>)
-      .amount as Record<string, unknown>;
+    const enriched = (
+      buildIouOutputSchema([]).properties as Record<string, unknown>
+    ).amount as Record<string, unknown>;
     expect(enriched.minimum).toBe(IOU_MIN_MAJOR_AMOUNT);
     expect(enriched.exclusiveMinimum).toBeUndefined();
   });
 
   it("parseDraft rejects a draft missing amount or with amount 0 (the manifest constraints are real)", () => {
     // Exactly the live "hi" extraction: amount 0 must NOT parse.
-    const zero = parseDraft({ kind: "settlement", amount: 0, currency: "USD", note: "hi" });
+    const zero = parseDraft({
+      kind: "settlement",
+      amount: 0,
+      currency: "USD",
+      note: "hi",
+    });
     expect(zero.ok).toBe(false);
     if (!zero.ok) expect(zero.errors[0]).toMatch(/amount/i);
     // Missing amount must NOT parse either (schema `required` mirrors this).
-    const missing = parseDraft({ kind: "settlement", currency: "USD", note: "hi" });
+    const missing = parseDraft({
+      kind: "settlement",
+      currency: "USD",
+      note: "hi",
+    });
     expect(missing.ok).toBe(false);
     if (!missing.ok) expect(missing.errors.join(" ")).toMatch(/amount/i);
     // Negative amounts and positive values that still round to zero minor units are equally out.
     expect(parseDraft({ amount: -5, currency: "USD" }).ok).toBe(false);
     expect(parseDraft({ amount: 0.0049, currency: "USD" }).ok).toBe(false);
-    expect(parseDraft({ amount: IOU_MIN_MAJOR_AMOUNT, currency: "USD" }).ok).toBe(true);
+    expect(
+      parseDraft({ amount: IOU_MIN_MAJOR_AMOUNT, currency: "USD" }).ok,
+    ).toBe(true);
   });
 });
 
@@ -152,10 +247,17 @@ describe("iouActionManifest", () => {
   });
 
   it("card direction labels cover exactly the parser's directions", () => {
-    expect(Object.keys(iouActionManifest.card.directionLabels).sort()).toEqual(["credit", "debt"]);
+    expect(Object.keys(iouActionManifest.card.directionLabels).sort()).toEqual([
+      "credit",
+      "debt",
+    ]);
     // both directions parse
-    expect(parseDraft({ amount: 1, currency: "USD", direction: "credit" }).ok).toBe(true);
-    expect(parseDraft({ amount: 1, currency: "USD", direction: "debt" }).ok).toBe(true);
+    expect(
+      parseDraft({ amount: 1, currency: "USD", direction: "credit" }).ok,
+    ).toBe(true);
+    expect(
+      parseDraft({ amount: 1, currency: "USD", direction: "debt" }).ok,
+    ).toBe(true);
   });
 
   it("forwards to the relay's OpenChat ingestion path with provenance auth", () => {
@@ -181,7 +283,9 @@ describe("iouActionManifest", () => {
   });
 
   it("publishes a per-invocation opaque-token chat-routing surface", () => {
-    const routing = iouActionManifest.surfaces.find((x) => x.kind === "chat_link");
+    const routing = iouActionManifest.surfaces.find(
+      (x) => x.kind === "chat_link",
+    );
     expect(routing).toBeDefined();
     expect(routing!.display).toBe("external");
     expect(routing!.url).toMatch(
@@ -192,7 +296,10 @@ describe("iouActionManifest", () => {
       expect(
         surface.url
           .replaceAll("{appId}", "1")
-          .replaceAll("{chatLinkToken}", "CAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAg"),
+          .replaceAll(
+            "{chatLinkToken}",
+            "CAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAg",
+          ),
       ).not.toMatch(/[{}]/);
     }
   });
@@ -224,9 +331,24 @@ describe("iouActionManifest", () => {
     expect(s!.url).toMatch(/^https?:\/\/[^/]+\/openchat\/card$/);
   });
 
+  it("declares a metadata-free private matcher surface", () => {
+    const s = iouActionManifest.surfaces.find(
+      (x) => x.kind === "private_match",
+    );
+    expect(s).toBeDefined();
+    expect(s!.display).toBe("sheet");
+    expect(s!.url).toMatch(/^https?:\/\/[^/]+\/openchat\/private-match$/);
+    expect(s!.url).not.toMatch(/[?#]/);
+    expect(JSON.stringify(s)).not.toMatch(
+      /school|reservation|saved.?type|keyword/i,
+    );
+  });
+
   it("every declared surface URL parses after public app-id substitution", () => {
     for (const surface of iouActionManifest.surfaces) {
-      expect(() => new URL(surface.url.replaceAll("{appId}", "7"))).not.toThrow();
+      expect(
+        () => new URL(surface.url.replaceAll("{appId}", "7")),
+      ).not.toThrow();
     }
   });
 });
@@ -258,9 +380,11 @@ describe("registered wire — schema evidence stays private and public rows stay
 
     const { buildManifestWire } = await import("./registerAiApp");
     const responseSchema = JSON.parse(
-      (buildManifestWire("") as unknown as {
-        actions: { response_schema: string }[];
-      }).actions[0].response_schema,
+      (
+        buildManifestWire("") as unknown as {
+          actions: { response_schema: string }[];
+        }
+      ).actions[0].response_schema,
     ) as unknown;
     const documentedSchema = (registration as { responseSchema: unknown })
       .responseSchema;
@@ -272,12 +396,21 @@ describe("registered wire — schema evidence stays private and public rows stay
   it("keeps from_message evidence in the payload schema but off the public card rows", async () => {
     const { buildManifestWire } = await import("./registerAiApp");
     const wire = buildManifestWire("") as unknown as {
-      actions: { response_schema: string; rules: unknown[]; card: { rows: { field: string; label: string }[] } }[];
+      actions: {
+        response_schema: string;
+        rules: unknown[];
+        card: { rows: { field: string; label: string }[] };
+      }[];
     };
     const action = wire.actions[0];
-    const schema = JSON.parse(action.response_schema) as { properties?: Record<string, unknown> };
+    const schema = JSON.parse(action.response_schema) as {
+      properties?: Record<string, unknown>;
+    };
     const fromMessageFields = buildIouRules([])
-      .filter((r): r is Extract<typeof r, { kind: "from_message" }> => r.kind === "from_message")
+      .filter(
+        (r): r is Extract<typeof r, { kind: "from_message" }> =>
+          r.kind === "from_message",
+      )
       .map((r) => r.field);
 
     expect(fromMessageFields.length).toBeGreaterThan(0);
@@ -290,9 +423,11 @@ describe("registered wire — schema evidence stays private and public rows stay
   it("declares only the compact user-reviewed fields as public card rows", async () => {
     // Pin the complete public list and explicitly exclude private/redundant channels.
     const { buildManifestWire } = await import("./registerAiApp");
-    const rows = (buildManifestWire("") as unknown as {
-      actions: { card: { rows: { field: string }[] } }[];
-    }).actions[0].card.rows;
+    const rows = (
+      buildManifestWire("") as unknown as {
+        actions: { card: { rows: { field: string }[] } }[];
+      }
+    ).actions[0].card.rows;
     expect(rows.map((r) => r.field)).toEqual([
       "amount",
       "currency",
@@ -306,8 +441,12 @@ describe("registered wire — schema evidence stays private and public rows stay
   it("stamps the raw message on `message`, never on `note`", () => {
     // note is the model's own per-entry description now; stamping the message over it gave every row
     // of a multi-transaction card the whole message.
-    const fromMessage = buildIouRules([]).filter((r) => r.kind === "from_message");
-    expect(fromMessage.map((r) => (r as { field: string }).field)).toEqual(["message"]);
+    const fromMessage = buildIouRules([]).filter(
+      (r) => r.kind === "from_message",
+    );
+    expect(fromMessage.map((r) => (r as { field: string }).field)).toEqual([
+      "message",
+    ]);
   });
 });
 
@@ -336,7 +475,9 @@ describe("the extraction prompt tells the model a single line can hold several t
     // The model only ever sees what was registered on-chain; a prompt edit that is not re-registered
     // changes nothing (this cost a full round of live testing to learn).
     const doc = registration as { promptTemplate?: string };
-    expect(doc.promptTemplate ?? "").toMatch(/one LINE can hold several\s+transactions/i);
+    expect(doc.promptTemplate ?? "").toMatch(
+      /one LINE can hold several\s+transactions/i,
+    );
   });
 
   it("forbids repeating one observed transaction as duplicate output", () => {
@@ -355,7 +496,9 @@ describe("the extraction prompt tells the model a single line can hold several t
   it("puts a numeric-occurrence cardinality check before classification and repeats it last", () => {
     const p = IOU_EXTRACTION_PROMPT;
     const normalized = p.replace(/\s+/g, " ");
-    const cardinality = p.indexOf("CARDINALITY — APPLY THIS BEFORE CLASSIFICATION");
+    const cardinality = p.indexOf(
+      "CARDINALITY — APPLY THIS BEFORE CLASSIFICATION",
+    );
     const kind = p.indexOf('- "kind"');
     const finalCheck = p.lastIndexOf("FINAL COUNT CHECK");
 
@@ -365,8 +508,12 @@ describe("the extraction prompt tells the model a single line can hold several t
     expect(p).toMatch(
       /exactly one distinct transaction amount[\s\S]*exactly\s+ONE JSON\s+object/i,
     );
-    expect(normalized).toMatch(/never create separate debtor and creditor views/i);
-    expect(normalized).toMatch(/number of output objects[^.]*number of distinct transactions/i);
+    expect(normalized).toMatch(
+      /never create separate debtor and creditor views/i,
+    );
+    expect(normalized).toMatch(
+      /number of output objects[^.]*number of distinct transactions/i,
+    );
     expect(normalized).toMatch(/one transaction[^.]*object, not an array/i);
   });
 
@@ -374,12 +521,20 @@ describe("the extraction prompt tells the model a single line can hold several t
     const p = IOU_EXTRACTION_PROMPT;
     const normalized = p.replace(/\s+/g, " ");
     expect(p).toMatch(/"owed to you"[^.]*"credit"/i);
-    expect(p).toMatch(/"you owe"[^.]*"debt"/i);
-    expect(normalized).toMatch(/output the literal JSON value "credit" or "debt"/i);
+    expect(p).toMatch(/"you owe me"[^.]*"credit"/i);
+    expect(p).toMatch(/"I owe"[^.]*"debt"/i);
+    expect(p).toMatch(/bare shorthand "owe 200 uber"[^.]*"debt"/i);
+    expect(normalized).toMatch(
+      /output the literal JSON value "credit" or "debt"/i,
+    );
     expect(normalized).toMatch(/never copy a source phrase into "direction"/i);
     expect(p).toMatch(/host calendar anchor[^.]*reference\s+context only/i);
-    expect(normalized).toMatch(/never output today's date unless the source itself says "today"/i);
-    expect(normalized).toMatch(/no visible date digits or date words[^.]*omit "date"/i);
+    expect(normalized).toMatch(
+      /never output today's date unless the source itself says "today"/i,
+    );
+    expect(normalized).toMatch(
+      /no visible date digits or date words[^.]*omit "date"/i,
+    );
     expect(iouActionManifest.rules).toContainEqual({
       kind: "keyword_map",
       field: "direction",
@@ -387,11 +542,30 @@ describe("the extraction prompt tells the model a single line can hold several t
       map: [
         {
           value: "credit",
-          keywords: ["owed to you", "you are owed", "due to you", "payable to you"],
+          keywords: [
+            "owed to you",
+            "you are owed",
+            "due to you",
+            "payable to you",
+            "you owe",
+            "owe me",
+            "owes me",
+          ],
         },
         {
           value: "debt",
-          keywords: ["you owe", "owed by you", "due from you", "payable by you"],
+          keywords: [
+            "i owe",
+            "we owe",
+            "owe you",
+            "owe him",
+            "owe her",
+            "owe them",
+            "owed by you",
+            "due from you",
+            "payable by you",
+            "owe",
+          ],
         },
       ],
     });
@@ -408,83 +582,103 @@ describe("the extraction prompt tells the model a single line can hold several t
 
   it("does not turn receipt totals/components or a repeated total into extra transactions", () => {
     const normalized = IOU_EXTRACTION_PROMPT.replace(/\s+/g, " ");
-    expect(normalized).toMatch(/line-item prices[^.]*subtotal[^.]*tax[^.]*tip[^.]*change[^.]*balance/i);
+    expect(normalized).toMatch(
+      /line-item prices[^.]*subtotal[^.]*tax[^.]*tip[^.]*change[^.]*balance/i,
+    );
     expect(normalized).toMatch(
       /repeated displays? of (?:the same transaction|its) total[^.]*not (?:a )?separate/i,
     );
-    expect(normalized).toMatch(/equal amounts[^.]*distinct transaction descriptions[^.]*separate/i);
-    expect(normalized).toMatch(/dates[^.]*times[^.]*IDs[^.]*quantities[^.]*percentages[^.]*exchange rates/i);
+    expect(normalized).toMatch(
+      /equal amounts[^.]*distinct transaction descriptions[^.]*separate/i,
+    );
+    expect(normalized).toMatch(
+      /dates[^.]*times[^.]*IDs[^.]*quantities[^.]*percentages[^.]*exchange rates/i,
+    );
   });
 
   it("ships the cardinality, direction, and date guards in the registered wire", () => {
-    const prompt = (registration as { promptTemplate?: string }).promptTemplate ?? "";
+    const prompt =
+      (registration as { promptTemplate?: string }).promptTemplate ?? "";
     expect(prompt).toContain("CARDINALITY — APPLY THIS BEFORE CLASSIFICATION");
     expect(prompt).toContain("FINAL COUNT CHECK");
     expect(prompt).toMatch(/"owed to you"[^.]*"credit"/i);
     expect(prompt).toMatch(/literal JSON value "credit" or "debt"/i);
-    expect(prompt).toMatch(/host calendar anchor[^.]*reference\s+context only/i);
+    expect(prompt).toMatch(
+      /host calendar anchor[^.]*reference\s+context only/i,
+    );
     expect(prompt.replace(/\s+/g, " ")).toMatch(
       /no visible date digits or date words[^.]*omit "date"/i,
     );
     expect(prompt).toBe(IOU_EXTRACTION_PROMPT);
 
     const finalRule = iouActionManifest.rules.at(-1);
-    expect(iouActionManifest.rules).toContainEqual({ kind: "context", provide: ["today"] });
+    expect(iouActionManifest.rules).toContainEqual({
+      kind: "context",
+      provide: ["today"],
+    });
     expect(finalRule).toEqual({
       kind: "instruction",
-      text:
-        'FINAL FORMAT CHECK: map visible phrases like "OWED TO YOU" to exactly "direction":"credit" and "YOU OWE" to exactly "direction":"debt"; never use the phrase itself as the value. Any host calendar anchor is reference only: remove "date" unless the source visibly states a date or relative-date phrase. One transaction must be one object, never an array.',
+      text: 'FINAL FORMAT CHECK: map visible phrases like "YOU OWE ME" to exactly "direction":"credit" and "I OWE YOU" to exactly "direction":"debt"; bare shorthand like "OWE 200 UBER" means "debt"; never use the phrase itself as the value. Any host calendar anchor is reference only: remove "date" unless the source visibly states a date or relative-date phrase. One transaction must be one object, never an array.',
     });
     expect((registration.rules as unknown[]).at(-1)).toEqual(finalRule);
   });
 
   it("does not require redundant model-authored message text for image extraction", () => {
     const p = IOU_EXTRACTION_PROMPT;
-    expect(p).toMatch(/"message"[^.]*plain-text input[^.]*omit for image input/i);
+    expect(p).toMatch(
+      /"message"[^.]*plain-text input[^.]*omit for image input/i,
+    );
     expect(p).not.toMatch(/image input[^.]*exact visible text/i);
-    expect(iouActionManifest.outputSchema.required as string[]).not.toContain("message");
+    expect(iouActionManifest.outputSchema.required as string[]).not.toContain(
+      "message",
+    );
   });
 
-  it("ships the optional image-message policy in the registered wire", () => {
-    const prompt = (registration as { promptTemplate?: string }).promptTemplate ?? "";
-    expect(prompt).toMatch(/"message"[^.]*plain-text input[^.]*omit for image input/i);
+  it("keeps image dates reviewable while omitting only model-authored image message text", () => {
+    const prompt =
+      (registration as { promptTemplate?: string }).promptTemplate ?? "";
+    expect(prompt).toMatch(
+      /"message"[^.]*plain-text input[^.]*omit for image input/i,
+    );
     const registeredSchema = registration.responseSchema as {
       required?: string[];
       properties?: Record<string, Record<string, unknown>>;
     };
-    const sourceProperties = iouActionManifest.outputSchema.properties as Record<
-      string,
-      Record<string, unknown>
-    >;
+    const sourceProperties = iouActionManifest.outputSchema
+      .properties as Record<string, Record<string, unknown>>;
     expect(registeredSchema.required).not.toContain("message");
-    expect(sourceProperties.date).toMatchObject({
-      "x-openchat-omit-for-image-only": true,
-    });
+    expect(sourceProperties.date).not.toHaveProperty(
+      "x-openchat-omit-for-image-only",
+    );
     expect(sourceProperties.message).toMatchObject({
       "x-openchat-omit-for-image-only": true,
     });
-    expect(registeredSchema.properties?.date).toMatchObject({
-      "x-openchat-omit-for-image-only": true,
-    });
+    expect(registeredSchema.properties?.date).not.toHaveProperty(
+      "x-openchat-omit-for-image-only",
+    );
     expect(registeredSchema.properties?.message).toMatchObject({
       "x-openchat-omit-for-image-only": true,
     });
   });
 
   it("ships the generic plain-text currency evidence contract and its exact aliases", async () => {
-    const sourceCurrency = (iouActionManifest.outputSchema.properties as Record<
-      string,
-      Record<string, unknown>
-    >).currency;
+    const sourceCurrency = (
+      iouActionManifest.outputSchema.properties as Record<
+        string,
+        Record<string, unknown>
+      >
+    ).currency;
     const documentedCurrency = (
       registration.responseSchema as {
         properties?: Record<string, Record<string, unknown>>;
       }
     ).properties?.currency;
     const { buildManifestWire } = await import("./registerAiApp");
-    const action = (buildManifestWire("") as unknown as {
-      actions: { response_schema: string; rules: unknown[] }[];
-    }).actions[0];
+    const action = (
+      buildManifestWire("") as unknown as {
+        actions: { response_schema: string; rules: unknown[] }[];
+      }
+    ).actions[0];
     const registeredCurrency = (
       JSON.parse(action.response_schema) as {
         properties?: Record<string, Record<string, unknown>>;
@@ -503,5 +697,4 @@ describe("the extraction prompt tells the model a single line can hold several t
     expect(buildIouRules([])).toContainEqual(expectedRule);
     expect(registration.rules).toContainEqual(expectedRule);
   });
-
 });

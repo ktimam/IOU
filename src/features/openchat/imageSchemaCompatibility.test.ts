@@ -5,6 +5,7 @@ import {
   IOU_MAX_MAJOR_AMOUNT,
   IOU_MIN_MAJOR_AMOUNT,
 } from "./actionManifest";
+import { buildConfirmPayload, initToFormState } from "./cardBridge";
 import { parseDraft } from "../entries/draft";
 import { buildManifestWire } from "./registerAiApp";
 
@@ -45,8 +46,8 @@ function expectImageSafeOptionalFields(schema: unknown): void {
     format: "date",
     minLength: 10,
     maxLength: 10,
-    "x-openchat-omit-for-image-only": true,
   });
+  expect(properties.date).not.toHaveProperty("x-openchat-omit-for-image-only");
   expect(properties.note).toMatchObject({
     type: "string",
     maxLength: 4_096,
@@ -67,11 +68,36 @@ function expectImageSafeOptionalFields(schema: unknown): void {
 }
 
 describe("OpenChat image extraction compatibility", () => {
-  it("declares bounded optional vision fields and strips unreviewed image-only date text", () => {
+  it("declares a bounded reviewable image date while still omitting image-only message text", () => {
     expectImageSafeOptionalFields(buildIouOutputSchema([]));
     expectImageSafeOptionalFields(
       (registration as { responseSchema: unknown }).responseSchema,
     );
+  });
+
+  it("preserves receipt-2's visible 04 Jul 2026 date through card review and explicit import", () => {
+    // Regression evidence: receipt-2.png (SHA-256 71BC0C1D...3A8012) visibly contains
+    // `Date: 04 Jul 2026 03:19 PM`. IOU stores the date portion as its canonical YYYY-MM-DD value;
+    // model inference/OCR remains an OpenChat responsibility, while this test pins IOU's handoff.
+    const card = initToFormState({
+      kind: "settlement",
+      amount: 9_757,
+      currency: "EGP",
+      direction: "credit",
+      date: "2026-07-04",
+      note: "Bill Payments - M9-4A-01",
+    });
+    expect(card.date).toBe("2026-07-04");
+
+    const confirmed = buildConfirmPayload(card);
+    expect(confirmed.date).toBe("2026-07-04");
+    const imported = parseDraft(confirmed, undefined, { dateEvidence: "explicit-only" });
+    expect(imported.ok).toBe(true);
+    if (imported.ok) {
+      expect(new Date(imported.value.initial.ts ?? 0).toISOString().slice(0, 10)).toBe(
+        "2026-07-04",
+      );
+    }
   });
 
   it("registers the same constrained schema and the exact rows the IOU attester recomputes", () => {

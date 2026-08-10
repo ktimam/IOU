@@ -4866,6 +4866,34 @@ enum RedeemAiAppCardCapabilityResponse {
     InvalidRequest(String),
 }
 
+#[derive(CandidType, Deserialize)]
+struct RedeemAiAppPrivateMatchCapabilityArgs {
+    token: Vec<u8>,
+    recipient_key_scheme: String,
+    recipient_public_key: Vec<u8>,
+}
+
+#[derive(CandidType, Deserialize)]
+struct RedeemAiAppPrivateMatchCapabilitySuccess {
+    context: RedeemedAiAppCardContext,
+    source_binding: Vec<u8>,
+    app_canister_id: Principal,
+    recipient_key_scheme: String,
+    recipient_public_key: Vec<u8>,
+    expires_at: u64,
+}
+
+#[derive(CandidType, Deserialize)]
+#[allow(clippy::large_enum_variant)]
+enum RedeemAiAppPrivateMatchCapabilityResponse {
+    Success(RedeemAiAppPrivateMatchCapabilitySuccess),
+    NotFound,
+    Expired,
+    NotAuthorized,
+    AppUnavailable,
+    InvalidRequest(String),
+}
+
 #[derive(Clone, CandidType, Deserialize, Debug, PartialEq, Eq)]
 pub struct OpenChatCardContext {
     pub sheet_id: String,
@@ -4888,6 +4916,40 @@ pub struct OpenChatCardContext {
 #[allow(clippy::large_enum_variant)] // Keep the public Candid result shape stable.
 pub enum OpenChatCardContextResult {
     Success(OpenChatCardContext),
+    NotConfigured,
+    InvalidCapability,
+    NotLinked,
+    ChatNotLinked,
+    NotAuthorized,
+    KeyUnavailable,
+}
+
+/// Encrypted account-local Saved-type roster released to one fresh anonymous matcher frame.
+/// The authoritative source commitment is public to that frame only; the canister never receives
+/// the plaintext message and cannot decrypt or inspect the roster.
+#[derive(Clone, CandidType, Deserialize, Debug, PartialEq, Eq)]
+pub struct OpenChatPrivateMatchContext {
+    pub sheet_id: String,
+    pub context_version: u16,
+    pub app_subject: Vec<u8>,
+    pub chat_handle: Vec<u8>,
+    pub message_handle: Vec<u8>,
+    pub app_id: u32,
+    pub app_revision: u64,
+    pub action_id: String,
+    pub source_binding: Vec<u8>,
+    pub vetkd_public_key: Vec<u8>,
+    pub encrypted_vet_key: Vec<u8>,
+    pub templates_a_enc: Option<Vec<u8>>,
+    pub templates_a_iv: Option<Vec<u8>>,
+    pub templates_b_enc: Option<Vec<u8>>,
+    pub templates_b_iv: Option<Vec<u8>>,
+}
+
+#[derive(Clone, CandidType, Deserialize, Debug, PartialEq, Eq)]
+#[allow(clippy::large_enum_variant)]
+pub enum OpenChatPrivateMatchContextResult {
+    Success(OpenChatPrivateMatchContext),
     NotConfigured,
     InvalidCapability,
     NotLinked,
@@ -5095,6 +5157,184 @@ async fn openchat_card_context(
         app_id: grant.context.app_id,
         app_revision: grant.context.app_revision,
         action_id: grant.context.action_id,
+        vetkd_public_key,
+        encrypted_vet_key: derived.encrypted_key,
+        templates_a_enc: pair.templates_a_enc,
+        templates_a_iv: pair.templates_a_iv,
+        templates_b_enc: pair.templates_b_enc,
+        templates_b_iv: pair.templates_b_iv,
+    })
+}
+
+/// Redeem an exact-message private-match capability and release the linked sheet's encrypted
+/// Saved-type roster only to the requesting iframe's fresh vetKD transport key. The browser frame
+/// must reproduce `source_binding` from the exact text before it unwraps this material. This
+/// canister sees neither the text nor the decrypted roster and therefore cannot act as a keyword
+/// membership oracle.
+#[ic_cdk::update]
+async fn openchat_private_match_context(
+    token: Vec<u8>,
+    recipient_key_scheme: String,
+    transport_public_key: Vec<u8>,
+) -> OpenChatPrivateMatchContextResult {
+    const IOU_PRIVATE_MATCH_KEY_SCHEME: &str = "iou.vetkd.bls12-381.v1";
+    if token.len() != 32
+        || recipient_key_scheme != IOU_PRIVATE_MATCH_KEY_SCHEME
+        || transport_public_key.len() != 48
+    {
+        return OpenChatPrivateMatchContextResult::InvalidCapability;
+    }
+    let Some(user_index_canister_id) = CONFIG.with(|c| {
+        c.borrow()
+            .get()
+            .openchat_user_index_canister_id
+    }) else {
+        return OpenChatPrivateMatchContextResult::NotConfigured;
+    };
+
+    let response = match ic_cdk::call::Call::bounded_wait(
+        user_index_canister_id,
+        "c2c_redeem_ai_app_private_match_capability",
+    )
+    .with_arg(&RedeemAiAppPrivateMatchCapabilityArgs {
+        token,
+        recipient_key_scheme: recipient_key_scheme.clone(),
+        recipient_public_key: transport_public_key.clone(),
+    })
+    .await
+    {
+        Ok(response) => response,
+        Err(_) => return OpenChatPrivateMatchContextResult::InvalidCapability,
+    };
+    let redeemed: RedeemAiAppPrivateMatchCapabilityResponse = match response.candid() {
+        Ok(value) => value,
+        Err(_) => return OpenChatPrivateMatchContextResult::InvalidCapability,
+    };
+    let grant = match redeemed {
+        RedeemAiAppPrivateMatchCapabilityResponse::Success(value) => value,
+        RedeemAiAppPrivateMatchCapabilityResponse::NotFound
+        | RedeemAiAppPrivateMatchCapabilityResponse::Expired
+        | RedeemAiAppPrivateMatchCapabilityResponse::NotAuthorized
+        | RedeemAiAppPrivateMatchCapabilityResponse::AppUnavailable
+        | RedeemAiAppPrivateMatchCapabilityResponse::InvalidRequest(_) => {
+            return OpenChatPrivateMatchContextResult::InvalidCapability
+        }
+    };
+
+    let now_ms = ic_cdk::api::time() / 1_000_000;
+    if grant.app_canister_id != ic_cdk::api::canister_self()
+        || grant.recipient_key_scheme != recipient_key_scheme
+        || grant.recipient_public_key != transport_public_key
+        || grant.source_binding.len() != 32
+        || grant.expires_at <= now_ms
+        || !valid_app_scoped_card_context(&AppScopedCardContextV1 {
+            context_version: grant.context.context_version,
+            app_subject: grant.context.app_subject.clone(),
+            chat_handle: grant.context.chat_handle.clone(),
+            message_handle: grant.context.message_handle.clone(),
+            app_id: grant.context.app_id,
+            app_revision: grant.context.app_revision,
+            action_id: grant.context.action_id.clone(),
+        })
+    {
+        return OpenChatPrivateMatchContextResult::InvalidCapability;
+    }
+    let Some(binding) = openchat_binding_for_subject(
+        user_index_canister_id,
+        grant.context.app_id,
+        &grant.context.app_subject,
+    ) else {
+        return OpenChatPrivateMatchContextResult::NotLinked;
+    };
+    let Some(chat_handle_key) = scoped_chat_handle_key(&grant.context.chat_handle) else {
+        return OpenChatPrivateMatchContextResult::InvalidCapability;
+    };
+    if binding.app_revision != Some(grant.context.app_revision)
+        || binding.app_canister_id != Some(ic_cdk::api::canister_self())
+        || binding.key_version.is_none()
+    {
+        return OpenChatPrivateMatchContextResult::NotAuthorized;
+    }
+    let Some(sheet_id) = linked_sheet_for(binding.iou_principal, &chat_handle_key) else {
+        return OpenChatPrivateMatchContextResult::ChatNotLinked;
+    };
+    if !card_access_still_valid(
+        user_index_canister_id,
+        &grant.context,
+        &binding,
+        &sheet_id,
+    ) {
+        return OpenChatPrivateMatchContextResult::NotAuthorized;
+    }
+
+    let vetkd_public_key = if let Some(cached) =
+        VETKD_PUBKEY_CACHE.with(|c| c.borrow().get().clone())
+    {
+        cached
+    } else {
+        let request = VetKDPublicKeyArgs {
+            canister_id: None,
+            context: b"iou-vetkd-symmetric-v1".to_vec(),
+            key_id: vetkd_key_id(),
+        };
+        let Ok(result) = ic_cdk_management_canister::vetkd_public_key(&request).await else {
+            return OpenChatPrivateMatchContextResult::KeyUnavailable;
+        };
+        let _ = VETKD_PUBKEY_CACHE.with(|c| c.borrow_mut().set(Some(result.public_key.clone())));
+        result.public_key
+    };
+    if vetkd_public_key.len() != 96
+        || !card_access_still_valid(
+            user_index_canister_id,
+            &grant.context,
+            &binding,
+            &sheet_id,
+        )
+    {
+        return OpenChatPrivateMatchContextResult::NotAuthorized;
+    }
+
+    let mut input = Vec::with_capacity(10 + sheet_id.len());
+    input.extend_from_slice(b"iou-sheet:");
+    input.extend_from_slice(sheet_id.as_bytes());
+    let request = VetKDDeriveKeyArgs {
+        input,
+        context: b"iou-vetkd-symmetric-v1".to_vec(),
+        key_id: vetkd_key_id(),
+        transport_public_key,
+    };
+    let Ok(derived) = ic_cdk_management_canister::vetkd_derive_key(&request).await else {
+        return OpenChatPrivateMatchContextResult::KeyUnavailable;
+    };
+    if !card_access_still_valid(
+        user_index_canister_id,
+        &grant.context,
+        &binding,
+        &sheet_id,
+    ) {
+        return OpenChatPrivateMatchContextResult::NotAuthorized;
+    }
+
+    // Fetch the encrypted roster only after the final post-await authorization check. A template
+    // edit may commit while vetKD awaits; returning an earlier clone would make a newly added or
+    // removed keyword produce a stale decision.
+    let Some(sheet) = SHEETS.with(|s| s.borrow().get(&sheet_id)) else {
+        return OpenChatPrivateMatchContextResult::NotAuthorized;
+    };
+    let Some(pair) = PAIRS.with(|p| p.borrow().get(&sheet.pair_id)) else {
+        return OpenChatPrivateMatchContextResult::NotAuthorized;
+    };
+
+    OpenChatPrivateMatchContextResult::Success(OpenChatPrivateMatchContext {
+        sheet_id,
+        context_version: grant.context.context_version,
+        app_subject: grant.context.app_subject,
+        chat_handle: grant.context.chat_handle,
+        message_handle: grant.context.message_handle,
+        app_id: grant.context.app_id,
+        app_revision: grant.context.app_revision,
+        action_id: grant.context.action_id,
+        source_binding: grant.source_binding,
         vetkd_public_key,
         encrypted_vet_key: derived.encrypted_key,
         templates_a_enc: pair.templates_a_enc,
@@ -6231,6 +6471,15 @@ fn verify_replace_signature(signed: &SignedReplaceRequest, leaving_principal: &P
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn private_match_fixed_source_binding_candid_decodes_as_blob() {
+        // OpenChat's frozen producer uses `[u8; 32]`; IOU intentionally accepts `Vec<u8>` and then
+        // enforces length 32. Both are Candid `vec nat8`, so the cross-repo wire remains exact.
+        let encoded = candid::encode_one([0x5Au8; 32]).unwrap();
+        let decoded: Vec<u8> = candid::decode_one(&encoded).unwrap();
+        assert_eq!(decoded, vec![0x5A; 32]);
+    }
     use ic_stable_structures::VectorMemory;
 
     #[test]

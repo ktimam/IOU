@@ -22,6 +22,7 @@ import { DefaultCurrencySync } from "../features/settings/DefaultCurrencySync";
 import { ManifestTypesSync } from "../features/openchat/ManifestTypesSync";
 import { EmbeddedBanner } from "../features/openchat/EmbeddedBanner";
 import { OpenChatCardPage } from "../features/openchat/OpenChatCardPage";
+import { OpenChatPrivateMatchPage } from "../features/openchat/OpenChatPrivateMatchPage";
 import { AcceptInvitePage } from "../features/invite/AcceptInvitePage";
 import { useDeepLinks } from "../features/deeplinks/deepLink";
 
@@ -35,20 +36,21 @@ function DeepLinks() {
 export function App() {
   return (
     <Routes>
-      {/* OpenChat "card" surface: IOU's own confirmable card, embedded by
+      {/* OpenChat anonymous surfaces: IOU's confirmable card and private matcher, embedded by
           OpenChat as a storage-partitioned iframe in the chat bubble. It has NO
           IOU session (partitioned cross-origin), so it renders OUTSIDE every
           auth/session provider — it only renders + collects values over the
           postMessage bridge and never touches the canister or identity. Kept as
-          a sibling of the splat below so it never mounts AuthProvider et al. */}
+          siblings of the splat below so neither mounts AuthProvider et al. */}
       <Route path="/openchat/card" element={<OpenChatCardPage />} />
+      <Route path="/openchat/private-match" element={<OpenChatPrivateMatchPage />} />
       <Route path="/*" element={<AuthedApp />} />
     </Routes>
   );
 }
 
 // The full, session-backed IOU app: everything below lives inside the auth and
-// data providers. Rendered for every route EXCEPT /openchat/card.
+// data providers. Rendered for every route except the two anonymous OpenChat surfaces above.
 function AuthedApp() {
   return (
     <AuthProvider>

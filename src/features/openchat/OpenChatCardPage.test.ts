@@ -1,9 +1,12 @@
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { renderToStaticMarkup } from "react-dom/server";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { buildConfirmPayload, type CardFormState } from "./cardBridge";
 import {
+  CARD_RESIZE_SETTLE_MS,
+  CardTypesStatus,
+  createCoalescedCardResizeReporter,
   hydrateSavedTypeForCard,
   isCardFormValid,
   ReadonlyView,
@@ -68,6 +71,60 @@ const ignoreChange = <K extends keyof CardFormState>(
 ): void => undefined;
 
 describe("OpenChat IOU card account type visibility", () => {
+  it("reserves one status line while private Types move from loading to ready", () => {
+    const idle = renderToStaticMarkup(CardTypesStatus({ state: { kind: "ready" } }));
+    const loading = renderToStaticMarkup(CardTypesStatus({ state: { kind: "loading" } }));
+    const error = renderToStaticMarkup(
+      CardTypesStatus({ state: { kind: "error", message: "Account types are unavailable." } }),
+    );
+
+    for (const markup of [idle, loading, error]) {
+      expect(markup).toContain('data-card-types-status="true"');
+      expect(markup).toContain("min-height:0.9rem");
+    }
+    expect(idle).toContain('aria-hidden="true"');
+    expect(idle).not.toContain("Loading this account");
+    expect(loading).toContain("Loading this account&#x27;s saved types");
+    expect(error).toContain('role="status"');
+    expect(error).toContain("Account types are unavailable.");
+  });
+
+  it("coalesces transient resize bursts and emits only a changed settled height", () => {
+    vi.useFakeTimers();
+    try {
+      let height = 320;
+      const reported: number[] = [];
+      const reporter = createCoalescedCardResizeReporter(
+        () => height,
+        (value) => reported.push(value),
+      );
+
+      reporter.schedule();
+      vi.advanceTimersByTime(CARD_RESIZE_SETTLE_MS);
+      expect(reported).toEqual([320]);
+      reported.length = 0;
+
+      height = 360;
+      reporter.schedule();
+      vi.advanceTimersByTime(CARD_RESIZE_SETTLE_MS / 2);
+      height = 400;
+      reporter.schedule();
+      vi.advanceTimersByTime(CARD_RESIZE_SETTLE_MS / 2);
+      height = 320;
+      reporter.schedule();
+      vi.advanceTimersByTime(CARD_RESIZE_SETTLE_MS);
+      expect(reported).toEqual([]);
+
+      height = 344;
+      reporter.schedule();
+      vi.advanceTimersByTime(CARD_RESIZE_SETTLE_MS);
+      expect(reported).toEqual([344]);
+      reporter.dispose();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("fails closed or defers collection until required private Types are hydrated", () => {
     const readiness = (openChatCardPage as unknown as {
       privateCollectionReadiness?: (input: {
@@ -307,11 +364,28 @@ describe("OpenChat IOU card account type visibility", () => {
     expect(payload).not.toHaveProperty("templateId");
   });
 
+  it("lets an exact single-card source message select the linked saved Type", () => {
+    const schoolType: TxnTemplate = {
+      ...TYPE,
+      id: "school-type",
+      name: "School",
+      keywords: ["school"],
+    };
+    const hydrated = hydrateSavedTypeForCard(
+      { ...FORM, templateId: undefined },
+      { message: "School expense 350 EGP", note: "Supplies" },
+      [schoolType],
+    );
+
+    expect(hydrated.templateId).toBe(schoolType.id);
+  });
+
   it("never lets a dropped sibling's full message select the surviving OpenChat row's saved Type", () => {
     const hydrated = hydrateSavedTypeForCard(
       { ...FORM, templateId: undefined },
       { message: "rent 100 and an invalid sibling row", note: "groceries" },
       [RENT_TYPE],
+      { evidence: "row-local" },
     );
     expect(hydrated.templateId).toBeUndefined();
   });
