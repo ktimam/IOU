@@ -22,8 +22,8 @@
 use candid::{CandidType, Decode, Deserialize, Encode, Principal};
 use ic_cdk_management_canister::raw_rand;
 use ic_stable_structures::memory_manager::{MemoryId, MemoryManager, VirtualMemory};
-use ic_stable_structures::{DefaultMemoryImpl, StableBTreeMap, StableCell, Storable};
 use ic_stable_structures::storable::Bound;
+use ic_stable_structures::{DefaultMemoryImpl, StableBTreeMap, StableCell, Storable};
 use serde::de::{self, MapAccess, SeqAccess, Visitor};
 use sha2::{Digest, Sha256};
 use std::borrow::Cow;
@@ -148,14 +148,14 @@ impl Storable for Config {
 #[derive(Clone, CandidType, Deserialize)]
 pub struct Pair {
     pub id: String,
-    pub members: [Principal; 2],   // [creator, joiner]
+    pub members: [Principal; 2], // [creator, joiner]
     pub invite_code: String,
     pub created_at: u64,
-    pub archived_at: Option<u64>,  // soft-delete; left in storage
+    pub archived_at: Option<u64>, // soft-delete; left in storage
     // v1.5.0: E2E-encrypted display names (AES-GCM under the active
     // sheet's K_sheet; the canister stores ciphertext only). All optional
     // ⇒ Candid-backward-compatible with pre-v1.5.0 records.
-    pub name_enc: Option<Vec<u8>>,         // account name
+    pub name_enc: Option<Vec<u8>>, // account name
     pub name_iv: Option<Vec<u8>>,
     pub member_a_name_enc: Option<Vec<u8>>, // member_a's display name
     pub member_a_name_iv: Option<Vec<u8>>,
@@ -219,8 +219,8 @@ pub struct Sheet {
     // ignores unknown record fields on decode, so `Decode!` reads them unchanged.
     pub closing_window_days: u32,
     pub last_entry_at: Option<u64>,
-    pub wrapped_key_a: Vec<u8>,    // sealed to member_a's vetkd pub
-    pub wrapped_key_b: Vec<u8>,    // sealed to member_b's vetkd pub
+    pub wrapped_key_a: Vec<u8>, // sealed to member_a's vetkd pub
+    pub wrapped_key_b: Vec<u8>, // sealed to member_b's vetkd pub
     pub member_a: Principal,
     pub member_b: Principal,
     pub created_at: u64,
@@ -292,8 +292,8 @@ pub struct Entry {
     pub created_by: Principal,
     pub created_at_server: u64,
     pub updated_at_server: Option<u64>,
-    pub entry_key: Vec<u8>,   // 32 random bytes (per-entry salt)
-    pub ciphertext: Vec<u8>,  // AES-GCM(per_entry_key, K_sheet, payload)
+    pub entry_key: Vec<u8>,  // 32 random bytes (per-entry salt)
+    pub ciphertext: Vec<u8>, // AES-GCM(per_entry_key, K_sheet, payload)
     pub iv: Vec<u8>,
     // v1.7.0: edit history + soft delete. Optional ⇒ Candid decodes
     // pre-v1.7.0 entries with these absent (None).
@@ -754,7 +754,12 @@ fn sheet_entries_remove(sheet_id: &str, entry_id: u64) -> Option<Entry> {
 /// so use StableBTreeMap::range rather than scanning every user's entries.
 fn sheet_entries_iter(sheet_id: &str) -> Vec<Entry> {
     let (start, end) = entry_key_bounds(sheet_id, u64::MAX);
-    ENTRIES.with(|m| m.borrow().range(start..=end).map(|(_, value)| value).collect())
+    ENTRIES.with(|m| {
+        m.borrow()
+            .range(start..=end)
+            .map(|(_, value)| value)
+            .collect()
+    })
 }
 
 fn entry_blob_bytes(entry_key: &[u8], ciphertext: &[u8], iv: &[u8]) -> u64 {
@@ -766,13 +771,18 @@ fn entry_blob_bytes(entry_key: &[u8], ciphertext: &[u8], iv: &[u8]) -> u64 {
 
 fn stored_entry_bytes(entry: &Entry) -> u64 {
     let current = entry_blob_bytes(&entry.entry_key, &entry.ciphertext, &entry.iv);
-    entry.history.as_deref().unwrap_or_default().iter().fold(current, |total, version| {
-        total.saturating_add(entry_blob_bytes(
-            &version.entry_key,
-            &version.ciphertext,
-            &version.iv,
-        ))
-    })
+    entry
+        .history
+        .as_deref()
+        .unwrap_or_default()
+        .iter()
+        .fold(current, |total, version| {
+            total.saturating_add(entry_blob_bytes(
+                &version.entry_key,
+                &version.ciphertext,
+                &version.iv,
+            ))
+        })
 }
 
 /// Return the sheet's current encrypted-payload usage. The cache is initialized lazily so an
@@ -783,7 +793,9 @@ fn sheet_entry_bytes(sheet_id: &str) -> u64 {
     }
     let total = sheet_entries_iter(sheet_id)
         .iter()
-        .fold(0u64, |sum, entry| sum.saturating_add(stored_entry_bytes(entry)));
+        .fold(0u64, |sum, entry| {
+            sum.saturating_add(stored_entry_bytes(entry))
+        });
     SHEET_ENTRY_BYTES.with(|m| {
         m.borrow_mut().insert(sheet_id.to_string(), total);
     });
@@ -919,7 +931,6 @@ fn post_upgrade() {
 // are used by `register_recovery_pubkey` and `submit_replace_member`;
 // they're already in the file so the candid derive picks them up.
 
-
 // ───────────────────────── helpers ─────────────────────────
 
 fn require_authed() {
@@ -932,11 +943,7 @@ fn can_manage_config(creator: Principal, caller: Principal, caller_is_controller
     caller != Principal::anonymous() && (caller_is_controller || creator == caller)
 }
 
-fn validate_entry_blob(
-    entry_key: &[u8],
-    ciphertext: &[u8],
-    iv: &[u8],
-) -> Result<(), &'static str> {
+fn validate_entry_blob(entry_key: &[u8], ciphertext: &[u8], iv: &[u8]) -> Result<(), &'static str> {
     if entry_key.len() != 32 {
         return Err("entry_key must be 32 bytes");
     }
@@ -963,10 +970,7 @@ fn validate_wrapped_key(blob: &[u8], allow_empty: bool) -> Result<(), &'static s
     Ok(())
 }
 
-fn validate_optional_name(
-    enc: &Option<Vec<u8>>,
-    iv: &Option<Vec<u8>>,
-) -> Result<(), &'static str> {
+fn validate_optional_name(enc: &Option<Vec<u8>>, iv: &Option<Vec<u8>>) -> Result<(), &'static str> {
     match (enc.as_deref(), iv.as_deref()) {
         (None, None) => Ok(()),
         (Some(enc), Some(iv)) => {
@@ -1235,6 +1239,7 @@ fn inspect_message() {
         "get_openchat_binding",
         "disconnect_openchat",
         "openchat_card_context",
+        "openchat_private_match_context",
     ];
     if !allowed.contains(&method_name.as_str()) {
         ic_cdk::trap(format!(
@@ -1412,12 +1417,13 @@ struct VerifyAiAppResponse {
     owner: Option<Principal>,
 }
 
-fn verify_ai_app(args: VerifyAiAppArgs, configured_owner: Option<Principal>) -> VerifyAiAppResponse {
+fn verify_ai_app(
+    args: VerifyAiAppArgs,
+    configured_owner: Option<Principal>,
+) -> VerifyAiAppResponse {
     let vouched = configured_owner
         .as_ref()
-        .map(|owner| {
-            *owner != Principal::anonymous() && args.name == "iou" && args.owner == *owner
-        })
+        .map(|owner| *owner != Principal::anonymous() && args.name == "iou" && args.owner == *owner)
         .unwrap_or(false);
     VerifyAiAppResponse {
         vouched,
@@ -1690,9 +1696,8 @@ impl<'de> Deserialize<'de> for AttestedEntryDrafts {
             where
                 A: MapAccess<'de>,
             {
-                let draft = AttestedEntryDraft::deserialize(
-                    de::value::MapAccessDeserializer::new(map),
-                )?;
+                let draft =
+                    AttestedEntryDraft::deserialize(de::value::MapAccessDeserializer::new(map))?;
                 Ok(AttestedEntryDrafts(vec![draft]))
             }
 
@@ -1791,18 +1796,20 @@ fn contains_whole_text_token(text: &str, token: &str) -> bool {
     if folded_token.is_empty() {
         return false;
     }
-    folded_text.match_indices(&folded_token).any(|(start, matched)| {
-        let before_is_word = folded_text[..start]
-            .chars()
-            .next_back()
-            .is_some_and(char::is_alphanumeric);
-        let end = start + matched.len();
-        let after_is_word = folded_text[end..]
-            .chars()
-            .next()
-            .is_some_and(char::is_alphanumeric);
-        !before_is_word && !after_is_word
-    })
+    folded_text
+        .match_indices(&folded_token)
+        .any(|(start, matched)| {
+            let before_is_word = folded_text[..start]
+                .chars()
+                .next_back()
+                .is_some_and(char::is_alphanumeric);
+            let end = start + matched.len();
+            let after_is_word = folded_text[end..]
+                .chars()
+                .next()
+                .is_some_and(char::is_alphanumeric);
+            !before_is_word && !after_is_word
+        })
 }
 
 fn text_currency_evidence_matches(text: &str, token: &str) -> bool {
@@ -1995,8 +2002,7 @@ fn lowercase_hex(bytes: &[u8]) -> String {
 }
 
 fn base64url_no_pad(bytes: &[u8]) -> String {
-    const ALPHABET: &[u8; 64] =
-        b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+    const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
     let mut out = String::with_capacity((bytes.len() * 4).div_ceil(3));
     for chunk in bytes.chunks(3) {
         let b0 = chunk[0];
@@ -2092,9 +2098,7 @@ fn attests_exact_iou_card(
 /// validating every row and consumer payload. Private Type names and ids
 /// cannot enter this initial/public payload.
 #[ic_cdk::update]
-fn c2c_attest_ai_app_card_v1(
-    args: AttestAiAppCardV1Args,
-) -> AttestAiAppCardV1Response {
+fn c2c_attest_ai_app_card_v1(args: AttestAiAppCardV1Args) -> AttestAiAppCardV1Response {
     let app_canister_id = ic_cdk::api::canister_self();
     let caller = ic_cdk::api::msg_caller();
     let configured =
@@ -2475,7 +2479,10 @@ async fn create_pair() -> CreatePairResult {
             invites.borrow_mut().insert(invite.clone(), id.clone());
         });
     });
-    CreatePairResult { pair_id: id, invite_code: invite }
+    CreatePairResult {
+        pair_id: id,
+        invite_code: invite,
+    }
 }
 
 /// join_pair: consumes an invite code, adds the caller as member B.
@@ -2556,11 +2563,21 @@ fn get_my_pairs() -> Vec<PairSummary> {
         .into_iter()
         .map(|pair| {
             let caller_is_a = pair.members[0] == caller;
-            let other_principal = if caller_is_a { pair.members[1] } else { pair.members[0] };
-            let (other_name_enc, other_name_iv) = if caller_is_a {
-                (pair.member_b_name_enc.clone(), pair.member_b_name_iv.clone())
+            let other_principal = if caller_is_a {
+                pair.members[1]
             } else {
-                (pair.member_a_name_enc.clone(), pair.member_a_name_iv.clone())
+                pair.members[0]
+            };
+            let (other_name_enc, other_name_iv) = if caller_is_a {
+                (
+                    pair.member_b_name_enc.clone(),
+                    pair.member_b_name_iv.clone(),
+                )
+            } else {
+                (
+                    pair.member_a_name_enc.clone(),
+                    pair.member_a_name_iv.clone(),
+                )
             };
             let (active_sheet_id, archived_sheet_count) =
                 sheet_stats.remove(&pair.id).unwrap_or((None, 0));
@@ -2673,7 +2690,11 @@ async fn create_sheet(req: CreateSheetReq) -> Sheet {
         if !is_solo && req.wrapped_key_b.is_empty() {
             ic_cdk::trap("wrapped_key_b must not be empty for a two-member sheet");
         }
-        let wrapped_key_b = if is_solo { Vec::new() } else { req.wrapped_key_b.clone() };
+        let wrapped_key_b = if is_solo {
+            Vec::new()
+        } else {
+            req.wrapped_key_b.clone()
+        };
         // v1: only one active sheet per pair. The check + insert
         // are in the same synchronous block (no await between), so
         // two concurrent create_sheet calls for the same pair
@@ -2740,7 +2761,9 @@ fn list_archived_sheets(pair_id: String) -> Vec<Sheet> {
             .map(|pair| is_member_of(&pair, caller))
             .unwrap_or(false)
     });
-    if !allowed { ic_cdk::trap("not a member of this pair"); }
+    if !allowed {
+        ic_cdk::trap("not a member of this pair");
+    }
     let mut out: Vec<Sheet> = SHEETS.with(|s| {
         let mut scanned = 0usize;
         let mut out = Vec::new();
@@ -3349,28 +3372,22 @@ fn add_entry_batch(req: AddEntryBatchReq) -> AddEntryBatchResult {
     // Reject an oversized attacker-controlled identity before using it to
     // allocate a stable-map lookup key. Row validation deliberately follows a
     // receipt lookup so response-loss retries remain authoritative.
-    validate_entry_batch_import_id(&req.import_id)
-        .unwrap_or_else(|message| ic_cdk::trap(message));
+    validate_entry_batch_import_id(&req.import_id).unwrap_or_else(|message| ic_cdk::trap(message));
     let receipt_key = entry_batch_receipt_key(&req.sheet_id, &req.import_id);
     let existing = ENTRY_BATCH_RECEIPTS.with(|receipts| receipts.borrow().get(&receipt_key));
     if let Some(receipt) = existing.as_ref() {
-        validate_entry_batch_receipt(receipt)
-            .unwrap_or_else(|message| ic_cdk::trap(message));
+        validate_entry_batch_receipt(receipt).unwrap_or_else(|message| ic_cdk::trap(message));
         return AddEntryBatchResult {
             entry_ids: receipt.entry_ids.clone(),
             replayed: true,
         };
     }
 
-    let current_counter = ENTRY_COUNTERS.with(|counters| {
-        counters.borrow().get(&req.sheet_id).unwrap_or(0)
-    });
-    let validated = validate_add_entry_batch(
-        &req,
-        current_counter,
-        None,
-        || sheet_entry_bytes(&req.sheet_id),
-    )
+    let current_counter =
+        ENTRY_COUNTERS.with(|counters| counters.borrow().get(&req.sheet_id).unwrap_or(0));
+    let validated = validate_add_entry_batch(&req, current_counter, None, || {
+        sheet_entry_bytes(&req.sheet_id)
+    })
     .unwrap_or_else(|message| ic_cdk::trap(message));
 
     let now = ic_cdk::api::time();
@@ -3564,19 +3581,20 @@ fn get_entry(sheet_id: String, entry_id: u64) -> Option<Entry> {
 /// get_entry for the rationale. A joined-but-ungranted partner of a solo
 /// sheet is rejected here even though they are a pair member.
 #[ic_cdk::query]
-fn list_entries(
-    sheet_id: String,
-    cursor: Option<u64>,
-    limit: u32,
-) -> ListEntriesResult {
+fn list_entries(sheet_id: String, cursor: Option<u64>, limit: u32) -> ListEntriesResult {
     if !caller_owns_sheet(&sheet_id) {
         ic_cdk::trap("caller does not have access to this sheet");
     }
     let limit = limit.min(200) as usize;
     if limit == 0 {
-        return ListEntriesResult { entries: Vec::new(), next_cursor: None };
+        return ListEntriesResult {
+            entries: Vec::new(),
+            next_cursor: None,
+        };
     }
-    let max_id = cursor.map(|value| value.saturating_sub(1)).unwrap_or(u64::MAX);
+    let max_id = cursor
+        .map(|value| value.saturating_sub(1))
+        .unwrap_or(u64::MAX);
     let (start, end) = entry_key_bounds(&sheet_id, max_id);
     // Fetch one extra row so next_cursor is returned only when another page really exists.
     let mut page: Vec<Entry> = ENTRIES.with(|m| {
@@ -3621,8 +3639,8 @@ fn list_entries(
 // is enabled by default on system subnets.
 
 use ic_cdk_management_canister::{
-    VetKDCurve, VetKDDeriveKeyArgs, VetKDDeriveKeyResult, VetKDKeyId,
-    VetKDPublicKeyArgs, VetKDPublicKeyResult,
+    VetKDCurve, VetKDDeriveKeyArgs, VetKDDeriveKeyResult, VetKDKeyId, VetKDPublicKeyArgs,
+    VetKDPublicKeyResult,
 };
 
 fn vetkd_key_id() -> VetKDKeyId {
@@ -3660,10 +3678,9 @@ async fn vetkd_public_key() -> Vec<u8> {
         context: b"iou-vetkd-symmetric-v1".to_vec(),
         key_id: vetkd_key_id(),
     };
-    let res: VetKDPublicKeyResult =
-        ic_cdk_management_canister::vetkd_public_key(&request)
-            .await
-            .expect("call to vetkd_public_key failed");
+    let res: VetKDPublicKeyResult = ic_cdk_management_canister::vetkd_public_key(&request)
+        .await
+        .expect("call to vetkd_public_key failed");
     let _ = VETKD_PUBKEY_CACHE.with(|c| c.borrow_mut().set(Some(res.public_key.clone())));
     res.public_key
 }
@@ -3679,10 +3696,7 @@ async fn vetkd_public_key() -> Vec<u8> {
 /// (this_canister, sheet_id) and cannot be replayed across sheets
 /// or canisters.
 #[ic_cdk::update]
-async fn vetkd_wrap_sheet_key(
-    sheet_id: String,
-    transport_public_key: Vec<u8>,
-) -> Vec<u8> {
+async fn vetkd_wrap_sheet_key(sheet_id: String, transport_public_key: Vec<u8>) -> Vec<u8> {
     require_authed();
     if transport_public_key.is_empty() {
         ic_cdk::trap("transport_public_key must not be empty");
@@ -3708,10 +3722,9 @@ async fn vetkd_wrap_sheet_key(
         key_id: vetkd_key_id(),
         transport_public_key,
     };
-    let res: VetKDDeriveKeyResult =
-        ic_cdk_management_canister::vetkd_derive_key(&request)
-            .await
-            .expect("call to vetkd_derive_key failed");
+    let res: VetKDDeriveKeyResult = ic_cdk_management_canister::vetkd_derive_key(&request)
+        .await
+        .expect("call to vetkd_derive_key failed");
     // Inter-canister awaits permit other updates to run. A leave/replacement
     // can revoke this principal while the management canister derives the
     // result, so repeat the consent check immediately before releasing it.
@@ -3753,10 +3766,9 @@ async fn vetkd_wrap_consumer_key(transport_public_key: Vec<u8>) -> Vec<u8> {
         key_id: vetkd_key_id(),
         transport_public_key,
     };
-    let res: VetKDDeriveKeyResult =
-        ic_cdk_management_canister::vetkd_derive_key(&request)
-            .await
-            .expect("call to vetkd_derive_key failed");
+    let res: VetKDDeriveKeyResult = ic_cdk_management_canister::vetkd_derive_key(&request)
+        .await
+        .expect("call to vetkd_derive_key failed");
     res.encrypted_key
 }
 
@@ -4005,6 +4017,8 @@ fn delete_consumer_keypair(expected_epoch: u64) -> ConsumerKeyMutationResult {
 pub struct ChatSheetLink {
     pub chat_key: String,
     pub sheet_id: u64,
+    /// OpenChat-provided display label. Optional keeps legacy stable rows decodable.
+    pub chat_name: Option<String>,
 }
 
 #[derive(Clone, CandidType, Deserialize, Debug, PartialEq, Eq)]
@@ -4017,6 +4031,8 @@ pub struct PendingChatRoute {
     // This optional field keeps old stable rows decodable while ensuring legacy card-attestation
     // rows can never become assignable after an upgrade.
     pub claim_version: Option<u16>,
+    /// OpenChat-provided display label, revealed only to this IOU principal.
+    pub chat_name: Option<String>,
 }
 
 impl Storable for PendingChatRoute {
@@ -4039,6 +4055,8 @@ pub struct PendingChatRouteView {
     /// Current destination, if this recently requested chat is already linked.
     /// Returned only when that destination is still an active, caller-readable route target.
     pub current_sheet_id: Option<u64>,
+    /// The chat label captured by OpenChat when this exact setup request was minted.
+    pub chat_name: Option<String>,
 }
 
 /// Authoritative cross-origin identity binding established only when the IOU
@@ -4197,13 +4215,13 @@ fn openchat_binding_matches_current_trust(
 
 fn remove_openchat_binding_for_iou(iou_principal: Principal) {
     clear_pending_chat_routes_for_principal(iou_principal);
-    if let Some(binding) =
-        OPENCHAT_BINDINGS_BY_IOU.with(|m| m.borrow_mut().remove(&iou_principal))
+    if let Some(binding) = OPENCHAT_BINDINGS_BY_IOU.with(|m| m.borrow_mut().remove(&iou_principal))
     {
         OPENCHAT_BINDINGS_BY_OC.with(|m| {
             let mut map = m.borrow_mut();
             if let Some(subject) = valid_app_subject(&binding) {
-                let reverse = openchat_subject_key(binding.user_index_canister_id, binding.app_id, subject);
+                let reverse =
+                    openchat_subject_key(binding.user_index_canister_id, binding.app_id, subject);
                 if map.get(&reverse) == Some(iou_principal) {
                     map.remove(&reverse);
                 }
@@ -4233,15 +4251,11 @@ fn replace_openchat_binding(binding: OpenChatBinding) {
             clear_pending_chat_routes_for_principal(previous_iou);
             OPENCHAT_BINDINGS_BY_IOU.with(|m| {
                 let mut map = m.borrow_mut();
-                if map
-                    .get(&previous_iou)
-                    .as_ref()
-                    .is_some_and(|old| {
-                        old.user_index_canister_id == binding.user_index_canister_id
-                            && old.app_id == binding.app_id
-                            && valid_app_subject(old) == valid_app_subject(&binding)
-                    })
-                {
+                if map.get(&previous_iou).as_ref().is_some_and(|old| {
+                    old.user_index_canister_id == binding.user_index_canister_id
+                        && old.app_id == binding.app_id
+                        && valid_app_subject(old) == valid_app_subject(&binding)
+                }) {
                     map.remove(&previous_iou);
                 }
             });
@@ -4294,12 +4308,14 @@ fn openchat_binding_for_subject(
     }
     let reverse = openchat_subject_key(user_index_canister_id, app_id, app_subject);
     let iou_principal = OPENCHAT_BINDINGS_BY_OC.with(|m| m.borrow().get(&reverse))?;
-    OPENCHAT_BINDINGS_BY_IOU.with(|m| m.borrow().get(&iou_principal)).filter(|binding| {
-        binding.user_index_canister_id == user_index_canister_id
-            && binding.app_id == app_id
-            && valid_app_subject(binding) == Some(app_subject)
-            && openchat_binding_key_matches_current(&iou_principal, binding)
-    })
+    OPENCHAT_BINDINGS_BY_IOU
+        .with(|m| m.borrow().get(&iou_principal))
+        .filter(|binding| {
+            binding.user_index_canister_id == user_index_canister_id
+                && binding.app_id == app_id
+                && valid_app_subject(binding) == Some(app_subject)
+                && openchat_binding_key_matches_current(&iou_principal, binding)
+        })
 }
 
 #[derive(CandidType, Deserialize)]
@@ -4346,10 +4362,7 @@ pub enum ConnectOpenChatResult {
 /// authoritatively returns the code's user/app, and the returned app canister
 /// must be this canister before the IOU-principal mapping is persisted.
 #[ic_cdk::update]
-async fn connect_openchat(
-    code: String,
-    public_key: String,
-) -> ConnectOpenChatResult {
+async fn connect_openchat(code: String, public_key: String) -> ConnectOpenChatResult {
     require_authed();
     let iou_principal = ic_cdk::api::msg_caller();
     if code.len() != 64
@@ -4360,15 +4373,11 @@ async fn connect_openchat(
         return ConnectOpenChatResult::CodeNotFound;
     }
     if public_key.is_empty() || public_key.len() > 2_000 {
-        return ConnectOpenChatResult::InvalidRequest(
-            "public key length out of range".to_string(),
-        );
+        return ConnectOpenChatResult::InvalidRequest("public key length out of range".to_string());
     }
-    let Some(user_index_canister_id) = CONFIG.with(|c| {
-        c.borrow()
-            .get()
-            .openchat_user_index_canister_id
-    }) else {
+    let Some(user_index_canister_id) =
+        CONFIG.with(|c| c.borrow().get().openchat_user_index_canister_id)
+    else {
         return ConnectOpenChatResult::NotConfigured;
     };
 
@@ -4402,15 +4411,9 @@ async fn connect_openchat(
     };
     let success = match outcome {
         ClaimAiAppLinkCodeResponse::Success(value) => value,
-        ClaimAiAppLinkCodeResponse::CodeNotFound => {
-            return ConnectOpenChatResult::CodeNotFound
-        }
-        ClaimAiAppLinkCodeResponse::CodeExpired => {
-            return ConnectOpenChatResult::CodeExpired
-        }
-        ClaimAiAppLinkCodeResponse::NotAuthorized => {
-            return ConnectOpenChatResult::WrongApp
-        }
+        ClaimAiAppLinkCodeResponse::CodeNotFound => return ConnectOpenChatResult::CodeNotFound,
+        ClaimAiAppLinkCodeResponse::CodeExpired => return ConnectOpenChatResult::CodeExpired,
+        ClaimAiAppLinkCodeResponse::NotAuthorized => return ConnectOpenChatResult::WrongApp,
         ClaimAiAppLinkCodeResponse::InvalidRequest(message) => {
             return ConnectOpenChatResult::InvalidRequest(message)
         }
@@ -4478,6 +4481,7 @@ struct RedeemAiAppChatLinkTokenSuccess {
     app_canister_id: Principal,
     chat_handle: Vec<u8>,
     chat_handle_version: u16,
+    chat_name: Option<String>,
 }
 
 #[derive(CandidType, Deserialize)]
@@ -4528,10 +4532,21 @@ fn redeemed_chat_link_handle(
         .flatten()
 }
 
+const MAX_OPENCHAT_CHAT_NAME_CHARS: usize = 80;
+
+fn validated_openchat_chat_name(value: Option<&str>) -> Option<String> {
+    let value = value?;
+    (value == value.trim()
+        && !value.is_empty()
+        && value.chars().count() <= MAX_OPENCHAT_CHAT_NAME_CHARS
+        && !value.chars().any(char::is_control))
+    .then(|| value.to_string())
+}
+
 fn chat_route_binding_still_current(caller: Principal, binding: &OpenChatBinding) -> bool {
-    OPENCHAT_BINDINGS_BY_IOU.with(|bindings| {
-        bindings.borrow().get(&caller).as_ref() == Some(binding)
-    }) && openchat_binding_matches_current_trust(&caller, binding)
+    OPENCHAT_BINDINGS_BY_IOU
+        .with(|bindings| bindings.borrow().get(&caller).as_ref() == Some(binding))
+        && openchat_binding_matches_current_trust(&caller, binding)
 }
 
 /// Redeem the one-time token placed by OpenChat in the per-chat Settings URL.
@@ -4542,9 +4557,7 @@ fn chat_route_binding_still_current(caller: Principal, binding: &OpenChatBinding
 /// therefore receives SubjectMismatch without consuming the token. Only a
 /// fully validated success becomes a caller-private pending route.
 #[ic_cdk::update]
-async fn claim_openchat_chat_route(
-    encoded_token: String,
-) -> ClaimOpenChatChatRouteResult {
+async fn claim_openchat_chat_route(encoded_token: String) -> ClaimOpenChatChatRouteResult {
     require_authed();
     let caller = ic_cdk::api::msg_caller();
     let Some(token) = decode_base64url_32(&encoded_token) else {
@@ -4555,8 +4568,7 @@ async fn claim_openchat_chat_route(
     else {
         return ClaimOpenChatChatRouteResult::NotConfigured;
     };
-    let Some(binding) =
-        OPENCHAT_BINDINGS_BY_IOU.with(|bindings| bindings.borrow().get(&caller))
+    let Some(binding) = OPENCHAT_BINDINGS_BY_IOU.with(|bindings| bindings.borrow().get(&caller))
     else {
         return ClaimOpenChatChatRouteResult::NotLinked;
     };
@@ -4620,12 +4632,14 @@ async fn claim_openchat_chat_route(
     {
         return ClaimOpenChatChatRouteResult::BindingChanged;
     }
-    let Some(chat_key) =
-        redeemed_chat_link_handle(&grant, &binding, ic_cdk::api::canister_self())
+    let Some(chat_key) = redeemed_chat_link_handle(&grant, &binding, ic_cdk::api::canister_self())
     else {
         return ClaimOpenChatChatRouteResult::InvalidBinding;
     };
-    remember_claimed_chat_route(caller, &chat_key, ic_cdk::api::time());
+    let Some(chat_name) = validated_openchat_chat_name(grant.chat_name.as_deref()) else {
+        return ClaimOpenChatChatRouteResult::InvalidBinding;
+    };
+    remember_claimed_chat_route(caller, &chat_key, &chat_name, ic_cdk::api::time());
     ClaimOpenChatChatRouteResult::Success(ClaimOpenChatChatRouteSuccess {
         pending_id: pending_chat_route_id(&caller, &chat_key),
     })
@@ -4671,8 +4685,7 @@ fn binding_removal_is_allowed(cause: OpenChatBindingRemovalCause<'_>) -> bool {
     match cause {
         OpenChatBindingRemovalCause::CoordinatedRevoke(response) => matches!(
             response,
-            RevokeAiAppUserKeyResponse::Success
-                | RevokeAiAppUserKeyResponse::KeyNotFound
+            RevokeAiAppUserKeyResponse::Success | RevokeAiAppUserKeyResponse::KeyNotFound
         ),
         OpenChatBindingRemovalCause::EmergencyLocalErase => true,
     }
@@ -4691,13 +4704,9 @@ fn disconnect_state_still_matches(
         caller,
         pinned_user_index,
         ic_cdk::api::canister_self(),
-    ) && OPENCHAT_BINDINGS_BY_IOU.with(|bindings| {
-        bindings.borrow().get(&caller).as_ref() == Some(binding)
-    }) && consumer_key_state_still_matches(
-        &caller,
-        expected_consumer_key_epoch,
-        public_key,
-    )
+    ) && OPENCHAT_BINDINGS_BY_IOU
+        .with(|bindings| bindings.borrow().get(&caller).as_ref() == Some(binding))
+        && consumer_key_state_still_matches(&caller, expected_consumer_key_epoch, public_key)
 }
 
 /// Coordinated IOU-side disconnect. The browser supplies a proof signed by
@@ -4726,8 +4735,7 @@ async fn disconnect_openchat(
         );
     }
 
-    let Some(binding) = OPENCHAT_BINDINGS_BY_IOU
-        .with(|bindings| bindings.borrow().get(&caller))
+    let Some(binding) = OPENCHAT_BINDINGS_BY_IOU.with(|bindings| bindings.borrow().get(&caller))
     else {
         return DisconnectOpenChatResult::NotLinked;
     };
@@ -4782,15 +4790,15 @@ async fn disconnect_openchat(
         Ok(value) => value,
         Err(error) => return DisconnectOpenChatResult::RemoteError(error.to_string()),
     };
-    if !binding_removal_is_allowed(OpenChatBindingRemovalCause::CoordinatedRevoke(
-        &outcome,
-    )) {
+    if !binding_removal_is_allowed(OpenChatBindingRemovalCause::CoordinatedRevoke(&outcome)) {
         let RevokeAiAppUserKeyResponse::Error((code, message)) = outcome else {
             unreachable!();
         };
         return DisconnectOpenChatResult::RemoteError(format!(
             "OpenChat error {code}{}",
-            message.map(|value| format!(": {value}")).unwrap_or_default()
+            message
+                .map(|value| format!(": {value}"))
+                .unwrap_or_default()
         ));
     }
 
@@ -4802,21 +4810,14 @@ async fn disconnect_openchat(
     {
         return DisconnectOpenChatResult::NotConfigured;
     }
-    if !disconnect_state_still_matches(
-        caller,
-        &binding,
-        consumer_key_epoch,
-        &public_key,
-    ) {
+    if !disconnect_state_still_matches(caller, &binding, consumer_key_epoch, &public_key) {
         return DisconnectOpenChatResult::BindingChanged;
     }
 
     remove_openchat_binding_for_iou(caller);
     match outcome {
         RevokeAiAppUserKeyResponse::Success => DisconnectOpenChatResult::Success,
-        RevokeAiAppUserKeyResponse::KeyNotFound => {
-            DisconnectOpenChatResult::KeyNotFound
-        }
+        RevokeAiAppUserKeyResponse::KeyNotFound => DisconnectOpenChatResult::KeyNotFound,
         RevokeAiAppUserKeyResponse::Error(_) => unreachable!(),
     }
 }
@@ -4985,7 +4986,8 @@ fn card_access_still_valid(
         && binding.key_version.is_some()
         && scoped_chat_handle_key(&context.chat_handle)
             .and_then(|key| linked_sheet_for(binding.iou_principal, &key))
-            .as_deref() == Some(sheet_id)
+            .as_deref()
+            == Some(sheet_id)
         && principal_owns_sheet(binding.iou_principal, sheet_id)
         && sheet_is_active(sheet_id)
 }
@@ -5007,11 +5009,9 @@ async fn openchat_card_context(
     {
         return OpenChatCardContextResult::InvalidCapability;
     }
-    let Some(user_index_canister_id) = CONFIG.with(|c| {
-        c.borrow()
-            .get()
-            .openchat_user_index_canister_id
-    }) else {
+    let Some(user_index_canister_id) =
+        CONFIG.with(|c| c.borrow().get().openchat_user_index_canister_id)
+    else {
         return OpenChatCardContextResult::NotConfigured;
     };
 
@@ -5084,12 +5084,7 @@ async fn openchat_card_context(
     let Some(sheet_id) = linked_sheet_for(binding.iou_principal, &chat_handle_key) else {
         return OpenChatCardContextResult::ChatNotLinked;
     };
-    if !card_access_still_valid(
-        user_index_canister_id,
-        &grant.context,
-        &binding,
-        &sheet_id,
-    ) {
+    if !card_access_still_valid(user_index_canister_id, &grant.context, &binding, &sheet_id) {
         return OpenChatCardContextResult::NotAuthorized;
     }
 
@@ -5117,12 +5112,7 @@ async fn openchat_card_context(
         result.public_key
     };
     if vetkd_public_key.len() != 96
-        || !card_access_still_valid(
-            user_index_canister_id,
-            &grant.context,
-            &binding,
-            &sheet_id,
-        )
+        || !card_access_still_valid(user_index_canister_id, &grant.context, &binding, &sheet_id)
     {
         return OpenChatCardContextResult::NotAuthorized;
     }
@@ -5139,12 +5129,7 @@ async fn openchat_card_context(
     let Ok(derived) = ic_cdk_management_canister::vetkd_derive_key(&request).await else {
         return OpenChatCardContextResult::KeyUnavailable;
     };
-    if !card_access_still_valid(
-        user_index_canister_id,
-        &grant.context,
-        &binding,
-        &sheet_id,
-    ) {
+    if !card_access_still_valid(user_index_canister_id, &grant.context, &binding, &sheet_id) {
         return OpenChatCardContextResult::NotAuthorized;
     }
 
@@ -5184,11 +5169,9 @@ async fn openchat_private_match_context(
     {
         return OpenChatPrivateMatchContextResult::InvalidCapability;
     }
-    let Some(user_index_canister_id) = CONFIG.with(|c| {
-        c.borrow()
-            .get()
-            .openchat_user_index_canister_id
-    }) else {
+    let Some(user_index_canister_id) =
+        CONFIG.with(|c| c.borrow().get().openchat_user_index_canister_id)
+    else {
         return OpenChatPrivateMatchContextResult::NotConfigured;
     };
 
@@ -5258,12 +5241,7 @@ async fn openchat_private_match_context(
     let Some(sheet_id) = linked_sheet_for(binding.iou_principal, &chat_handle_key) else {
         return OpenChatPrivateMatchContextResult::ChatNotLinked;
     };
-    if !card_access_still_valid(
-        user_index_canister_id,
-        &grant.context,
-        &binding,
-        &sheet_id,
-    ) {
+    if !card_access_still_valid(user_index_canister_id, &grant.context, &binding, &sheet_id) {
         return OpenChatPrivateMatchContextResult::NotAuthorized;
     }
 
@@ -5284,12 +5262,7 @@ async fn openchat_private_match_context(
         result.public_key
     };
     if vetkd_public_key.len() != 96
-        || !card_access_still_valid(
-            user_index_canister_id,
-            &grant.context,
-            &binding,
-            &sheet_id,
-        )
+        || !card_access_still_valid(user_index_canister_id, &grant.context, &binding, &sheet_id)
     {
         return OpenChatPrivateMatchContextResult::NotAuthorized;
     }
@@ -5306,12 +5279,7 @@ async fn openchat_private_match_context(
     let Ok(derived) = ic_cdk_management_canister::vetkd_derive_key(&request).await else {
         return OpenChatPrivateMatchContextResult::KeyUnavailable;
     };
-    if !card_access_still_valid(
-        user_index_canister_id,
-        &grant.context,
-        &binding,
-        &sheet_id,
-    ) {
+    if !card_access_still_valid(user_index_canister_id, &grant.context, &binding, &sheet_id) {
         return OpenChatPrivateMatchContextResult::NotAuthorized;
     }
 
@@ -5376,13 +5344,26 @@ fn chat_link_bounds(caller: &Principal) -> (String, String) {
 fn is_canonical_app_scoped_chat_handle(chat_key: &str) -> bool {
     let bytes = chat_key.as_bytes();
     bytes.len() == 43
-        && bytes.iter().all(|byte| {
-            byte.is_ascii_alphanumeric() || *byte == b'-' || *byte == b'_'
-        })
+        && bytes
+            .iter()
+            .all(|byte| byte.is_ascii_alphanumeric() || *byte == b'-' || *byte == b'_')
         && matches!(
             bytes[42],
-            b'A' | b'E' | b'I' | b'M' | b'Q' | b'U' | b'Y' | b'c' | b'g' | b'k' | b'o'
-                | b's' | b'w' | b'0' | b'4' | b'8'
+            b'A' | b'E'
+                | b'I'
+                | b'M'
+                | b'Q'
+                | b'U'
+                | b'Y'
+                | b'c'
+                | b'g'
+                | b'k'
+                | b'o'
+                | b's'
+                | b'w'
+                | b'0'
+                | b'4'
+                | b'8'
         )
 }
 
@@ -5462,8 +5443,10 @@ fn clear_all_pending_chat_routes() {
 /// Remember a setup candidate only after IOU has successfully redeemed OpenChat's one-time,
 /// account-bound launch token. Card attestations and private-context requests deliberately do not
 /// call this path: viewing/proposing in a chat is not consent to route a private IOU sheet there.
-fn remember_claimed_chat_route(caller: Principal, chat_key: &str, now: u64) {
-    if !is_canonical_app_scoped_chat_handle(chat_key) {
+fn remember_claimed_chat_route(caller: Principal, chat_key: &str, chat_name: &str, now: u64) {
+    if !is_canonical_app_scoped_chat_handle(chat_key)
+        || validated_openchat_chat_name(Some(chat_name)).is_none()
+    {
         return;
     }
     let pending_id = pending_chat_route_id(&caller, chat_key);
@@ -5493,9 +5476,7 @@ fn remember_claimed_chat_route(caller: Principal, chat_key: &str, now: u64) {
                 if let Some((oldest, _)) = map
                     .iter()
                     .map(|(row_key, route)| (row_key, route.last_seen))
-                    .min_by(|left, right| {
-                        left.1.cmp(&right.1).then_with(|| left.0.cmp(&right.0))
-                    })
+                    .min_by(|left, right| left.1.cmp(&right.1).then_with(|| left.0.cmp(&right.0)))
                 {
                     map.remove(&oldest);
                 }
@@ -5507,8 +5488,17 @@ fn remember_claimed_chat_route(caller: Principal, chat_key: &str, now: u64) {
                 chat_key: chat_key.to_string(),
                 last_seen: now,
                 claim_version: Some(1),
+                chat_name: Some(chat_name.to_string()),
             },
         );
+    });
+    CHAT_SHEET_LINKS.with(|links| {
+        let key = chat_link_key(&caller, chat_key);
+        let mut map = links.borrow_mut();
+        if let Some(mut link) = map.get(&key) {
+            link.chat_name = Some(chat_name.to_string());
+            map.insert(key, link);
+        }
     });
 }
 
@@ -5520,19 +5510,54 @@ fn actionable_pending_chat_route(
     pending_id: &str,
     now: u64,
 ) -> Option<PendingChatRoute> {
-    let route = PENDING_CHAT_ROUTES.with(|routes| {
+    let pending = PENDING_CHAT_ROUTES.with(|routes| {
         routes
             .borrow()
             .get(&pending_chat_route_key(&caller, pending_id))
-    })?;
-    (route.claim_version == Some(1)
-        && pending_chat_route_is_live(&route, now)
-        && pending_chat_route_id(&caller, &route.chat_key) == pending_id)
-        .then_some(route)
+    });
+    if let Some(route) = pending.filter(|route| {
+        route.claim_version == Some(1)
+            && pending_chat_route_is_live(route, now)
+            && pending_chat_route_id(&caller, &route.chat_key) == pending_id
+    }) {
+        return Some(route);
+    }
+
+    // The one-time setup request is deliberately short-lived, but a link the caller explicitly
+    // saved is durable. Reconstruct only that caller's opaque route so it remains visible,
+    // reassignable and removable without retaining every expired setup request forever.
+    let (start, end) = chat_link_bounds(&caller);
+    CHAT_SHEET_LINKS.with(|links| {
+        links
+            .borrow()
+            .range(start..end)
+            .map(|(_, link)| link)
+            .find(|link| {
+                is_canonical_app_scoped_chat_handle(&link.chat_key)
+                    && pending_chat_route_id(&caller, &link.chat_key) == pending_id
+            })
+            .map(|link| PendingChatRoute {
+                chat_key: link.chat_key,
+                last_seen: 0,
+                claim_version: Some(1),
+                chat_name: link.chat_name,
+            })
+    })
 }
 
-fn store_chat_sheet_link(caller: Principal, chat_key: String, sheet_id: u64) {
+fn store_chat_sheet_link(
+    caller: Principal,
+    chat_key: String,
+    sheet_id: u64,
+    chat_name: Option<String>,
+) {
     validate_app_scoped_chat_handle(&chat_key);
+    if chat_name
+        .as_deref()
+        .is_some_and(|name| validated_openchat_chat_name(Some(name)).is_none())
+    {
+        ic_cdk::trap("invalid OpenChat chat name");
+    }
     let sheet_id_text = format!("{sheet_id:016x}");
     if !principal_owns_sheet(caller, &sheet_id_text) {
         ic_cdk::trap("caller does not have access to the linked sheet");
@@ -5561,11 +5586,13 @@ fn store_chat_sheet_link(caller: Principal, chat_key: String, sheet_id: u64) {
                 ic_cdk::trap("chat-to-sheet link quota reached");
             }
         }
+        let chat_name = chat_name.or_else(|| map.get(&key).and_then(|link| link.chat_name));
         map.insert(
             key,
             ChatSheetLink {
                 chat_key: chat_key.clone(),
                 sheet_id,
+                chat_name,
             },
         );
     });
@@ -5577,7 +5604,7 @@ fn store_chat_sheet_link(caller: Principal, chat_key: String, sheet_id: u64) {
 fn set_chat_sheet_link(chat_key: String, sheet_id: u64) {
     require_authed();
     let caller = ic_cdk::api::msg_caller();
-    store_chat_sheet_link(caller, chat_key, sheet_id);
+    store_chat_sheet_link(caller, chat_key, sheet_id, None);
 }
 
 /// Return only active sheets the caller is explicitly recorded on. Pair membership alone is not
@@ -5607,13 +5634,34 @@ fn chat_routable_sheet_ids() -> Vec<u64> {
     })
 }
 
-#[ic_cdk::query]
-fn pending_chat_routes() -> Vec<PendingChatRouteView> {
-    let caller = ic_cdk::api::msg_caller();
-    if caller == Principal::anonymous() {
-        return Vec::new();
+fn pending_chat_route_view(
+    caller: Principal,
+    pending_id: String,
+    route: &PendingChatRoute,
+) -> PendingChatRouteView {
+    let linked_sheet = linked_sheet_for(caller, &route.chat_key);
+    let current_sheet_id = linked_sheet.as_deref().and_then(|sheet_id| {
+        let routable = SHEETS.with(|sheets| {
+            sheets
+                .borrow()
+                .get(&sheet_id.to_string())
+                .as_ref()
+                .is_some_and(|sheet| sheet_is_chat_routable(sheet, caller))
+        });
+        routable
+            .then(|| u64::from_str_radix(sheet_id, 16).ok())
+            .flatten()
+    });
+    PendingChatRouteView {
+        pending_id,
+        last_seen: route.last_seen,
+        has_current_link: linked_sheet.is_some(),
+        current_sheet_id,
+        chat_name: route.chat_name.clone(),
     }
-    let now = ic_cdk::api::time();
+}
+
+fn pending_chat_route_views(caller: Principal, now: u64) -> Vec<PendingChatRouteView> {
     let (start, end) = pending_chat_route_bounds(&caller);
     let mut rows: Vec<PendingChatRouteView> = PENDING_CHAT_ROUTES.with(|routes| {
         routes
@@ -5625,29 +5673,39 @@ fn pending_chat_routes() -> Vec<PendingChatRouteView> {
             .take(MAX_PENDING_CHAT_ROUTES_PER_PRINCIPAL)
             .filter_map(|(key, route)| {
                 key.rsplit_once('\0').map(|(_, pending_id)| {
-                    let linked_sheet = linked_sheet_for(caller, &route.chat_key);
-                    let current_sheet_id = linked_sheet.as_deref().and_then(|sheet_id| {
-                        let routable = SHEETS.with(|sheets| {
-                            sheets
-                                .borrow()
-                                .get(&sheet_id.to_string())
-                                .as_ref()
-                                .is_some_and(|sheet| sheet_is_chat_routable(sheet, caller))
-                        });
-                        routable
-                            .then(|| u64::from_str_radix(sheet_id, 16).ok())
-                            .flatten()
-                    });
-                    PendingChatRouteView {
-                        pending_id: pending_id.to_string(),
-                        last_seen: route.last_seen,
-                        has_current_link: linked_sheet.is_some(),
-                        current_sheet_id,
-                    }
+                    pending_chat_route_view(caller, pending_id.to_string(), &route)
                 })
             })
             .collect()
     });
+    let mut seen: BTreeSet<String> = rows.iter().map(|row| row.pending_id.clone()).collect();
+    if rows.len() < MAX_PENDING_CHAT_ROUTES_PER_PRINCIPAL {
+        let (start, end) = chat_link_bounds(&caller);
+        CHAT_SHEET_LINKS.with(|links| {
+            for (_, link) in links.borrow().range(start..end) {
+                if rows.len() >= MAX_PENDING_CHAT_ROUTES_PER_PRINCIPAL {
+                    break;
+                }
+                if !is_canonical_app_scoped_chat_handle(&link.chat_key) {
+                    continue;
+                }
+                let pending_id = pending_chat_route_id(&caller, &link.chat_key);
+                if !seen.insert(pending_id.clone()) {
+                    continue;
+                }
+                rows.push(pending_chat_route_view(
+                    caller,
+                    pending_id,
+                    &PendingChatRoute {
+                        chat_key: link.chat_key,
+                        last_seen: 0,
+                        claim_version: Some(1),
+                        chat_name: link.chat_name,
+                    },
+                ));
+            }
+        });
+    }
     rows.sort_by(|left, right| {
         right
             .last_seen
@@ -5657,13 +5715,21 @@ fn pending_chat_routes() -> Vec<PendingChatRouteView> {
     rows
 }
 
+#[ic_cdk::query]
+fn pending_chat_routes() -> Vec<PendingChatRouteView> {
+    let caller = ic_cdk::api::msg_caller();
+    if caller == Principal::anonymous() {
+        return Vec::new();
+    }
+    pending_chat_route_views(caller, ic_cdk::api::time())
+}
+
 #[ic_cdk::update]
 fn assign_pending_chat_route(pending_id: String, sheet_id: u64) {
     require_authed();
     validate_pending_chat_route_id(&pending_id);
     let caller = ic_cdk::api::msg_caller();
-    let Some(route) =
-        actionable_pending_chat_route(caller, &pending_id, ic_cdk::api::time())
+    let Some(route) = actionable_pending_chat_route(caller, &pending_id, ic_cdk::api::time())
     else {
         ic_cdk::trap("pending chat request is missing, expired, or belongs to another caller");
     };
@@ -5677,7 +5743,7 @@ fn assign_pending_chat_route(pending_id: String, sheet_id: u64) {
     if !binding_is_current {
         ic_cdk::trap("OpenChat connection changed; connect again before routing this chat");
     }
-    store_chat_sheet_link(caller, route.chat_key, sheet_id);
+    store_chat_sheet_link(caller, route.chat_key, sheet_id, route.chat_name);
 }
 
 #[ic_cdk::update]
@@ -5686,8 +5752,7 @@ fn remove_pending_chat_route_link(pending_id: String) {
     validate_pending_chat_route_id(&pending_id);
     let caller = ic_cdk::api::msg_caller();
     let key = pending_chat_route_key(&caller, &pending_id);
-    let Some(route) =
-        actionable_pending_chat_route(caller, &pending_id, ic_cdk::api::time())
+    let Some(route) = actionable_pending_chat_route(caller, &pending_id, ic_cdk::api::time())
     else {
         ic_cdk::trap("pending chat request is missing, expired, or belongs to another caller");
     };
@@ -5779,8 +5844,8 @@ pub struct ReplaceRequest {
 #[derive(Clone, CandidType, Deserialize)]
 pub struct SignedReplaceRequest {
     pub request: ReplaceRequest,
-    pub signature: Vec<u8>,        // 64 bytes Ed25519 sig
-    pub signer_pubkey: Vec<u8>,    // 32 bytes Ed25519 pubkey
+    pub signature: Vec<u8>,     // 64 bytes Ed25519 sig
+    pub signer_pubkey: Vec<u8>, // 32 bytes Ed25519 pubkey
 }
 
 /// register_recovery_pubkey: bind an Ed25519 verification pubkey to
@@ -6168,7 +6233,11 @@ fn leave_pair(pair_id: String) -> Pair {
             ic_cdk::trap("cannot leave a solo account; delete it instead");
         }
         let leaving_is_a = pair.members[0] == caller;
-        let staying = if leaving_is_a { pair.members[1] } else { pair.members[0] };
+        let staying = if leaving_is_a {
+            pair.members[1]
+        } else {
+            pair.members[0]
+        };
         pair.members[0] = staying;
         pair.members[1] = Principal::anonymous();
         map.insert(pair_id.clone(), pair.clone());
@@ -6446,9 +6515,13 @@ fn verify_replace_signature(signed: &SignedReplaceRequest, leaving_principal: &P
         None => ic_cdk::trap("leaving member has not registered a recovery pubkey"),
     };
     let msg = canonical_replace_bytes(&signed.request);
-    let pk_bytes: [u8; 32] = pk_bytes_vec.try_into()
+    let pk_bytes: [u8; 32] = pk_bytes_vec
+        .try_into()
         .unwrap_or_else(|_| ic_cdk::trap("invalid stored pubkey length"));
-    let sig_bytes: [u8; 64] = signed.signature.clone().try_into()
+    let sig_bytes: [u8; 64] = signed
+        .signature
+        .clone()
+        .try_into()
         .unwrap_or_else(|_| ic_cdk::trap("invalid sig length"));
     let pk = match VerifyingKey::from_bytes(&pk_bytes) {
         Ok(p) => p,
@@ -6497,7 +6570,11 @@ mod tests {
         for sheet in &["a", "sheet-with-dashes", "1234567890abcdef"] {
             for id in [0u64, 1, 42, u64::MAX, 1_000_000_000_000] {
                 let k = entry_key(sheet, id);
-                assert_eq!(entry_key_sheet_id(&k), *sheet, "round-trip for sheet={sheet} id={id}");
+                assert_eq!(
+                    entry_key_sheet_id(&k),
+                    *sheet,
+                    "round-trip for sheet={sheet} id={id}"
+                );
             }
         }
     }
@@ -6539,12 +6616,9 @@ mod tests {
             row.ciphertext = vec![92; 48];
             row.iv = vec![93; 16];
         }
-        let retry = validate_add_entry_batch(
-            &reencrypted,
-            43,
-            Some(&receipt),
-            || panic!("receipt replay must not scan sheet entries"),
-        )
+        let retry = validate_add_entry_batch(&reencrypted, 43, Some(&receipt), || {
+            panic!("receipt replay must not scan sheet entries")
+        })
         .unwrap();
         assert!(retry.is_replay());
         assert_eq!(retry.entry_ids(), &[41, 42, 43]);
@@ -6578,8 +6652,7 @@ mod tests {
             Some("caller does not have access to this sheet")
         );
         assert_eq!(
-            validate_entry_batch_sheet_access(Some(test_sheet(SheetState::Closed)), p(1))
-                .err(),
+            validate_entry_batch_sheet_access(Some(test_sheet(SheetState::Closed)), p(1)).err(),
             Some("sheet is not active")
         );
         assert_eq!(
@@ -6595,24 +6668,18 @@ mod tests {
         let receipt = first.receipt();
         let mut changed = request.clone();
         changed.entries[0].ciphertext = vec![9; 47];
-        let changed_retry = validate_add_entry_batch(
-            &changed,
-            3,
-            Some(&receipt),
-            || panic!("receipt replay must not scan after payload drift"),
-        )
+        let changed_retry = validate_add_entry_batch(&changed, 3, Some(&receipt), || {
+            panic!("receipt replay must not scan after payload drift")
+        })
         .unwrap();
         assert!(changed_retry.is_replay());
         assert_eq!(changed_retry.entry_ids(), &[1, 2, 3]);
 
         let mut shortened = request;
         shortened.entries.clear();
-        let count_drift = validate_add_entry_batch(
-            &shortened,
-            3,
-            Some(&receipt),
-            || panic!("receipt replay must not validate count or scan entries"),
-        )
+        let count_drift = validate_add_entry_batch(&shortened, 3, Some(&receipt), || {
+            panic!("receipt replay must not validate count or scan entries")
+        })
         .unwrap();
         assert!(count_drift.is_replay());
         assert_eq!(count_drift.entry_ids(), &[1, 2, 3]);
@@ -6622,18 +6689,11 @@ mod tests {
     fn batch_preflight_enforces_count_entry_and_aggregate_sheet_quotas() {
         let two = test_add_entry_batch_req(2);
         assert_eq!(
-            validate_add_entry_batch(&two, MAX_ENTRIES_PER_SHEET - 1, None, || 0)
-                .unwrap_err(),
+            validate_add_entry_batch(&two, MAX_ENTRIES_PER_SHEET - 1, None, || 0).unwrap_err(),
             "entry quota reached for this sheet"
         );
         assert_eq!(
-            validate_add_entry_batch(
-                &two,
-                0,
-                None,
-                || MAX_SHEET_ENCRYPTED_BYTES - 1,
-            )
-            .unwrap_err(),
+            validate_add_entry_batch(&two, 0, None, || MAX_SHEET_ENCRYPTED_BYTES - 1,).unwrap_err(),
             "sheet encrypted payload quota exceeded"
         );
 
@@ -6694,25 +6754,56 @@ mod tests {
         let lookup = endpoint.find("ENTRY_BATCH_RECEIPTS.with").unwrap();
         let validate = endpoint.find("validate_add_entry_batch(").unwrap();
         let scan = endpoint.find("sheet_entry_bytes(&req.sheet_id)").unwrap();
-        assert!(access < lookup, "current membership/state must gate receipt lookup");
-        assert!(lookup < validate, "receipt replay must precede new-row validation");
-        assert!(validate < scan, "cheap new-row validation owns the lazy scan closure");
+        assert!(
+            access < lookup,
+            "current membership/state must gate receipt lookup"
+        );
+        assert!(
+            lookup < validate,
+            "receipt replay must precede new-row validation"
+        );
+        assert!(
+            validate < scan,
+            "cheap new-row validation owns the lazy scan closure"
+        );
     }
 
     #[test]
     fn batch_endpoint_is_pinned_in_both_inspect_message_security_lists() {
         let source = include_str!("lib.rs");
         let inspect_start = source.find("fn inspect_message()").unwrap();
-        let endpoint_start = source[inspect_start..]
-            .find("fn whoami()")
-            .unwrap()
-            + inspect_start;
+        let endpoint_start = source[inspect_start..].find("fn whoami()").unwrap() + inspect_start;
         let inspect = &source[inspect_start..endpoint_start];
         let auth_start = inspect.find("let require_auth_methods").unwrap();
         let allowed = &inspect[..auth_start];
         let require_auth = &inspect[auth_start..];
         assert_eq!(allowed.matches("\"add_entry_batch\"").count(), 1);
         assert_eq!(require_auth.matches("\"add_entry_batch\"").count(), 1);
+    }
+
+    #[test]
+    fn private_match_context_is_allowed_as_an_anonymous_capability_endpoint() {
+        let source = include_str!("lib.rs");
+        let inspect_start = source.find("fn inspect_message()").unwrap();
+        let endpoint_start = source[inspect_start..].find("fn whoami()").unwrap() + inspect_start;
+        let inspect = &source[inspect_start..endpoint_start];
+        let auth_start = inspect.find("let require_auth_methods").unwrap();
+        let allowed = &inspect[..auth_start];
+        let require_auth = &inspect[auth_start..];
+        assert_eq!(
+            allowed
+                .matches("\"openchat_private_match_context\"")
+                .count(),
+            1,
+            "the credentialless frame must reach the capability-gated endpoint",
+        );
+        assert_eq!(
+            require_auth
+                .matches("\"openchat_private_match_context\"")
+                .count(),
+            0,
+            "the caller is intentionally anonymous; the one-use capability is the authority",
+        );
     }
 
     #[test]
@@ -6725,7 +6816,12 @@ mod tests {
         };
         receipts.insert("sheet\0message".into(), receipt.clone());
         assert_eq!(receipts.get(&"sheet\0message".to_string()), Some(receipt));
-        const { assert!(SCHEMA_VERSION >= 18, "MemoryId 29 batch receipts require schema v18") };
+        const {
+            assert!(
+                SCHEMA_VERSION >= 18,
+                "MemoryId 29 batch receipts require schema v18"
+            )
+        };
     }
 
     #[test]
@@ -6810,7 +6906,10 @@ mod tests {
             "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAB",
             "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA!",
         ] {
-            assert!(!is_canonical_app_scoped_chat_handle(malformed), "{malformed:?}");
+            assert!(
+                !is_canonical_app_scoped_chat_handle(malformed),
+                "{malformed:?}"
+            );
         }
     }
 
@@ -6880,6 +6979,26 @@ mod tests {
         assert_eq!(upgraded.chat_key, legacy.chat_key);
         assert_eq!(upgraded.last_seen, legacy.last_seen);
         assert_eq!(upgraded.claim_version, None);
+        assert_eq!(upgraded.chat_name, None);
+    }
+
+    #[test]
+    fn legacy_chat_sheet_link_decodes_without_openchat_display_name() {
+        #[derive(CandidType)]
+        struct LegacyChatSheetLink {
+            chat_key: String,
+            sheet_id: u64,
+        }
+
+        let legacy = LegacyChatSheetLink {
+            chat_key: base64url_no_pad(&[37; 32]),
+            sheet_id: 7,
+        };
+        let bytes = Encode!(&legacy).expect("encode legacy chat link");
+        let upgraded = Decode!(&bytes, ChatSheetLink).expect("decode legacy chat link");
+        assert_eq!(upgraded.chat_key, legacy.chat_key);
+        assert_eq!(upgraded.sheet_id, legacy.sheet_id);
+        assert_eq!(upgraded.chat_name, None);
     }
 
     #[test]
@@ -6888,6 +7007,7 @@ mod tests {
             chat_key: "CAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAg".to_string(),
             last_seen: 10,
             claim_version: Some(1),
+            chat_name: Some("Manager".to_string()),
         };
         assert!(pending_chat_route_is_live(
             &route,
@@ -6902,6 +7022,41 @@ mod tests {
     }
 
     #[test]
+    fn durable_chat_links_remain_visible_and_actionable_after_setup_request_expiry() {
+        let owner = p(238);
+        let chat_key = base64url_no_pad(&[38; 32]);
+        let pending_id = pending_chat_route_id(&owner, &chat_key);
+        let link_key = chat_link_key(&owner, &chat_key);
+        clear_pending_chat_routes_for_principal(owner);
+        CHAT_SHEET_LINKS.with(|links| {
+            let mut links = links.borrow_mut();
+            links.remove(&link_key);
+            links.insert(
+                link_key.clone(),
+                ChatSheetLink {
+                    chat_key: chat_key.clone(),
+                    sheet_id: 7,
+                    chat_name: Some("Mother".to_string()),
+                },
+            );
+        });
+        remember_claimed_chat_route(owner, &chat_key, "Mother", 10);
+
+        let after_expiry = 11 + PENDING_CHAT_ROUTE_TTL_NS;
+        let rows = pending_chat_route_views(owner, after_expiry);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].pending_id, pending_id);
+        assert_eq!(rows[0].last_seen, 0);
+        assert!(rows[0].has_current_link);
+        assert!(actionable_pending_chat_route(owner, &pending_id, after_expiry).is_some());
+
+        CHAT_SHEET_LINKS.with(|links| {
+            links.borrow_mut().remove(&link_key);
+        });
+        clear_pending_chat_routes_for_principal(owner);
+    }
+
+    #[test]
     fn two_authenticated_pending_chats_remain_independently_actionable() {
         let owner = p(241);
         let other = p(239);
@@ -6911,27 +7066,31 @@ mod tests {
         let older_id = pending_chat_route_id(&owner, &older_handle);
         let newer_id = pending_chat_route_id(&owner, &newer_handle);
 
-        remember_claimed_chat_route(owner, &older_handle, 10);
+        remember_claimed_chat_route(owner, &older_handle, "Mother", 10);
         assert!(actionable_pending_chat_route(owner, &older_id, 10).is_some());
 
         // A second authenticated launch must not invalidate the first chat's exact pending id.
         // Caller scoping and TTL—not visual ordering—remain the authorization boundary.
-        remember_claimed_chat_route(owner, &newer_handle, 11);
-        assert!(actionable_pending_chat_route(owner, &older_id, 11).is_some());
-        assert!(actionable_pending_chat_route(owner, &newer_id, 11).is_some());
+        remember_claimed_chat_route(owner, &newer_handle, "Manager", 11);
+        assert_eq!(
+            actionable_pending_chat_route(owner, &older_id, 11).and_then(|route| route.chat_name),
+            Some("Mother".to_string()),
+        );
+        assert_eq!(
+            actionable_pending_chat_route(owner, &newer_id, 11).and_then(|route| route.chat_name),
+            Some("Manager".to_string()),
+        );
         assert!(actionable_pending_chat_route(other, &older_id, 11).is_none());
 
         clear_pending_chat_routes_for_principal(owner);
-        remember_claimed_chat_route(owner, &older_handle, 20);
-        remember_claimed_chat_route(owner, &newer_handle, 20);
+        remember_claimed_chat_route(owner, &older_handle, "Mother", 20);
+        remember_claimed_chat_route(owner, &newer_handle, "Manager", 20);
         assert!(actionable_pending_chat_route(owner, &older_id, 20).is_some());
         assert!(actionable_pending_chat_route(owner, &newer_id, 20).is_some());
-        assert!(actionable_pending_chat_route(
-            owner,
-            &older_id,
-            21 + PENDING_CHAT_ROUTE_TTL_NS,
-        )
-        .is_none());
+        assert!(
+            actionable_pending_chat_route(owner, &older_id, 21 + PENDING_CHAT_ROUTE_TTL_NS,)
+                .is_none()
+        );
         clear_pending_chat_routes_for_principal(owner);
     }
 
@@ -6941,7 +7100,7 @@ mod tests {
         clear_pending_chat_routes_for_principal(owner);
         for index in 1u8..=33 {
             let handle = base64url_no_pad(&[index; 32]);
-            remember_claimed_chat_route(owner, &handle, u64::from(index));
+            remember_claimed_chat_route(owner, &handle, &format!("Chat {index}"), u64::from(index));
         }
         let (start, end) = pending_chat_route_bounds(&owner);
         let keys: Vec<String> = PENDING_CHAT_ROUTES.with(|routes| {
@@ -6960,9 +7119,8 @@ mod tests {
 
         // Disconnect/relink cleanup is unconditional, even if no current binding row remains.
         remove_openchat_binding_for_iou(owner);
-        let remaining = PENDING_CHAT_ROUTES.with(|routes| {
-            routes.borrow().range(start..end).count()
-        });
+        let remaining =
+            PENDING_CHAT_ROUTES.with(|routes| routes.borrow().range(start..end).count());
         assert_eq!(remaining, 0);
     }
 
@@ -6986,6 +7144,7 @@ mod tests {
                         chat_key: handle.clone(),
                         last_seen: (index + 1) as u64,
                         claim_version: Some(1),
+                        chat_name: Some(format!("Chat {index}")),
                     },
                 );
             }
@@ -6999,6 +7158,7 @@ mod tests {
         remember_claimed_chat_route(
             newcomer,
             &newcomer_handle,
+            "New chat",
             MAX_PENDING_CHAT_ROUTES_TOTAL as u64 + 1,
         );
         PENDING_CHAT_ROUTES.with(|routes| {
@@ -7011,19 +7171,19 @@ mod tests {
         clear_all_pending_chat_routes();
         let expired_owner = p(242);
         let expired_handle = base64url_no_pad(&[73; 32]);
-        remember_claimed_chat_route(expired_owner, &expired_handle, 1);
+        remember_claimed_chat_route(expired_owner, &expired_handle, "Expired", 1);
         let live_owner = p(243);
         let live_handle = base64url_no_pad(&[74; 32]);
         remember_claimed_chat_route(
             live_owner,
             &live_handle,
+            "Live",
             PENDING_CHAT_ROUTE_TTL_NS + 2,
         );
         let (expired_start, expired_end) = pending_chat_route_bounds(&expired_owner);
         assert_eq!(
-            PENDING_CHAT_ROUTES.with(|routes| {
-                routes.borrow().range(expired_start..expired_end).count()
-            }),
+            PENDING_CHAT_ROUTES
+                .with(|routes| { routes.borrow().range(expired_start..expired_end).count() }),
             0,
         );
         clear_all_pending_chat_routes();
@@ -7040,17 +7200,17 @@ mod tests {
             &test_sheet(SheetState::Closed),
             p(1),
         ));
-        assert!(!sheet_is_chat_routable(
-            &active,
-            Principal::anonymous(),
-        ));
+        assert!(!sheet_is_chat_routable(&active, Principal::anonymous(),));
     }
 
     #[test]
     fn app_scoped_card_context_requires_exact_v1_handles() {
         let mut context = test_scoped_card_context();
         assert!(valid_app_scoped_card_context(&context));
-        assert_eq!(scoped_chat_handle_key(&context.chat_handle).unwrap().len(), 43);
+        assert_eq!(
+            scoped_chat_handle_key(&context.chat_handle).unwrap().len(),
+            43
+        );
         assert_eq!(
             scoped_chat_handle_key(&context.chat_handle).unwrap(),
             "CAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAg"
@@ -7131,7 +7291,12 @@ mod tests {
         // time — if SCHEMA_VERSION is ever dropped below 3 the
         // test crate won't compile, which is the loudest possible
         // signal.
-        const { assert!(SCHEMA_VERSION >= 3, "SCHEMA_VERSION must be >= 3 after the v1.3.3 MemoryId move (issue #7)") };
+        const {
+            assert!(
+                SCHEMA_VERSION >= 3,
+                "SCHEMA_VERSION must be >= 3 after the v1.3.3 MemoryId move (issue #7)"
+            )
+        };
     }
 
     // ── v1.12.0: shared transaction types per account ──────────────────
@@ -7192,32 +7357,55 @@ mod tests {
     fn ai_app_attestation_requires_exact_configured_owner_and_name() {
         let owner = p(7);
         let correct = verify_ai_app(
-            VerifyAiAppArgs { name: "iou".into(), owner },
+            VerifyAiAppArgs {
+                name: "iou".into(),
+                owner,
+            },
             Some(owner),
         );
         assert!(correct.vouched);
         assert_eq!(correct.owner, Some(owner));
 
-        assert!(!verify_ai_app(
-            VerifyAiAppArgs { name: "IOU".into(), owner },
-            Some(owner),
-        )
-        .vouched);
-        assert!(!verify_ai_app(
-            VerifyAiAppArgs { name: "iou".into(), owner: p(8) },
-            Some(owner),
-        )
-        .vouched);
-        assert!(!verify_ai_app(
-            VerifyAiAppArgs { name: "iou".into(), owner },
-            None,
-        )
-        .vouched);
-        assert!(!verify_ai_app(
-            VerifyAiAppArgs { name: "iou".into(), owner: Principal::anonymous() },
-            Some(Principal::anonymous()),
-        )
-        .vouched);
+        assert!(
+            !verify_ai_app(
+                VerifyAiAppArgs {
+                    name: "IOU".into(),
+                    owner
+                },
+                Some(owner),
+            )
+            .vouched
+        );
+        assert!(
+            !verify_ai_app(
+                VerifyAiAppArgs {
+                    name: "iou".into(),
+                    owner: p(8)
+                },
+                Some(owner),
+            )
+            .vouched
+        );
+        assert!(
+            !verify_ai_app(
+                VerifyAiAppArgs {
+                    name: "iou".into(),
+                    owner
+                },
+                None,
+            )
+            .vouched
+        );
+        assert!(
+            !verify_ai_app(
+                VerifyAiAppArgs {
+                    name: "iou".into(),
+                    owner: Principal::anonymous()
+                },
+                Some(Principal::anonymous()),
+            )
+            .vouched
+        );
     }
 
     fn test_ai_app_v2_binding() -> AiAppVerificationBinding {
@@ -7326,25 +7514,67 @@ mod tests {
 
         let mut changed = binding.clone();
         changed.commitment.content.rows[2].value = "Private rent type".into();
-        assert!(!attests_exact_iou_card(&changed, Some(&configured), Some(&link), p(3), p(1)));
+        assert!(!attests_exact_iou_card(
+            &changed,
+            Some(&configured),
+            Some(&link),
+            p(3),
+            p(1)
+        ));
 
         let mut changed = binding.clone();
         changed.commitment.content.rows.swap(0, 1);
-        assert!(!attests_exact_iou_card(&changed, Some(&configured), Some(&link), p(3), p(1)));
+        assert!(!attests_exact_iou_card(
+            &changed,
+            Some(&configured),
+            Some(&link),
+            p(3),
+            p(1)
+        ));
 
         let mut changed = binding.clone();
         changed.commitment.content.disclosure = Some("Redundant acknowledgement".into());
-        assert!(!attests_exact_iou_card(&changed, Some(&configured), Some(&link), p(3), p(1)));
+        assert!(!attests_exact_iou_card(
+            &changed,
+            Some(&configured),
+            Some(&link),
+            p(3),
+            p(1)
+        ));
 
         let mut changed = binding.clone();
         changed.commitment.context.context_version = 2;
-        assert!(!attests_exact_iou_card(&changed, Some(&configured), Some(&link), p(3), p(1)));
+        assert!(!attests_exact_iou_card(
+            &changed,
+            Some(&configured),
+            Some(&link),
+            p(3),
+            p(1)
+        ));
 
-        assert!(!attests_exact_iou_card(&binding, Some(&configured), Some(&link), p(3), p(9)));
-        assert!(!attests_exact_iou_card(&binding, Some(&configured), None, p(3), p(1)));
+        assert!(!attests_exact_iou_card(
+            &binding,
+            Some(&configured),
+            Some(&link),
+            p(3),
+            p(9)
+        ));
+        assert!(!attests_exact_iou_card(
+            &binding,
+            Some(&configured),
+            None,
+            p(3),
+            p(1)
+        ));
         let mut wrong_link = link.clone();
         wrong_link.app_subject = Some(vec![11; 32]);
-        assert!(!attests_exact_iou_card(&binding, Some(&configured), Some(&wrong_link), p(3), p(1)));
+        assert!(!attests_exact_iou_card(
+            &binding,
+            Some(&configured),
+            Some(&wrong_link),
+            p(3),
+            p(1)
+        ));
     }
 
     #[test]
@@ -7374,8 +7604,7 @@ mod tests {
             p(1),
         ));
 
-        binding.commitment.content.rows[0].value =
-            "20 USD iou debt 2026-08-08 rent rent 20".into();
+        binding.commitment.content.rows[0].value = "20 USD iou debt 2026-08-08 rent rent 20".into();
         assert!(!attests_exact_iou_card(
             &binding,
             Some(&configured),
@@ -7398,6 +7627,7 @@ mod tests {
                     chat_key: legacy_handle,
                     last_seen: 10,
                     claim_version: None,
+                    chat_name: None,
                 },
             );
         });
@@ -7405,8 +7635,8 @@ mod tests {
         let second_handle = base64url_no_pad(&[42; 32]);
         let first_id = pending_chat_route_id(&link.iou_principal, &first_handle);
         let second_id = pending_chat_route_id(&link.iou_principal, &second_handle);
-        remember_claimed_chat_route(link.iou_principal, &first_handle, 11);
-        remember_claimed_chat_route(link.iou_principal, &second_handle, 12);
+        remember_claimed_chat_route(link.iou_principal, &first_handle, "Mother", 11);
+        remember_claimed_chat_route(link.iou_principal, &second_handle, "Manager", 12);
 
         assert!(actionable_pending_chat_route(link.iou_principal, &legacy_id, 12).is_none());
         assert!(actionable_pending_chat_route(link.iou_principal, &first_id, 12).is_some());
@@ -7435,7 +7665,8 @@ mod tests {
             br#"{"amount":25,"direction":"debt","message":"I owe 25 USD"}"#.as_slice(),
             br#"{"amount":25,"kind":"iou","message":"I owe 25 USD"}"#.as_slice(),
             br#"{"amount":25,"kind":"iou","direction":"debt","message":""}"#.as_slice(),
-            br#"{"amount":25,"kind":"iou","direction":"debt","message":"bad\u0000evidence"}"#.as_slice(),
+            br#"{"amount":25,"kind":"iou","direction":"debt","message":"bad\u0000evidence"}"#
+                .as_slice(),
         ] {
             assert!(parse_attested_entry_drafts(payload, false).is_none());
         }
@@ -7457,7 +7688,8 @@ mod tests {
     }
 
     #[test]
-    fn initial_attester_recomputes_registered_text_currency_evidence_but_preserves_image_and_edits() {
+    fn initial_attester_recomputes_registered_text_currency_evidence_but_preserves_image_and_edits()
+    {
         for payload in [
             br#"{"amount":20,"kind":"settlement","currency":"USD","direction":"debt","message":"paid 20"}"#.as_slice(),
             br#"{"amount":20,"kind":"settlement","currency":"USD","direction":"debt","message":"paid 20 EGP"}"#.as_slice(),
@@ -7477,7 +7709,10 @@ mod tests {
             assert!(parse_attested_entry_drafts(payload, false).is_some());
         }
         let registered_aliases: [(&str, &[&str]); 6] = [
-            ("USD", &["$", "dollar", "dollars", "US dollar", "US dollars"]),
+            (
+                "USD",
+                &["$", "dollar", "dollars", "US dollar", "US dollars"],
+            ),
             ("GBP", &["£", "pound sterling", "pounds sterling"]),
             ("EUR", &["€", "euro", "euros"]),
             ("JPY", &["¥", "yen"]),
@@ -7526,15 +7761,29 @@ mod tests {
             assert!(parse_attested_entry_drafts(payload, false).is_none());
         }
 
-        let overlong_note = format!(r#"{{"amount":25,"kind":"iou","direction":"debt","message":"I owe 25","note":"{}"}}"#, "n".repeat(4_097));
+        let overlong_note = format!(
+            r#"{{"amount":25,"kind":"iou","direction":"debt","message":"I owe 25","note":"{}"}}"#,
+            "n".repeat(4_097)
+        );
         assert!(parse_attested_entry_drafts(overlong_note.as_bytes(), false).is_none());
-        let overlong_message = format!(r#"{{"amount":25,"kind":"iou","direction":"debt","message":"{}"}}"#, "m".repeat(201));
+        let overlong_message = format!(
+            r#"{{"amount":25,"kind":"iou","direction":"debt","message":"{}"}}"#,
+            "m".repeat(201)
+        );
         assert!(parse_attested_entry_drafts(overlong_message.as_bytes(), false).is_none());
 
         // Optional malformed fields can be omitted, but the registered ledger semantics remain
         // mandatory at the app attestation boundary. Source text is optional for image-only input.
-        assert!(parse_attested_entry_drafts(br#"{"amount":25,"kind":"iou","direction":"debt","message":"I owe 25"}"#, false).is_some());
-        assert!(parse_attested_entry_drafts(br#"{"amount":0.005,"kind":"iou","direction":"debt","message":"I owe 0.005"}"#, false).is_some());
+        assert!(parse_attested_entry_drafts(
+            br#"{"amount":25,"kind":"iou","direction":"debt","message":"I owe 25"}"#,
+            false
+        )
+        .is_some());
+        assert!(parse_attested_entry_drafts(
+            br#"{"amount":0.005,"kind":"iou","direction":"debt","message":"I owe 0.005"}"#,
+            false
+        )
+        .is_some());
         assert!(
             parse_attested_entry_drafts(br#"{"amount":25,"kind":"iou","direction":"debt","message":"I owe 25 on leap day","date":"2024-02-29"}"#, false).is_some()
         );
@@ -7665,26 +7914,33 @@ mod tests {
             binding.user_index_canister_id,
         );
         assert!(!stale.vouched);
-        assert_eq!(stale.binding, binding, "mismatches return the stored commitment");
+        assert_eq!(
+            stale.binding, binding,
+            "mismatches return the stored commitment"
+        );
 
-        assert!(!verify_ai_app_v2(
-            binding.clone(),
-            Some(binding.clone()),
-            Some(binding.owner),
-            Some(binding.user_index_canister_id),
-            binding.app_canister_id,
-            p(9),
-        )
-        .vouched);
-        assert!(!verify_ai_app_v2(
-            binding.clone(),
-            None,
-            Some(binding.owner),
-            Some(binding.user_index_canister_id),
-            binding.app_canister_id,
-            binding.user_index_canister_id,
-        )
-        .vouched);
+        assert!(
+            !verify_ai_app_v2(
+                binding.clone(),
+                Some(binding.clone()),
+                Some(binding.owner),
+                Some(binding.user_index_canister_id),
+                binding.app_canister_id,
+                p(9),
+            )
+            .vouched
+        );
+        assert!(
+            !verify_ai_app_v2(
+                binding.clone(),
+                None,
+                Some(binding.owner),
+                Some(binding.user_index_canister_id),
+                binding.app_canister_id,
+                binding.user_index_canister_id,
+            )
+            .vouched
+        );
     }
 
     #[test]
@@ -7798,21 +8054,20 @@ mod tests {
             app_canister_id: Principal::from_slice(&[0x2a]),
             chat_handle: vec![0x22; 32],
             chat_handle_version: 1,
+            chat_name: Some("Manager".to_string()),
         };
-        let encoded = candid::encode_one(RedeemAiAppChatLinkTokenResponse::Success(
-            expected.clone(),
-        ))
-        .unwrap();
+        let encoded =
+            candid::encode_one(RedeemAiAppChatLinkTokenResponse::Success(expected.clone()))
+                .unwrap();
         let encoded_hex = encoded
             .iter()
             .map(|byte| format!("{byte:02x}"))
             .collect::<String>();
         assert_eq!(
             encoded_hex,
-            "4449444c056b08a8f7dc3201a888d28c037ffacbddf2037fee82c1ea077fa39bfdac0803cca39e90097fcf82d6ba097fb8bafce40a716c02007a01026e716c08a2e5ea2a78c59cb79e057af9bcce970878f99fbdfe0879cec1e58d0a048892b4880c7ad5f4e3bd0d68ef82b5980f046d7b0100040d0000000000000001000b0000000000000007000000201111111111111111111111111111111111111111111111111111111111111111010001012a202222222222222222222222222222222222222222222222222222222222222222"
+            "4449444c056b08a8f7dc3201a888d28c037ffacbddf2037fee82c1ea077fa39bfdac0803cca39e90097fcf82d6ba097fb8bafce40a716c02007a01026e716c09a2e5ea2a78c59cb79e057af9bcce970878f99fbdfe0879cec1e58d0a048892b4880c7ad5f4e3bd0d68d2c0c9f70e02ef82b5980f046d7b0100040d0000000000000001000b0000000000000007000000201111111111111111111111111111111111111111111111111111111111111111010001012a01074d616e61676572202222222222222222222222222222222222222222222222222222222222222222"
         );
-        let decoded: RedeemAiAppChatLinkTokenResponse =
-            candid::decode_one(&encoded).unwrap();
+        let decoded: RedeemAiAppChatLinkTokenResponse = candid::decode_one(&encoded).unwrap();
         match decoded {
             RedeemAiAppChatLinkTokenResponse::Success(value) => {
                 assert_eq!(value, expected);
@@ -7833,6 +8088,7 @@ mod tests {
             app_canister_id: binding.app_canister_id.unwrap(),
             chat_handle: vec![41; 32],
             chat_handle_version: 1,
+            chat_name: Some("Manager".to_string()),
         };
         assert_eq!(
             redeemed_chat_link_handle(&grant, &binding, binding.app_canister_id.unwrap()),
@@ -7866,11 +8122,7 @@ mod tests {
         cases.push(value);
         for mismatched in cases {
             assert_eq!(
-                redeemed_chat_link_handle(
-                    &mismatched,
-                    &binding,
-                    binding.app_canister_id.unwrap(),
-                ),
+                redeemed_chat_link_handle(&mismatched, &binding, binding.app_canister_id.unwrap(),),
                 None,
             );
         }
@@ -7947,11 +8199,10 @@ mod tests {
     }
 
     #[test]
-    fn normal_disconnect_removes_binding_only_for_clean_remote_outcomes_but_emergency_erase_is_explicit() {
+    fn normal_disconnect_removes_binding_only_for_clean_remote_outcomes_but_emergency_erase_is_explicit(
+    ) {
         assert!(binding_removal_is_allowed(
-            OpenChatBindingRemovalCause::CoordinatedRevoke(
-                &RevokeAiAppUserKeyResponse::Success,
-            ),
+            OpenChatBindingRemovalCause::CoordinatedRevoke(&RevokeAiAppUserKeyResponse::Success,),
         ));
         assert!(binding_removal_is_allowed(
             OpenChatBindingRemovalCause::CoordinatedRevoke(
@@ -7959,9 +8210,10 @@ mod tests {
             ),
         ));
         assert!(!binding_removal_is_allowed(
-            OpenChatBindingRemovalCause::CoordinatedRevoke(
-                &RevokeAiAppUserKeyResponse::Error((503, Some("unavailable".into()))),
-            ),
+            OpenChatBindingRemovalCause::CoordinatedRevoke(&RevokeAiAppUserKeyResponse::Error((
+                503,
+                Some("unavailable".into())
+            )),),
         ));
         assert!(binding_removal_is_allowed(
             OpenChatBindingRemovalCause::EmergencyLocalErase,
@@ -8005,15 +8257,15 @@ mod tests {
     fn entry_blob_validation_covers_tag_size_upper_bound_and_nonce_shape() {
         let key = vec![0u8; 32];
         assert!(validate_entry_blob(&key, &[0u8; 16], &[0u8; 12]).is_ok());
-        assert!(validate_entry_blob(&key, &vec![0u8; MAX_ENTRY_CIPHERTEXT_BYTES], &[0u8; 16]).is_ok());
+        assert!(
+            validate_entry_blob(&key, &vec![0u8; MAX_ENTRY_CIPHERTEXT_BYTES], &[0u8; 16]).is_ok()
+        );
         assert!(validate_entry_blob(&key[..31], &[0u8; 16], &[0u8; 12]).is_err());
         assert!(validate_entry_blob(&key, &[0u8; 15], &[0u8; 12]).is_err());
-        assert!(validate_entry_blob(
-            &key,
-            &vec![0u8; MAX_ENTRY_CIPHERTEXT_BYTES + 1],
-            &[0u8; 12],
-        )
-        .is_err());
+        assert!(
+            validate_entry_blob(&key, &vec![0u8; MAX_ENTRY_CIPHERTEXT_BYTES + 1], &[0u8; 12],)
+                .is_err()
+        );
         assert!(validate_entry_blob(&key, &[0u8; 16], &[0u8; 11]).is_err());
         assert!(validate_entry_blob(&key, &[0u8; 16], &[0u8; 17]).is_err());
     }
@@ -8173,15 +8425,9 @@ mod tests {
 
     #[test]
     fn openchat_binding_authorization_requires_persisted_matching_key() {
-        assert!(openchat_binding_key_matches(
-            Some("key-a"),
-            Some("key-a")
-        ));
+        assert!(openchat_binding_key_matches(Some("key-a"), Some("key-a")));
         assert!(!openchat_binding_key_matches(None, Some("key-a")));
-        assert!(!openchat_binding_key_matches(
-            Some("key-a"),
-            Some("key-b")
-        ));
+        assert!(!openchat_binding_key_matches(Some("key-a"), Some("key-b")));
         assert!(!openchat_binding_key_matches(Some("key-a"), None));
     }
 
@@ -8215,9 +8461,8 @@ mod tests {
         let epoch_memory = VectorMemory::default();
         let principal = p(42);
         {
-            let mut keypairs = StableBTreeMap::<Principal, ConsumerKeypair, _>::init(
-                key_memory.clone(),
-            );
+            let mut keypairs =
+                StableBTreeMap::<Principal, ConsumerKeypair, _>::init(key_memory.clone());
             keypairs.insert(
                 principal,
                 ConsumerKeypair {
@@ -8258,9 +8503,9 @@ mod tests {
         // Bytes emitted by @dfinity/candid for the declarations.ts IDL. This
         // guards Rust enum labels/record hashes as well as the handwritten DID.
         let ok_wire = [
-            68, 73, 68, 76, 3, 108, 2, 131, 195, 145, 228, 1, 120, 130, 218, 202, 218, 4,
-            120, 107, 2, 160, 204, 247, 171, 7, 127, 144, 239, 134, 222, 8, 0, 107, 2,
-            188, 138, 1, 120, 197, 254, 210, 1, 1, 1, 2, 0, 7, 0, 0, 0, 0, 0, 0, 0,
+            68, 73, 68, 76, 3, 108, 2, 131, 195, 145, 228, 1, 120, 130, 218, 202, 218, 4, 120, 107,
+            2, 160, 204, 247, 171, 7, 127, 144, 239, 134, 222, 8, 0, 107, 2, 188, 138, 1, 120, 197,
+            254, 210, 1, 1, 1, 2, 0, 7, 0, 0, 0, 0, 0, 0, 0,
         ];
         assert!(matches!(
             Decode!(&ok_wire, ConsumerKeyMutationResult).expect("decode frontend Ok"),
@@ -8268,14 +8513,12 @@ mod tests {
         ));
 
         let stale_wire = [
-            68, 73, 68, 76, 3, 108, 2, 131, 195, 145, 228, 1, 120, 130, 218, 202, 218, 4,
-            120, 107, 2, 160, 204, 247, 171, 7, 127, 144, 239, 134, 222, 8, 0, 107, 2,
-            188, 138, 1, 120, 197, 254, 210, 1, 1, 1, 2, 1, 1, 2, 0, 0, 0, 0, 0, 0,
-            0, 1, 0, 0, 0, 0, 0, 0, 0,
+            68, 73, 68, 76, 3, 108, 2, 131, 195, 145, 228, 1, 120, 130, 218, 202, 218, 4, 120, 107,
+            2, 160, 204, 247, 171, 7, 127, 144, 239, 134, 222, 8, 0, 107, 2, 188, 138, 1, 120, 197,
+            254, 210, 1, 1, 1, 2, 1, 1, 2, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0,
         ];
         assert!(matches!(
-            Decode!(&stale_wire, ConsumerKeyMutationResult)
-                .expect("decode frontend StaleEpoch"),
+            Decode!(&stale_wire, ConsumerKeyMutationResult).expect("decode frontend StaleEpoch"),
             ConsumerKeyMutationResult::Err(ConsumerKeyMutationError::StaleEpoch(
                 ConsumerKeyEpochConflict {
                     expected_epoch: 1,
@@ -8285,9 +8528,9 @@ mod tests {
         ));
 
         let tombstone_wire = [
-            68, 73, 68, 76, 4, 109, 123, 108, 2, 233, 159, 216, 232, 5, 0, 162, 148, 172,
-            253, 14, 113, 110, 1, 108, 2, 243, 200, 133, 155, 2, 120, 185, 194, 200, 202,
-            11, 2, 1, 3, 2, 0, 0, 0, 0, 0, 0, 0, 0,
+            68, 73, 68, 76, 4, 109, 123, 108, 2, 233, 159, 216, 232, 5, 0, 162, 148, 172, 253, 14,
+            113, 110, 1, 108, 2, 243, 200, 133, 155, 2, 120, 185, 194, 200, 202, 11, 2, 1, 3, 2, 0,
+            0, 0, 0, 0, 0, 0, 0,
         ];
         let state = Decode!(&tombstone_wire, ConsumerKeypairState)
             .expect("decode frontend tombstone state");
@@ -8301,10 +8544,10 @@ mod tests {
         // variant's type table also contains Success { pending_id : text }, so this one golden
         // locks every public result label and payload type across the Rust/TypeScript boundary.
         let wrong_account_wire = [
-            68, 73, 68, 76, 2, 108, 1, 131, 212, 177, 142, 12, 113, 107, 9, 194, 166, 149, 19,
-            127, 172, 192, 130, 91, 127, 160, 214, 216, 136, 3, 127, 162, 137, 205, 140, 8, 127,
-            207, 136, 216, 155, 8, 127, 163, 155, 253, 172, 8, 0, 145, 165, 252, 241, 10, 127,
-            174, 146, 159, 186, 14, 127, 247, 227, 162, 207, 15, 127, 1, 1, 2,
+            68, 73, 68, 76, 2, 108, 1, 131, 212, 177, 142, 12, 113, 107, 9, 194, 166, 149, 19, 127,
+            172, 192, 130, 91, 127, 160, 214, 216, 136, 3, 127, 162, 137, 205, 140, 8, 127, 207,
+            136, 216, 155, 8, 127, 163, 155, 253, 172, 8, 0, 145, 165, 252, 241, 10, 127, 174, 146,
+            159, 186, 14, 127, 247, 227, 162, 207, 15, 127, 1, 1, 2,
         ];
         assert!(matches!(
             Decode!(&wrong_account_wire, ClaimOpenChatChatRouteResult)
@@ -8400,7 +8643,10 @@ mod tests {
             creator_principal: Principal,
             deployed_at: u64,
         }
-        let old = OldConfig { creator_principal: p(1), deployed_at: 99 };
+        let old = OldConfig {
+            creator_principal: p(1),
+            deployed_at: 99,
+        };
         let bytes = Encode!(&old).expect("encode old config");
         let new = Config::from_bytes(std::borrow::Cow::Owned(bytes));
         assert_eq!(new.creator_principal, p(1));

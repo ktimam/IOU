@@ -130,6 +130,39 @@ describe("multi-entry inbox cleanup policy", () => {
     expect(source.match(/await propose\.click\(\{ timeout: 12_000 \}\)/g)).toHaveLength(1);
   });
 
+  it("correlates the recipient card by immutable message id, not view-local event coordinates", () => {
+    const cardFinder = source.indexOf("async function findClassicMultiCard(");
+    const finderEnd = source.indexOf("async function assertClassicMultiCard(", cardFinder);
+    const finder = source.slice(cardFinder, finderEnd);
+    const senderWait = source.indexOf(
+      "senderCard = await findClassicMultiCard(proposerOC, publicRows, undefined, 60_000)",
+    );
+    const recipientWait = source.indexOf(
+      "runCard = await findClassicMultiCard(",
+      senderWait,
+    );
+    const recipientGuard = source.indexOf(
+      "runCard.message.messageId !== senderCard.message.messageId",
+      recipientWait,
+    );
+
+    expect(cardFinder).toBeGreaterThanOrEqual(0);
+    expect(finderEnd).toBeGreaterThan(cardFinder);
+    expect(finder).toContain("expectedMessageId?: string");
+    expect(finder).toContain('page.locator(`[data-id="${expectedMessageId}"]`)');
+    expect(finder).not.toContain("exactOpenChatMessageWrapper(page, expectedMessage)");
+    expect(finder).toContain("let stableCoordinates: string | undefined");
+    expect(finder).toContain("stableCoordinates !== coordinates");
+    expect(finder).toContain("stableCoordinates = undefined");
+    expect(finder.trimEnd()).toMatch(/return null;\s*}$/);
+    expect(senderWait).toBeGreaterThan(finderEnd);
+    expect(recipientWait).toBeGreaterThan(senderWait);
+    expect(source.slice(recipientWait, recipientGuard)).toContain(
+      "senderCard.message.messageId",
+    );
+    expect(recipientGuard).toBeGreaterThan(recipientWait);
+  });
+
   it("dismisses every blocking startup overlay before either direct-chat selection", () => {
     expect(source).toContain("dismissBlockingOpenChatOverlays,");
     const proposerDismiss = source.indexOf(

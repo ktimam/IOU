@@ -128,11 +128,18 @@ export function PreferencesProvider({ children }: { children: ReactNode }) {
   }, [principal, scope]);
 
   const mergeMap = useCallback(
-    (key: "accountNames" | "sheetNames" | "partnerNames", id: string, name: string) => {
+    (
+      key: "accountNames" | "sheetNames" | "partnerNames",
+      id: string,
+      name: string,
+    ) => {
       setStored((previous) => {
         const prev = previous.scope === scope ? previous.prefs : loadPreferences(principal);
         if (prev[key][id] === name) return { scope, prefs: prev }; // no-op, but adopt the new auth scope
-        const next = { ...prev, [key]: { ...prev[key], [id]: name } };
+        const nextMap = { ...prev[key] };
+        if (name.trim() === "") delete nextMap[id];
+        else nextMap[id] = name;
+        const next = { ...prev, [key]: nextMap };
         savePreferences(principal, next);
         return { scope, prefs: next };
       });

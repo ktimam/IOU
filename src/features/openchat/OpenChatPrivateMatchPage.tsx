@@ -14,15 +14,19 @@ import {
 import {
   buildPrivateMatchReady,
   buildPrivateMatchResult,
+  buildPrivateMatchSourceReady,
+  parsePrivateMatchAuthorize,
   parsePrivateMatchBootstrap,
-  parsePrivateMatchRequest,
+  parsePrivateMatchSource,
   privateMatchParentTargetOrigin,
   type PrivateMatchBinding,
 } from "./privateMatchBridge";
 import {
   destroyPrivateMatchContext,
-  loadPrivateMatchContext,
+  preparePrivateMatchContext,
+  PrivateMatchContextUnavailable,
   uniquePrivateKeywordMatch,
+  verifyPrivateMatchSource,
   type LoadedPrivateMatchContext,
 } from "./privateMatchContext";
 
@@ -53,7 +57,8 @@ export function OpenChatPrivateMatchPage() {
     let parentOrigin: string | undefined;
     let session: CardTransportSession | undefined;
     let context: LoadedPrivateMatchContext | undefined;
-    let requestStarted = false;
+    let authorizationStarted = false;
+    let sourceStarted = false;
 
     const teardown = () => {
       active = false;
@@ -89,35 +94,65 @@ export function OpenChatPrivateMatchPage() {
         return;
       }
 
-      if (event.origin !== parentOrigin || requestStarted || session === undefined) return;
-      const request = parsePrivateMatchRequest(event.data, binding);
-      if (request === null) return;
-      requestStarted = true;
+      if (parentOrigin === undefined || event.origin !== parentOrigin || session === undefined) return;
+      if (!authorizationStarted) {
+        const request = parsePrivateMatchAuthorize(event.data, binding);
+        if (request === null) return;
+        const authorizedBinding = binding;
+        const authorizedOrigin = parentOrigin;
+        authorizationStarted = true;
+        void preparePrivateMatchContext(request.capability, session)
+          .then((loaded) => {
+            if (!active) {
+              destroyPrivateMatchContext(loaded);
+              return;
+            }
+            context = loaded;
+            if (loaded.keywordSets.length === 0) {
+              finish(false);
+              return;
+            }
+            // A successful context proves this exact chat is durably linked before the host is
+            // invited to release its authoritative text. Unlinked chats finish false here without
+            // ever receiving a source message.
+            parentWindow.postMessage(
+              buildPrivateMatchSourceReady(authorizedBinding),
+              authorizedOrigin,
+            );
+          })
+          .catch((error: unknown) => {
+            if (
+              error instanceof PrivateMatchContextUnavailable &&
+              error.definitiveNoMatch
+            ) {
+              finish(false);
+              return;
+            }
+            // Do not turn a redeem/network/decrypt failure into a definitive no-match. Silence keeps
+            // the wire boolean-only; the host's bounded timeout classifies it transient and retries
+            // with a fresh capability.
+            teardown();
+          });
+        return;
+      }
 
+      if (context === undefined || sourceStarted) return;
+      const source = parsePrivateMatchSource(event.data, binding);
+      if (source === null) return;
+      sourceStarted = true;
       // Keep the exact string byte-for-byte. Do not trim, normalize, lowercase or log it.
-      let exactMessageText = request.messageText;
-      void loadPrivateMatchContext(request.capability, session, exactMessageText)
-        .then((loaded) => {
-          if (!active) {
-            destroyPrivateMatchContext(loaded);
-            return;
-          }
-          context = loaded;
-          // Match only what the card's authoritative `message` field will persist. A keyword after
-          // that boundary must not suggest a Saved type the final card cannot deterministically
-          // hydrate. loadPrivateMatchContext has already verified the FULL exact-source commitment.
-          const persistedEvidence = privateMatchPersistedMessageEvidence(exactMessageText);
-          const matched = uniquePrivateKeywordMatch(loaded.keywordSets, persistedEvidence);
-          exactMessageText = "";
-          finish(matched);
-        })
-        .catch(() => {
-          exactMessageText = "";
-          // Do not turn a redeem/network/decrypt failure into a definitive no-match. Silence keeps
-          // the wire boolean-only; the host's bounded timeout classifies it transient and retries
-          // with a fresh capability.
-          teardown();
-        });
+      let exactMessageText = source.messageText;
+      if (!verifyPrivateMatchSource(context, exactMessageText)) {
+        exactMessageText = "";
+        teardown();
+        return;
+      }
+      // Match only what the card's authoritative `message` field will persist. A keyword after
+      // that boundary must not suggest a Saved type the final card cannot deterministically hydrate.
+      const persistedEvidence = privateMatchPersistedMessageEvidence(exactMessageText);
+      const matched = uniquePrivateKeywordMatch(context.keywordSets, persistedEvidence);
+      exactMessageText = "";
+      finish(matched);
     };
 
     window.addEventListener("message", onMessage);

@@ -8,7 +8,9 @@
 export const PRIVATE_MATCH_MSG = {
   bootstrap: "oc:private-match:bootstrap",
   ready: "oc:private-match:ready",
-  request: "oc:private-match:request",
+  authorize: "oc:private-match:authorize",
+  sourceReady: "oc:private-match:source-ready",
+  source: "oc:private-match:source",
   result: "oc:private-match:result",
 } as const;
 
@@ -61,10 +63,17 @@ export type PrivateMatchBinding = {
   attemptId: string;
 };
 
-export type PrivateMatchRequest = PrivateMatchBinding & {
+export type PrivateMatchAuthorize = PrivateMatchBinding & {
   capability: string;
+};
+
+export type PrivateMatchSource = PrivateMatchBinding & {
   messageText: string;
 };
+
+function hasOnlyKeys(value: Record<string, unknown>, allowed: readonly string[]): boolean {
+  return Object.keys(value).every((key) => allowed.includes(key));
+}
 
 export function parsePrivateMatchBootstrap(value: unknown): PrivateMatchBinding | null {
   if (
@@ -79,19 +88,18 @@ export function parsePrivateMatchBootstrap(value: unknown): PrivateMatchBinding 
   return { frameNonce: value.frameNonce, attemptId: value.attemptId };
 }
 
-export function parsePrivateMatchRequest(
+export function parsePrivateMatchAuthorize(
   value: unknown,
   expected: PrivateMatchBinding,
-): PrivateMatchRequest | null {
+): PrivateMatchAuthorize | null {
   if (
     !isRecord(value) ||
-    value.type !== PRIVATE_MATCH_MSG.request ||
+    value.type !== PRIVATE_MATCH_MSG.authorize ||
     value.version !== PRIVATE_MATCH_VERSION ||
     value.frameNonce !== expected.frameNonce ||
     value.attemptId !== expected.attemptId ||
     !isPrivateMatchCapability(value.capability) ||
-    typeof value.messageText !== "string" ||
-    new TextEncoder().encode(value.messageText).length > PRIVATE_MATCH_MAX_TEXT_BYTES
+    !hasOnlyKeys(value, ["type", "version", "frameNonce", "attemptId", "capability"])
   ) {
     return null;
   }
@@ -99,6 +107,28 @@ export function parsePrivateMatchRequest(
     frameNonce: expected.frameNonce,
     attemptId: expected.attemptId,
     capability: value.capability,
+  };
+}
+
+export function parsePrivateMatchSource(
+  value: unknown,
+  expected: PrivateMatchBinding,
+): PrivateMatchSource | null {
+  if (
+    !isRecord(value) ||
+    value.type !== PRIVATE_MATCH_MSG.source ||
+    value.version !== PRIVATE_MATCH_VERSION ||
+    value.frameNonce !== expected.frameNonce ||
+    value.attemptId !== expected.attemptId ||
+    typeof value.messageText !== "string" ||
+    new TextEncoder().encode(value.messageText).length > PRIVATE_MATCH_MAX_TEXT_BYTES ||
+    !hasOnlyKeys(value, ["type", "version", "frameNonce", "attemptId", "messageText"])
+  ) {
+    return null;
+  }
+  return {
+    frameNonce: expected.frameNonce,
+    attemptId: expected.attemptId,
     messageText: value.messageText,
   };
 }
@@ -120,6 +150,20 @@ export function buildPrivateMatchReady(
     ...binding,
     recipientKeyScheme: PRIVATE_MATCH_RECIPIENT_KEY_SCHEME,
     recipientPublicKey,
+  } as const;
+}
+
+export function buildPrivateMatchSourceReady(binding: PrivateMatchBinding) {
+  if (
+    !isPrivateMatchFrameNonce(binding.frameNonce) ||
+    !isPrivateMatchAttemptId(binding.attemptId)
+  ) {
+    throw new Error("invalid private-match source-ready binding");
+  }
+  return {
+    type: PRIVATE_MATCH_MSG.sourceReady,
+    version: PRIVATE_MATCH_VERSION,
+    ...binding,
   } as const;
 }
 

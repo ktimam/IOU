@@ -283,12 +283,14 @@ export const idlFactory = ({ IDL: idl }: { IDL: IDL }) => {
   const ChatSheetLink = idl.Record({
     chat_key: idl.Text,
     sheet_id: idl.Nat64,
+    chat_name: idl.Opt(idl.Text),
   });
   const PendingChatRoute = idl.Record({
     pending_id: idl.Text,
     last_seen: idl.Nat64,
     has_current_link: idl.Bool,
     current_sheet_id: idl.Opt(idl.Nat64),
+    chat_name: idl.Opt(idl.Text),
   });
   const ClaimOpenChatChatRouteSuccess = idl.Record({
     pending_id: idl.Text,

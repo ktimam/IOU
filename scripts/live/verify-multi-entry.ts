@@ -24,7 +24,7 @@ import {
 import { Actor, HttpAgent } from "@dfinity/agent";
 import { webcrypto } from "node:crypto";
 import { CDP_PORTS } from "./cdpPorts";
-import { isImmediateStableSuccessor, sameStableMessage } from "./journeySafety";
+import { isImmediateStableSuccessor } from "./journeySafety";
 import {
   dismissBlockingOpenChatOverlays,
   exactOpenChatMessageWrapper,
@@ -285,16 +285,23 @@ async function messageFromCard(card: Locator): Promise<OpenChatMessageRef> {
 async function findClassicMultiCard(
   page: Page,
   expectedRows: OpenChatCardRowEvidence[],
-  expectedMessage?: OpenChatMessageRef,
+  expectedMessageId?: string,
   timeoutMs = 40_000,
 ): Promise<LoadedMultiCard | null> {
+  if (expectedMessageId !== undefined && !/^\d+$/.test(expectedMessageId)) {
+    throw new Error("refusing invalid expected multi-card message id");
+  }
   const deadline = Date.now() + timeoutMs;
   let firstFoundAt: number | undefined;
+  let stableCoordinates: string | undefined;
   let found: LoadedMultiCard | null = null;
   while (Date.now() < deadline) {
     await throwVisibleProposalBlocker(page);
-    const cards = expectedMessage
-      ? exactOpenChatMessageWrapper(page, expectedMessage).locator(".action-card")
+    // messageIndex/eventIndex belong to each participant's event view and can also change while an
+    // optimistic send reconciles. The backend message id is the immutable cross-view correlation;
+    // exact nonce-scoped rows and uniqueness remain mandatory before confirmation.
+    const cards = expectedMessageId !== undefined
+      ? page.locator(`[data-id="${expectedMessageId}"]`).locator(".action-card")
       : page.locator(".action-card");
     const matches: LoadedMultiCard[] = [];
     for (let index = 0; index < await cards.count().catch(() => 0); index++) {
@@ -321,14 +328,28 @@ async function findClassicMultiCard(
       throw new Error("multiple exact two-entry cards were found; refusing ambiguous confirmation");
     }
     if (matches.length === 1) {
-      found = matches[0];
-      firstFoundAt ??= Date.now();
-      if (Date.now() - firstFoundAt >= 800) return found;
+      const candidate = matches[0];
+      if (expectedMessageId !== undefined && candidate.message.messageId !== expectedMessageId) {
+        throw new Error("multi card escaped its immutable message-id scope");
+      }
+      const coordinates = `${candidate.message.messageId}/${candidate.message.messageIndex}/${candidate.message.eventIndex}`;
+      found = candidate;
+      if (stableCoordinates !== coordinates) {
+        stableCoordinates = coordinates;
+        firstFoundAt = Date.now();
+      }
+      if (firstFoundAt !== undefined && Date.now() - firstFoundAt >= 2_000) return found;
+    } else {
+      // A disappearing card or coordinate transition restarts the settle window. Never carry an
+      // earlier observation through a transient renderer state and call the next frame stable.
+      found = null;
+      stableCoordinates = undefined;
+      firstFoundAt = undefined;
     }
     await page.waitForTimeout(400);
   }
   await throwVisibleProposalBlocker(page);
-  return found;
+  return null;
 }
 
 async function assertClassicMultiCard(
@@ -750,8 +771,13 @@ async function main() {
       throw new Error("multi card is not the immediate stable successor of this run's source");
     }
 
-    runCard = await findClassicMultiCard(confirmerOC, publicRows, senderCard.message, 35_000);
-    if (!runCard || !sameStableMessage(senderCard.message, runCard.message)) {
+    runCard = await findClassicMultiCard(
+      confirmerOC,
+      publicRows,
+      senderCard.message.messageId,
+      35_000,
+    );
+    if (!runCard || runCard.message.messageId !== senderCard.message.messageId) {
       throw new Error("recipient did not resolve the sender's exact stable multi card");
     }
     check(extractionPromptCalls === 1, "multi propose requested deterministic JSON exactly once");

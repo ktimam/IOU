@@ -160,8 +160,8 @@ export function TemplatesManager({
       schedule,
       note: note.trim() || undefined,
       // Split the comma list into private matching words; drop empties and any >64 chars, cap at 50.
-      // These remain E2E-encrypted account data. A separately consented, chat-bound private matcher
-      // may use them to suggest IOU; they are never serialized into OpenChat's public app manifest.
+      // These remain E2E-encrypted account data. A chat-bound matcher may use them only after IOU
+      // proves that chat has a saved sheet link; they never enter OpenChat's public app manifest.
       keywords: keywords.trim()
         ? keywords
             .split(",")
@@ -524,10 +524,9 @@ export function TemplatesManager({
               Comma-separated and encrypted with this account. The type name is not an automatic
               trigger; add the name here too if you want it to match. In OpenChat, connect IOU for a
               direct chat; for a group or channel, connect IOU and have an admin enable it there. Then
-              link that exact chat to this IOU account and enable private Saved-type triggers. Keep
-              auto-propose suggestions on and that chat unmuted. A match suggests IOU for new text
-              messages observed while that chat is open, and privately selects this Saved type
-              without publishing its name or trigger words.
+              link that exact chat to this IOU account. New matching messages then suggest IOU
+              automatically and select this Saved type without publishing its name or trigger
+              words. Keep AI action suggestions on and that chat unmuted.
             </span>
           </label>
         </div>

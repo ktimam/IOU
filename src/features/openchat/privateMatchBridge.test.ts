@@ -2,8 +2,10 @@ import { describe, expect, it } from "vitest";
 import {
   buildPrivateMatchReady,
   buildPrivateMatchResult,
+  buildPrivateMatchSourceReady,
+  parsePrivateMatchAuthorize,
   parsePrivateMatchBootstrap,
-  parsePrivateMatchRequest,
+  parsePrivateMatchSource,
   privateMatchParentTargetOrigin,
   PRIVATE_MATCH_MSG,
   PRIVATE_MATCH_VERSION,
@@ -42,22 +44,37 @@ describe("private-match iframe protocol", () => {
     );
   });
 
-  it("accepts only the exact nonce/attempt, canonical bearer and bounded exact text", () => {
-    const request = {
-      type: PRIVATE_MATCH_MSG.request,
+  it("authorizes before accepting any exact source text", () => {
+    const authorize = {
+      type: PRIVATE_MATCH_MSG.authorize,
       version: PRIVATE_MATCH_VERSION,
       ...binding,
       capability: b64url(32, 4),
+    };
+    expect(parsePrivateMatchAuthorize(authorize, binding)?.capability).toBe(b64url(32, 4));
+    expect(
+      parsePrivateMatchAuthorize({ ...authorize, messageText: "must not cross yet" }, binding),
+    ).toBeNull();
+    expect(buildPrivateMatchSourceReady(binding)).toEqual({
+      type: PRIVATE_MATCH_MSG.sourceReady,
+      version: PRIVATE_MATCH_VERSION,
+      ...binding,
+    });
+
+    const source = {
+      type: PRIVATE_MATCH_MSG.source,
+      version: PRIVATE_MATCH_VERSION,
+      ...binding,
       messageText: "School expense 350 EGP ",
     };
-    expect(parsePrivateMatchRequest(request, binding)?.messageText).toBe(
+    expect(parsePrivateMatchSource(source, binding)?.messageText).toBe(
       "School expense 350 EGP ",
     );
     expect(
-      parsePrivateMatchRequest({ ...request, attemptId: b64url(16, 9) }, binding),
+      parsePrivateMatchSource({ ...source, attemptId: b64url(16, 9) }, binding),
     ).toBeNull();
-    expect(parsePrivateMatchRequest({ ...request, capability: "not-a-token" }, binding)).toBeNull();
-    expect(parsePrivateMatchRequest({ ...request, messageText: "x".repeat(32 * 1024 + 1) }, binding)).toBeNull();
+    expect(parsePrivateMatchAuthorize({ ...authorize, capability: "not-a-token" }, binding)).toBeNull();
+    expect(parsePrivateMatchSource({ ...source, messageText: "x".repeat(32 * 1024 + 1) }, binding)).toBeNull();
   });
 
   it("never falls back to wildcard for an opaque or missing parent origin", () => {

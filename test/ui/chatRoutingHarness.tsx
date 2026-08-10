@@ -48,12 +48,14 @@ const productionActor = {
       ? [
           {
             pending_id: RECENT_ID,
+            chat_name: ["Manager"],
             last_seen: 30n,
             has_current_link: false,
             current_sheet_id: [],
           },
           {
             pending_id: OLDER_ID,
+            chat_name: ["Mother"],
             last_seen: 20n,
             has_current_link: false,
             current_sheet_id: [],
@@ -96,6 +98,7 @@ const ambiguousClaimActor = {
     return ambiguousPendingReady
       ? [{
           pending_id: OLDER_ID,
+          chat_name: ["Mother"],
           last_seen: 20n,
           has_current_link: false,
           current_sheet_id: [],
@@ -167,8 +170,8 @@ function Harness() {
   const [pending, setPending] = useState(
     viewer === "father"
       ? [
-          { pendingId: RECENT_ID, lastSeen: 20n, hasCurrentLink: false, currentSheetId: null },
-          { pendingId: OLDER_ID, lastSeen: 10n, hasCurrentLink: false, currentSheetId: null },
+          { pendingId: RECENT_ID, chatName: "Manager", lastSeen: 20n, hasCurrentLink: false, currentSheetId: null },
+          { pendingId: OLDER_ID, chatName: "Mother", lastSeen: 10n, hasCurrentLink: false, currentSheetId: null },
         ]
       : [],
   );

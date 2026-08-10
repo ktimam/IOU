@@ -441,8 +441,8 @@ export const iouActionManifest: IouActionManifest = {
 // ── Private template compatibility boundary ────────────────────────────────────────────────────
 // Account types are private E2E data. OpenChat's manifest is public and user-global, so values
 // accepted by these compatibility helpers are never serialized into the manifest.
-// Matching happens privately against only the account linked to that chat. With the separate
-// per-chat private-trigger consent enabled, an isolated matcher may use those encrypted values to
+// Matching happens privately against only the account linked to that chat. With an explicit
+// durable chat-to-sheet link, an isolated matcher may use those encrypted values to
 // suggest IOU; this public manifest still cannot see or publish them.
 export type ManifestTemplate = {
   id: string;

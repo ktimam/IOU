@@ -1,7 +1,8 @@
 // One-use private Saved-type matcher context for /openchat/private-match.
 // The IOU canister returns an authoritative exact-text commitment and only
-// encrypted linked-sheet roster material. This anonymous frame verifies the
-// commitment before unwrapping/decrypting anything.
+// encrypted linked-sheet roster material. The anonymous frame first proves the
+// chat has a durable link, then requests the source and verifies its commitment
+// before running the private keyword matcher.
 
 import { Actor, HttpAgent } from "@dfinity/agent";
 import { sha256 } from "@noble/hashes/sha256";
@@ -50,7 +51,15 @@ export type LoadedPrivateMatchContext = {
   // fees and schedules are erased before this function returns.
   keywordSets: string[][];
   sheetKey: Uint8Array;
+  sourceBinding: Uint8Array;
 };
+
+export class PrivateMatchContextUnavailable extends Error {
+  constructor(readonly definitiveNoMatch: boolean) {
+    super("private match unavailable");
+    this.name = "PrivateMatchContextUnavailable";
+  }
+}
 
 const idl = ({ IDL: idl }: { IDL: IDL }) => {
   const Context = idl.Record({
@@ -157,11 +166,21 @@ export function exactPrivateMatchSource(source: string, expected: Uint8Array): b
 export function destroyPrivateMatchContext(context: LoadedPrivateMatchContext | undefined): void {
   if (context === undefined) return;
   context.sheetKey.fill(0);
+  context.sourceBinding.fill(0);
   for (const keywords of context.keywordSets) {
     keywords.fill("");
     keywords.length = 0;
   }
   context.keywordSets.length = 0;
+}
+
+export function verifyPrivateMatchSource(
+  context: LoadedPrivateMatchContext,
+  exactMessageText: string,
+): boolean {
+  const matches = exactPrivateMatchSource(exactMessageText, context.sourceBinding);
+  context.sourceBinding.fill(0);
+  return matches;
 }
 
 export function uniquePrivateKeywordMatch(
@@ -201,10 +220,9 @@ function eraseDecryptedTemplate(value: object): void {
   for (const key of Object.keys(record)) Reflect.deleteProperty(record, key);
 }
 
-export async function loadPrivateMatchContext(
+export async function preparePrivateMatchContext(
   capability: string,
   session: CardTransportSession,
-  exactMessageText: string,
 ): Promise<LoadedPrivateMatchContext> {
   const token = decodeCanonicalCapability(capability);
   const agent = new HttpAgent({ host });
@@ -228,7 +246,14 @@ export async function loadPrivateMatchContext(
   } finally {
     token.fill(0);
   }
-  if (!("Success" in result)) throw new Error("private match unavailable");
+  if (!("Success" in result)) {
+    const definitiveNoMatch =
+      "NotConfigured" in result ||
+      "NotLinked" in result ||
+      "ChatNotLinked" in result ||
+      "NotAuthorized" in result;
+    throw new PrivateMatchContextUnavailable(definitiveNoMatch);
+  }
 
   const raw = result.Success;
   const sourceBinding = exactBytes(raw.source_binding);
@@ -236,14 +261,13 @@ export async function loadPrivateMatchContext(
   zeroRawBytes(raw.app_subject);
   zeroRawBytes(raw.chat_handle);
   zeroRawBytes(raw.message_handle);
-  // This check deliberately precedes parsing or decrypting the roster/key material.
-  const sourceMatches = exactPrivateMatchSource(exactMessageText, sourceBinding);
-  sourceBinding.fill(0);
-  if (!sourceMatches) {
+  if (sourceBinding.length !== 32) {
+    sourceBinding.fill(0);
     zeroUndecryptedRawMaterial(raw);
-    throw new Error("private match source mismatch");
+    throw new Error("invalid private match source binding");
   }
   if (!/^[0-9a-f]{16}$/.test(raw.sheet_id)) {
+    sourceBinding.fill(0);
     zeroUndecryptedRawMaterial(raw);
     throw new Error("invalid private match sheet");
   }
@@ -296,9 +320,11 @@ export async function loadPrivateMatchContext(
     return {
       keywordSets,
       sheetKey,
+      sourceBinding,
     };
   } catch (error) {
     sheetKey?.fill(0);
+    sourceBinding.fill(0);
     throw error;
   } finally {
     masterPublicKey?.fill(0);

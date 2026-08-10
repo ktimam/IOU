@@ -21,6 +21,7 @@ export type ActiveRouteSheet = {
 
 export type PendingChatRoute = {
   pendingId: string;
+  chatName: string | null;
   lastSeen: bigint;
   hasCurrentLink: boolean;
   currentSheetId: string | null;
@@ -34,6 +35,7 @@ export type ChatRouteRow = {
   lastSeen: bigint;
   hasCurrentLink: boolean;
   currentSheetId: string | null;
+  chatName: string | null;
   isMostRecent: boolean;
 };
 
@@ -152,6 +154,7 @@ export function routableSheetIdSet(routableWire: unknown): Set<string> {
 export function buildChatRouteRows(
   pending: PendingChatRoute[],
 ): ChatRouteRow[] {
+  let durableIndex = 0;
   return [...pending]
     .sort((left, right) =>
       left.lastSeen === right.lastSeen
@@ -160,16 +163,29 @@ export function buildChatRouteRows(
           ? -1
           : 1,
     )
-    .map((route, index) => ({
-      kind: "pending",
-      internalKey: `pending:${route.pendingId}`,
-      pendingId: route.pendingId,
-      label: index === 0 ? "Most recent chat request" : `Earlier chat request ${index}`,
-      lastSeen: route.lastSeen,
-      hasCurrentLink: route.hasCurrentLink,
-      currentSheetId: route.currentSheetId,
-      isMostRecent: index === 0,
-    }));
+    .map((route, index) => {
+      const durable = route.lastSeen === 0n && route.hasCurrentLink;
+      if (durable) durableIndex += 1;
+      return {
+        kind: "pending",
+        internalKey: `pending:${route.pendingId}`,
+        pendingId: route.pendingId,
+        label:
+          route.chatName ??
+          (durable
+            ? durableIndex === 1
+              ? "Unnamed linked OpenChat chat"
+              : `Unnamed linked OpenChat chat ${durableIndex}`
+            : index === 0
+              ? "Unnamed recent OpenChat chat"
+              : `Unnamed earlier OpenChat chat ${index}`),
+        lastSeen: route.lastSeen,
+        hasCurrentLink: route.hasCurrentLink,
+        currentSheetId: route.currentSheetId,
+        chatName: route.chatName,
+        isMostRecent: !durable && index === 0,
+      } satisfies ChatRouteRow;
+    });
 }
 
 function requestedAt(lastSeen: bigint): string {
@@ -219,14 +235,11 @@ export function ChatRoutingView({
     if (!focusedPendingId) return;
     const row = rows.find((candidate) => candidate.pendingId === focusedPendingId);
     if (!row) return;
-    if ((selections[row.internalKey] ?? "") === "" && sheets.length === 1) {
-      onSelect(row.internalKey, sheets[0].sheetId);
-    }
     const element = routeElements.current.get(row.internalKey);
     element?.scrollIntoView({ block: "center" });
     element?.querySelector<HTMLSelectElement>("select")?.focus();
     onRouteFocused();
-  }, [focusedPendingId, onRouteFocused, onSelect, rows, selections, sheets]);
+  }, [focusedPendingId, onRouteFocused, rows]);
 
   return (
     <section className="card" id="openchat-routing" ref={sectionRef}>
@@ -234,8 +247,8 @@ export function ChatRoutingView({
         <div>
           <h2 style={{ marginBottom: 4 }}>Chat routing</h2>
           <p className="muted small" style={{ margin: 0 }}>
-            Choose which active account/sheet receives each OpenChat chat. Chat identities stay
-            private: they are never placed in this page&apos;s URL or shown here.
+            Each name comes from the exact OpenChat chat that opened setup. Choose the IOU
+            account / sheet for that chat; saving one row never changes another chat.
           </p>
         </div>
         <button
@@ -260,9 +273,18 @@ export function ChatRoutingView({
         </p>
       )}
 
+      {!loading && rows.length > 0 && (
+        <p className="muted small">
+          {rows.length} chat {rows.length === 1 ? "route" : "routes"} shown. To add another, use
+          Open setup inside that exact OpenChat chat.
+        </p>
+      )}
+
       {rows.map((row) => {
         const selected = selections[row.internalKey] ?? "";
         const busy = busyKey === row.internalKey;
+        const destination = sheets.find((sheet) => sheet.sheetId === selected)?.label ??
+          "Choose destination";
         return (
           <div
             className="card"
@@ -273,12 +295,17 @@ export function ChatRoutingView({
             }}
             style={{ marginTop: 12 }}
           >
-            <h3 style={{ marginTop: 0 }}>{row.label}</h3>
+            <h3 style={{ marginTop: 0 }}>
+              {row.label} <span className="muted">→ {destination}</span>
+            </h3>
             <p className="muted small">
-              Requested {requestedAt(row.lastSeen)} through authenticated OpenChat context.
-              {row.hasCurrentLink
-                ? " It already has a saved destination; you can reassign or remove it."
-                : " Pick its destination."}
+              {row.lastSeen === 0n && row.hasCurrentLink
+                ? "This chat has a saved routing destination. You can reassign or remove it."
+                : `Requested ${requestedAt(row.lastSeen)} through authenticated OpenChat context.${
+                    row.hasCurrentLink
+                      ? " It already has a saved destination; you can reassign or remove it."
+                      : " Pick its destination."
+                  }`}
             </p>
             <label>
               Account / sheet
@@ -298,7 +325,11 @@ export function ChatRoutingView({
             </label>
             <div className="row" style={{ marginTop: 10, gap: 8 }}>
               <button disabled={busy || selected === ""} onClick={() => onSave(row)}>
-                {busy ? "Saving…" : row.hasCurrentLink ? "Save destination" : "Link chat"}
+                {busy
+                  ? "Saving…"
+                  : row.hasCurrentLink
+                    ? `Save ${row.label} destination`
+                    : `Link ${row.label}`}
               </button>
               <button className="secondary" disabled={busy} onClick={() => onRemove(row)}>
                 {row.hasCurrentLink ? "Remove link" : "Dismiss"}
@@ -379,6 +410,7 @@ export function ChatRoutingSettingsContent({
             last_seen?: unknown;
             has_current_link?: unknown;
             current_sheet_id?: unknown;
+            chat_name?: unknown;
           };
           if (
             typeof candidate.pending_id !== "string" ||
@@ -390,8 +422,16 @@ export function ChatRoutingSettingsContent({
             const currentWire = unwrap(candidate.current_sheet_id);
             const currentSheetId =
               currentWire == null ? null : nat64ToSheetId(BigInt(currentWire as bigint));
+            const chatNameWire = unwrap(candidate.chat_name);
+            const chatName =
+              typeof chatNameWire === "string" &&
+              chatNameWire !== "" &&
+              chatNameWire.trim() === chatNameWire
+                ? chatNameWire
+                : null;
             return [{
               pendingId: candidate.pending_id,
+              chatName,
               lastSeen: BigInt(candidate.last_seen as bigint),
               hasCurrentLink: candidate.has_current_link === true,
               currentSheetId:
@@ -410,8 +450,7 @@ export function ChatRoutingSettingsContent({
         Object.fromEntries(
           nextRows.map((row) => [
             row.internalKey,
-            row.currentSheetId ??
-              (nextSheets.length === 1 && row.isMostRecent ? nextSheets[0].sheetId : ""),
+            row.currentSheetId ?? "",
           ]),
         ),
       );
@@ -422,7 +461,7 @@ export function ChatRoutingSettingsContent({
     } finally {
       if (generation === reloadGeneration.current) setLoading(false);
     }
-  }, [actor, prefs, principal]);
+  }, [actor, prefs.accountNames, prefs.partnerNames, prefs.sheetNames, principal]);
 
   useEffect(() => {
     void reload();
@@ -515,7 +554,11 @@ export function ChatRoutingSettingsContent({
         // The durable write succeeded; another screen can refresh the optimistic cache later.
       }
       await reload();
-      setStatus("Chat destination saved. Retry/open the IOU card to load this account's types.");
+      const destination =
+        sheets.find((sheet) => sheet.sheetId === sheetId)?.label ?? "the selected account";
+      setStatus(
+        `${row.label} now routes to ${destination}. Other OpenChat chat links were not changed.`,
+      );
     } catch (error) {
       setStatus(`Could not save chat destination: ${String((error as Error)?.message ?? error)}`);
     } finally {
@@ -581,5 +624,11 @@ export function ChatRoutingSettingsContent({
 export function ChatRoutingSettings(props: ChatRoutingSettingsProps) {
   const { actor } = useActor();
   const { prefs } = usePreferences();
-  return <ChatRoutingSettingsContent {...props} actor={actor} prefs={prefs} />;
+  return (
+    <ChatRoutingSettingsContent
+      {...props}
+      actor={actor}
+      prefs={prefs}
+    />
+  );
 }

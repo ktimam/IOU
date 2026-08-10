@@ -348,6 +348,7 @@ type ConsumerKeyMutationResult = variant {
 type ChatSheetLink = record {
     chat_key : text;
     sheet_id : nat64;
+    chat_name : opt text;
 };
 
 // Caller-private setup candidate. pending_id is a principal-scoped SHA-256
@@ -357,6 +358,7 @@ type PendingChatRoute = record {
     last_seen : nat64;
     has_current_link : bool;
     current_sheet_id : opt nat64;
+    chat_name : opt text;
 };
 
 type OpenChatBinding = record {
