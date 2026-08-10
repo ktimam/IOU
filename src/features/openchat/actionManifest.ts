@@ -168,7 +168,9 @@ Each object may contain these fields:
   date or an explicit relative-date phrase. A host calendar anchor, when supplied for text input,
   is reference context only for resolving relative phrases. Never output today's date unless the
   source itself says "today". If there are no visible date digits or date words in the source, omit
-  "date". For a date range, use the start date.
+  "date". For a date range, use the start date. For image input, inspect Date, Transaction date,
+  Booking date, and Due date labels. "Date: 04 Jul 2026 03:19 PM" must become "date":"2026-07-04";
+  ignore the time.
 - "note": a short description taken from the input.
 - "message": OpenChat supplies a bounded exact-source prefix for plain-text input; omit for image input.
 Include a field only when the input supports it; omit any field you are unsure of. Never invent
@@ -336,12 +338,16 @@ export const iouActionManifest: IouActionManifest = {
         format: "ascii-uppercase",
         "x-openchat-require-text-evidence": true,
       },
-      direction: { enum: ["credit", "debt"] },
+      // Ambiguous two-person shorthand has no author-relative direction evidence. Keep direction
+      // required, but provide a visible editable debt fallback instead of discarding the action.
+      // Explicit model output and deterministic source-phrase overrides still take precedence.
+      direction: { type: "string", enum: ["credit", "debt"], default: "debt" },
       date: {
         type: "string",
         minLength: 10,
         maxLength: 10,
         format: "date",
+        "x-openchat-normalize-date": true,
       },
       note: { type: "string", maxLength: 4_096, format: "utf8-no-nul" },
       // Declared so conformToSchema keeps it — an undeclared key is dropped before the card is built.
@@ -353,10 +359,11 @@ export const iouActionManifest: IouActionManifest = {
         "x-openchat-omit-for-image-only": true,
       },
     },
-    // These values define the ledger semantics and cannot safely fall through to card UI defaults.
-    // Currency remains optional because IOU can recover it from prefs.defaultCurrency. `message` is
-    // optional too: OpenChat supplies authoritative text input itself, while a vision model's text
-    // echo is not proof of what an image contains. Missing ledger semantics still fail closed.
+    // Amount and kind define the ledger semantics and still fail closed when absent. Direction
+    // remains required after applying the declared, visible editable fallback above. Currency stays
+    // optional because IOU can recover it from its configured card currency or the user's import
+    // default. `message` is optional too: OpenChat supplies authoritative text input itself, while a
+    // vision model's text echo is not proof of what an image contains.
     required: ["amount", "kind", "direction"],
   },
   rules: IOU_EXTRACTION_RULES,

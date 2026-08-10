@@ -162,8 +162,8 @@ describe("invalid attested-card guardrails", () => {
   // boundary.
 
   it("schema requires ledger semantics but NOT currency or model-authored source evidence", () => {
-    // amount/kind/direction are unrecoverable without silently changing ledger meaning, so an
-    // absent or invalid value must be dropped rather than masked by a card UI default.
+    // amount/kind are unrecoverable without inventing ledger meaning. Direction stays required but
+    // can be satisfied by the app-declared visible editable fallback for genuinely ambiguous input.
     // currency IS recoverable: IOU fills a missing currency from prefs.defaultCurrency on import
     // (baseWithDefaultCurrency), so requiring it would wrongly BLOCK a no-currency message at the
     // OpenChat gate before IOU can default it (live 2026-07-23: "paid 120 for groceries" → no card).
@@ -182,6 +182,28 @@ describe("invalid attested-card guardrails", () => {
     );
     expect(buildIouOutputSchema([]).required as string[]).not.toContain(
       "message",
+    );
+  });
+
+  it("declares a visible editable debt fallback when the model omits an ambiguous direction", () => {
+    const direction = (
+      iouActionManifest.outputSchema.properties as Record<string, unknown>
+    ).direction as Record<string, unknown>;
+    expect(direction).toMatchObject({
+      enum: ["credit", "debt"],
+      default: "debt",
+    });
+    expect(
+      (
+        (registration as { responseSchema: { properties: Record<string, unknown> } })
+          .responseSchema.properties.direction as Record<string, unknown>
+      ).default,
+    ).toBe("debt");
+  });
+
+  it("gives the vision model an exact labelled-date conversion example", () => {
+    expect(IOU_EXTRACTION_PROMPT).toContain(
+      '"Date: 04 Jul 2026 03:19 PM" must become "date":"2026-07-04"',
     );
   });
 

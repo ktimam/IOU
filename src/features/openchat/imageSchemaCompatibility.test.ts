@@ -46,6 +46,7 @@ function expectImageSafeOptionalFields(schema: unknown): void {
     format: "date",
     minLength: 10,
     maxLength: 10,
+    "x-openchat-normalize-date": true,
   });
   expect(properties.date).not.toHaveProperty("x-openchat-omit-for-image-only");
   expect(properties.note).toMatchObject({
