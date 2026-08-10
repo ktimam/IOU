@@ -44,6 +44,28 @@ describe('repository security policy', () => {
     );
   });
 
+  it('has one user default currency and no deployment-wide chat-card default', () => {
+    const candid = read('src/iou_backend.did');
+    const declarations = read('src/backend/declarations.ts');
+    const backend = read('src/lib.rs');
+    for (const source of [candid, declarations]) {
+      expect(source).not.toContain('set_card_currency');
+      expect(source).not.toContain('card_currency');
+    }
+    expect(backend).not.toContain('set_card_currency');
+    expect(backend).not.toMatch(/pub struct Config \{[\s\S]*?pub card_currency:/);
+    expect(backend).toContain('config_ignores_the_removed_deployment_card_currency');
+    expect(candid).toMatch(
+      /type OpenChatCardContext = record \{[\s\S]*?default_currency : opt text;/,
+    );
+    expect(declarations).toMatch(
+      /const OpenChatCardContext = idl\.Record\(\{[\s\S]*?default_currency: idl\.Opt\(idl\.Text\)/,
+    );
+    expect(backend).toMatch(
+      /pub struct OpenChatCardContext \{[\s\S]*?pub default_currency: Option<String>/,
+    );
+  });
+
   it('does not publish frontend source maps in the production bundle', () => {
     const config = read('vite.config.ts');
     expect(config).toMatch(/sourcemap:\s*false/);

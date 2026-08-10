@@ -14,6 +14,7 @@ import {
   type Locator,
   type Page,
 } from "@playwright/test";
+import { TemporaryTabScope } from "./temporaryBrowserTab";
 
 const FATHER_OPENCHAT_PORT = Number(process.env.FATHER_OPENCHAT_PORT || 19222);
 const FATHER_IOU_PORT = Number(process.env.FATHER_IOU_PORT || 19231);
@@ -329,14 +330,17 @@ async function main(): Promise<void> {
     throw new Error("Father OpenChat or IOU profile is unavailable");
   }
 
+  const tabs = new TemporaryTabScope();
+  const routingPages = new Set<Page>();
+  let openchatDisposable: Page | undefined;
   try {
-    await existingIou.reload({ waitUntil: "domcontentloaded", timeout: 30000 });
-    await existingIou.waitForTimeout(1500);
-    const openchat = openchatSource;
-    await openchat.goto(`${OPENCHAT_URL}/chats`, { waitUntil: "domcontentloaded" });
+    const openchat = await tabs.open(openchatSource, `${OPENCHAT_URL}/chats`);
+    openchatDisposable = openchat;
+    const iou = await tabs.open(existingIou, `${IOU_ORIGIN}/settings`);
+    await iou.waitForTimeout(1500);
     await openchat.waitForTimeout(2000);
     const launchHashes = new Set<string>();
-    const before = await linkedSheetState(existingIou);
+    const before = await linkedSheetState(iou);
     check(before.binding, "Father IOU account is connected to OpenChat before chat routing");
     check(before.routes.length === 1, "Father starts with exactly one existing linked chat");
     const existingMotherSheetId = before.routes[0].sheetId;
@@ -358,15 +362,21 @@ async function main(): Promise<void> {
       const token = /^#openchat-routing\/([A-Za-z0-9_-]{43})$/.exec(new URL(launchUrl).hash)?.[1];
       if (token === undefined) throw new Error("native handoff returned an invalid setup URL");
       launchHashes.add(createHash("sha256").update(token, "utf8").digest("hex"));
-      await existingIou.goto(launchUrl, { waitUntil: "domcontentloaded", timeout: 30000 });
-      const routingPage = await waitForRoutingPage(existingIou);
-      check(true, `${target.counterpart} setup redeemed in Father's authenticated IOU profile`);
-      selectedSheetIds.push(await verifyOrAssignFocusedRoute(
-        routingPage,
-        target.counterpart,
-        target.sheetLabel,
-        target.preserveExisting,
-      ));
+      const routingPage = await tabs.open(existingIou, launchUrl);
+      routingPages.add(routingPage);
+      try {
+        await waitForRoutingPage(routingPage);
+        check(true, `${target.counterpart} setup redeemed in Father's authenticated IOU profile`);
+        selectedSheetIds.push(await verifyOrAssignFocusedRoute(
+          routingPage,
+          target.counterpart,
+          target.sheetLabel,
+          target.preserveExisting,
+        ));
+      } finally {
+        routingPages.delete(routingPage);
+        await routingPage.close({ runBeforeUnload: false }).catch(() => {});
+      }
     }
 
     check(launchHashes.size === 2, "mother and manager used two distinct one-time setup URLs");
@@ -374,7 +384,7 @@ async function main(): Promise<void> {
       new Set(selectedSheetIds).size === 2,
       "FatherMother and House resolved to two distinct current sheet IDs",
     );
-    const after = await linkedSheetState(existingIou);
+    const after = await linkedSheetState(iou);
     check(after.binding, "per-chat setup preserved the existing OpenChat connection");
     check(
       after.routes.length === 2,
@@ -386,7 +396,11 @@ async function main(): Promise<void> {
     check(manager?.sheetId === selectedSheetIds[1], "manager alone routes to House");
     console.log("PER-CHAT ROUTING LIVE VERIFY PASSED");
   } finally {
-    await removeNativeOpenCapture(openchatSource);
+    if (openchatDisposable) await removeNativeOpenCapture(openchatDisposable);
+    for (const routingPage of routingPages) {
+      await routingPage.close({ runBeforeUnload: false }).catch(() => {});
+    }
+    await tabs.close();
   }
 }
 

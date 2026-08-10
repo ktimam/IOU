@@ -41,6 +41,7 @@ export type AuthoritativeCardContext = {
 
 export type LoadedCardPrivateContext = {
   authoritative: AuthoritativeCardContext;
+  defaultCurrency: string;
   templates: TxnTemplate[];
   sheetKey: Uint8Array;
 };
@@ -54,6 +55,7 @@ type RawSuccess = {
   app_id: number;
   app_revision: bigint;
   action_id: string;
+  default_currency: [] | [string];
   vetkd_public_key: Uint8Array | number[];
   encrypted_vet_key: Uint8Array | number[];
   templates_a_enc: [] | [Uint8Array | number[]];
@@ -81,6 +83,9 @@ const idl = ({ IDL: idl }: { IDL: IDL }) => {
     app_id: idl.Nat32,
     app_revision: idl.Nat64,
     action_id: idl.Text,
+    // Optional on the wire so a newly loaded frontend can safely overlap an older backend during a
+    // rolling local upgrade. Current backends always return the viewer's effective account default.
+    default_currency: idl.Opt(idl.Text),
     vetkd_public_key: idl.Vec(idl.Nat8),
     encrypted_vet_key: idl.Vec(idl.Nat8),
     templates_a_enc: idl.Opt(idl.Vec(idl.Nat8)),
@@ -189,6 +194,13 @@ function opt<T>(value: [] | [T]): T | undefined {
 function optionalBytes(value: [] | [Uint8Array | number[]]): Uint8Array | undefined {
   const candidate = opt(value);
   return candidate === undefined ? undefined : exactBytes(candidate);
+}
+
+/** Parse the exact viewer's caller-scoped account default; USD is the product's single fallback. */
+export function parsePrivateDefaultCurrency(value: unknown): string {
+  if (!Array.isArray(value) || value.length !== 1 || typeof value[0] !== "string") return "USD";
+  const code = value[0].trim().toUpperCase();
+  return /^[A-Z]{3}$/.test(code) ? code : "USD";
 }
 
 export function parseAuthoritativeCardContext(raw: RawSuccess): AuthoritativeCardContext {
@@ -311,7 +323,12 @@ export async function loadCardPrivateContext(
     const templates = visibleTemplates(
       mergePairTemplates(slotA.templates, slotB.templates),
     );
-    return { authoritative, templates, sheetKey };
+    return {
+      authoritative,
+      defaultCurrency: parsePrivateDefaultCurrency(raw.default_currency),
+      templates,
+      sheetKey,
+    };
   } catch (error) {
     sheetKey?.fill(0);
     throw error;

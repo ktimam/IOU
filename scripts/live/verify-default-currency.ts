@@ -1,10 +1,8 @@
 // AUTOMATED live verification of DEFAULT CURRENCY (Issue 3) under the APP-RENDERED card:
 //   a message with NO currency (a) still POSTS a card — the gate no longer requires currency — and
-//   (b) the app card DEFERS the currency to the user's IOU default instead of inventing one. The
-//   card iframe is storage-partitioned and cannot read prefs.defaultCurrency, so it must show the
-//   "Default currency" option ("") and DEPOSIT a draft with NO currency; the real IOU app fills the
-//   default (baseWithDefaultCurrency) at import. This proves the app-card migration did not regress
-//   Issue 3 for non-USD users (a hardcoded USD in the card would).
+//   (b) the app card obtains the confirming viewer's one IOU default from its exact capability-bound
+//   private context. The card must show that code and DEPOSIT it explicitly. This proves the card is
+//   not using a deployment-wide second default or a hardcoded USD fallback for non-USD users.
 //
 // Manual seam supplies a deterministic no-currency extraction. Proposer+confirmer manager (v1 :9241);
 // deposit read on father IOU :9231 (fan-out gives both members the envelope). Exit 1 on any failure.
@@ -71,7 +69,14 @@ async function main() {
     manualExtract: true,
   });
   const fatherIou = await tabs.open(sourceFatherIou, "http://127.0.0.1:3000/pairs");
-  const managerIou = await tabs.open(sourceManagerIou, "http://127.0.0.1:3000/pairs");
+  const managerIou = await tabs.open(sourceManagerIou, "http://127.0.0.1:3000/settings");
+  await managerIou.getByRole("heading", { name: "Default currency", exact: true }).waitFor();
+  const managerDefault = await managerIou
+    .getByRole("heading", { name: "Default currency", exact: true })
+    .locator("..")
+    .locator("select")
+    .inputValue();
+  check(/^[A-Z]{3}$/.test(managerDefault), `manager has one valid account default (${managerDefault})`);
   await oc.waitForTimeout(2500);
   await oc.locator(".chat-summary, .chat_summary").filter({ hasText: /father/i }).first().click({ timeout: 12000 });
   await oc.waitForTimeout(2500);
@@ -130,12 +135,15 @@ async function main() {
   if (!card) throw new Error("this run's exact no-currency card wrapper was not found");
   await artifactScope.trackExactCard(card, [note, String(uniqAmt)]);
 
-  // 3. The card DEFERS currency: its currency <select> is on "Default" ("") — it did NOT invent USD.
+  // 3. The exact viewer's private account default is materialized on the card.
   const currencySelect = frame.locator("select").first();
   const curVal = await currencySelect.inputValue().catch(() => "?");
-  check(curVal === "", `the card's currency defaults to "Default currency" ("") — got "${curVal}" (no invented USD)`);
+  check(
+    curVal === managerDefault,
+    `the card uses the manager's one account default — got "${curVal}", expected "${managerDefault}"`,
+  );
 
-  // 4. Confirm leaving currency on Default → the deposit omits currency.
+  // 4. Confirm without editing currency: the same viewer default must be deposited explicitly.
   inboxScope = new ActionInboxArtifactScope(
     [
       { label: "father", page: fatherIou },
@@ -147,7 +155,7 @@ async function main() {
         {
           kind: "iou",
           amount: uniqAmt,
-          currency: null,
+          currency: managerDefault,
           direction: "credit",
           note,
         },
@@ -160,7 +168,7 @@ async function main() {
   await frame.getByRole("button", { name: /Add to IOU/i }).click({ timeout: 10000 });
   await oc.waitForTimeout(6000);
 
-  // 5. The deposited draft carries our unique amount and NO currency field (deferred to import).
+  // 5. The deposited draft carries our unique amount and the exact viewer default.
   let mine: Record<string, unknown> | undefined;
   for (let i = 0; i < 8 && !mine; i++) {
     await oc.waitForTimeout(2000);
@@ -169,13 +177,15 @@ async function main() {
   }
   check(!!mine, `a deposit with amount ${uniqAmt} exists`);
   if (mine) {
-    const hasCur = "currency" in mine && String((mine as any).currency ?? "").trim() !== "";
     console.log("   [deposit]", JSON.stringify(mine));
-    check(!hasCur, "the deposited draft OMITS currency (the IOU app fills prefs.defaultCurrency at import)");
+    check(
+      String((mine as any).currency ?? "") === managerDefault,
+      `the deposited draft carries the same account default (${managerDefault})`,
+    );
   }
 
   if (failures > 0) throw new Error(`DEFAULT-CURRENCY VERIFY FAILED — ${failures} assertion(s)`);
-  console.log("\n🏁 DEFAULT-CURRENCY (app-card): no-currency message → card posts, defers currency to the IOU default → deposit omits currency");
+  console.log("\n🏁 DEFAULT-CURRENCY (app-card): no-currency message → viewer default appears on card → deposit carries the same currency");
   } catch (error) {
     primaryFailed = true;
     throw error;

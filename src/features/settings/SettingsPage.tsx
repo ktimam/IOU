@@ -48,45 +48,6 @@ export function SettingsPage() {
   const [name, setName] = useState(prefs.profileName);
   const [status, setStatus] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
-  // The DEPLOYMENT-wide currency the OpenChat card pre-selects (Config.card_currency). "" = unset.
-  const [cardCurrency, setCardCurrency] = useState<string>("");
-  const [cardStatus, setCardStatus] = useState<string | null>(null);
-
-  useEffect(() => {
-    if (!actor) return;
-    void (async () => {
-      try {
-        const cfg = (await actor.get_config()) as { card_currency?: [] | [string] };
-        const opt = cfg?.card_currency;
-        setCardCurrency(Array.isArray(opt) && opt.length > 0 ? String(opt[0]) : "");
-      } catch {
-        /* older canister / offline — leave it unset */
-      }
-    })();
-  }, [actor]);
-
-  // Deployment-wide, so it is saved straight to the canister (no local cache).
-  async function saveCardCurrency(code: string) {
-    setCardCurrency(code);
-    setCardStatus(null);
-    if (!actor) return;
-    try {
-      // "" clears it on the canister, so "Not set" really turns the pre-selection off.
-      await actor.set_card_currency(code);
-      setCardStatus(
-        code
-          ? `Chat cards now pre-select ${code}.`
-          : "Cleared — chat cards will use each person's own default at import.",
-      );
-    } catch (e) {
-      const msg = (e as Error).message;
-      setCardStatus(
-        /only the creator/i.test(msg)
-          ? "Only the deployment's creator can change this."
-          : `Could not save: ${msg}`,
-      );
-    }
-  }
 
   // Local first so every picker updates instantly, then persist to the canister so the choice
   // follows the user to their other devices (DefaultCurrencySync pulls it on load there).
@@ -215,26 +176,6 @@ export function SettingsPage() {
             </option>
           ))}
         </select>
-      </div>
-
-      <div className="card">
-        <h2>Chat card currency</h2>
-        <p className="muted small">
-          The currency IOU pre-selects on confirmable cards inside OpenChat. This one is
-          <strong> shared by everyone</strong> on this deployment, because a card is rendered in a
-          sandboxed frame that cannot tell who is looking at it — so both members of a chat see, and
-          import, the same code. Leave it unset to let each person's own default apply at import
-          instead. Whoever confirms a card can always change it there first.
-        </p>
-        <select value={cardCurrency} onChange={(e) => void saveCardCurrency(e.target.value)}>
-          <option value="">Not set — use each person's own default</option>
-          {orderedCurrencies(cardCurrency || prefs.defaultCurrency).map((c) => (
-            <option key={c} value={c}>
-              {c}
-            </option>
-          ))}
-        </select>
-        {cardStatus && <p className="muted small">{cardStatus}</p>}
       </div>
 
       <div className="card">

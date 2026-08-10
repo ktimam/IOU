@@ -30,9 +30,6 @@ type AiAppVerificationBinding = record {
 type Config = record {
     creator_principal : principal;
     deployed_at : nat64;
-    // v1.12.0: deployment-wide currency the app-rendered card pre-selects. ANONYMOUSLY
-    // readable via get_config — the storage-partitioned card iframe has no identity.
-    card_currency : opt text;
     // Exact OpenChat user-canister owner this deployment will vouch for.
     ai_app_owner : opt principal;
     // Exact OpenChat UserIndex trusted for link claims/card capabilities.
@@ -423,6 +420,8 @@ type OpenChatCardContext = record {
     app_id : nat32;
     app_revision : nat64;
     action_id : text;
+    // Exact viewer's one account default; optional only for rolling-upgrade compatibility.
+    default_currency : opt text;
     vetkd_public_key : vec nat8;
     encrypted_vet_key : vec nat8;
     templates_a_enc : opt vec nat8;
@@ -481,7 +480,6 @@ service : {
     set_ai_app_owner : (principal) -> ();
     set_openchat_user_index_canister_id : (principal) -> ();
     set_ai_app_verification_binding : (opt AiAppVerificationBinding) -> ();
-    set_card_currency : (text) -> ();
     c2c_verify_ai_app : (VerifyAiAppArgs) -> (VerifyAiAppResponse) query;
     c2c_verify_ai_app_v2 : (VerifyAiAppV2Args) -> (VerifyAiAppV2Response) query;
     c2c_attest_ai_app_card_v1 : (AttestAiAppCardV1Args) -> (AttestAiAppCardV1Response);

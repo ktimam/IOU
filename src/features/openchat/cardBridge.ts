@@ -365,26 +365,18 @@ export function currencyStatedIn(text: string, code: string): boolean {
   return stated(c) || aliases.some(stated);
 }
 
-export function initToFormState(data: EntryDraft, seedCurrency = ""): CardFormState {
+export function initToFormState(data: EntryDraft): CardFormState {
   const kind = data.kind === "settlement" || data.kind === "iou" ? data.kind : "";
   const amount = data.amount != null ? String(data.amount) : "";
-  // Empty ("") is the sentinel for "no currency → let the REAL IOU app fill the user's default
-  // (prefs.defaultCurrency) at import". The card iframe is storage-partitioned and CANNOT read those
-  // prefs, so it must NOT invent a currency; it shows a "Your IOU default" option for this state and
-  // buildConfirmPayload omits currency so baseWithDefaultCurrency resolves it against the default of
-  // whoever pressed Add to IOU.
-  //
-  // `seedCurrency` overrides that deferral with the DEPLOYMENT's card currency (Config.card_currency,
-  // fetched anonymously — see cardCurrency.ts). It is app-level on purpose: the frame cannot identify
-  // its viewer (measured: no localStorage / IndexedDB / caches / BroadcastChannel / Storage Access),
-  // and a value keyed by the chat is contested between users (an OpenChat direct-chat key names only
-  // the COUNTERPARTY, so it is shared by everyone who chats with that person). One global value is
-  // the only thing every viewer resolves identically, so both members of a card see — and import —
-  // the same code. Unset => "" => today's per-user deferral, unchanged.
+  // Empty ("") means the source did not provide trustworthy currency evidence. The credentialless
+  // frame cannot read IOU browser storage, so it stays empty until the exact viewer's capability-bound
+  // private context supplies that viewer's one account Default currency. This is deliberately not a
+  // deployment/chat setting and never overwrites an explicit evidenced text/image currency.
   //
   // For plain text, OpenChat supplies the bounded exact-source prefix in `message`; a claimed
-  // currency that excerpt did not state is a model guess and falls back to the app/default currency. Image-only inference
-  // intentionally omits `message`: the claimed currency came from the pixels, remains editable, and
+  // currency that excerpt did not state is a model guess and falls back to the exact viewer's Default
+  // currency. Image-only inference intentionally omits `message`: the claimed currency came from the
+  // pixels, remains editable, and
   // must stay visible rather than being silently replaced by an unrelated account default.
   const evidence =
     typeof data.message === "string" && data.message.trim() !== "" ? data.message : undefined;
@@ -392,7 +384,7 @@ export function initToFormState(data: EntryDraft, seedCurrency = ""): CardFormSt
   const currency =
     claimed !== "" && (evidence === undefined || currencyStatedIn(evidence, claimed))
       ? claimed.toUpperCase()
-      : seedCurrency.trim().toUpperCase(); // the app card currency, else "" (resolve at import)
+      : "";
   const direction: Direction = data.direction === "debt" ? "debt" : "credit";
   const note = typeof data.note === "string" ? data.note : "";
   const date = typeof data.date === "string" ? data.date : "";
@@ -410,6 +402,19 @@ export function initToFormState(data: EntryDraft, seedCurrency = ""): CardFormSt
 }
 
 /**
+ * Fill a missing/untrusted currency from the exact viewer's one IOU account default, after the
+ * capability-bound private context has been verified. Explicit evidenced card currency always wins.
+ */
+export function applyDefaultCurrency(
+  state: CardFormState,
+  defaultCurrency: string,
+): CardFormState {
+  const code = defaultCurrency.trim().toUpperCase();
+  if (state.currency !== "" || !/^[A-Z]{3}$/.test(code)) return state;
+  return { ...state, currency: code };
+}
+
+/**
  * MULTI-mode fan-out. When the init `data` carries a non-empty `entries` array (the multi-entry
  * card), seed one editable form state per element using the SAME initToFormState logic the single
  * card uses — so each row prefills, defaults, and normalizes identically. Returns null for the
@@ -417,10 +422,10 @@ export function initToFormState(data: EntryDraft, seedCurrency = ""): CardFormSt
  * one-entry UI. Non-object elements are treated as an empty draft (defensive; parseInit already
  * filters them out on the wire).
  */
-export function initEntries(data: CardInitData, seedCurrency = ""): CardFormState[] | null {
+export function initEntries(data: CardInitData): CardFormState[] | null {
   const entries = data?.entries;
   if (!Array.isArray(entries) || entries.length === 0) return null;
-  return entries.map((e) => initToFormState(isPlainObject(e) ? (e as EntryDraft) : {}, seedCurrency));
+  return entries.map((e) => initToFormState(isPlainObject(e) ? (e as EntryDraft) : {}));
 }
 
 /**
@@ -444,8 +449,8 @@ export function buildConfirmPayload(
     direction: state.direction,
     note: state.note,
   };
-  // Omit currency when the user left it on "Default" ("") so the REAL IOU app injects
-  // prefs.defaultCurrency at import (baseWithDefaultCurrency). A picked currency is passed through.
+  // Keep omission for legacy/unpaired payload compatibility. Current actionable cards hydrate the
+  // viewer's one Default currency first and therefore emit a concrete code.
   const currency = state.currency.trim().toUpperCase();
   if (currency !== "") payload.currency = currency;
   // Preserve authoritative plain-text source context when present. OpenChat imports deliberately

@@ -288,7 +288,7 @@ describe("OpenChat IOU card account type visibility", () => {
     expect(isCardFormValid({ ...FORM, amount: "0.0049" })).toBe(false);
     expect(isCardFormValid({ ...FORM, amount: String(IOU_MAX_MAJOR_AMOUNT) })).toBe(true);
     expect(isCardFormValid({ ...FORM, amount: "90071992547410" })).toBe(false);
-    expect(isCardFormValid({ ...FORM, currency: "" })).toBe(true);
+    expect(isCardFormValid({ ...FORM, currency: "" })).toBe(false);
     expect(isCardFormValid({ ...FORM, currency: "USD" })).toBe(true);
     expect(isCardFormValid({ ...FORM, currency: "US" })).toBe(false);
     expect(isCardFormValid({ ...FORM, date: "" })).toBe(true);
@@ -306,6 +306,16 @@ describe("OpenChat IOU card account type visibility", () => {
     expect(([FORM, { ...FORM, kind: "" }] satisfies CardFormState[]).every(isCardFormValid)).toBe(
       false,
     );
+  });
+
+  it("hydrates currency from the exact viewer's private context and has no global card default", () => {
+    const source = readFileSync(resolve(__dirname, "OpenChatCardPage.tsx"), "utf8");
+    const settings = readFileSync(resolve(__dirname, "../settings/SettingsPage.tsx"), "utf8");
+    expect(source).toContain("applyDefaultCurrency(formRef.current, loaded.defaultCurrency)");
+    expect(source).not.toContain("fetchCardCurrency");
+    expect(source).not.toContain("appCurrency");
+    expect(settings).not.toContain("Chat card currency");
+    expect(settings).not.toContain("set_card_currency");
   });
 
   it("renders the extracted Date as an editable card field", () => {

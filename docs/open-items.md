@@ -305,10 +305,12 @@ NOT R1: the match would land after the card, so the Template row would disappear
 is not re-proposed as if it were free.
 
 The tension is real: matching at card-creation time happens inside OpenChat, which only has what was
-registered (public), while the types are readable only with an IOU session — and the card iframe is
-storage-partitioned with no session (measured; see `cardCurrency.ts`). Current behaviour is pinned in
-`actionManifest.test.ts` and `resolveTemplateBase.test.ts`, so whatever lands is a deliberate edit to
-those tests rather than silent drift.
+registered (public), while the types are readable only with an IOU session. The current
+credentialless frame resolves this through an exact viewer/chat/message-bound private capability;
+neither Saved-type data nor the viewer's single default currency is published in the app manifest.
+Current behaviour is pinned in `actionManifest.test.ts`, `cardPrivateContext.test.ts`, and
+`resolveTemplateBase.test.ts`, so whatever lands is a deliberate edit to those tests rather than
+silent drift.
 
 ---
 

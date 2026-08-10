@@ -111,15 +111,6 @@ pub struct AiAppVerificationBinding {
 pub struct Config {
     pub creator_principal: Principal,
     pub deployed_at: u64,
-    // v1.12.0: the currency IOU's app-rendered confirmable card pre-selects, for the WHOLE
-    // deployment. Deliberately app-level rather than per user: the card renders in an iframe that
-    // OpenChat storage-partitions, so it has no IOU session and cannot tell one viewer from another,
-    // and anything keyed by the chat would collide (an OpenChat direct-chat key names only the
-    // COUNTERPARTY, so every user chatting with the same person shares it — see the MemoryId 21
-    // note). One global value is the only thing every viewer resolves identically. `get_config` is
-    // anonymous, so the card can read it with no identity. None = unset, and the card falls back to
-    // deferring the currency to whoever imports it. Additive `opt` ⇒ old records decode with None.
-    pub card_currency: Option<String>,
     // The OpenChat registry owner is a user-canister principal and is not necessarily the same
     // principal that installed/administers IOU. Publication is vouched only when the owner supplied
     // by OpenChat exactly matches this separately configured value. Optional keeps old stable Config
@@ -535,7 +526,6 @@ thread_local! {
             Config {
                 creator_principal: Principal::anonymous(),
                 deployed_at: 0,
-                card_currency: None,
                 ai_app_owner: None,
                 openchat_user_index_canister_id: None,
                 ai_app_verification_binding: None,
@@ -866,7 +856,6 @@ fn init() {
         let _ = c.borrow_mut().set(Config {
             creator_principal: installer,
             deployed_at: ic_cdk::api::time(),
-            card_currency: current.card_currency,
             ai_app_owner: current.ai_app_owner,
             openchat_user_index_canister_id: current.openchat_user_index_canister_id,
             ai_app_verification_binding: current.ai_app_verification_binding,
@@ -1171,7 +1160,6 @@ fn inspect_message() {
         "set_ai_app_owner",
         "set_openchat_user_index_canister_id",
         "set_ai_app_verification_binding",
-        "set_card_currency",
         // Phase 2: pair lifecycle
         "create_pair",
         "join_pair",
@@ -1262,7 +1250,6 @@ fn inspect_message() {
         "set_ai_app_owner",
         "set_openchat_user_index_canister_id",
         "set_ai_app_verification_binding",
-        "set_card_currency",
         "create_pair",
         "join_pair",
         "issue_invite",
@@ -2227,7 +2214,6 @@ fn set_creator_principal(p: Principal) {
         let _ = cfg.set(Config {
             creator_principal: p,
             deployed_at: ic_cdk::api::time(),
-            card_currency: current.card_currency.clone(),
             ai_app_owner: current.ai_app_owner,
             openchat_user_index_canister_id: current.openchat_user_index_canister_id,
             ai_app_verification_binding: current.ai_app_verification_binding.clone(),
@@ -2261,7 +2247,6 @@ fn set_ai_app_owner(owner: Principal) {
         let _ = cfg.set(Config {
             creator_principal: current.creator_principal,
             deployed_at: current.deployed_at,
-            card_currency: current.card_currency,
             ai_app_owner: next_owner,
             openchat_user_index_canister_id: current.openchat_user_index_canister_id,
             ai_app_verification_binding: verification_binding,
@@ -2300,7 +2285,6 @@ fn set_openchat_user_index_canister_id(canister_id: Principal) {
         let _ = cfg.set(Config {
             creator_principal: current.creator_principal,
             deployed_at: current.deployed_at,
-            card_currency: current.card_currency,
             ai_app_owner: current.ai_app_owner,
             openchat_user_index_canister_id: next_user_index,
             ai_app_verification_binding: verification_binding,
@@ -2347,7 +2331,6 @@ fn set_ai_app_verification_binding(binding: Option<AiAppVerificationBinding>) {
         let _ = cfg.set(Config {
             creator_principal: current.creator_principal,
             deployed_at: current.deployed_at,
-            card_currency: current.card_currency,
             ai_app_owner: current.ai_app_owner,
             openchat_user_index_canister_id: current.openchat_user_index_canister_id,
             ai_app_verification_binding: binding,
@@ -2357,42 +2340,6 @@ fn set_ai_app_verification_binding(binding: Option<AiAppVerificationBinding>) {
     if trust_changed {
         clear_all_pending_chat_routes();
     }
-}
-
-/// set_card_currency: the deployment-wide currency IOU's confirmable card pre-selects.
-///
-/// Gated like set_creator_principal: only the configured administrator or a canister controller may
-/// set it. It is ONE value for every user of this canister and only a PRE-SELECTION: whoever
-/// confirms a card can change it in the dropdown before importing.
-#[ic_cdk::update]
-fn set_card_currency(iso: String) {
-    require_authed();
-    let caller = ic_cdk::api::msg_caller();
-    // An EMPTY string CLEARS it, so a deployment can go back to per-user deferral without a second
-    // endpoint (and so the Settings "Not set" option actually does something).
-    let code = iso.trim().to_ascii_uppercase();
-    if !code.is_empty() && (code.len() != 3 || !code.chars().all(|c| c.is_ascii_alphabetic())) {
-        ic_cdk::trap("currency must be a 3-letter ISO 4217 code (or empty to clear)");
-    }
-    CONFIG.with(|c| {
-        let mut cfg = c.borrow_mut();
-        let current = cfg.get().clone();
-        if !can_manage_config(
-            current.creator_principal,
-            caller,
-            ic_cdk::api::is_controller(&caller),
-        ) {
-            ic_cdk::trap("only the creator or a canister controller can change configuration");
-        }
-        let _ = cfg.set(Config {
-            creator_principal: current.creator_principal,
-            deployed_at: current.deployed_at,
-            card_currency: if code.is_empty() { None } else { Some(code) },
-            ai_app_owner: current.ai_app_owner,
-            openchat_user_index_canister_id: current.openchat_user_index_canister_id,
-            ai_app_verification_binding: current.ai_app_verification_binding,
-        });
-    });
 }
 
 // ───────────────────────── Phase 2 endpoints (pair lifecycle) ─────────────────────────
@@ -4905,6 +4852,9 @@ pub struct OpenChatCardContext {
     pub app_id: u32,
     pub app_revision: u64,
     pub action_id: String,
+    // The exact viewer's one caller-scoped account default. Optional only for rolling Candid
+    // compatibility; current responses always return Some(effective code).
+    pub default_currency: Option<String>,
     pub vetkd_public_key: Vec<u8>,
     pub encrypted_vet_key: Vec<u8>,
     pub templates_a_enc: Option<Vec<u8>>,
@@ -4957,6 +4907,34 @@ pub enum OpenChatPrivateMatchContextResult {
     ChatNotLinked,
     NotAuthorized,
     KeyUnavailable,
+}
+
+const IOU_DEFAULT_CURRENCY_FALLBACK: &str = "USD";
+
+fn effective_default_currency(value: Option<&str>) -> String {
+    let code = value
+        .unwrap_or(IOU_DEFAULT_CURRENCY_FALLBACK)
+        .trim()
+        .to_ascii_uppercase();
+    if code.len() == 3
+        && code
+            .chars()
+            .all(|character| character.is_ascii_alphabetic())
+    {
+        code
+    } else {
+        IOU_DEFAULT_CURRENCY_FALLBACK.to_string()
+    }
+}
+
+fn default_currency_for_principal(principal: Principal) -> String {
+    let stored = USERS.with(|users| {
+        users
+            .borrow()
+            .get(&principal)
+            .and_then(|record| record.default_currency)
+    });
+    effective_default_currency(stored.as_deref())
 }
 
 fn linked_sheet_for(principal: Principal, chat_key: &str) -> Option<String> {
@@ -5142,6 +5120,7 @@ async fn openchat_card_context(
         app_id: grant.context.app_id,
         app_revision: grant.context.app_revision,
         action_id: grant.context.action_id,
+        default_currency: Some(default_currency_for_principal(binding.iou_principal)),
         vetkd_public_key,
         encrypted_vet_key: derived.encrypted_key,
         templates_a_enc: pair.templates_a_enc,
@@ -8634,10 +8613,8 @@ mod tests {
     }
 
     #[test]
-    fn config_decodes_pre_card_currency_records_as_none() {
-        // Additive `opt` on the Config CELL: a Config written before v1.12.0 must decode with
-        // card_currency = None, so an existing deployment upgrades without trapping and the card
-        // simply falls back to per-user deferral until someone sets one.
+    fn config_decodes_minimal_legacy_records() {
+        // Every current trust field remains optional, so the original Config CELL still decodes.
         #[derive(CandidType, Deserialize)]
         struct OldConfig {
             creator_principal: Principal,
@@ -8651,15 +8628,25 @@ mod tests {
         let new = Config::from_bytes(std::borrow::Cow::Owned(bytes));
         assert_eq!(new.creator_principal, p(1));
         assert_eq!(new.deployed_at, 99);
-        assert_eq!(new.card_currency, None);
         assert_eq!(new.ai_app_owner, None);
         assert_eq!(new.openchat_user_index_canister_id, None);
         assert_eq!(new.ai_app_verification_binding, None);
     }
 
     #[test]
-    fn config_round_trips_with_card_currency() {
-        let cfg = Config {
+    fn config_ignores_the_removed_deployment_card_currency() {
+        // Stable Candid records are width-subtyped: an old cell may carry the retired global
+        // card_currency field, while the new Config decodes and preserves every remaining field.
+        #[derive(CandidType, Deserialize)]
+        struct OldConfigWithCardCurrency {
+            creator_principal: Principal,
+            deployed_at: u64,
+            card_currency: Option<String>,
+            ai_app_owner: Option<Principal>,
+            openchat_user_index_canister_id: Option<Principal>,
+            ai_app_verification_binding: Option<AiAppVerificationBinding>,
+        }
+        let old = OldConfigWithCardCurrency {
             creator_principal: p(2),
             deployed_at: 7,
             card_currency: Some("EGP".into()),
@@ -8667,13 +8654,20 @@ mod tests {
             openchat_user_index_canister_id: Some(p(4)),
             ai_app_verification_binding: None,
         };
-        let back = Config::from_bytes(cfg.to_bytes());
-        assert_eq!(back.card_currency, Some("EGP".to_string()));
+        let back = Config::from_bytes(Cow::Owned(Encode!(&old).expect("encode old config")));
         assert_eq!(back.ai_app_owner, Some(p(3)));
         assert_eq!(back.openchat_user_index_canister_id, Some(p(4)));
         assert_eq!(back.ai_app_verification_binding, None);
         assert_eq!(back.creator_principal, p(2));
         assert_eq!(back.deployed_at, 7);
+    }
+
+    #[test]
+    fn viewer_default_currency_is_normalized_with_one_product_fallback() {
+        assert_eq!(effective_default_currency(Some(" egp ")), "EGP");
+        assert_eq!(effective_default_currency(Some("EUR")), "EUR");
+        assert_eq!(effective_default_currency(None), "USD");
+        assert_eq!(effective_default_currency(Some("EGYPT")), "USD");
     }
 
     #[test]

@@ -13,6 +13,7 @@ import {
   buildPrivateContextStatus,
   buildReady,
   buildResize,
+  applyDefaultCurrency,
   currencyStatedIn,
   initEntries,
   initToFormState,
@@ -294,16 +295,13 @@ describe("initToFormState and currency evidence", () => {
   });
 
   it("keeps a schema-conformed image currency visible when no redundant message echo exists", () => {
-    const state = initToFormState(
-      {
-        kind: "settlement",
-        amount: 5,
-        currency: "USD",
-        direction: "debt",
-        note: "Lunch",
-      },
-      "EGP",
-    );
+    const state = initToFormState({
+      kind: "settlement",
+      amount: 5,
+      currency: "USD",
+      direction: "debt",
+      note: "Lunch",
+    });
     expect(state.currency).toBe("USD");
     expect(buildConfirmPayload(state)).toMatchObject({ currency: "USD" });
   });
@@ -328,14 +326,18 @@ describe("initToFormState and currency evidence", () => {
     ).toBe("USD");
   });
 
-  it("uses the configured app currency only when the message left currency unstated", () => {
-    expect(initToFormState({ amount: 300, note: "Owe 300 uber" }, " egp ").currency).toBe("EGP");
-    expect(
-      initToFormState(
-        { amount: 300, currency: "USD", note: "uber", message: "Owe 300 USD uber" },
-        "EGP",
-      ).currency,
-    ).toBe("USD");
+  it("applies the viewer's one default only when authoritative public evidence left currency empty", () => {
+    const unstated = initToFormState({ amount: 300, note: "Owe 300 uber" });
+    expect(applyDefaultCurrency(unstated, " egp ").currency).toBe("EGP");
+
+    const explicit = initToFormState({
+      amount: 300,
+      currency: "USD",
+      note: "uber",
+      message: "Owe 300 USD uber",
+    });
+    expect(applyDefaultCurrency(explicit, "EGP").currency).toBe("USD");
+    expect(applyDefaultCurrency(unstated, "EGYPT")).toBe(unstated);
   });
 });
 

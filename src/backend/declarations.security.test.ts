@@ -205,6 +205,7 @@ describe("security-sensitive Candid bindings", () => {
         last_seen: 123n,
         has_current_link: true,
         current_sheet_id: [0x1111111111111111n],
+        chat_name: [],
       }]]),
     ) as any[];
     expect(decoded[0][0]).toEqual({
@@ -212,6 +213,7 @@ describe("security-sensitive Candid bindings", () => {
       last_seen: 123n,
       has_current_link: true,
       current_sheet_id: [0x1111111111111111n],
+      chat_name: [],
     });
     expect(decoded[0][0]).not.toHaveProperty("chat_key");
     expect(decoded[0][0]).not.toHaveProperty("chat_handle");

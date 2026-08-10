@@ -51,8 +51,6 @@ export const idlFactory = ({ IDL: idl }: { IDL: IDL }) => {
   const Config = idl.Record({
     creator_principal: idl.Principal,
     deployed_at: idl.Nat64,
-    // v1.12.0: deployment-wide currency the app-rendered card pre-selects (anonymously readable).
-    card_currency: idl.Opt(idl.Text),
     ai_app_owner: idl.Opt(idl.Principal),
     openchat_user_index_canister_id: idl.Opt(idl.Principal),
     ai_app_verification_binding: idl.Opt(AiAppVerificationBinding),
@@ -347,6 +345,7 @@ export const idlFactory = ({ IDL: idl }: { IDL: IDL }) => {
     app_id: idl.Nat32,
     app_revision: idl.Nat64,
     action_id: idl.Text,
+    default_currency: idl.Opt(idl.Text),
     vetkd_public_key: idl.Vec(idl.Nat8),
     encrypted_vet_key: idl.Vec(idl.Nat8),
     templates_a_enc: idl.Opt(idl.Vec(idl.Nat8)),
@@ -383,7 +382,6 @@ export const idlFactory = ({ IDL: idl }: { IDL: IDL }) => {
     set_ai_app_owner: idl.Func([idl.Principal], [], []),
     set_openchat_user_index_canister_id: idl.Func([idl.Principal], [], []),
     set_ai_app_verification_binding: idl.Func([idl.Opt(AiAppVerificationBinding)], [], []),
-    set_card_currency: idl.Func([idl.Text], [], []),
     c2c_verify_ai_app: idl.Func([VerifyAiAppArgs], [VerifyAiAppResponse], ["query"]),
     c2c_verify_ai_app_v2: idl.Func([VerifyAiAppV2Args], [VerifyAiAppV2Response], ["query"]),
     c2c_attest_ai_app_card_v1: idl.Func(

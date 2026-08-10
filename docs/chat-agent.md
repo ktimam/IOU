@@ -343,48 +343,22 @@ deletes ONLY the cached prefs key (never the whole localStorage: that would dest
 identity, which has no recovery path), reloads, and asserts the code comes back from the canister.
 Verified live on two profiles: child EGP, and father GBP -> wipe -> GBP -> restored to USD.
 
-##### The card CAN show a code — one per deployment (2026-07-30)
+##### One default currency, including OpenChat cards (superseded 2026-08-10)
 
-`Config.card_currency` is a deployment-wide currency the card pre-selects, set in Settings → "Chat card
-currency" and read by the frame through the ANONYMOUS `get_config` query. Zero OpenChat changes. Unset
-(the default) keeps the per-user deferral below, so nothing changes until someone sets one; selecting
-"Not set" clears it again (`set_card_currency("")`).
+There is one setting: `UserRecord.default_currency`, shown as **Default currency**. The former
+deployment-wide `Config.card_currency`, its setter, and the second Settings control were removed.
+Old stable Config bytes remain upgrade-safe because Candid ignores the removed record field.
 
-It is app-level ON PURPOSE, and that is the whole design: the frame cannot identify its viewer, so the
-only value every viewer resolves identically is a global one. Both members of a card therefore see —
-and, since a non-empty currency travels in the confirm payload, IMPORT — the same code. That is the
-accepted trade-off, and it is only a PRE-SELECTION: whoever confirms can change it in the dropdown
-first, and a currency the MESSAGE itself stated always beats it (`currencyStatedIn`).
+The credentialless card still cannot read IOU browser storage, but it no longer needs a global
+workaround. `openchat_card_context` already redeems a one-time capability bound to the exact viewer,
+app revision, chat, message, action, and iframe transport key. That private response now carries only
+that viewer's caller-scoped default code (plus the existing encrypted Saved-type material). The frame
+fills an empty/untrusted Currency only after validating that context. A currency explicitly evidenced
+by the message or image always wins and remains editable. Capability/viewer rotation clears only a
+previously auto-filled code, so one person's default cannot carry into another viewer's card.
 
-Gate: `set_card_currency` is creator-only once a creator principal has been claimed (fresh deployments
-start with `creator_principal` = anonymous, so the first user can set it). Schema stays v9 — the field
-is an additive `opt` on the Config cell, so existing deployments decode with None
-(`config_decodes_pre_card_currency_records_as_none`). Guard:
-`scripts/live/verify-card-app-currency.ts` — sets it, asserts EVERY listed profile's card pre-selects
-it, clears it, asserts they all go back to deferring, and checks a stated currency wins throughout.
-Verified live on child + father: both cards showed EGP.
-
-##### Why the card cannot show each viewer's OWN default (2026-07-30)
-
-The default currency is a **per-user** fact and is resolved at import, where identity exists. The card
-iframe cannot show the literal code (`EGP`), and an attempt to fix that was built, live-verified, and
-reverted after three measurements on the live setup:
-
-- An OpenChat **direct-chat key names only the counterparty** — child and mother both store
-  `direct:<father>` (pointing at *different* sheets), so any map keyed by chat key is shared between
-  them. The existing `chat_sheet_links` map escapes this only because it is caller-keyed, and an
-  anonymous reader cannot supply a caller.
-- The value it could serve (the linked sheet's founding currency) is a **per-sheet** fact: the
-  father-created sheet is USD, so the child's card showed USD *and confirmed USD*, storing the wrong
-  currency for an EGP user — the very bug the deferral prevents.
-- The frame cannot cache a pick either: with `credentialless` (what OpenChat uses) its `localStorage`
-  is wiped on every host reload, and without it the frame will not load at all (COEP).
-
-So the model's invented currency is dropped unless the message actually stated it (`currencyStatedIn`),
-the card omits currency from the confirm payload, and `baseWithDefaultCurrency` stamps the confirming
-user's own default at import. Guard: `scripts/live/card-default-currency.ts`. Full reasoning and the
-burned MemoryId 21 note: `open-chat-cycle/fork-notes/08-app-rendered-cards.md` (2026-07-30 addendum)
-and `src/lib.rs`.
+The wire field is optional solely for rolling-upgrade compatibility; current backends return the
+effective account default, with the same single USD fallback used by normal IOU entry forms.
 
 ##### Setting up an on-device model (the no-model guide's destination)
 

@@ -5,6 +5,7 @@ import {
   decodeCanonicalCapability,
   destroyCardTransportSession,
   destroyLoadedCardContext,
+  parsePrivateDefaultCurrency,
   parseAuthoritativeCardContext,
   type AuthoritativeCardContext,
 } from "./cardPrivateContext";
@@ -114,6 +115,7 @@ describe("authoritative card context binding", () => {
       app_id: 23,
       app_revision: 5n,
       action_id: "iou.entry.import",
+      default_currency: ["EGP"],
       vetkd_public_key: new Uint8Array(96),
       encrypted_vet_key: new Uint8Array([1]),
       templates_a_enc: [],
@@ -132,6 +134,14 @@ describe("authoritative card context binding", () => {
       "invalid private card context",
     );
   });
+
+  it("uses the exact viewer default from private context and one USD fallback", () => {
+    expect(parsePrivateDefaultCurrency(["egp"])).toBe("EGP");
+    expect(parsePrivateDefaultCurrency([" EUR "])).toBe("EUR");
+    expect(parsePrivateDefaultCurrency([])).toBe("USD");
+    expect(parsePrivateDefaultCurrency(["EGYPT"])).toBe("USD");
+    expect(parsePrivateDefaultCurrency("GBP")).toBe("USD");
+  });
 });
 
 describe("private key material lifecycle", () => {
@@ -148,6 +158,7 @@ describe("private key material lifecycle", () => {
     const sheetKey = new Uint8Array(32).fill(5);
     destroyLoadedCardContext({
       authoritative: AUTHORITATIVE,
+      defaultCurrency: "EGP",
       templates: [],
       sheetKey,
     });

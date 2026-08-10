@@ -74,7 +74,7 @@ describe("IOU private matcher isolation", () => {
     expect(templatesManager).toContain("direct chat");
     expect(templatesManager).toContain("have an admin enable it there");
     expect(templatesManager).toContain("link that exact chat to this IOU account");
-    expect(templatesManager).toMatch(/Keep\s+auto-propose suggestions on and that chat unmuted/);
-    expect(templatesManager).toMatch(/new text\s+messages observed while that chat is open/);
+    expect(templatesManager).toMatch(/Keep\s+AI action suggestions on and that chat\s+unmuted/);
+    expect(templatesManager).toMatch(/new matching messages observed while that\s+chat is open/i);
   });
 });

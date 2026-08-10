@@ -524,9 +524,10 @@ export function TemplatesManager({
               Comma-separated and encrypted with this account. The type name is not an automatic
               trigger; add the name here too if you want it to match. In OpenChat, connect IOU for a
               direct chat; for a group or channel, connect IOU and have an admin enable it there. Then
-              link that exact chat to this IOU account. New matching messages then suggest IOU
-              automatically and select this Saved type without publishing its name or trigger
-              words. Keep AI action suggestions on and that chat unmuted.
+              link that exact chat to this IOU account. New matching messages observed while that
+              chat is open then suggest IOU automatically and select this Saved type without
+              publishing its name or trigger words. Keep AI action suggestions on and that chat
+              unmuted.
             </span>
           </label>
         </div>

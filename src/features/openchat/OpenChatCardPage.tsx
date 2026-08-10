@@ -15,7 +15,6 @@ import type { Direction } from "../entries/types";
 import { matchTemplateForDraft } from "../entries/resolveTemplateBase";
 import { orderedCurrencies } from "../settings/currencies";
 import type { TxnTemplate } from "../templates/TemplatesContext";
-import { fetchCardCurrency } from "./cardCurrency";
 import {
   parseBootstrap,
   cardParentTargetOrigin,
@@ -23,6 +22,7 @@ import {
   parseBusy,
   parseCollectConfirm,
   parsePrivateContextRequest,
+  applyDefaultCurrency,
   initToFormState,
   initEntries,
   buildConfirmPayload,
@@ -301,13 +301,6 @@ export function OpenChatCardPage() {
   // The host owns the only action buttons. Its busy signal freezes the editable values after that
   // click while it collects, grants, and submits the exact snapshot.
   const [submitting, setSubmitting] = useState(false);
-  // The DEPLOYMENT's card currency (Config.card_currency), fetched anonymously once on mount. Undefined
-  // until it resolves — and it may never (unset, offline, older canister), in which case the card keeps
-  // deferring the currency to whoever imports, exactly as before. See cardCurrency.ts for why this is
-  // app-level rather than per viewer.
-  const [appCurrency, setAppCurrency] = useState<string | undefined>(undefined);
-  // Mirror for the message handler, which closes over state from its mount-time render.
-  const appCurrencyRef = useRef<string | undefined>(undefined);
   const frameNonceRef = useRef<string | null>(null);
   const parentTargetOriginRef = useRef<string | null>(null);
   const initializedNonceRef = useRef<string | null>(null);
@@ -316,6 +309,10 @@ export function OpenChatCardPage() {
   const deferredCollectionRef = useRef<DeferredCollectionChallenge>();
   const transportRef = useRef<CardTransportSession>();
   const privateContextRef = useRef<LoadedCardPrivateContext>();
+  // Only auto-filled values are cleared on capability/viewer rotation. Explicit evidence and human
+  // edits remain intact, while one viewer's default can never carry into another viewer's context.
+  const defaultedCurrencyRef = useRef(false);
+  const defaultedMultiCurrencyRef = useRef<boolean[]>([]);
   const privateCapabilityRef = useRef<string>();
   const privateInitContextRef = useRef<CardInitContext>();
   const [templates, setTemplates] = useState<TxnTemplate[]>([]);
@@ -328,18 +325,6 @@ export function OpenChatCardPage() {
   multiRef.current = multi;
   ctxRef.current = ctx;
   typesStateRef.current = typesState;
-
-  useEffect(() => {
-    let cancelled = false;
-    void fetchCardCurrency().then((c) => {
-      if (cancelled || !c) return;
-      appCurrencyRef.current = c;
-      setAppCurrency(c);
-    });
-    return () => {
-      cancelled = true;
-    };
-  }, []);
 
   const post = useCallback((msg: unknown) => {
     // Use the exact parent origin learned from its nonce-bound bootstrap.
@@ -377,6 +362,27 @@ export function OpenChatCardPage() {
       }
     };
 
+    const clearPrivateDefaults = () => {
+      if (defaultedCurrencyRef.current) {
+        const nextForm = { ...formRef.current, currency: "" };
+        defaultedCurrencyRef.current = false;
+        formRef.current = nextForm;
+        setForm(nextForm);
+      }
+      const currentMulti = multiRef.current;
+      if (currentMulti) {
+        const markers = defaultedMultiCurrencyRef.current;
+        const nextMulti = currentMulti.map((entry, index) =>
+          markers[index] ? { ...entry, currency: "" } : entry,
+        );
+        defaultedMultiCurrencyRef.current = [];
+        multiRef.current = nextMulti;
+        setMulti(nextMulti);
+      } else {
+        defaultedMultiCurrencyRef.current = [];
+      }
+    };
+
     const resetPrivateState = () => {
       destroyLoadedCardContext(privateContextRef.current);
       privateContextRef.current = undefined;
@@ -385,6 +391,7 @@ export function OpenChatCardPage() {
       deferredCollectionRef.current = undefined;
       setTemplates([]);
       setCurrentTypesState({ kind: "waiting" });
+      clearPrivateDefaults();
       clearPrivateSelections();
     };
 
@@ -632,14 +639,17 @@ export function OpenChatCardPage() {
         initializedNonceRef.current = frameNonce;
         // Seed public form data only once. Host re-init updates theme/readonly/private authority and
         // must never overwrite edits the viewer has already made in the isolated frame.
-        const seed = appCurrencyRef.current ?? "";
-        const entries = initEntries(parsed.data, seed);
+        const entries = initEntries(parsed.data);
         if (entries) {
+          defaultedCurrencyRef.current = false;
+          defaultedMultiCurrencyRef.current = [];
           multiRef.current = entries;
           setMulti(entries);
         } else {
+          defaultedCurrencyRef.current = false;
+          defaultedMultiCurrencyRef.current = [];
           multiRef.current = null;
-          const initialForm = initToFormState(parsed.data, seed);
+          const initialForm = initToFormState(parsed.data);
           formRef.current = initialForm;
           setMulti(null);
           setForm(initialForm);
@@ -730,20 +740,26 @@ export function OpenChatCardPage() {
             const evidence = "row-local" as const;
             const currentMulti = multiRef.current;
             if (currentMulti) {
-              const hydratedMulti = currentMulti.map((state, index) =>
-                hydrateSavedTypeForCard(
-                  state,
+              const hydratedMulti = currentMulti.map((state, index) => {
+                const withDefault = applyDefaultCurrency(state, loaded.defaultCurrency);
+                defaultedMultiCurrencyRef.current[index] =
+                  state.currency === "" && withDefault.currency !== "";
+                return hydrateSavedTypeForCard(
+                  withDefault,
                   rawEntries[index] ?? {},
                   loaded.templates,
                   { evidence },
-                ),
-              );
+                );
+              });
               multiRef.current = hydratedMulti;
               setMulti(hydratedMulti);
             }
           } else {
+            const withDefault = applyDefaultCurrency(formRef.current, loaded.defaultCurrency);
+            defaultedCurrencyRef.current =
+              formRef.current.currency === "" && withDefault.currency !== "";
             const hydratedForm = hydrateSavedTypeForCard(
-              formRef.current,
+              withDefault,
               parsed.data,
               loaded.templates,
             );
@@ -796,17 +812,6 @@ export function OpenChatCardPage() {
     };
   }, [post]);
 
-  // The fetch usually lands AFTER init, so adopt it wherever the card is still deferring
-  // (currency ""). Keyed on appCurrency alone, so a user who deliberately picks "Your IOU default"
-  // afterwards is never overridden.
-  useEffect(() => {
-    if (!appCurrency) return;
-    setForm((f) => (f.currency === "" ? { ...f, currency: appCurrency } : f));
-    setMulti((m) =>
-      m ? m.map((e) => (e.currency === "" ? { ...e, currency: appCurrency } : e)) : m,
-    );
-  }, [appCurrency]);
-
   // Size the host iframe to settled initialized content. The short quiet window coalesces React's
   // public-init/private-hydration layout burst so the host never animates through transient heights.
   // Before init there are no authoritative values to size or reveal, so do not report the empty
@@ -841,15 +846,19 @@ export function OpenChatCardPage() {
 
   const formValid = isCardFormValid(form);
 
-  const set = <K extends keyof CardFormState>(key: K, value: CardFormState[K]) =>
+  const set = <K extends keyof CardFormState>(key: K, value: CardFormState[K]) => {
+    if (key === "currency") defaultedCurrencyRef.current = false;
     setForm((f) => ({ ...f, [key]: value }));
+  };
 
 
   // MULTI-mode edits patch one entry in the list. The host-owned button later requests one exact
   // unwrapped array snapshot (parseDraftBatch), so there is no action control inside this iframe.
   const setEntry = useCallback(
-    <K extends keyof CardFormState>(idx: number, key: K, value: CardFormState[K]) =>
-      setMulti((m) => (m ? m.map((e, i) => (i === idx ? { ...e, [key]: value } : e)) : m)),
+    <K extends keyof CardFormState>(idx: number, key: K, value: CardFormState[K]) => {
+      if (key === "currency") defaultedMultiCurrencyRef.current[idx] = false;
+      setMulti((m) => (m ? m.map((e, i) => (i === idx ? { ...e, [key]: value } : e)) : m));
+    },
     [],
   );
   const multiAllValid = !!multi && multi.length > 0 && multi.every(isCardFormValid);
@@ -938,7 +947,7 @@ export function OpenChatCardPage() {
               ))}
               {!multiAllValid && (
                 <span style={{ fontSize: "0.75rem", color: "var(--text-dim)", textAlign: "right" }}>
-                  Check each entry's amount, Type, direction, and Note before adding.
+                  Check each entry's amount, currency, Type, direction, and Note before adding.
                 </span>
               )}
             </div>
@@ -974,11 +983,9 @@ export function OpenChatCardPage() {
                   onChange={(e) => set("currency", e.target.value)}
                   style={inputStyle}
                 >
-                  {/* "" defers to the user's IOU default (prefs.defaultCurrency), resolved at import
-                      — the iframe is storage-partitioned and can't read that setting itself. */}
-                  {/* "" → resolved to YOUR IOU default currency at import; the frame cannot read it
-                      (see initToFormState), so it names the source instead of guessing a code. */}
-                  <option value="">Your IOU default</option>
+                  <option value="" disabled>
+                    Loading your default…
+                  </option>
                   {currencyOptions.map((c) => (
                     <option key={c} value={c}>
                       {c}
@@ -1019,7 +1026,7 @@ export function OpenChatCardPage() {
             </Field>
             {!formValid && (
               <span style={{ fontSize: "0.75rem", color: "var(--text-dim)", textAlign: "right" }}>
-                Check the amount, Type, direction, and Note before adding.
+                Check the amount, currency, Type, direction, and Note before adding.
               </span>
             )}
           </div>
@@ -1094,7 +1101,7 @@ export function isCardFormValid(s: CardFormState): boolean {
     n <= IOU_MAX_MAJOR_AMOUNT &&
     Number.isSafeInteger(minorUnits) &&
     minorUnits >= 1 &&
-    (currency === "" || /^[A-Za-z]{3}$/.test(currency)) &&
+    /^[A-Za-z]{3}$/.test(currency) &&
     (s.kind === "iou" || s.kind === "settlement") &&
     (s.direction === "credit" || s.direction === "debt") &&
     dateIsValid &&
@@ -1256,8 +1263,9 @@ function EntryRow({
             onChange={(e) => onChange("currency", e.target.value)}
             style={inputStyle}
           >
-            {/* "" → the user's IOU default currency, filled at import (see single-mode note). */}
-            <option value="">Your default</option>
+            <option value="" disabled>
+              Loading your default…
+            </option>
             {currencyOptions.map((c) => (
               <option key={c} value={c}>
                 {c}
@@ -1296,7 +1304,7 @@ function EntryRow({
       </Field>
       {!valid && (
         <span style={{ fontSize: "0.6875rem", color: "var(--debt)" }}>
-          Enter an amount greater than 0 and choose a Type.
+          Enter an amount greater than 0, choose a currency and Type, and check the direction.
         </span>
       )}
     </div>
@@ -1313,7 +1321,7 @@ export function ReadonlyView({
   templates: TxnTemplate[];
 }) {
   const rows: { label: string; value: string }[] = [
-    { label: "Amount", value: form.amount ? `${form.amount} ${form.currency || "(your IOU default)"}` : "—" },
+    { label: "Amount", value: form.amount ? `${form.amount} ${form.currency || "—"}` : "—" },
   ];
   // Between Currency and Direction, which is where the classic OC-rendered table put them — and, like
   // that renderer, only when they carry a value.

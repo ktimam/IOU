@@ -361,9 +361,10 @@ export const iouActionManifest: IouActionManifest = {
     },
     // Amount and kind define the ledger semantics and still fail closed when absent. Direction
     // remains required after applying the declared, visible editable fallback above. Currency stays
-    // optional because IOU can recover it from its configured card currency or the user's import
-    // default. `message` is optional too: OpenChat supplies authoritative text input itself, while a
-    // vision model's text echo is not proof of what an image contains.
+    // optional because IOU fills it from the exact viewer's one account default in private card
+    // context (and again at import for legacy payloads). `message` is optional too: OpenChat supplies
+    // authoritative text input itself, while a vision model's text echo is not proof of what an image
+    // contains.
     required: ["amount", "kind", "direction"],
   },
   rules: IOU_EXTRACTION_RULES,
