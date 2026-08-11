@@ -21,6 +21,15 @@ describe("buildManifestWire", () => {
     expect(manifest.per_user_keys).toBe(true);
   });
 
+  it("opts the IOU action into app-authorized account-scoped recipients", () => {
+    expect(iouActionManifest.recipientScope).toBe("app_authorized");
+
+    const manifest = buildManifestWire("", undefined, () => {}) as {
+      actions: { recipient_scope: { app_authorized: null }[] }[];
+    };
+    expect(manifest.actions[0]?.recipient_scope).toEqual([{ app_authorized: null }]);
+  });
+
   it("still carries an explicit app-level key when one is supplied (legacy path)", () => {
     const manifest = buildManifestWire(FAKE_PEM, undefined, () => {});
     expect(manifest.consumer_public_key).toBe(FAKE_PEM);
@@ -127,6 +136,7 @@ describe("buildManifestWire", () => {
         },
         endpoint: "https://app.example/confirm",
         consumer_public_key: [],
+        recipient_scope: [],
         rules: [],
         accepts_image: false,
       }],

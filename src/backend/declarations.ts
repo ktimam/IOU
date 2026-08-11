@@ -121,6 +121,33 @@ export const idlFactory = ({ IDL: idl }: { IDL: IDL }) => {
     vouched: idl.Bool,
     binding: CardConfirmationAttestationBindingV1,
   });
+  const AuthorizeAiActionRecipientsArgs = idl.Record({
+    context: AppScopedCardContextV1,
+    content_hash: idl.Vec(idl.Nat8),
+    confirm_payload_hash: idl.Vec(idl.Nat8),
+    confirmation_lease_generation: idl.Nat64,
+    created_at: idl.Nat64,
+    authorization_created_at: idl.Nat64,
+  });
+  const AuthorizedAiActionRecipient = idl.Record({
+    app_subject: idl.Vec(idl.Nat8),
+    subject_version: idl.Nat16,
+    consumer_queue_selector: idl.Vec(idl.Nat8),
+    consumer_queue_selector_version: idl.Nat16,
+    consumer_public_key: idl.Text,
+    app_user_key_version: idl.Nat64,
+  });
+  const AuthorizeAiActionRecipientsSuccess = idl.Record({
+    recipients: idl.Vec(AuthorizedAiActionRecipient),
+    scope_commitment: idl.Vec(idl.Nat8),
+    expires_at: idl.Nat64,
+  });
+  const AuthorizeAiActionRecipientsResponse = idl.Variant({
+    Success: AuthorizeAiActionRecipientsSuccess,
+    NotAuthorized: idl.Null,
+    Stale: idl.Null,
+    InvalidRequest: idl.Text,
+  });
   const SheetState = idl.Variant({
     Active: idl.Null,
     Closed: idl.Null,
@@ -392,6 +419,11 @@ export const idlFactory = ({ IDL: idl }: { IDL: IDL }) => {
     c2c_attest_ai_app_card_confirmation_v1: idl.Func(
       [AttestAiAppCardConfirmationV1Args],
       [AttestAiAppCardConfirmationV1Response],
+      [],
+    ),
+    c2c_authorize_ai_action_recipients: idl.Func(
+      [AuthorizeAiActionRecipientsArgs],
+      [AuthorizeAiActionRecipientsResponse],
       [],
     ),
     // Phase 2

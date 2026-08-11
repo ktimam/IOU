@@ -69,6 +69,10 @@ export function buildIdl() {
     rows: IDL.Vec(AiActionCardRowTemplate),
     disclosure: IDL.Opt(IDL.Text),
   });
+  const AiActionRecipientScope = IDL.Variant({
+    confirmer: IDL.Null,
+    app_authorized: IDL.Null,
+  });
   const AiActionDefinition = IDL.Record({
     name: IDL.Text,
     description: IDL.Text,
@@ -77,6 +81,7 @@ export function buildIdl() {
     card: AiActionCardTemplate,
     endpoint: IDL.Text,
     consumer_public_key: IDL.Opt(IDL.Text),
+    recipient_scope: IDL.Opt(AiActionRecipientScope),
     rules: IDL.Vec(AiActionRuleIdl),
     accepts_image: IDL.Bool,
   });
@@ -187,6 +192,10 @@ const OP_LABEL: Record<string, string> = {
 };
 const CONTEXT_LABEL: Record<string, string> = { today: "today" };
 const DISPLAY_LABEL: Record<string, string> = { sheet: "sheet", external: "external" };
+const RECIPIENT_SCOPE_LABEL: Record<string, string> = {
+  confirmer: "confirmer",
+  app_authorized: "app_authorized",
+};
 
 function candidLabel(table: Record<string, string>, value: string, what: string): string {
   const label = table[value];
@@ -298,6 +307,15 @@ export function buildManifestWire(
     endpoint: paste.endpoint,
     // No per-action key: the app-level consumer_public_key below is the effective delivery key.
     consumer_public_key: none<string>(),
+    // App-authorized is an explicit opt-in. Older/other actions that omit this option retain the
+    // confirmer-only default and cannot request broader delivery.
+    recipient_scope: opt({
+      [candidLabel(
+        RECIPIENT_SCOPE_LABEL,
+        iouActionManifest.recipientScope,
+        "recipient scope",
+      )]: null,
+    }),
     rules: buildIouRules(privateTemplatesForLeakTest).map(ruleToWire),
     // Opt into OpenChat's auto-propose-on-image chip (this action extracts from receipt images).
     accepts_image: iouActionManifest.acceptsImage,

@@ -274,6 +274,43 @@ function encodeManifest(out: CommitmentEncoder, manifest: Record<string, unknown
   }
 }
 
+function appendRecipientScopeExtension(
+  out: CommitmentEncoder,
+  manifest: Record<string, unknown>,
+): void {
+  const appAuthorized: number[] = [];
+  const actions = arrayField(manifest, "actions");
+  for (const [index, actionValue] of actions.entries()) {
+    if (!isRecord(actionValue)) throw new Error("manifest commitment action must be a record");
+    // Backward compatibility: this field did not exist in verifier V2's frozen base encoding.
+    // Missing/None/explicit Confirmer therefore append no bytes and retain the exact legacy hash.
+    const scopeValue = Object.prototype.hasOwnProperty.call(actionValue, "recipient_scope")
+      ? actionValue.recipient_scope
+      : [];
+    if (!Array.isArray(scopeValue) || scopeValue.length > 1) {
+      throw new Error("manifest commitment recipient_scope must contain zero or one value");
+    }
+    if (scopeValue.length === 0) continue;
+    const tag = variant(
+      scopeValue[0],
+      ["confirmer", "app_authorized"],
+      "recipient scope",
+    );
+    if (tag === "app_authorized") appAuthorized.push(index);
+  }
+  if (appAuthorized.length === 0) return;
+
+  // Frozen additive extension shared with OpenChat. It is omitted entirely for legacy/default
+  // scopes, so already installed verifier-v2 manifest hashes remain valid across the upgrade.
+  out.raw(utf8.encode("OC-RECIPIENT-SCOPE"));
+  out.u8(1);
+  out.u32(appAuthorized.length);
+  for (const index of appAuthorized) {
+    out.u32(index);
+    out.u8(1); // app_authorized
+  }
+}
+
 /** Explicit, language-neutral OpenChat verifier-v2 encoding. */
 export function encodeManifestCommitmentV2(commitment: ManifestCommitmentV2): Uint8Array {
   const out = new CommitmentEncoder();
@@ -288,5 +325,6 @@ export function encodeManifestCommitmentV2(commitment: ManifestCommitmentV2): Ui
   out.string(commitment.canonical_name);
   if (!isRecord(commitment.manifest)) throw new Error("manifest commitment manifest must be a record");
   encodeManifest(out, commitment.manifest);
+  appendRecipientScopeExtension(out, commitment.manifest);
   return out.finish();
 }

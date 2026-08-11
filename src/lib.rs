@@ -1228,6 +1228,9 @@ fn inspect_message() {
         "disconnect_openchat",
         "openchat_card_context",
         "openchat_private_match_context",
+        // App-authoritative shared-account fan-out. The method itself pins the exact UserIndex
+        // canister caller; it is intentionally not a normal signed-in-user endpoint.
+        "c2c_authorize_ai_action_recipients",
     ];
     if !allowed.contains(&method_name.as_str()) {
         ic_cdk::trap(format!(
@@ -1578,6 +1581,52 @@ struct AttestAiAppCardConfirmationV1Response {
     binding: CardConfirmationAttestationBindingV1,
 }
 
+/// OpenChat's app-authoritative recipient callback. All user/account coordinates stay inside IOU;
+/// the response contains only the opaque app subject, queue selector and independently registered
+/// public key that UserIndex already knows how to validate for each recipient.
+#[derive(Clone, CandidType, Deserialize, Debug, PartialEq, Eq)]
+struct AuthorizeAiActionRecipientsArgs {
+    context: AppScopedCardContextV1,
+    content_hash: Vec<u8>,
+    confirm_payload_hash: Vec<u8>,
+    confirmation_lease_generation: u64,
+    /// Immutable confirmation provenance timestamp (milliseconds).
+    created_at: u64,
+    /// Fresh timestamp for this exact authorization/deposit attempt (milliseconds).
+    authorization_created_at: u64,
+}
+
+#[derive(Clone, CandidType, Deserialize, Debug, PartialEq, Eq)]
+struct AuthorizedAiActionRecipient {
+    app_subject: Vec<u8>,
+    subject_version: u16,
+    consumer_queue_selector: Vec<u8>,
+    consumer_queue_selector_version: u16,
+    consumer_public_key: String,
+    app_user_key_version: u64,
+}
+
+#[derive(Clone, CandidType, Deserialize, Debug, PartialEq, Eq)]
+struct AuthorizeAiActionRecipientsSuccess {
+    recipients: Vec<AuthorizedAiActionRecipient>,
+    scope_commitment: Vec<u8>,
+    expires_at: u64,
+}
+
+#[derive(Clone, CandidType, Deserialize, Debug, PartialEq, Eq)]
+enum AuthorizeAiActionRecipientsResponse {
+    Success(AuthorizeAiActionRecipientsSuccess),
+    NotAuthorized,
+    Stale,
+    InvalidRequest(String),
+}
+
+#[derive(Clone, Debug)]
+struct RecipientBindingState {
+    binding: OpenChatBinding,
+    current_consumer_public_key: Option<String>,
+}
+
 const IOU_CARD_ACTION_ID: &str = "iou.entry.import";
 const IOU_CARD_TITLE: &str = "Add to IOU";
 const IOU_CARD_CONFIRM_LABEL: &str = "Add to IOU";
@@ -1586,6 +1635,7 @@ const MAX_CARD_CONFIRM_PAYLOAD_BYTES: usize = 16_384;
 const MAX_CARD_DRAFTS: usize = 32;
 const TEMPLATE_REF_PREFIX: &str = "ioutr1.";
 const TEMPLATE_REF_MAX_LENGTH: usize = 1_416;
+const AI_ACTION_RECIPIENT_GRANT_TTL_MS: u64 = 300_000;
 
 #[derive(Clone, Debug)]
 struct AttestedEntryDraft {
@@ -4265,6 +4315,319 @@ fn openchat_binding_for_subject(
         })
 }
 
+fn recipient_binding_is_current(
+    state: &RecipientBindingState,
+    configured: &AiAppVerificationBinding,
+    app_canister_id: Principal,
+) -> Option<AuthorizedAiActionRecipient> {
+    let binding = &state.binding;
+    if binding.iou_principal == Principal::anonymous()
+        || configured.app_canister_id != app_canister_id
+        || !openchat_binding_matches_verification(binding, configured)
+        || !openchat_binding_key_matches(
+            binding.consumer_public_key_pem.as_deref(),
+            state.current_consumer_public_key.as_deref(),
+        )
+    {
+        return None;
+    }
+    let app_subject = valid_app_subject(binding)?.to_vec();
+    let consumer_queue_selector = valid_consumer_queue_selector(binding)?.to_vec();
+    let consumer_public_key = binding.consumer_public_key_pem.clone()?;
+    let app_user_key_version = binding.key_version.filter(|version| *version > 0)?;
+    if consumer_public_key.is_empty()
+        || consumer_public_key.len() > 2_000
+        || !consumer_public_key.contains("BEGIN PUBLIC KEY")
+    {
+        return None;
+    }
+    Some(AuthorizedAiActionRecipient {
+        app_subject,
+        subject_version: binding.subject_version?,
+        consumer_queue_selector,
+        consumer_queue_selector_version: binding.consumer_queue_selector_version?,
+        consumer_public_key,
+        app_user_key_version,
+    })
+}
+
+fn scope_hash_bytes(hasher: &mut Sha256, value: &[u8]) {
+    hasher.update((value.len() as u64).to_be_bytes());
+    hasher.update(value);
+}
+
+fn scope_hash_text(hasher: &mut Sha256, value: &str) {
+    scope_hash_bytes(hasher, value.as_bytes());
+}
+
+fn scope_hash_principal(hasher: &mut Sha256, value: Principal) {
+    scope_hash_bytes(hasher, value.as_slice());
+}
+
+fn ai_action_recipient_scope_commitment(
+    args: &AuthorizeAiActionRecipientsArgs,
+    configured: &AiAppVerificationBinding,
+    app_canister_id: Principal,
+    sheet: &Sheet,
+    pair: &Pair,
+    recipients: &[(Principal, AuthorizedAiActionRecipient)],
+    expires_at: u64,
+) -> Vec<u8> {
+    let mut digest = Sha256::new();
+    digest.update(b"iou.ai-action-recipient-scope.v1\0");
+    scope_hash_principal(&mut digest, configured.user_index_canister_id);
+    scope_hash_principal(&mut digest, app_canister_id);
+    digest.update(args.context.context_version.to_be_bytes());
+    scope_hash_bytes(&mut digest, &args.context.app_subject);
+    scope_hash_bytes(&mut digest, &args.context.chat_handle);
+    scope_hash_bytes(&mut digest, &args.context.message_handle);
+    digest.update(args.context.app_id.to_be_bytes());
+    digest.update(args.context.app_revision.to_be_bytes());
+    scope_hash_text(&mut digest, &args.context.action_id);
+    scope_hash_bytes(&mut digest, &args.content_hash);
+    scope_hash_bytes(&mut digest, &args.confirm_payload_hash);
+    digest.update(args.confirmation_lease_generation.to_be_bytes());
+    digest.update(args.created_at.to_be_bytes());
+    digest.update(args.authorization_created_at.to_be_bytes());
+    digest.update(expires_at.to_be_bytes());
+
+    // These exact account coordinates never leave IOU. Hashing both the routed sheet and its
+    // parent pair makes the opaque commitment change across account reassignment or membership
+    // churn without making Pair.members a recipient authority.
+    scope_hash_text(&mut digest, &sheet.id);
+    scope_hash_text(&mut digest, &sheet.pair_id);
+    digest.update([match sheet.state {
+        SheetState::Active => 1,
+        SheetState::Closed => 2,
+    }]);
+    scope_hash_principal(&mut digest, sheet.member_a);
+    scope_hash_principal(&mut digest, sheet.member_b);
+    scope_hash_text(&mut digest, &pair.id);
+    scope_hash_principal(&mut digest, pair.members[0]);
+    scope_hash_principal(&mut digest, pair.members[1]);
+    match pair.archived_at {
+        Some(value) => {
+            digest.update([1]);
+            digest.update(value.to_be_bytes());
+        }
+        None => digest.update([0]),
+    }
+
+    digest.update((recipients.len() as u64).to_be_bytes());
+    for (principal, recipient) in recipients {
+        scope_hash_principal(&mut digest, *principal);
+        scope_hash_bytes(&mut digest, &recipient.app_subject);
+        digest.update(recipient.subject_version.to_be_bytes());
+        scope_hash_bytes(&mut digest, &recipient.consumer_queue_selector);
+        digest.update(recipient.consumer_queue_selector_version.to_be_bytes());
+        scope_hash_text(&mut digest, &recipient.consumer_public_key);
+        digest.update(recipient.app_user_key_version.to_be_bytes());
+    }
+    digest.finalize().to_vec()
+}
+
+fn authorize_ai_action_recipients_for_state(
+    args: &AuthorizeAiActionRecipientsArgs,
+    config: &Config,
+    app_canister_id: Principal,
+    caller: Principal,
+    now_ms: u64,
+    confirmer_binding: &OpenChatBinding,
+    sheet: &Sheet,
+    pair: &Pair,
+    candidates: &[RecipientBindingState],
+) -> AuthorizeAiActionRecipientsResponse {
+    let Some(configured) = config.ai_app_verification_binding.as_ref() else {
+        return AuthorizeAiActionRecipientsResponse::NotAuthorized;
+    };
+    if caller != configured.user_index_canister_id
+        || !verification_binding_is_valid(
+            configured,
+            config.ai_app_owner,
+            config.openchat_user_index_canister_id,
+            app_canister_id,
+        )
+        || configured.inbox_canister_id.is_none()
+    {
+        return AuthorizeAiActionRecipientsResponse::NotAuthorized;
+    }
+    if !valid_app_scoped_card_context(&args.context)
+        || args.context.app_id != configured.app_id
+        || args.context.app_revision != configured.app_revision
+        || args.context.action_id != IOU_CARD_ACTION_ID
+        || args.content_hash.len() != 32
+        || !args.content_hash.iter().any(|byte| *byte != 0)
+        || args.confirm_payload_hash.len() != 32
+        || !args.confirm_payload_hash.iter().any(|byte| *byte != 0)
+        || args.confirmation_lease_generation == 0
+        || args.created_at == 0
+        || args.authorization_created_at == 0
+    {
+        return AuthorizeAiActionRecipientsResponse::InvalidRequest(
+            "invalid action recipient authorization coordinates".into(),
+        );
+    }
+    let expires_at = args
+        .authorization_created_at
+        .saturating_add(AI_ACTION_RECIPIENT_GRANT_TTL_MS);
+    // `created_at` and `authorization_created_at` are produced by OpenChat canisters which may
+    // live on different subnets from IOU. Their millisecond clocks are not a safe ordering
+    // authority. The pinned UserIndex validates its freshly-issued authorization window on its
+    // own clock; IOU only rejects a grant once that trusted timestamp plus the bounded TTL is
+    // unambiguously in the past on IOU's clock.
+    if now_ms > expires_at {
+        return AuthorizeAiActionRecipientsResponse::Stale;
+    }
+    if !matches!(sheet.state, SheetState::Active)
+        || sheet.pair_id != pair.id
+        || pair.archived_at.is_some()
+        || confirmer_binding.iou_principal == Principal::anonymous()
+        || !principal_can_read_sheet(sheet, confirmer_binding.iou_principal)
+        || valid_app_subject(confirmer_binding) != Some(args.context.app_subject.as_slice())
+    {
+        return AuthorizeAiActionRecipientsResponse::NotAuthorized;
+    }
+
+    let mut exact_members = Vec::with_capacity(2);
+    for member in [sheet.member_a, sheet.member_b] {
+        if member != Principal::anonymous() && !exact_members.contains(&member) {
+            exact_members.push(member);
+        }
+    }
+    let expected_recipient_count = exact_members.len();
+    let mut recipients: Vec<(Principal, AuthorizedAiActionRecipient)> = Vec::new();
+    for member in exact_members {
+        let Some(state) = candidates
+            .iter()
+            .find(|candidate| candidate.binding.iou_principal == member)
+        else {
+            continue;
+        };
+        let Some(recipient) = recipient_binding_is_current(state, configured, app_canister_id)
+        else {
+            continue;
+        };
+        recipients.push((member, recipient));
+    }
+    if recipients.len() != expected_recipient_count {
+        return AuthorizeAiActionRecipientsResponse::NotAuthorized;
+    }
+    let confirmer_is_current = recipients.iter().any(|(principal, recipient)| {
+        *principal == confirmer_binding.iou_principal
+            && recipient.app_subject == args.context.app_subject
+            && candidates
+                .iter()
+                .any(|state| state.binding == *confirmer_binding)
+    });
+    if !confirmer_is_current {
+        return AuthorizeAiActionRecipientsResponse::NotAuthorized;
+    }
+    recipients.sort_by(|left, right| {
+        left.1
+            .app_subject
+            .cmp(&right.1.app_subject)
+            .then_with(|| {
+                left.1
+                    .consumer_queue_selector
+                    .cmp(&right.1.consumer_queue_selector)
+            })
+            .then_with(|| {
+                left.1
+                    .app_user_key_version
+                    .cmp(&right.1.app_user_key_version)
+            })
+    });
+    let scope_commitment = ai_action_recipient_scope_commitment(
+        args,
+        configured,
+        app_canister_id,
+        sheet,
+        pair,
+        &recipients,
+        expires_at,
+    );
+    AuthorizeAiActionRecipientsResponse::Success(AuthorizeAiActionRecipientsSuccess {
+        recipients: recipients
+            .into_iter()
+            .map(|(_, recipient)| recipient)
+            .collect(),
+        scope_commitment,
+        expires_at,
+    })
+}
+
+/// Resolve the confirmer's exact private chat route, authorize only current members of that exact
+/// active sheet, and return independently encrypted delivery coordinates. UserIndex is the only
+/// accepted caller. Before success, legacy confirmer-only chat routing is atomically repaired for
+/// every exact sheet member so the partner's envelope cannot appear as an unmapped global draft.
+#[ic_cdk::update]
+fn c2c_authorize_ai_action_recipients(
+    args: AuthorizeAiActionRecipientsArgs,
+) -> AuthorizeAiActionRecipientsResponse {
+    let app_canister_id = ic_cdk::api::canister_self();
+    let caller = ic_cdk::api::msg_caller();
+    let now_ms = ic_cdk::api::time() / 1_000_000;
+    let config = CONFIG.with(|config| config.borrow().get().clone());
+    if config.openchat_user_index_canister_id != Some(caller) {
+        return AuthorizeAiActionRecipientsResponse::NotAuthorized;
+    }
+    let Some(confirmer_binding) =
+        openchat_binding_for_subject(caller, args.context.app_id, &args.context.app_subject)
+    else {
+        return AuthorizeAiActionRecipientsResponse::NotAuthorized;
+    };
+    let Some(chat_key) = scoped_chat_handle_key(&args.context.chat_handle) else {
+        return AuthorizeAiActionRecipientsResponse::InvalidRequest(
+            "invalid app-scoped chat handle".into(),
+        );
+    };
+    let Some(sheet_id) = linked_sheet_for(confirmer_binding.iou_principal, &chat_key) else {
+        return AuthorizeAiActionRecipientsResponse::NotAuthorized;
+    };
+    let Some(sheet) = SHEETS.with(|sheets| sheets.borrow().get(&sheet_id)) else {
+        return AuthorizeAiActionRecipientsResponse::NotAuthorized;
+    };
+    let Some(pair) = PAIRS.with(|pairs| pairs.borrow().get(&sheet.pair_id)) else {
+        return AuthorizeAiActionRecipientsResponse::NotAuthorized;
+    };
+    let candidates: Vec<RecipientBindingState> = [sheet.member_a, sheet.member_b]
+        .into_iter()
+        .filter(|member| *member != Principal::anonymous())
+        .filter_map(|member| {
+            let binding =
+                OPENCHAT_BINDINGS_BY_IOU.with(|bindings| bindings.borrow().get(&member))?;
+            let current_consumer_public_key = CONSUMER_KEYPAIRS.with(|keypairs| {
+                keypairs
+                    .borrow()
+                    .get(&member)
+                    .map(|keypair| keypair.public_key_pem)
+            });
+            Some(RecipientBindingState {
+                binding,
+                current_consumer_public_key,
+            })
+        })
+        .collect();
+    let response = authorize_ai_action_recipients_for_state(
+        &args,
+        &config,
+        app_canister_id,
+        caller,
+        now_ms,
+        &confirmer_binding,
+        &sheet,
+        &pair,
+        &candidates,
+    );
+    if matches!(response, AuthorizeAiActionRecipientsResponse::Success(_))
+        && repair_shared_chat_sheet_link(confirmer_binding.iou_principal, &chat_key, &sheet)
+            .is_err()
+    {
+        return AuthorizeAiActionRecipientsResponse::NotAuthorized;
+    }
+    response
+}
+
 #[derive(CandidType, Deserialize)]
 struct ClaimAiAppLinkCodeArgs {
     code: String,
@@ -5346,12 +5709,6 @@ fn is_canonical_app_scoped_chat_handle(chat_key: &str) -> bool {
         )
 }
 
-fn validate_app_scoped_chat_handle(chat_key: &str) {
-    if !is_canonical_app_scoped_chat_handle(chat_key) {
-        ic_cdk::trap("chat_key must be a canonical 32-byte app-scoped handle");
-    }
-}
-
 /// Removal keeps the released bounded-text validator so callers can explicitly delete a legacy raw
 /// row during migration. New writes and all reads remain canonical-handle-only.
 fn validate_legacy_chat_key_for_removal(chat_key: &str) {
@@ -5471,14 +5828,23 @@ fn remember_claimed_chat_route(caller: Principal, chat_key: &str, chat_name: &st
             },
         );
     });
-    CHAT_SHEET_LINKS.with(|links| {
-        let key = chat_link_key(&caller, chat_key);
-        let mut map = links.borrow_mut();
-        if let Some(mut link) = map.get(&key) {
-            link.chat_name = Some(chat_name.to_string());
-            map.insert(key, link);
-        }
+    // Token redemption authenticates this exact OpenChat label, but still does not create routing
+    // consent. If a valid active shared route already exists, refresh the same label on both exact
+    // account-member copies; with no saved route this remains a pending setup candidate only.
+    let existing_sheet_id = CHAT_SHEET_LINKS.with(|links| {
+        links
+            .borrow()
+            .get(&chat_link_key(&caller, chat_key))
+            .map(|link| link.sheet_id)
     });
+    if let Some(sheet_id) = existing_sheet_id {
+        let _ = store_shared_chat_sheet_link(
+            caller,
+            chat_key.to_string(),
+            sheet_id,
+            Some(chat_name.to_string()),
+        );
+    }
 }
 
 /// Resolve exactly the caller-scoped pending id selected by the page. Each
@@ -5524,57 +5890,222 @@ fn actionable_pending_chat_route(
     })
 }
 
+fn exact_sheet_members(sheet: &Sheet) -> Vec<Principal> {
+    let mut members = Vec::with_capacity(2);
+    for principal in [sheet.member_a, sheet.member_b] {
+        if principal != Principal::anonymous() && !members.contains(&principal) {
+            members.push(principal);
+        }
+    }
+    members
+}
+
+/// Atomically reconcile one app-scoped chat route across the exact old/new sheet members. Quotas
+/// and ownership are preflighted for every target before the first stable write. Old partner rows
+/// are removed only while they still point to the caller's exact prior sheet, so a later conflicting
+/// assignment cannot be erased by an older remove/reassign operation.
+fn store_shared_chat_sheet_link(
+    caller: Principal,
+    chat_key: String,
+    sheet_id: u64,
+    chat_name: Option<String>,
+) -> Result<(), &'static str> {
+    if !is_canonical_app_scoped_chat_handle(&chat_key) {
+        return Err("chat_key must be a canonical 32-byte app-scoped handle");
+    }
+    if chat_name
+        .as_deref()
+        .is_some_and(|name| validated_openchat_chat_name(Some(name)).is_none())
+    {
+        return Err("invalid OpenChat chat name");
+    }
+    let sheet_id_text = format!("{sheet_id:016x}");
+    let Some(target_sheet) = SHEETS.with(|sheets| sheets.borrow().get(&sheet_id_text)) else {
+        return Err("caller does not have access to the linked sheet");
+    };
+    if !principal_can_read_sheet(&target_sheet, caller) {
+        return Err("caller does not have access to the linked sheet");
+    }
+    if !matches!(target_sheet.state, SheetState::Active) {
+        return Err("only an active sheet can be linked to an OpenChat chat");
+    }
+    let target_members = exact_sheet_members(&target_sheet);
+    if !target_members.contains(&caller) {
+        return Err("caller does not have access to the linked sheet");
+    }
+
+    let caller_key = chat_link_key(&caller, &chat_key);
+    let prior_link = CHAT_SHEET_LINKS.with(|links| links.borrow().get(&caller_key));
+    let prior_sheet = prior_link.as_ref().and_then(|link| {
+        SHEETS.with(|sheets| sheets.borrow().get(&format!("{:016x}", link.sheet_id)))
+    });
+    let prior_sheet_id = prior_link.as_ref().map(|link| link.sheet_id);
+    let prior_sheet_is_exact = prior_sheet
+        .as_ref()
+        .is_some_and(|sheet| principal_can_read_sheet(sheet, caller));
+    let prior_members = prior_sheet
+        .as_ref()
+        .filter(|sheet| principal_can_read_sheet(sheet, caller))
+        .map(exact_sheet_members)
+        .unwrap_or_else(|| vec![caller]);
+    let prior_and_target_members_match = prior_members.len() == target_members.len()
+        && prior_members
+            .iter()
+            .all(|member| target_members.contains(member));
+    if prior_sheet_is_exact
+        && prior_sheet_id.is_some_and(|prior_id| prior_id != sheet_id)
+        && !prior_and_target_members_match
+    {
+        return Err("unlink the existing account route before changing its members");
+    }
+    let shared_chat_name = chat_name.or_else(|| {
+        prior_link
+            .as_ref()
+            .filter(|link| link.sheet_id == sheet_id)
+            .and_then(|link| link.chat_name.clone())
+    });
+
+    CHAT_SHEET_LINKS.with(|m| -> Result<(), &'static str> {
+        let mut map = m.borrow_mut();
+        let mut legacy_keys = BTreeSet::new();
+        // Every target member must have capacity before any old row is removed. A same-handle row
+        // for another account is a conflict unless it is one of the caller's exact prior shared
+        // rows being reconciled by this same update. Reject before the first stable mutation so an
+        // A-B assignment can never split an existing B-C route by overwriting only B.
+        for member in &target_members {
+            let key = chat_link_key(member, &chat_key);
+            if let Some(existing) = map.get(&key).filter(|link| link.sheet_id != sheet_id) {
+                let belongs_to_exact_prior_sheet = prior_sheet_is_exact
+                    && prior_sheet_id == Some(existing.sheet_id)
+                    && prior_members.contains(member);
+                if !belongs_to_exact_prior_sheet {
+                    return Err("target account member has a conflicting chat route");
+                }
+            }
+            let (start, end) = chat_link_bounds(member);
+            let rows: Vec<(String, bool)> = map
+                .range(start..end)
+                .map(|(row_key, value)| {
+                    (
+                        row_key,
+                        is_canonical_app_scoped_chat_handle(&value.chat_key),
+                    )
+                })
+                .collect();
+            let canonical_count = rows.iter().filter(|(_, canonical)| *canonical).count();
+            for (row_key, canonical) in rows {
+                if !canonical {
+                    legacy_keys.insert(row_key);
+                }
+            }
+            if !map.contains_key(&key) && canonical_count >= MAX_CHAT_LINKS_PER_PRINCIPAL {
+                return Err("chat-to-sheet link quota reached");
+            }
+        }
+
+        for legacy_key in legacy_keys {
+            map.remove(&legacy_key);
+        }
+
+        if let Some(expected_sheet_id) = prior_sheet_id {
+            for member in &prior_members {
+                let key = chat_link_key(member, &chat_key);
+                if map
+                    .get(&key)
+                    .as_ref()
+                    .is_some_and(|link| link.sheet_id == expected_sheet_id)
+                {
+                    map.remove(&key);
+                }
+            }
+        }
+        for member in &target_members {
+            let key = chat_link_key(member, &chat_key);
+            let member_chat_name = shared_chat_name
+                .clone()
+                .or_else(|| map.get(&key).and_then(|link| link.chat_name));
+            map.insert(
+                key,
+                ChatSheetLink {
+                    chat_key: chat_key.clone(),
+                    sheet_id,
+                    chat_name: member_chat_name,
+                },
+            );
+        }
+        Ok(())
+    })
+}
+
+fn repair_shared_chat_sheet_link(
+    confirmer: Principal,
+    chat_key: &str,
+    sheet: &Sheet,
+) -> Result<(), &'static str> {
+    let sheet_id = u64::from_str_radix(&sheet.id, 16).map_err(|_| "invalid routed sheet id")?;
+    let existing =
+        CHAT_SHEET_LINKS.with(|links| links.borrow().get(&chat_link_key(&confirmer, chat_key)));
+    if existing.as_ref().map(|link| link.sheet_id) != Some(sheet_id)
+        || !matches!(sheet.state, SheetState::Active)
+        || !principal_can_read_sheet(sheet, confirmer)
+    {
+        return Err("confirmer route no longer points to the active sheet");
+    }
+    let has_partner_conflict = exact_sheet_members(sheet).into_iter().any(|member| {
+        CHAT_SHEET_LINKS.with(|links| {
+            links
+                .borrow()
+                .get(&chat_link_key(&member, chat_key))
+                .is_some_and(|link| link.sheet_id != sheet_id)
+        })
+    });
+    if has_partner_conflict {
+        return Err("another exact sheet member has a newer conflicting chat route");
+    }
+    store_shared_chat_sheet_link(
+        confirmer,
+        chat_key.to_string(),
+        sheet_id,
+        existing.and_then(|link| link.chat_name),
+    )
+}
+
+fn remove_shared_chat_sheet_link(caller: Principal, chat_key: &str) -> Result<(), &'static str> {
+    let caller_key = chat_link_key(&caller, chat_key);
+    let Some(existing) = CHAT_SHEET_LINKS.with(|links| links.borrow().get(&caller_key)) else {
+        return Ok(());
+    };
+    let sheet = SHEETS.with(|sheets| sheets.borrow().get(&format!("{:016x}", existing.sheet_id)));
+    let members = sheet
+        .as_ref()
+        .filter(|sheet| principal_can_read_sheet(sheet, caller))
+        .map(exact_sheet_members)
+        .unwrap_or_else(|| vec![caller]);
+    CHAT_SHEET_LINKS.with(|links| {
+        let mut map = links.borrow_mut();
+        for member in members {
+            let key = chat_link_key(&member, chat_key);
+            if map
+                .get(&key)
+                .as_ref()
+                .is_some_and(|link| link.sheet_id == existing.sheet_id)
+            {
+                map.remove(&key);
+            }
+        }
+    });
+    Ok(())
+}
+
 fn store_chat_sheet_link(
     caller: Principal,
     chat_key: String,
     sheet_id: u64,
     chat_name: Option<String>,
 ) {
-    validate_app_scoped_chat_handle(&chat_key);
-    if chat_name
-        .as_deref()
-        .is_some_and(|name| validated_openchat_chat_name(Some(name)).is_none())
-    {
-        ic_cdk::trap("invalid OpenChat chat name");
+    if let Err(message) = store_shared_chat_sheet_link(caller, chat_key, sheet_id, chat_name) {
+        ic_cdk::trap(message);
     }
-    let sheet_id_text = format!("{sheet_id:016x}");
-    if !principal_owns_sheet(caller, &sheet_id_text) {
-        ic_cdk::trap("caller does not have access to the linked sheet");
-    }
-    if !sheet_is_active(&sheet_id_text) {
-        ic_cdk::trap("only an active sheet can be linked to an OpenChat chat");
-    }
-    CHAT_SHEET_LINKS.with(|m| {
-        let mut map = m.borrow_mut();
-        let key = chat_link_key(&caller, &chat_key);
-        let (start, end) = chat_link_bounds(&caller);
-        let legacy_keys: Vec<String> = map
-            .range(start.clone()..end.clone())
-            .filter(|(_, value)| !is_canonical_app_scoped_chat_handle(&value.chat_key))
-            .map(|(legacy_key, _)| legacy_key)
-            .collect();
-        for legacy_key in legacy_keys {
-            map.remove(&legacy_key);
-        }
-        if !map.contains_key(&key) {
-            let count = map
-                .range(start..end)
-                .take(MAX_CHAT_LINKS_PER_PRINCIPAL)
-                .count();
-            if count >= MAX_CHAT_LINKS_PER_PRINCIPAL {
-                ic_cdk::trap("chat-to-sheet link quota reached");
-            }
-        }
-        let chat_name = chat_name.or_else(|| map.get(&key).and_then(|link| link.chat_name));
-        map.insert(
-            key,
-            ChatSheetLink {
-                chat_key: chat_key.clone(),
-                sheet_id,
-                chat_name,
-            },
-        );
-    });
 }
 
 /// set_chat_sheet_link: caller-keyed upsert of an app-scoped chat handle → sheet mapping. The stable
@@ -5735,11 +6266,9 @@ fn remove_pending_chat_route_link(pending_id: String) {
     else {
         ic_cdk::trap("pending chat request is missing, expired, or belongs to another caller");
     };
-    CHAT_SHEET_LINKS.with(|links| {
-        links
-            .borrow_mut()
-            .remove(&chat_link_key(&caller, &route.chat_key));
-    });
+    if let Err(message) = remove_shared_chat_sheet_link(caller, &route.chat_key) {
+        ic_cdk::trap(message);
+    }
     PENDING_CHAT_ROUTES.with(|routes| {
         routes.borrow_mut().remove(&key);
     });
@@ -5764,9 +6293,9 @@ fn remove_chat_sheet_link(chat_key: String) {
     require_authed();
     validate_legacy_chat_key_for_removal(&chat_key);
     let caller = ic_cdk::api::msg_caller();
-    CHAT_SHEET_LINKS.with(|m| {
-        m.borrow_mut().remove(&chat_link_key(&caller, &chat_key));
-    });
+    if let Err(message) = remove_shared_chat_sheet_link(caller, &chat_key) {
+        ic_cdk::trap(message);
+    }
 }
 
 /// chat_sheet_links: all of the caller's canonical app-scoped chat-handle → sheet mappings. Legacy
@@ -6786,6 +7315,30 @@ mod tests {
     }
 
     #[test]
+    fn recipient_callback_is_whitelisted_but_not_a_generic_signed_in_user_method() {
+        let source = include_str!("lib.rs");
+        let inspect_start = source.find("fn inspect_message()").unwrap();
+        let endpoint_start = source[inspect_start..].find("fn whoami()").unwrap() + inspect_start;
+        let inspect = &source[inspect_start..endpoint_start];
+        let auth_start = inspect.find("let require_auth_methods").unwrap();
+        let allowed = &inspect[..auth_start];
+        let require_auth = &inspect[auth_start..];
+        assert_eq!(
+            allowed
+                .matches("\"c2c_authorize_ai_action_recipients\"")
+                .count(),
+            1,
+        );
+        assert_eq!(
+            require_auth
+                .matches("\"c2c_authorize_ai_action_recipients\"")
+                .count(),
+            0,
+            "the callback performs a stricter exact-UserIndex caller check in its handler",
+        );
+    }
+
+    #[test]
     fn batch_receipts_round_trip_in_a_fresh_stable_map_region() {
         let memory = VectorMemory::default();
         let mut receipts = StableBTreeMap::<String, EntryBatchReceipt, _>::init(memory.clone());
@@ -7465,6 +8018,684 @@ mod tests {
             openchat_user_id: Principal::anonymous(),
             linked_at: 1,
         }
+    }
+
+    fn test_recipient_config() -> Config {
+        Config {
+            creator_principal: p(99),
+            deployed_at: 1,
+            ai_app_owner: Some(p(2)),
+            openchat_user_index_canister_id: Some(p(1)),
+            ai_app_verification_binding: Some(test_ai_app_v2_binding()),
+        }
+    }
+
+    fn test_recipient_link(principal: Principal, seed: u8) -> RecipientBindingState {
+        let public_key =
+            format!("-----BEGIN PUBLIC KEY-----\nkey-{seed}\n-----END PUBLIC KEY-----");
+        RecipientBindingState {
+            binding: OpenChatBinding {
+                iou_principal: principal,
+                user_index_canister_id: p(1),
+                app_id: 7,
+                app_revision: Some(99),
+                app_canister_id: Some(p(3)),
+                key_version: Some(u64::from(seed)),
+                app_subject: Some(vec![seed; 32]),
+                subject_version: Some(1),
+                consumer_queue_selector: Some(vec![seed.wrapping_add(40); 32]),
+                consumer_queue_selector_version: Some(1),
+                consumer_public_key_pem: Some(public_key.clone()),
+                openchat_user_id: Principal::anonymous(),
+                linked_at: 1,
+            },
+            current_consumer_public_key: Some(public_key),
+        }
+    }
+
+    fn test_recipient_args(confirmer_subject: u8) -> AuthorizeAiActionRecipientsArgs {
+        let mut context = test_scoped_card_context();
+        context.app_subject = vec![confirmer_subject; 32];
+        AuthorizeAiActionRecipientsArgs {
+            context,
+            content_hash: vec![10; 32],
+            confirm_payload_hash: vec![11; 32],
+            confirmation_lease_generation: 3,
+            // Confirmation provenance is immutable and may be old when UserIndex makes a fresh
+            // authorization/deposit attempt.
+            created_at: 100,
+            authorization_created_at: 1_000,
+        }
+    }
+
+    fn test_recipient_pair(sheet: &Sheet) -> Pair {
+        Pair {
+            id: sheet.pair_id.clone(),
+            members: [sheet.member_a, sheet.member_b],
+            invite_code: "unused".into(),
+            created_at: 1,
+            archived_at: None,
+            name_enc: None,
+            name_iv: None,
+            member_a_name_enc: None,
+            member_a_name_iv: None,
+            member_b_name_enc: None,
+            member_b_name_iv: None,
+            templates_a_enc: None,
+            templates_a_iv: None,
+            templates_b_enc: None,
+            templates_b_iv: None,
+        }
+    }
+
+    #[test]
+    fn recipient_grant_uses_only_exact_routed_sheet_members_and_is_deterministic() {
+        let sheet = test_sheet(SheetState::Active);
+        let pair = test_recipient_pair(&sheet);
+        let confirmer = test_recipient_link(sheet.member_a, 21);
+        let partner = test_recipient_link(sheet.member_b, 22);
+        let unrelated = test_recipient_link(p(23), 23);
+        let args = test_recipient_args(21);
+        let candidates = vec![unrelated, partner.clone(), confirmer.clone()];
+
+        let first = authorize_ai_action_recipients_for_state(
+            &args,
+            &test_recipient_config(),
+            p(3),
+            p(1),
+            1_001,
+            &confirmer.binding,
+            &sheet,
+            &pair,
+            &candidates,
+        );
+        let second = authorize_ai_action_recipients_for_state(
+            &args,
+            &test_recipient_config(),
+            p(3),
+            p(1),
+            1_001,
+            &confirmer.binding,
+            &sheet,
+            &pair,
+            &candidates,
+        );
+        assert_eq!(first, second);
+        let AuthorizeAiActionRecipientsResponse::Success(success) = first else {
+            panic!("exact routed account should authorize");
+        };
+        assert_eq!(success.expires_at, 301_000);
+        assert_eq!(success.recipients.len(), 2);
+        assert_eq!(success.recipients[0].app_subject, vec![21; 32]);
+        assert_eq!(success.recipients[1].app_subject, vec![22; 32]);
+        assert_eq!(success.recipients[0].app_user_key_version, 21);
+        assert_eq!(success.scope_commitment.len(), 32);
+        assert!(!success
+            .recipients
+            .iter()
+            .any(|recipient| { recipient.app_subject == vec![23; 32] }));
+
+        // Pair membership is not recipient authority: a late pair member who is not recorded on
+        // this exact sheet cannot displace or join its independently encrypted deliveries.
+        let mut broader_pair = pair.clone();
+        broader_pair.members[1] = p(23);
+        let broader = authorize_ai_action_recipients_for_state(
+            &args,
+            &test_recipient_config(),
+            p(3),
+            p(1),
+            1_001,
+            &confirmer.binding,
+            &sheet,
+            &broader_pair,
+            &candidates,
+        );
+        let AuthorizeAiActionRecipientsResponse::Success(broader) = broader else {
+            panic!("pair churn must not broaden exact sheet access");
+        };
+        assert_eq!(broader.recipients.len(), 2);
+    }
+
+    #[test]
+    fn recipient_grant_rejects_stale_authority_and_binds_every_security_coordinate() {
+        let sheet = test_sheet(SheetState::Active);
+        let pair = test_recipient_pair(&sheet);
+        let confirmer = test_recipient_link(sheet.member_a, 31);
+        let partner = test_recipient_link(sheet.member_b, 32);
+        let args = test_recipient_args(31);
+        let candidates = vec![confirmer.clone(), partner.clone()];
+        let authorize = |request: &AuthorizeAiActionRecipientsArgs,
+                         routed_sheet: &Sheet,
+                         bindings: &[RecipientBindingState],
+                         caller: Principal,
+                         now_ms: u64| {
+            authorize_ai_action_recipients_for_state(
+                request,
+                &test_recipient_config(),
+                p(3),
+                caller,
+                now_ms,
+                &confirmer.binding,
+                routed_sheet,
+                &pair,
+                bindings,
+            )
+        };
+        let AuthorizeAiActionRecipientsResponse::Success(base) =
+            authorize(&args, &sheet, &candidates, p(1), 1_001)
+        else {
+            panic!("fixture should authorize");
+        };
+
+        let mut changed_args = args.clone();
+        changed_args.confirm_payload_hash[0] ^= 1;
+        let AuthorizeAiActionRecipientsResponse::Success(changed) =
+            authorize(&changed_args, &sheet, &candidates, p(1), 1_001)
+        else {
+            panic!("changed valid request should still authorize");
+        };
+        assert_ne!(base.scope_commitment, changed.scope_commitment);
+
+        let mut fresh_retry = args.clone();
+        fresh_retry.authorization_created_at = 2_000;
+        let AuthorizeAiActionRecipientsResponse::Success(fresh_retry) =
+            authorize(&fresh_retry, &sheet, &candidates, p(1), 2_001)
+        else {
+            panic!("an old confirmation must accept a fresh authorization attempt");
+        };
+        assert_eq!(fresh_retry.expires_at, 302_000);
+        assert_ne!(base.scope_commitment, fresh_retry.scope_commitment);
+
+        let mut changed_sheet = test_sheet(SheetState::Active);
+        changed_sheet.id = "1111111111111111".into();
+        let AuthorizeAiActionRecipientsResponse::Success(changed) =
+            authorize(&args, &changed_sheet, &candidates, p(1), 1_001)
+        else {
+            panic!("changed exact sheet should still authorize");
+        };
+        assert_ne!(base.scope_commitment, changed.scope_commitment);
+
+        let mut stale_confirmer = confirmer.clone();
+        stale_confirmer.current_consumer_public_key = Some("replaced".into());
+        assert_eq!(
+            authorize(
+                &args,
+                &sheet,
+                &[stale_confirmer, partner.clone()],
+                p(1),
+                1_001
+            ),
+            AuthorizeAiActionRecipientsResponse::NotAuthorized,
+        );
+        let mut stale_partner = partner.clone();
+        stale_partner.current_consumer_public_key = Some("replaced".into());
+        assert_eq!(
+            authorize(
+                &args,
+                &sheet,
+                &[confirmer.clone(), stale_partner],
+                p(1),
+                1_001
+            ),
+            AuthorizeAiActionRecipientsResponse::NotAuthorized,
+            "app-authorized delivery must never silently fall back to confirmer-only",
+        );
+        assert_eq!(
+            authorize(&args, &sheet, &candidates, p(9), 1_001),
+            AuthorizeAiActionRecipientsResponse::NotAuthorized,
+        );
+        assert_eq!(
+            authorize(&args, &sheet, &candidates, p(1), 301_001),
+            AuthorizeAiActionRecipientsResponse::Stale,
+        );
+        assert!(matches!(
+            authorize(&args, &sheet, &candidates, p(1), 999),
+            AuthorizeAiActionRecipientsResponse::Success(_)
+        ));
+        let mut cross_subnet_order = args.clone();
+        cross_subnet_order.created_at = cross_subnet_order.authorization_created_at + 1;
+        assert!(matches!(
+            authorize(&cross_subnet_order, &sheet, &candidates, p(1), 1_001),
+            AuthorizeAiActionRecipientsResponse::Success(_)
+        ));
+        let mut closed = test_sheet(SheetState::Closed);
+        closed.closed_at = Some(1);
+        assert_eq!(
+            authorize(&args, &closed, &candidates, p(1), 1_001),
+            AuthorizeAiActionRecipientsResponse::NotAuthorized,
+        );
+        let mut archived_pair = pair.clone();
+        archived_pair.archived_at = Some(1);
+        assert_eq!(
+            authorize_ai_action_recipients_for_state(
+                &args,
+                &test_recipient_config(),
+                p(3),
+                p(1),
+                1_001,
+                &confirmer.binding,
+                &sheet,
+                &archived_pair,
+                &candidates,
+            ),
+            AuthorizeAiActionRecipientsResponse::NotAuthorized,
+        );
+    }
+
+    #[test]
+    fn shared_chat_route_materialization_repairs_partner_and_preserves_newer_conflicts() {
+        let chat_key = base64url_no_pad(&[91; 32]);
+        let mut first = test_sheet(SheetState::Active);
+        first.id = "9191919191919191".into();
+        first.pair_id = "9191919191919100".into();
+        first.member_a = p(91);
+        first.member_b = p(92);
+        let mut second = test_sheet(SheetState::Active);
+        second.id = "9292929292929292".into();
+        second.pair_id = "9292929292929200".into();
+        second.member_a = p(91);
+        second.member_b = p(93);
+        let first_id = u64::from_str_radix(&first.id, 16).unwrap();
+        let second_id = u64::from_str_radix(&second.id, 16).unwrap();
+        let unrelated_sheet_id = 0x9393939393939393;
+        SHEETS.with(|sheets| {
+            sheets.borrow_mut().insert(first.id.clone(), first.clone());
+            sheets
+                .borrow_mut()
+                .insert(second.id.clone(), second.clone());
+        });
+        for principal in [p(91), p(92), p(93), p(94)] {
+            CHAT_SHEET_LINKS.with(|links| {
+                links
+                    .borrow_mut()
+                    .remove(&chat_link_key(&principal, &chat_key));
+            });
+        }
+
+        // Legacy state has only the confirmer's row. Callback-time repair must materialize the
+        // same opaque route for the exact partner, never an unrelated principal/account.
+        CHAT_SHEET_LINKS.with(|links| {
+            links.borrow_mut().insert(
+                chat_link_key(&p(91), &chat_key),
+                ChatSheetLink {
+                    chat_key: chat_key.clone(),
+                    sheet_id: first_id,
+                    chat_name: Some("Family".into()),
+                },
+            );
+        });
+        repair_shared_chat_sheet_link(p(91), &chat_key, &first).expect("legacy route repair");
+        assert_eq!(linked_sheet_for(p(92), &chat_key), Some(first.id.clone()));
+        assert_eq!(linked_sheet_for(p(94), &chat_key), None);
+        remember_claimed_chat_route(p(91), &chat_key, "Family renamed", 10);
+        for member in [p(91), p(92)] {
+            let linked_name = CHAT_SHEET_LINKS.with(|links| {
+                links
+                    .borrow()
+                    .get(&chat_link_key(&member, &chat_key))
+                    .and_then(|link| link.chat_name)
+            });
+            assert_eq!(linked_name.as_deref(), Some("Family renamed"));
+        }
+
+        // A newer partner-specific conflict must survive the old account's conditional removal.
+        CHAT_SHEET_LINKS.with(|links| {
+            links.borrow_mut().insert(
+                chat_link_key(&p(92), &chat_key),
+                ChatSheetLink {
+                    chat_key: chat_key.clone(),
+                    sheet_id: unrelated_sheet_id,
+                    chat_name: None,
+                },
+            );
+        });
+        assert!(repair_shared_chat_sheet_link(p(91), &chat_key, &first).is_err());
+        assert_eq!(
+            linked_sheet_for(p(92), &chat_key),
+            Some(format!("{unrelated_sheet_id:016x}")),
+            "lazy callback repair must not overwrite a newer partner decision",
+        );
+        assert!(store_shared_chat_sheet_link(p(91), chat_key.clone(), second_id, None).is_err());
+        assert_eq!(linked_sheet_for(p(91), &chat_key), Some(first.id.clone()));
+        assert_eq!(linked_sheet_for(p(93), &chat_key), None);
+        remove_shared_chat_sheet_link(p(91), &chat_key)
+            .expect("explicitly unlink before changing account members");
+        assert_eq!(linked_sheet_for(p(91), &chat_key), None);
+        assert_eq!(
+            linked_sheet_for(p(92), &chat_key),
+            Some(format!("{unrelated_sheet_id:016x}")),
+            "explicit unlink must preserve the partner's newer conflicting account",
+        );
+        store_shared_chat_sheet_link(p(91), chat_key.clone(), second_id, None)
+            .expect("link new account after explicit unlink");
+        assert_eq!(linked_sheet_for(p(91), &chat_key), Some(second.id.clone()));
+        assert_eq!(linked_sheet_for(p(93), &chat_key), Some(second.id.clone()));
+        assert_eq!(
+            linked_sheet_for(p(92), &chat_key),
+            Some(format!("{unrelated_sheet_id:016x}"))
+        );
+        assert_eq!(linked_sheet_for(p(94), &chat_key), None);
+
+        remove_shared_chat_sheet_link(p(91), &chat_key).expect("remove shared route");
+        assert_eq!(linked_sheet_for(p(91), &chat_key), None);
+        assert_eq!(linked_sheet_for(p(93), &chat_key), None);
+        assert_eq!(
+            linked_sheet_for(p(92), &chat_key),
+            Some(format!("{unrelated_sheet_id:016x}")),
+            "conditional removal must preserve the partner's newer conflicting account",
+        );
+
+        for principal in [p(91), p(92), p(93), p(94)] {
+            CHAT_SHEET_LINKS.with(|links| {
+                links
+                    .borrow_mut()
+                    .remove(&chat_link_key(&principal, &chat_key));
+            });
+        }
+        SHEETS.with(|sheets| {
+            sheets.borrow_mut().remove(&first.id);
+            sheets.borrow_mut().remove(&second.id);
+        });
+        clear_pending_chat_routes_for_principal(p(91));
+    }
+
+    #[test]
+    fn shared_chat_route_rejects_target_partner_bound_to_another_shared_account_atomically() {
+        let chat_key = base64url_no_pad(&[101; 32]);
+        let mut target_ab = test_sheet(SheetState::Active);
+        target_ab.id = "a1a1a1a1a1a1a1a1".into();
+        target_ab.pair_id = "a1a1a1a1a1a1a100".into();
+        target_ab.member_a = p(101);
+        target_ab.member_b = p(102);
+        let mut existing_bc = test_sheet(SheetState::Active);
+        existing_bc.id = "b2b2b2b2b2b2b2b2".into();
+        existing_bc.pair_id = "b2b2b2b2b2b2b200".into();
+        existing_bc.member_a = p(102);
+        existing_bc.member_b = p(103);
+        let target_id = u64::from_str_radix(&target_ab.id, 16).unwrap();
+        let existing_id = u64::from_str_radix(&existing_bc.id, 16).unwrap();
+        SHEETS.with(|sheets| {
+            sheets
+                .borrow_mut()
+                .insert(target_ab.id.clone(), target_ab.clone());
+            sheets
+                .borrow_mut()
+                .insert(existing_bc.id.clone(), existing_bc.clone());
+        });
+        for principal in [p(101), p(102), p(103)] {
+            CHAT_SHEET_LINKS.with(|links| {
+                links
+                    .borrow_mut()
+                    .remove(&chat_link_key(&principal, &chat_key));
+            });
+        }
+        CHAT_SHEET_LINKS.with(|links| {
+            let mut links = links.borrow_mut();
+            for member in [p(102), p(103)] {
+                links.insert(
+                    chat_link_key(&member, &chat_key),
+                    ChatSheetLink {
+                        chat_key: chat_key.clone(),
+                        sheet_id: existing_id,
+                        chat_name: Some("Existing B-C".into()),
+                    },
+                );
+            }
+        });
+        let snapshot = |principal: Principal| {
+            CHAT_SHEET_LINKS.with(|links| {
+                links
+                    .borrow()
+                    .get(&chat_link_key(&principal, &chat_key))
+                    .map(|link| (link.sheet_id, link.chat_key, link.chat_name))
+            })
+        };
+        let before: Vec<_> = [p(101), p(102), p(103)]
+            .into_iter()
+            .map(&snapshot)
+            .collect();
+
+        assert!(store_shared_chat_sheet_link(
+            p(101),
+            chat_key.clone(),
+            target_id,
+            Some("Target A-B".into()),
+        )
+        .is_err());
+        let after: Vec<_> = [p(101), p(102), p(103)]
+            .into_iter()
+            .map(&snapshot)
+            .collect();
+        assert_eq!(
+            after, before,
+            "conflicting account topology must not mutate any row"
+        );
+
+        for principal in [p(101), p(102), p(103)] {
+            CHAT_SHEET_LINKS.with(|links| {
+                links
+                    .borrow_mut()
+                    .remove(&chat_link_key(&principal, &chat_key));
+            });
+        }
+        SHEETS.with(|sheets| {
+            sheets.borrow_mut().remove(&target_ab.id);
+            sheets.borrow_mut().remove(&existing_bc.id);
+        });
+    }
+
+    #[test]
+    fn shared_chat_route_rejects_ab_to_ac_account_topology_change_atomically() {
+        let chat_key = base64url_no_pad(&[121; 32]);
+        let mut old_ab = test_sheet(SheetState::Active);
+        old_ab.id = "e1e1e1e1e1e1e1e1".into();
+        old_ab.pair_id = "e1e1e1e1e1e1e100".into();
+        old_ab.member_a = p(121);
+        old_ab.member_b = p(122);
+        let mut target_ac = test_sheet(SheetState::Active);
+        target_ac.id = "f2f2f2f2f2f2f2f2".into();
+        target_ac.pair_id = "f2f2f2f2f2f2f200".into();
+        target_ac.member_a = p(121);
+        target_ac.member_b = p(123);
+        let old_id = u64::from_str_radix(&old_ab.id, 16).unwrap();
+        let target_id = u64::from_str_radix(&target_ac.id, 16).unwrap();
+        SHEETS.with(|sheets| {
+            sheets
+                .borrow_mut()
+                .insert(old_ab.id.clone(), old_ab.clone());
+            sheets
+                .borrow_mut()
+                .insert(target_ac.id.clone(), target_ac.clone());
+        });
+        for member in [p(121), p(122), p(123)] {
+            CHAT_SHEET_LINKS.with(|links| {
+                links
+                    .borrow_mut()
+                    .remove(&chat_link_key(&member, &chat_key));
+            });
+        }
+        CHAT_SHEET_LINKS.with(|links| {
+            let mut links = links.borrow_mut();
+            for member in [p(121), p(122)] {
+                links.insert(
+                    chat_link_key(&member, &chat_key),
+                    ChatSheetLink {
+                        chat_key: chat_key.clone(),
+                        sheet_id: old_id,
+                        chat_name: Some("Old A-B".into()),
+                    },
+                );
+            }
+        });
+        let snapshot = |principal: Principal| {
+            CHAT_SHEET_LINKS.with(|links| {
+                links
+                    .borrow()
+                    .get(&chat_link_key(&principal, &chat_key))
+                    .map(|link| (link.sheet_id, link.chat_key, link.chat_name))
+            })
+        };
+        let before: Vec<_> = [p(121), p(122), p(123)]
+            .into_iter()
+            .map(&snapshot)
+            .collect();
+        let result = store_shared_chat_sheet_link(
+            p(121),
+            chat_key.clone(),
+            target_id,
+            Some("Target A-C".into()),
+        );
+        let after: Vec<_> = [p(121), p(122), p(123)]
+            .into_iter()
+            .map(&snapshot)
+            .collect();
+
+        for member in [p(121), p(122), p(123)] {
+            CHAT_SHEET_LINKS.with(|links| {
+                links
+                    .borrow_mut()
+                    .remove(&chat_link_key(&member, &chat_key));
+            });
+        }
+        SHEETS.with(|sheets| {
+            sheets.borrow_mut().remove(&old_ab.id);
+            sheets.borrow_mut().remove(&target_ac.id);
+        });
+
+        assert!(result.is_err());
+        assert_eq!(
+            after, before,
+            "a caller must explicitly unlink before changing the account member topology"
+        );
+    }
+
+    #[test]
+    fn shared_chat_route_never_cleans_members_of_an_unreadable_prior_sheet() {
+        let chat_key = base64url_no_pad(&[131; 32]);
+        let mut unrelated_bc = test_sheet(SheetState::Active);
+        unrelated_bc.id = "b3b3b3b3b3b3b3b3".into();
+        unrelated_bc.pair_id = "b3b3b3b3b3b3b300".into();
+        unrelated_bc.member_a = p(132);
+        unrelated_bc.member_b = p(133);
+        let mut target_ad = test_sheet(SheetState::Active);
+        target_ad.id = "a4a4a4a4a4a4a4a4".into();
+        target_ad.pair_id = "a4a4a4a4a4a4a400".into();
+        target_ad.member_a = p(131);
+        target_ad.member_b = p(134);
+        let unrelated_id = u64::from_str_radix(&unrelated_bc.id, 16).unwrap();
+        let target_id = u64::from_str_radix(&target_ad.id, 16).unwrap();
+        SHEETS.with(|sheets| {
+            sheets
+                .borrow_mut()
+                .insert(unrelated_bc.id.clone(), unrelated_bc.clone());
+            sheets
+                .borrow_mut()
+                .insert(target_ad.id.clone(), target_ad.clone());
+        });
+        for member in [p(131), p(132), p(133), p(134)] {
+            CHAT_SHEET_LINKS.with(|links| {
+                links
+                    .borrow_mut()
+                    .remove(&chat_link_key(&member, &chat_key));
+            });
+        }
+        CHAT_SHEET_LINKS.with(|links| {
+            let mut links = links.borrow_mut();
+            for member in [p(131), p(132), p(133)] {
+                links.insert(
+                    chat_link_key(&member, &chat_key),
+                    ChatSheetLink {
+                        chat_key: chat_key.clone(),
+                        sheet_id: unrelated_id,
+                        chat_name: Some("Unrelated B-C".into()),
+                    },
+                );
+            }
+        });
+
+        let result = store_shared_chat_sheet_link(
+            p(131),
+            chat_key.clone(),
+            target_id,
+            Some("Target A-D".into()),
+        );
+        let a = linked_sheet_for(p(131), &chat_key);
+        let b = linked_sheet_for(p(132), &chat_key);
+        let c = linked_sheet_for(p(133), &chat_key);
+        let d = linked_sheet_for(p(134), &chat_key);
+
+        for member in [p(131), p(132), p(133), p(134)] {
+            CHAT_SHEET_LINKS.with(|links| {
+                links
+                    .borrow_mut()
+                    .remove(&chat_link_key(&member, &chat_key));
+            });
+        }
+        SHEETS.with(|sheets| {
+            sheets.borrow_mut().remove(&unrelated_bc.id);
+            sheets.borrow_mut().remove(&target_ad.id);
+        });
+
+        assert!(result.is_err());
+        assert_eq!(a, Some(unrelated_bc.id.clone()));
+        assert_eq!(d, None);
+        assert_eq!(b, Some(unrelated_bc.id.clone()));
+        assert_eq!(c, Some(unrelated_bc.id));
+    }
+
+    #[test]
+    fn shared_chat_route_allows_exact_ab_old_sheet_to_ab_new_sheet_reassignment() {
+        let chat_key = base64url_no_pad(&[111; 32]);
+        let mut old_ab = test_sheet(SheetState::Active);
+        old_ab.id = "c1c1c1c1c1c1c1c1".into();
+        old_ab.pair_id = "c1c1c1c1c1c1c100".into();
+        old_ab.member_a = p(111);
+        old_ab.member_b = p(112);
+        let mut new_ab = test_sheet(SheetState::Active);
+        new_ab.id = "d2d2d2d2d2d2d2d2".into();
+        new_ab.pair_id = old_ab.pair_id.clone();
+        new_ab.member_a = p(111);
+        new_ab.member_b = p(112);
+        let old_id = u64::from_str_radix(&old_ab.id, 16).unwrap();
+        let new_id = u64::from_str_radix(&new_ab.id, 16).unwrap();
+        SHEETS.with(|sheets| {
+            sheets
+                .borrow_mut()
+                .insert(old_ab.id.clone(), old_ab.clone());
+            sheets
+                .borrow_mut()
+                .insert(new_ab.id.clone(), new_ab.clone());
+        });
+        for member in [p(111), p(112)] {
+            CHAT_SHEET_LINKS.with(|links| {
+                links.borrow_mut().insert(
+                    chat_link_key(&member, &chat_key),
+                    ChatSheetLink {
+                        chat_key: chat_key.clone(),
+                        sheet_id: old_id,
+                        chat_name: Some("A-B".into()),
+                    },
+                );
+            });
+        }
+
+        store_shared_chat_sheet_link(p(111), chat_key.clone(), new_id, None)
+            .expect("caller may atomically move the same A-B route to A-B's new sheet");
+        for member in [p(111), p(112)] {
+            assert_eq!(linked_sheet_for(member, &chat_key), Some(new_ab.id.clone()));
+        }
+
+        for member in [p(111), p(112)] {
+            CHAT_SHEET_LINKS.with(|links| {
+                links
+                    .borrow_mut()
+                    .remove(&chat_link_key(&member, &chat_key));
+            });
+        }
+        SHEETS.with(|sheets| {
+            sheets.borrow_mut().remove(&old_ab.id);
+            sheets.borrow_mut().remove(&new_ab.id);
+        });
     }
 
     fn test_confirmation_binding(payload: Vec<u8>) -> CardConfirmationAttestationBindingV1 {

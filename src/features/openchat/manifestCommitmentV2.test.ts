@@ -32,6 +32,36 @@ function digest(value: ManifestCommitmentV2): string {
 }
 
 describe("manifest verifier V2 language-neutral encoding", () => {
+  it("keeps legacy and explicit confirmer hashes identical while app-authorized adds the frozen trailer", () => {
+    const base = commitment();
+    const manifest = base.manifest as any;
+    const action = manifest.actions[0];
+    const omitted = {
+      ...base,
+      manifest: {
+        ...manifest,
+        actions: [{ ...action, recipient_scope: undefined }],
+      },
+    };
+    delete (omitted.manifest as any).actions[0].recipient_scope;
+    const confirmer = {
+      ...base,
+      manifest: {
+        ...manifest,
+        actions: [{ ...action, recipient_scope: [{ confirmer: null }] }],
+      },
+    };
+    expect(digest(omitted)).toBe(digest(confirmer));
+
+    const encoded = encodeManifestCommitmentV2(base);
+    const trailer = Buffer.concat([
+      Buffer.from("OC-RECIPIENT-SCOPE", "ascii"),
+      Buffer.from([1, 0, 0, 0, 1, 0, 0, 0, 0, 1]),
+    ]);
+    expect(Buffer.from(encoded).subarray(-trailer.length).equals(trailer)).toBe(true);
+    expect(digest(base)).not.toBe(digest(confirmer));
+  });
+
   it("is deterministic and binds every outer registry coordinate", () => {
     const base = commitment();
     const expected = digest(base);
@@ -59,6 +89,7 @@ describe("manifest verifier V2 language-neutral encoding", () => {
       { ...manifest, per_user_keys: !manifest.per_user_keys },
       { ...manifest, surfaces: [...manifest.surfaces].reverse() },
       { ...manifest, actions: [{ ...action, endpoint: "https://evil.example/confirm" }] },
+      { ...manifest, actions: [{ ...action, recipient_scope: [{ confirmer: null }] }] },
       { ...manifest, actions: [{ ...action, response_schema: '{"type":"string"}' }] },
       { ...manifest, actions: [{ ...action, card: { ...action.card, title: "Forged" } }] },
     ];
@@ -115,6 +146,12 @@ describe("manifest verifier V2 language-neutral encoding", () => {
       encodeManifestCommitmentV2({
         ...base,
         manifest: { ...manifest, actions: [{ ...action, rules: [{ forged: {} }] }] },
+      }),
+    ).toThrow(/unknown variant/);
+    expect(() =>
+      encodeManifestCommitmentV2({
+        ...base,
+        manifest: { ...manifest, actions: [{ ...action, recipient_scope: [{ everyone: null }] }] },
       }),
     ).toThrow(/unknown variant/);
     expect(() =>

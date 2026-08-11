@@ -117,6 +117,9 @@ export type IouActionManifest = {
   // encrypted to THAT user's own registered key (paired once per user via a high-entropy claim token —
   // see ActionInboxSettings "Connect to OpenChat") instead of the single app-level key.
   perUserKeys: boolean;
+  // Explicit app-authoritative fan-out: IOU resolves the exact routed shared account and returns
+  // only opaque per-recipient delivery coordinates. Omitted/"confirmer" actions stay confirmer-only.
+  recipientScope: "confirmer" | "app_authorized";
   // When true, OpenChat auto-proposes this action on IMAGE messages (its on-device vision model
   // extracts the receipt/photo). Maps to the action's `accepts_image` capability in the wire.
   acceptsImage: boolean;
@@ -387,6 +390,7 @@ export const iouActionManifest: IouActionManifest = {
   callback: { path: "/v1/openchat/drafts", auth: "openchat-provenance" },
   delivery: { mode: "action_inbox" },
   perUserKeys: true,
+  recipientScope: "app_authorized",
   // IOU extracts from receipt images, so opt into OpenChat's auto-propose-on-image chip.
   acceptsImage: true,
   // Surfaces: pages of IOU that OpenChat can open on our behalf. display: "external" opens them as

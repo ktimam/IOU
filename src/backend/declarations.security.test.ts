@@ -192,6 +192,62 @@ describe("security-sensitive Candid bindings", () => {
     ).toEqual({ KeyNotFound: null });
   });
 
+  it("exposes the app-authoritative recipient callback using only opaque delivery coordinates", () => {
+    const service = idlFactory({ IDL }) as any;
+    const method = service._fields.find(
+      ([name]: [string]) => name === "c2c_authorize_ai_action_recipients",
+    )[1];
+    const request = {
+      context: {
+        context_version: 1,
+        app_subject: new Uint8Array(32).fill(1),
+        chat_handle: new Uint8Array(32).fill(2),
+        message_handle: new Uint8Array(32).fill(3),
+        app_id: 7,
+        app_revision: 99n,
+        action_id: "iou.entry.import",
+      },
+      content_hash: new Uint8Array(32).fill(4),
+      confirm_payload_hash: new Uint8Array(32).fill(5),
+      confirmation_lease_generation: 6n,
+      created_at: 1_000n,
+      authorization_created_at: 2_000n,
+    };
+    const [decodedRequest] = IDL.decode(
+      method.argTypes,
+      IDL.encode(method.argTypes, [request]),
+    ) as any[];
+    expect(Array.from(decodedRequest.context.chat_handle)).toHaveLength(32);
+    expect(decodedRequest.created_at).toBe(1_000n);
+    expect(decodedRequest.authorization_created_at).toBe(2_000n);
+
+    const success = {
+      Success: {
+        recipients: [{
+          app_subject: new Uint8Array(32).fill(7),
+          subject_version: 1,
+          consumer_queue_selector: new Uint8Array(32).fill(8),
+          consumer_queue_selector_version: 1,
+          consumer_public_key: "-----BEGIN PUBLIC KEY-----\nkey\n-----END PUBLIC KEY-----",
+          app_user_key_version: 9n,
+        }],
+        scope_commitment: new Uint8Array(32).fill(10),
+        expires_at: 301_000n,
+      },
+    };
+    const [decoded] = IDL.decode(
+      method.retTypes,
+      IDL.encode(method.retTypes, [success]),
+    ) as any[];
+    expect(Array.from(decoded.Success.recipients[0].app_subject)).toHaveLength(32);
+    expect(Array.from(decoded.Success.recipients[0].consumer_queue_selector)).toHaveLength(32);
+    expect(decoded.Success.recipients[0].app_user_key_version).toBe(9n);
+    expect(Array.from(decoded.Success.scope_commitment)).toHaveLength(32);
+    expect(decoded.Success).not.toHaveProperty("sheet_id");
+    expect(decoded.Success).not.toHaveProperty("pair_id");
+    expect(decoded.Success.recipients[0]).not.toHaveProperty("iou_principal");
+  });
+
   it("keeps chat-routing handles inside the canister and exposes only opaque pending ids", () => {
     const service = idlFactory({ IDL }) as any;
     const method = (name: string) =>

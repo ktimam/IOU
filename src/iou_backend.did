@@ -125,6 +125,37 @@ type AttestAiAppCardConfirmationV1Response = record {
     binding : CardConfirmationAttestationBindingV1;
 };
 
+type AuthorizeAiActionRecipientsArgs = record {
+    context : AppScopedCardContextV1;
+    content_hash : blob;
+    confirm_payload_hash : blob;
+    confirmation_lease_generation : nat64;
+    created_at : nat64;
+    authorization_created_at : nat64;
+};
+
+type AuthorizedAiActionRecipient = record {
+    app_subject : blob;
+    subject_version : nat16;
+    consumer_queue_selector : blob;
+    consumer_queue_selector_version : nat16;
+    consumer_public_key : text;
+    app_user_key_version : nat64;
+};
+
+type AuthorizeAiActionRecipientsSuccess = record {
+    recipients : vec AuthorizedAiActionRecipient;
+    scope_commitment : blob;
+    expires_at : nat64;
+};
+
+type AuthorizeAiActionRecipientsResponse = variant {
+    Success : AuthorizeAiActionRecipientsSuccess;
+    NotAuthorized;
+    Stale;
+    InvalidRequest : text;
+};
+
 type Pair = record {
     id : text;
     members : vec principal;     // [creator, joiner | anonymous]
@@ -484,6 +515,7 @@ service : {
     c2c_verify_ai_app_v2 : (VerifyAiAppV2Args) -> (VerifyAiAppV2Response) query;
     c2c_attest_ai_app_card_v1 : (AttestAiAppCardV1Args) -> (AttestAiAppCardV1Response);
     c2c_attest_ai_app_card_confirmation_v1 : (AttestAiAppCardConfirmationV1Args) -> (AttestAiAppCardConfirmationV1Response);
+    c2c_authorize_ai_action_recipients : (AuthorizeAiActionRecipientsArgs) -> (AuthorizeAiActionRecipientsResponse);
 
     // Phase 2
     create_pair : () -> (CreatePairResult);
