@@ -2325,6 +2325,28 @@ async function waitForUniqueExactRow(
   return null;
 }
 
+async function waitForExactHistoryRowsGone(
+  page: Page,
+  exactNote: string,
+  label: string,
+  timeoutMs: number,
+): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (true) {
+    // Re-run the exact-note inventory on every poll. A Playwright nth(index) Locator is positional:
+    // after deletion/reload it can retarget the next History row and falsely remain "visible".
+    const rows = await exactHistoryRows(page, exactNote);
+    if (rows.length > 1) {
+      throw new Error(`${label}: found ${rows.length} exact History rows; refusing ambiguity`);
+    }
+    if (rows.length === 0) return;
+    if (Date.now() >= deadline) {
+      throw new Error(`${label}: exact History row remained after delete timeout`);
+    }
+    await page.waitForTimeout(250);
+  }
+}
+
 async function cleanupIouRun(
   page: Page,
   note: string,
@@ -2393,7 +2415,12 @@ async function cleanupIouRun(
       throw new Error(`[${who}] exact nonce entry is visible but has no delete action`);
     }
     await remove.click({ timeout: 8_000 });
-    await row.waitFor({ state: "hidden", timeout: 15_000 });
+    await waitForExactHistoryRowsGone(
+      page,
+      note,
+      `[${who}] exact nonce entry cleanup`,
+      15_000,
+    );
     deletedEntries = 1;
   }
   return { sheet, deletedEntries, acknowledged: acknowledged.acknowledged };

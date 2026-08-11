@@ -854,6 +854,18 @@ describe("live OpenChat journey cleanup policy", () => {
       "await remove.click",
     ]);
     expect(cleanup).not.toMatch(/filter\(\{\s*hasText:\s*note\s*\}\)/);
+    expect(cleanup).toContain("await waitForExactHistoryRowsGone(");
+    expect(cleanup).not.toContain('row.waitFor({ state: "hidden"');
+    const deletedRowPoll = between(
+      "async function waitForExactHistoryRowsGone(",
+      "async function cleanupIouRun(",
+    );
+    expectOrdered(deletedRowPoll, [
+      "await exactHistoryRows(page, exactNote)",
+      "if (rows.length > 1)",
+      "if (rows.length === 0) return",
+      "if (Date.now() >= deadline)",
+    ]);
     expect(journey).toContain("renderedNote === exactNote");
     expect(journey).not.toMatch(/filter\(\{\s*hasText:\s*note/);
   });
