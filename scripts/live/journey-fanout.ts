@@ -1,4 +1,4 @@
-// AUTOMATED live journey (P0-30/32 class): pairing → propose → confirm → confirmer deposit, asserted.
+// AUTOMATED live journey: pairing -> propose -> confirm -> exact-sheet fanout -> one shared import.
 //
 //   manager (browser :19241, IOU tab same profile)  ──┐ direct chat
 //   father  (desktop OC :19222, IOU tab :19231)    ──┘
@@ -12,10 +12,10 @@
 //   4. manager sends a fresh chat message and proposes via the DETERMINISTIC manual-JSON path
 //      (browser clients prompt for the extraction JSON — no on-device model, no nondeterminism).
 //   5. father (the NON-proposer) confirms the card.
-//   6. Assert ONE confirm deposited exactly +1 envelope into the confirmer's own bucket and did not
-//      leak a copy into the non-confirmer's account.
-//   7. On the confirmer's IOU page, follow the draft's authoritative chat route, press
-//      "Review & add", submit the prefilled EntryForm, and assert this run's nonce in History.
+//   6. Assert ONE confirm deposited exactly +1 independently encrypted envelope into BOTH exact
+//      linked-sheet members' buckets, and both copies resolve to the same sheet.
+//   7. On the confirmer's IOU page, import once and assert the shared History row; the other
+//      member's pending copy must reconcile instead of creating a duplicate.
 //      The exact nonce-scoped entry is soft-deleted afterwards so repeated runs do not affect
 //      balances (the canister intentionally retains its audit tombstone).
 //
@@ -1386,8 +1386,7 @@ function uniqueTrackedRunCard<T extends LoadedRunCard>(
 
 // Observe cards that are added after this point and retain each card's presentation transitions.
 // The exact sender card is identified later from the nonce inside its isolated iframe; the observer
-// id then lets the journey prove that same DOM card moved from optimistic/unverified to the
-// backend-verified directory binding without a page reload.
+// id then proves the retained row presents only its verified directory-bound card without a reload.
 async function installNewCardObserver(page: Page, tag: string): Promise<void> {
   await page.evaluate(`(() => {
     const observerTag = ${JSON.stringify(tag)};
@@ -2586,6 +2585,7 @@ async function main() {
   const confirmerCandidateCards = new Map<string, LoadedRunCard>();
   const senderRunCards = new Map<string, NonceBoundRunCard>();
   const confirmerRunCards = new Map<string, NonceBoundRunCard>();
+  let proposerLinkedSheet: string | null = null;
   let confirmerLinkedSheet: string | null = null;
   let confirmationAttempted = false;
   let entrySubmissionAttempted = false;
@@ -2657,6 +2657,17 @@ async function main() {
   // deterministic JSON synchronously so Playwright cannot race and auto-dismiss the native prompt.
   if (!REAL_MODEL) {
     promptOverrideHandle = await installManualPromptOverride(proposerOC, extraction);
+  }
+  // A newly opened disposable tab can independently show OpenChat's notification preference modal.
+  // Decline that exact prompt before touching the composer; no other overlay is dismissed here.
+  const notificationPrompt = proposerOC.locator(".modal-content").filter({
+    has: proposerOC.getByRole("heading", { name: "Notifications", exact: true }),
+  });
+  if ((await notificationPrompt.count()) === 1 && await notificationPrompt.isVisible()) {
+    await notificationPrompt
+      .getByRole("button", { name: "No thanks", exact: true })
+      .click({ timeout: 10_000 });
+    await notificationPrompt.waitFor({ state: "hidden", timeout: 10_000 });
   }
   // Dismiss any open modal/sheet overlay first (a leftover #masked_overlay — e.g. an open chat menu
   // from a prior aborted run — silently intercepts ALL pointer events on the v2 tree).
@@ -2933,14 +2944,14 @@ async function main() {
         .__iouJourneyDocumentMarker === marker,
     documentMarker,
   );
-  check(sawOptimistic, "sender card was observed in its optimistic/unverified state");
+  check(!sawOptimistic, "sender never exposed the optimistic/unverified card state");
   check(sawVerified, "the same sender card became directory-bound and actionable");
   check(
     markerSurvived && senderMainFrameNavigations === 0,
-    "sender optimistic→verified transition completed in-place without reload/navigation",
+    "sender verified card completed in-place without reload/navigation",
   );
-  if (!sawOptimistic || !sawVerified || !markerSurvived || senderMainFrameNavigations !== 0) {
-    throw new Error("sender card did not transition from optimistic to verified in place");
+  if (sawOptimistic || !sawVerified || !markerSurvived || senderMainFrameNavigations !== 0) {
+    throw new Error("sender card exposed an unverified state or remounted during verification");
   }
 
   // 5. The confirmer (the NON-proposer) confirms through the nonce-scoped card's host-owned action.
@@ -3052,13 +3063,13 @@ async function main() {
   console.log(`[${CONFIRMER.user}] confirmed with one host-owned Add to IOU click`);
   await confirmerOC.waitForTimeout(6000);
 
-  // 6. Per-user delivery: ONE confirm → +1 envelope for the authoritative confirmer only. The
-  //    non-confirmer's own key must not receive a copy (OpenChat's card route is confirmer-bound).
+  // 6. App-authorized delivery: ONE confirm -> +1 independently encrypted envelope for each
+  //    authenticated member of the exact IOU sheet selected by this chat route.
   const after = { proposer: await bucketCount(a, fpProposer), confirmer: await bucketCount(a, fpConfirmer) };
   console.log("[inbox] after:", after);
-  check(after.proposer === before.proposer, `${PROPOSER.user} non-confirmer bucket unchanged (${before.proposer})`);
+  check(after.proposer === before.proposer + 1, `${PROPOSER.user} bucket +1 (${before.proposer} → ${after.proposer})`);
   check(after.confirmer === before.confirmer + 1, `${CONFIRMER.user} bucket +1 (${before.confirmer} → ${after.confirmer})`);
-  deliveryObserved = after.proposer === before.proposer && after.confirmer === before.confirmer + 1;
+  deliveryObserved = after.proposer === before.proposer + 1 && after.confirmer === before.confirmer + 1;
 
   // 7. Continue through the IOU consumer UI. Resolve this exact delivery's opaque chat handle from
   //    the verified inbox envelope, then resolve that handle through the authenticated user's
@@ -3077,6 +3088,23 @@ async function main() {
   }
   confirmerLinkedSheet = route.linkedSheet;
 
+  await proposerIOU.goto(`${IOU_BASE}/pairs`, { waitUntil: "domcontentloaded" });
+  let proposerRoute: InboxRunLookup = { found: false, linkedSheet: null, matched: 0, acknowledged: 0 };
+  for (let i = 0; i < 10 && !proposerRoute.found; i++) {
+    proposerRoute = await lookupInboxRun(proposerIOU, note, false);
+    if (!proposerRoute.found) await proposerIOU.waitForTimeout(2000);
+  }
+  check(proposerRoute.found, `${PROPOSER.user} independently received this run's draft`);
+  check(!!proposerRoute.linkedSheet, `${PROPOSER.user} resolves the draft to one IOU sheet`);
+  check(
+    proposerRoute.linkedSheet === confirmerLinkedSheet,
+    "both recipients resolve the draft to the same exact linked sheet",
+  );
+  if (!proposerRoute.found || proposerRoute.linkedSheet !== confirmerLinkedSheet) {
+    throw new Error("the two recipient copies did not resolve to the same exact linked sheet");
+  }
+  proposerLinkedSheet = proposerRoute.linkedSheet;
+
   await confirmerIOU.goto(`${IOU_BASE}/sheet/${confirmerLinkedSheet}`, {
     waitUntil: "domcontentloaded",
   });
@@ -3084,6 +3112,31 @@ async function main() {
     expectedCardCurrency || (await accountDefaultCurrency(confirmerIOU));
   const resolvedDraftDate = new Date().toISOString().slice(0, 10);
   const pendingSummary = `IOU 350.00 ${importCurrency} \u00b7 owed to you \u00b7 ${resolvedDraftDate} \u00b7 ${note}`;
+  await proposerIOU.goto(`${IOU_BASE}/sheet/${proposerLinkedSheet}`, {
+    waitUntil: "domcontentloaded",
+  });
+  let proposerPendingCard = await waitForUniqueExactRow(
+    proposerIOU,
+    () => exactPendingRows(proposerIOU, pendingSummary),
+    `${PROPOSER.user} pending IOU draft`,
+    30_000,
+  );
+  if (proposerPendingCard === null) {
+    await proposerIOU.reload({ waitUntil: "domcontentloaded" });
+    proposerPendingCard = await waitForUniqueExactRow(
+      proposerIOU,
+      () => exactPendingRows(proposerIOU, pendingSummary),
+      `${PROPOSER.user} pending IOU draft after reload`,
+      30_000,
+    );
+  }
+  check(
+    proposerPendingCard !== null,
+    `${PROPOSER.user} sees the independently encrypted Pending from chat copy`,
+  );
+  if (proposerPendingCard === null) {
+    throw new Error(`${PROPOSER.user} pending IOU draft did not render`);
+  }
   // Let SheetPage's authenticated ActionInbox effect finish. Repeated short reloads cancel that
   // effect and can starve a healthy poll forever; use one uninterrupted wait, then one fallback
   // reload for a genuinely missed mount.
@@ -3147,6 +3200,20 @@ async function main() {
   if (createdEntry === null) throw new Error("the exact submitted History entry did not render");
   check(await createdEntry.isVisible(), `the submitted entry is present in .history with nonce ${nonce}`);
   check(!(await pendingCard.isVisible().catch(() => false)), "the consumed Pending from chat card is gone");
+  await proposerIOU.reload({ waitUntil: "domcontentloaded" });
+  const proposerPendingAfterImport = await waitForUniqueExactRow(
+    proposerIOU,
+    () => exactPendingRows(proposerIOU, pendingSummary),
+    `${PROPOSER.user} reconciled pending IOU draft`,
+    10_000,
+  );
+  check(
+    proposerPendingAfterImport === null,
+    `${PROPOSER.user}'s second encrypted copy reconciles after the shared-sheet import`,
+  );
+  if (proposerPendingAfterImport !== null) {
+    throw new Error(`${PROPOSER.user} retained a duplicate pending draft after shared-sheet import`);
+  }
   journeyBodyCompleted = true;
   } finally {
     try {
@@ -3512,7 +3579,7 @@ async function main() {
     console.error(`\nJOURNEY FAILED — ${failures} assertion(s) failed`);
     process.exit(1);
   }
-  console.log("\n🏁 JOURNEY PASSED: chat send → one host Add to IOU → confirmer delivery → Review & add → IOU History");
+  console.log("\n🏁 JOURNEY PASSED: chat send -> one Add -> exact-sheet fanout -> one shared import");
   process.exit(0);
 }
 
