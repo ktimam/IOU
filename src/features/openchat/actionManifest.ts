@@ -320,6 +320,15 @@ export const iouActionManifest: IouActionManifest = {
   prompt: IOU_EXTRACTION_PROMPT,
   outputSchema: {
     type: "object",
+    // Explicitly opt plain-text multi-entry shorthand into OpenChat's bounded, source-only
+    // amount/label parser. IOU's declared rules/defaults still supply and validate semantics.
+    "x-openchat-text-sequence": {
+      numberField: "amount",
+      labelField: "note",
+      minimumItems: 2,
+      // Only these complete command phrases authorize the bare alternating monetary shorthand.
+      anchors: ["owe me", "owe"],
+    },
     properties: {
       kind: { enum: ["settlement", "iou"] },
       // number ONLY: string amounts like "26k" are handled by the k_m_suffix normalize rule

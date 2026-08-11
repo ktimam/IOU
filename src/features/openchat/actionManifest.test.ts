@@ -380,6 +380,36 @@ describe("iouActionManifest", () => {
 // list directly. `message` deliberately survives only in the stored payload/schema: it must not be
 // repeated as public description text in every classic multi-entry summary.
 describe("registered wire — schema evidence stays private and public rows stay compact", () => {
+  it("opts into the bounded generic amount/label text-sequence fallback in source, docs, and wire", async () => {
+    const expected = {
+      numberField: "amount",
+      labelField: "note",
+      minimumItems: 2,
+      anchors: ["owe me", "owe"],
+    };
+    const sourceSchema = iouActionManifest.outputSchema as {
+      properties?: Record<string, { type?: unknown }>;
+      required?: unknown;
+      "x-openchat-text-sequence"?: unknown;
+    };
+    const documentedSchema = registration.responseSchema as typeof sourceSchema;
+    const { buildManifestWire } = await import("./registerAiApp");
+    const wireSchema = JSON.parse(
+      (
+        buildManifestWire("") as unknown as {
+          actions: { response_schema: string }[];
+        }
+      ).actions[0].response_schema,
+    ) as typeof sourceSchema;
+
+    for (const schema of [sourceSchema, documentedSchema, wireSchema]) {
+      expect(schema["x-openchat-text-sequence"]).toEqual(expected);
+      expect(schema.properties?.amount?.type).toBe("number");
+      expect(schema.properties?.note?.type).toBe("string");
+      expect(schema.required).toContain("amount");
+    }
+  });
+
   it("contains no unbounded JSON Schema pattern keyword at any depth", async () => {
     const collectKeyPaths = (
       value: unknown,
