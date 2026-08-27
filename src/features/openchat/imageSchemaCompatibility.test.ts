@@ -41,6 +41,12 @@ function expectImageSafeOptionalFields(schema: unknown): void {
     format: "ascii-uppercase",
     "x-openchat-require-text-evidence": true,
   });
+  expect(properties.direction).toMatchObject({
+    type: "string",
+    enum: ["credit", "debt"],
+    default: "debt",
+    "x-openchat-default-for-image-only": "credit",
+  });
   expect(properties.date).toMatchObject({
     type: "string",
     format: "date",

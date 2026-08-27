@@ -3,7 +3,10 @@ import { createHash } from "node:crypto";
 import { IDL } from "@dfinity/candid";
 import { Principal } from "@dfinity/principal";
 import { buildIdl, buildManifestWire } from "./registerAiApp";
-import { iouActionManifest } from "./actionManifest";
+import {
+  iouActionManifest,
+  IOU_IMAGE_EXTRACTION_PROMPT,
+} from "./actionManifest";
 import {
   encodeManifestCommitmentV2,
   MANIFEST_COMMITMENT_DOMAIN_V2,
@@ -47,6 +50,19 @@ describe("buildManifestWire", () => {
       actions: { card: { disclosure: string[] } }[];
     };
     expect(manifest.actions[0]?.card.disclosure).toEqual([]);
+  });
+
+  it("carries the exact image-only prompt contract through the unchanged response-schema wire", () => {
+    const manifest = buildManifestWire("", undefined, () => {}) as {
+      actions: { response_schema: string }[];
+    };
+    const schema = JSON.parse(manifest.actions[0].response_schema);
+
+    expect(schema["x-openchat-image-prompt-template"]).toEqual({
+      version: 1,
+      template: IOU_IMAGE_EXTRACTION_PROMPT,
+      includeRuleGuidance: false,
+    });
   });
 
   it("sends app_canister_id as an opt principal when a valid one is supplied, [] otherwise", () => {

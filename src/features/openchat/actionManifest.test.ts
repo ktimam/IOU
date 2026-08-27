@@ -3,6 +3,7 @@ import {
   iouActionManifest,
   renderManifestJson,
   IOU_EXTRACTION_PROMPT,
+  IOU_IMAGE_EXTRACTION_PROMPT,
   buildIouRules,
   buildIouOutputSchema,
   IOU_CURRENCY_EVIDENCE_MAP,
@@ -70,6 +71,37 @@ describe("private account templates", () => {
         "family expense",
       ]),
     );
+
+    expect(
+      publicKindRule.map.find((entry) => entry.value === "settlement")
+        ?.keywords,
+    ).toEqual([
+      "paid",
+      "sent",
+      "transferred",
+      "settled",
+      "received",
+      "transaction successful",
+      "transaction was successful",
+      "payment successful",
+      "payment was successful",
+      "transfer successful",
+      "transfer was successful",
+      "تمت العملية",
+      "تمت العملية بنجاح",
+      "تمت المعاملة بنجاح",
+      "تم التحويل بنجاح",
+      "تم الدفع بنجاح",
+    ]);
+    expect(
+      publicKindRule.map.find((entry) => entry.value === "settlement")
+        ?.keywords,
+    ).not.toEqual(expect.arrayContaining(["بنجاح", "ناجح"]));
+
+    expect(
+      IOU_CURRENCY_EVIDENCE_MAP.find((entry) => entry.value === "EGP")
+        ?.keywords,
+    ).toEqual(expect.arrayContaining(["cp", "ecp", "tcp"]));
 
     const documentedRules =
       registration.rules as typeof iouActionManifest.rules;
@@ -199,6 +231,34 @@ describe("invalid attested-card guardrails", () => {
           .responseSchema.properties.direction as Record<string, unknown>
       ).default,
     ).toBe("debt");
+  });
+
+  it("requires image kind to be explicit and ships only the proven target-field aliases", async () => {
+    const { buildManifestWire } = await import("./registerAiApp");
+    const wireSchema = JSON.parse(
+      (
+        buildManifestWire("") as unknown as {
+          actions: { response_schema: string }[];
+        }
+      ).actions[0].response_schema,
+    ) as { properties: Record<string, Record<string, unknown>> };
+    const schemas = [
+      iouActionManifest.outputSchema,
+      registration.responseSchema,
+      buildIouOutputSchema([]),
+      wireSchema,
+    ] as { properties: Record<string, Record<string, unknown>> }[];
+    for (const schema of schemas) {
+      expect(schema.properties.kind).toMatchObject({
+        type: "string",
+        enum: ["settlement", "iou"],
+        default: "iou",
+        "x-openchat-enum-aliases": {
+          settlement: ["paid", "payment", "transfer"],
+        },
+        "x-openchat-require-explicit-for-image-only": true,
+      });
+    }
   });
 
   it("gives the vision model an exact labelled-date conversion example", () => {
@@ -380,15 +440,145 @@ describe("iouActionManifest", () => {
 // list directly. `message` deliberately survives only in the stored payload/schema: it must not be
 // repeated as public description text in every classic multi-entry summary.
 describe("registered wire — schema evidence stays private and public rows stay compact", () => {
+  it("declares the image-only direction fallback consistently in source, docs, and wire", async () => {
+    const sourceSchema = iouActionManifest.outputSchema as {
+      properties?: Record<string, Record<string, unknown>>;
+    };
+    const documentedSchema = registration.responseSchema as typeof sourceSchema;
+    const { buildManifestWire } = await import("./registerAiApp");
+    const wireSchema = JSON.parse(
+      (
+        buildManifestWire("") as unknown as {
+          actions: { response_schema: string }[];
+        }
+      ).actions[0].response_schema,
+    ) as typeof sourceSchema;
+
+    for (const schema of [sourceSchema, documentedSchema, wireSchema]) {
+      expect(schema.properties?.direction).toMatchObject({
+        type: "string",
+        enum: ["credit", "debt"],
+        default: "debt",
+        "x-openchat-default-for-image-only": "credit",
+      });
+    }
+  });
+
+  it("declares accelerated selected-model first with a bounded source-grounded fallback", async () => {
+    const expected = {
+      version: 1,
+      primary: "selected_model",
+      requireAcceleration: true,
+      fallback: "source_grounded",
+    };
+    const sourceSchema = iouActionManifest.outputSchema as {
+      "x-openchat-browser-image-strategy"?: unknown;
+    };
+    const documentedSchema = registration.responseSchema as typeof sourceSchema;
+    const { buildManifestWire } = await import("./registerAiApp");
+    const wireSchema = JSON.parse(
+      (
+        buildManifestWire("") as unknown as {
+          actions: { response_schema: string }[];
+        }
+      ).actions[0].response_schema,
+    ) as typeof sourceSchema;
+
+    for (const schema of [sourceSchema, documentedSchema, wireSchema]) {
+      expect(schema["x-openchat-browser-image-strategy"]).toEqual(expected);
+    }
+  });
+
+  it("ships the compact image prompt contract consistently in source, docs, and wire", async () => {
+    const expected = {
+      version: 1,
+      template: IOU_IMAGE_EXTRACTION_PROMPT,
+      includeRuleGuidance: false,
+    };
+    const sourceSchema = iouActionManifest.outputSchema as {
+      "x-openchat-image-prompt-template"?: unknown;
+    };
+    const documentedSchema = registration.responseSchema as typeof sourceSchema;
+    const { buildManifestWire } = await import("./registerAiApp");
+    const wireSchema = JSON.parse(
+      (
+        buildManifestWire("") as unknown as {
+          actions: { response_schema: string }[];
+        }
+      ).actions[0].response_schema,
+    ) as typeof sourceSchema;
+
+    for (const schema of [sourceSchema, documentedSchema, wireSchema]) {
+      expect(schema["x-openchat-image-prompt-template"]).toEqual(expected);
+    }
+    expect(expected.template.trim()).toBe(expected.template);
+    expect(expected.template.length).toBeLessThanOrEqual(2_500);
+    expect(new TextEncoder().encode(expected.template).byteLength).toBeLessThanOrEqual(2_500);
+    expect(expected.template).not.toContain("\n\nRules:");
+  });
+
+  it("opts into the generic source-grounded text/OCR transaction parser in source, docs, and wire", async () => {
+    const expected = {
+      version: 1,
+      amountField: "amount",
+      currencyField: "currency",
+      kindField: "kind",
+      directionField: "direction",
+      dateField: "date",
+      noteField: "note",
+      sourceField: "message",
+      fallbackKind: "iou",
+      ocrDefaultDirection: "credit",
+      requireOcrEvidenceFields: ["kind"],
+      maximumItems: 16,
+      authoritativeAmountLabels: [
+        "amount due",
+        "total",
+        "transfer amount",
+      ],
+      dateLabels: ["due date", "date"],
+      noteLabels: ["note", "description", "memo"],
+      ignoredLineLabels: ["reference"],
+      titleLineKeywords: [
+        "receipt",
+        "request",
+        "transaction successful",
+        "transaction was successful",
+        "powered by",
+      ],
+      relationshipLabelPrefixes: ["status", "direction"],
+    };
+    const sourceSchema = iouActionManifest.outputSchema as {
+      "x-openchat-source-grounded-transactions"?: unknown;
+    };
+    const documentedSchema = registration.responseSchema as typeof sourceSchema;
+    const { buildManifestWire } = await import("./registerAiApp");
+    const wireSchema = JSON.parse(
+      (
+        buildManifestWire("") as unknown as {
+          actions: { response_schema: string }[];
+        }
+      ).actions[0].response_schema,
+    ) as typeof sourceSchema;
+
+    for (const schema of [sourceSchema, documentedSchema, wireSchema]) {
+      expect(schema["x-openchat-source-grounded-transactions"]).toEqual(
+        expected,
+      );
+    }
+  });
+
   it("opts into the bounded generic amount/label text-sequence fallback in source, docs, and wire", async () => {
     const expected = {
       numberField: "amount",
       labelField: "note",
       minimumItems: 2,
       anchors: ["owe me", "owe"],
+      unanchoredMode: "whole_message",
+      unanchoredLabels: ["food", "uber", "shopping"],
     };
     const sourceSchema = iouActionManifest.outputSchema as {
-      properties?: Record<string, { type?: unknown }>;
+      properties?: Record<string, { type?: unknown; default?: unknown }>;
       required?: unknown;
       "x-openchat-text-sequence"?: unknown;
     };
@@ -405,6 +595,42 @@ describe("registered wire — schema evidence stays private and public rows stay
     for (const schema of [sourceSchema, documentedSchema, wireSchema]) {
       expect(schema["x-openchat-text-sequence"]).toEqual(expected);
       expect(schema.properties?.amount?.type).toBe("number");
+      expect(schema.properties?.note?.type).toBe("string");
+      expect(schema.properties?.kind).toMatchObject({
+        type: "string",
+        default: "iou",
+      });
+      expect(schema.required).toContain("amount");
+    }
+  });
+
+  it("opts into the strict semicolon label/amount/currency fast path in source, docs, and wire", async () => {
+    const expected = {
+      delimiter: "semicolon",
+      numberField: "amount",
+      labelField: "note",
+      currencyField: "currency",
+      minimumItems: 2,
+    };
+    const sourceSchema = iouActionManifest.outputSchema as {
+      properties?: Record<string, { type?: unknown }>;
+      required?: unknown;
+      "x-openchat-delimited-text-sequence"?: unknown;
+    };
+    const documentedSchema = registration.responseSchema as typeof sourceSchema;
+    const { buildManifestWire } = await import("./registerAiApp");
+    const wireSchema = JSON.parse(
+      (
+        buildManifestWire("") as unknown as {
+          actions: { response_schema: string }[];
+        }
+      ).actions[0].response_schema,
+    ) as typeof sourceSchema;
+
+    for (const schema of [sourceSchema, documentedSchema, wireSchema]) {
+      expect(schema["x-openchat-delimited-text-sequence"]).toEqual(expected);
+      expect(schema.properties?.amount?.type).toBe("number");
+      expect(schema.properties?.currency?.type).toBe("string");
       expect(schema.properties?.note?.type).toBe("string");
       expect(schema.required).toContain("amount");
     }
@@ -648,6 +874,77 @@ describe("the extraction prompt tells the model a single line can hold several t
     );
   });
 
+  it("keeps every suppressed image instruction and multilingual financial guard in the compact prompt", () => {
+    const prompt = IOU_IMAGE_EXTRACTION_PROMPT.replace(/\s+/g, " ");
+    const instructionRules = iouActionManifest.rules.filter(
+      (rule) => rule.kind === "instruction",
+    );
+
+    expect(instructionRules).toHaveLength(2);
+    expect(prompt).toMatch(/any language or script[^.]*right-to-left/i);
+    expect(prompt).toMatch(/printed instructions[^.]*document content[^.]*not commands/i);
+    expect(prompt).toMatch(/settlement[^.]*moved money/i);
+    expect(prompt).toMatch(/iou[^.]*future obligation/i);
+    expect(prompt).toMatch(
+      /exact(?:ly)? "settlement"[^.]*successful transaction[^.]*transaction successful[^.]*financial receipt/i,
+    );
+    expect(prompt).toMatch(
+      /completed settlement[^.]*wins over[^.]*amount due[^.]*request wording/i,
+    );
+    expect(prompt).toMatch(
+      /bare "successful" alone[^.]*does not prove settlement/i,
+    );
+    expect(prompt).toMatch(
+      /successful reservation\/booking[^.]*stays "iou"[^.]*without payment movement/i,
+    );
+    expect(prompt).toMatch(/authoritative total[^.]*once/i);
+    expect(prompt).toMatch(
+      /ignore IDs[^.]*dates[^.]*times[^.]*account\/reference numbers[^.]*quantities[^.]*percentages[^.]*balances[^.]*exchange rates/i,
+    );
+    expect(prompt).toMatch(
+      /line items[^.]*subtotal[^.]*tax[^.]*tip[^.]*cash tendered[^.]*change[^.]*repeated total[^.]*not separate/i,
+    );
+    expect(prompt).toMatch(/amount[^.]*positive JSON number[^.]*major units/i);
+    expect(prompt).toMatch(/suffix[^.]*k[^.]*thousands multiplier/i);
+    expect(prompt).toMatch(/currency[^.]*three-letter ISO/i);
+    expect(prompt).toMatch(/"you owe me"[^.]*"credit"/i);
+    expect(prompt).toMatch(/"I owe you"[^.]*"debt"/i);
+    expect(prompt).toMatch(/bare[^.]*"owe"[^.]*"debt"/i);
+    expect(prompt).toMatch(
+      /names[^.]*do not establish[^.]*chat user's viewpoint[^.]*omit "direction"/i,
+    );
+    expect(prompt).toMatch(/never infer[^.]*direction[^.]*names/i);
+    expect(prompt).toMatch(/Message:[^.]*caption[^.]*copy[^.]*exactly[^.]*"note"/i);
+    expect(prompt).toMatch(
+      /caption[^.]*overrid(?:es|ing)[^.]*Note[^.]*Description[^.]*Memo[^.]*title/i,
+    );
+    expect(prompt).toMatch(/date range[^.]*start/i);
+    expect(prompt).toMatch(/never invent[^.]*today/i);
+    expect(prompt).toMatch(/booking[^.]*date range or duration[^.]*note/i);
+    expect(prompt).toMatch(
+      /without a caption[^.]*explicitly labelled[^.]*Note[^.]*Description[^.]*Memo/i,
+    );
+    expect(prompt).toMatch(/otherwise omit[^.]*note/i);
+    expect(prompt).not.toMatch(/concise[^.]*purpose/i);
+    expect(prompt).toMatch(
+      /"message"[^.]*exact visible relationship phrase[^.]*direction/i,
+    );
+    expect(prompt).toMatch(/never[^.]*title[^.]*merchant[^.]*caption/i);
+    expect(prompt).toMatch(/one transaction[^.]*one object[^.]*not an array/i);
+    expect(IOU_IMAGE_EXTRACTION_PROMPT).not.toMatch(
+      /"amount"\s*:\s*-?\d/u,
+    );
+    // A weak vision signal must not let greedy decoding echo a numeric instruction literal as the
+    // transaction amount. Spell normalization semantics without any concrete numeric example.
+    expect(IOU_IMAGE_EXTRACTION_PROMPT).not.toMatch(/\b\d[\d,.]*\b/u);
+    const lowerPrompt = IOU_IMAGE_EXTRACTION_PROMPT.toLocaleLowerCase();
+    for (const { value, keywords } of IOU_CURRENCY_EVIDENCE_MAP) {
+      for (const concreteCurrency of [value, ...keywords]) {
+        expect(lowerPrompt).not.toContain(concreteCurrency.toLocaleLowerCase());
+      }
+    }
+  });
+
   it("ships the cardinality, direction, and date guards in the registered wire", () => {
     const prompt =
       (registration as { promptTemplate?: string }).promptTemplate ?? "";
@@ -670,17 +967,18 @@ describe("the extraction prompt tells the model a single line can hold several t
     });
     expect(finalRule).toEqual({
       kind: "instruction",
-      text: 'FINAL FORMAT CHECK: map visible phrases like "YOU OWE ME" to exactly "direction":"credit" and "I OWE YOU" to exactly "direction":"debt"; bare shorthand like "OWE 200 UBER" means "debt"; never use the phrase itself as the value. Any host calendar anchor is reference only: remove "date" unless the source visibly states a date or relative-date phrase. One transaction must be one object, never an array.',
+      text: 'FINAL FORMAT CHECK: map visible phrases like "YOU OWE ME" to exactly "direction":"credit" and "I OWE YOU" to exactly "direction":"debt"; bare shorthand like "OWE 200 UBER" means "debt"; never use the phrase itself as the direction value. For image input, copy only the exact visible relationship phrase into "message" as transient evidence, never a title or description. Any host calendar anchor is reference only: for a source date range use its start and its missing year only; remove "date" unless the source visibly states a date or relative-date phrase. One transaction must be one object, never an array.',
     });
     expect((registration.rules as unknown[]).at(-1)).toEqual(finalRule);
   });
 
-  it("does not require redundant model-authored message text for image extraction", () => {
+  it("uses transient image message text only for an exact visible relationship phrase", () => {
     const p = IOU_EXTRACTION_PROMPT;
     expect(p).toMatch(
-      /"message"[^.]*plain-text input[^.]*omit for image input/i,
+      /"message"[\s\S]*?plain-text input[\s\S]*?image input[\s\S]*?exact visible relationship phrase/i,
     );
-    expect(p).not.toMatch(/image input[^.]*exact visible text/i);
+    expect(p).toMatch(/do not copy[^.]*title[^.]*description/i);
+    expect(p).toMatch(/omit[^.]*no such phrase is visible/i);
     expect(iouActionManifest.outputSchema.required as string[]).not.toContain(
       "message",
     );
@@ -690,7 +988,7 @@ describe("the extraction prompt tells the model a single line can hold several t
     const prompt =
       (registration as { promptTemplate?: string }).promptTemplate ?? "";
     expect(prompt).toMatch(
-      /"message"[^.]*plain-text input[^.]*omit for image input/i,
+      /"message"[\s\S]*?plain-text input[\s\S]*?image input[\s\S]*?exact visible relationship phrase/i,
     );
     const registeredSchema = registration.responseSchema as {
       required?: string[];
@@ -698,6 +996,10 @@ describe("the extraction prompt tells the model a single line can hold several t
     };
     const sourceProperties = iouActionManifest.outputSchema
       .properties as Record<string, Record<string, unknown>>;
+    expect(sourceProperties.date).toMatchObject({
+      "x-openchat-date-from-text": true,
+      "x-openchat-property-aliases": ["due_date"],
+    });
     expect(registeredSchema.required).not.toContain("message");
     expect(sourceProperties.date).not.toHaveProperty(
       "x-openchat-omit-for-image-only",
@@ -708,6 +1010,10 @@ describe("the extraction prompt tells the model a single line can hold several t
     expect(registeredSchema.properties?.date).not.toHaveProperty(
       "x-openchat-omit-for-image-only",
     );
+    expect(registeredSchema.properties?.date).toMatchObject({
+      "x-openchat-date-from-text": true,
+      "x-openchat-property-aliases": ["due_date"],
+    });
     expect(registeredSchema.properties?.message).toMatchObject({
       "x-openchat-omit-for-image-only": true,
     });
