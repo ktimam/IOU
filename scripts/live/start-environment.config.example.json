@@ -1,0 +1,109 @@
+{
+  "openChatRepo": "C:\\path\\to\\openchat-checkout",
+  "tailscaleExecutable": "C:\\path\\to\\tailscale.exe",
+  "tailnetHost": "device-name.tailnet-name.ts.net",
+  "openChat": {
+    "internetIdentityCanisterId": "local-internet-identity-canister-id",
+    "vapidPublicKey": "local-openchat-vapid-public-key",
+    "walletConnectProjectId": "local-wallet-connect-project-id"
+  },
+  "aiApp": {
+    "name": "app-name",
+    "id": 1,
+    "userIndexCanisterId": "user-index-canister-id",
+    "appCanisterId": "app-canister-id",
+    "inboxCanisterId": "inbox-canister-id",
+    "surfaceOrigin": "https://device-name.tailnet-name.ts.net:8443"
+  },
+  "model": {
+    "id": "model-owner/model-name",
+    "revision": "pinned-model-revision",
+    "ortAssetPrefix": "/assets/path-to-pinned-ort-runtime",
+    "ortLoaderFile": "pinned-runtime.jspi.mjs",
+    "ortWasmFile": "pinned-runtime.jspi.wasm",
+    "ortLoaderBytes": 1,
+    "ortWasmBytes": 1,
+    "ortLoaderSha256": "0000000000000000000000000000000000000000000000000000000000000000",
+    "ortWasmSha256": "0000000000000000000000000000000000000000000000000000000000000000",
+    "processorBytes": 1,
+    "processorRuntimeBytes": 1,
+    "processorRuntimeSha256": "0000000000000000000000000000000000000000000000000000000000000000",
+    "visionGraphBytes": 1,
+    "decoderGraphBytes": 1,
+    "decoderGraphSha256": "0000000000000000000000000000000000000000000000000000000000000000",
+    "workerRequiredMarkers": [
+      "pinned-all-WebGPU-worker-marker",
+      "pinned-normalized-image-input-worker-marker"
+    ]
+  },
+  "imageProbe": {
+    "path": "/__oc-local-image/storage-canister-id/blobs/123",
+    "bytes": 1,
+    "contentType": "image/png"
+  },
+  "pocketIc": {
+    "distro": "your-wsl-distribution",
+    "binary": "/home/user/path/to/pocket-ic",
+    "stateDir": "/home/user/path/to/recovered-state",
+    "controlPortFile": "/home/user/path/to/control.port",
+    "metadataFile": "/home/user/path/to/runtime.manager.json",
+    "logFile": "/home/user/path/to/runtime.log",
+    "gatewayPort": 8080,
+    "ttlSeconds": 1,
+    "logLevels": "error",
+    "artificialDelayMs": 1,
+    "defaultEffectiveCanisterId": "expected-default-effective-canister-id",
+    "strictReopenRequestSha256": "0000000000000000000000000000000000000000000000000000000000000000",
+    "runtimeConfigSha256": "1111111111111111111111111111111111111111111111111111111111111111",
+    "strictReopenRequest": {
+      "subnet_config_set": {
+        "nns": { "state_config": "New", "instruction_config": "Production" },
+        "sns": null,
+        "ii": { "state_config": "New", "instruction_config": "Production" },
+        "fiduciary": null,
+        "bitcoin": null,
+        "system": [
+          { "state_config": "New", "instruction_config": "Production" }
+        ],
+        "application": [],
+        "verified_application": []
+      },
+      "http_gateway_config": {
+        "ip_addr": "127.0.0.1",
+        "port": 8080,
+        "domains": null,
+        "https_config": null
+      },
+      "state_dir": "/home/user/path/to/recovered-state",
+      "icp_config": {
+        "beta_features": "Enabled",
+        "canister_backtrace": null,
+        "function_name_length_limits": null,
+        "canister_execution_rate_limiting": null
+      },
+      "log_level": "ERROR",
+      "bitcoind_addr": null,
+      "dogecoind_addr": null,
+      "icp_features": null,
+      "incomplete_state": null,
+      "initial_time": {
+        "AutoProgress": { "artificial_delay_ms": 1 }
+      }
+    },
+    "expectedTopology": {
+      "expected-subnet-id": {
+        "kind": "expected-subnet-kind",
+        "seed": "expected-subnet-seed",
+        "ranges": ["expected-range-start|expected-range-end"]
+      }
+    },
+    "expectedCanisters": [
+      {
+        "role": "expected-canister-role",
+        "id": "expected-canister-id",
+        "version": "expected-version",
+        "commit": "expected-commit"
+      }
+    ]
+  }
+}
