@@ -668,12 +668,26 @@ async function pageEnvironment(page: Page) {
           sources["/src/utils/onDeviceInference.ts"].includes(
             "prepareImageRegionForInference(",
           ) &&
+          sources["/src/utils/onDeviceInference.ts"].includes(
+            'request.imageRegion !== "detail_card"',
+          ) &&
           sources["/src/utils/inferenceImage.ts"].includes(
-            'region !== "lower_half"',
+            "function detailCardCrop(",
+          ) &&
+          sources["/src/utils/inferenceImage.ts"].includes(
+            'region === "detail_card"',
+          ) &&
+          sources["/src/utils/inferenceImage.ts"].includes(
+            "dimensions.height * 58 / 100",
+          ) &&
+          sources["/src/utils/inferenceImage.ts"].includes(
+            "dimensions.height * 86 / 100",
           ) &&
           sources["/src/utils/inferenceImage.ts"].includes(
             "async function canvasRegionCrop(",
-          ),
+          ) &&
+          sources[actionUrl].includes("extensionVersion !== 3") &&
+          sources[actionUrl].includes('pass.imageRegion !== "detail_card"'),
         pinnedTransformersManifest:
           sources["/src/utils/transformersWebGpuProtocol.ts"].includes(
             "TRANSFORMERS_QWEN_ARTIFACTS",

@@ -504,7 +504,7 @@ describe("registered wire — schema evidence stays private and public rows stay
       includeRuleGuidance: false,
     };
     const expectedFocused = {
-      version: 2,
+      version: 3,
       primaryFields: ["amount", "currency", "kind"],
       primaryMaxTokens: 64,
       passes: [
@@ -514,7 +514,7 @@ describe("registered wire — schema evidence stays private and public rows stay
           includeRuleGuidance: false,
           includeMessage: false,
           maxTokens: 48,
-          imageRegion: "lower_half",
+          imageRegion: "detail_card",
         },
       ],
     };

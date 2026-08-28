@@ -10,7 +10,7 @@
       "includeRuleGuidance": false
     },
     "x-openchat-image-focused-passes": {
-      "version": 2,
+      "version": 3,
       "primaryFields": [
         "amount",
         "currency",
@@ -27,7 +27,7 @@
           "includeRuleGuidance": false,
           "includeMessage": false,
           "maxTokens": 48,
-          "imageRegion": "lower_half"
+          "imageRegion": "detail_card"
         }
       ]
     },

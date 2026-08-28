@@ -201,6 +201,12 @@ describe("real-model IOU acceptance cases", () => {
     expect(runner).toContain("typeof shared.runAiAction");
     expect(runner).toContain("device!.inferOnDevice(request)");
     expect(runner).toContain("productionImageRegion");
+    expect(runner).toContain('request.imageRegion !== "detail_card"');
+    expect(runner).toContain("function detailCardCrop(");
+    expect(runner).toContain('region === "detail_card"');
+    expect(runner).toContain("dimensions.height * 58 / 100");
+    expect(runner).toContain("dimensions.height * 86 / 100");
+    expect(runner).toContain("extensionVersion !== 3");
     expect(runner).not.toContain('import("/src/utils/modelQualification.ts")');
     expect(runner).not.toContain('import("/src/utils/modelAcceptanceRuntime.ts")');
     expect(runner).toContain("runtimeDigest: live.runtimeDigest");

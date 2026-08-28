@@ -192,8 +192,8 @@ non-whitespace output character MUST be { and the last non-whitespace output cha
 Do not wrap that object in []. Each object must choose exactly one "kind" and one "direction".`;
 
 // Phone-class WebGPU is most reliable when the small VLM has one bounded attention job per pass.
-// OpenChat's v2 image prompt pipeline projects each pass onto only its declared fields, so this core
-// pass cannot invent a date/note/direction and the lower-detail pass cannot alter the amount. Both
+// OpenChat's focused image prompt pipeline projects each pass onto only its declared fields, so this
+// core pass cannot invent a date/note/direction and the lower-detail pass cannot alter the amount. Both
 // passes use the selected vision model directly; no OCR or text-reader output participates.
 export const IOU_IMAGE_EXTRACTION_PROMPT = `Read the financial document. Return ONLY one JSON object, or a reading-order JSON array for separate transactions. Each object may use only "amount", "currency", and "kind".
 
@@ -389,7 +389,7 @@ export const iouActionManifest: IouActionManifest = {
     // Additive to the v1 compact prompt above: older OpenChat clients still get the stable compact
     // core extraction, while clients that understand focused passes also read the date separately.
     "x-openchat-image-focused-passes": {
-      version: 2,
+      version: 3,
       primaryFields: ["amount", "currency", "kind"],
       primaryMaxTokens: 64,
       passes: [
@@ -399,7 +399,7 @@ export const iouActionManifest: IouActionManifest = {
           includeRuleGuidance: false,
           includeMessage: false,
           maxTokens: 48,
-          imageRegion: "lower_half",
+          imageRegion: "detail_card",
         },
       ],
     },

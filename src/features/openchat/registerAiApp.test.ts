@@ -70,7 +70,7 @@ describe("buildManifestWire", () => {
       includeRuleGuidance: false,
     });
     expect(schema["x-openchat-image-focused-passes"]).toEqual({
-      version: 2,
+      version: 3,
       primaryFields: ["amount", "currency", "kind"],
       primaryMaxTokens: 64,
       passes: [
@@ -80,7 +80,7 @@ describe("buildManifestWire", () => {
           includeRuleGuidance: false,
           includeMessage: false,
           maxTokens: 48,
-          imageRegion: "lower_half",
+          imageRegion: "detail_card",
         },
       ],
     });

@@ -159,14 +159,14 @@ describe("mobile portrait model date regression", () => {
         imageRegion: string;
       }[];
     };
-    expect(pipeline.version).toBe(2);
+    expect(pipeline.version).toBe(3);
     expect(pipeline.primaryFields).toEqual(["amount", "currency", "kind"]);
     expect(pipeline.passes).toEqual([
       expect.objectContaining({
         fields: ["date", "note"],
         maxTokens: 48,
         template: IOU_IMAGE_DATE_EXTRACTION_PROMPT,
-        imageRegion: "lower_half",
+        imageRegion: "detail_card",
       }),
     ]);
     expect(pipeline.primaryFields).not.toContain("date");
