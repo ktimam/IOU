@@ -7,6 +7,7 @@
  *     --cdp <forwarded-Chrome-DevTools-endpoint> \
  *     --origin <exact-OpenChat-origin> \
  *     --image <receipt-image> \
+ *     --runs 2 \
  *     --output output/playwright/physical-phone-transformers-webgpu.json
  *
  * This opens one disposable tab on the supplied origin, preserves that origin's model CacheStorage,
@@ -22,6 +23,10 @@ import {
   type Page,
   type Request,
 } from "@playwright/test";
+import {
+  IOU_IMAGE_DATE_EXTRACTION_PROMPT,
+  IOU_IMAGE_EXTRACTION_PROMPT,
+} from "../../src/features/openchat/actionManifest";
 
 const REPOSITORY_ROOT = resolve(
   dirname(fileURLToPath(import.meta.url)),
@@ -34,8 +39,12 @@ const INFERENCE_MODULE_PATH = "/src/utils/transformersWebGpuInference.ts";
 const PROTOCOL_MODULE_PATH = "/src/utils/transformersWebGpuProtocol.ts";
 const PRELOAD_TIMEOUT_MS = 30 * 60_000;
 const MAX_IMAGE_BYTES = 20 * 1024 * 1024;
-const MAX_OUTPUT_TOKENS = 96;
+const SINGLE_PASS_MAX_OUTPUT_TOKENS = 96;
+const PRIMARY_MAX_OUTPUT_TOKENS = 64;
+const FOCUSED_DATE_MAX_OUTPUT_TOKENS = 24;
 const MAX_TECHNICAL_ERROR_LENGTH = 768;
+const MAX_RUNS = 10;
+const MAX_STAGE_SEQUENCE_ENTRIES = 32 * MAX_RUNS;
 const NORMALIZED_IMAGE_INPUT_MARKER =
   "openchat-qwen-webgpu-normalized-image-input-v1";
 
@@ -47,6 +56,9 @@ const PROMPT =
   "transfer, payment and refund are never kind values. Bare success without a visible money-movement label is insufficient. " +
   "Direction is relative to the chat user: names, sender/receiver rows and account numbers do not identify that user, so use null unless the receipt explicitly states the user viewpoint. " +
   "Preserve visible amount/currency/date exactly; use null rather than infer or invent.";
+
+type PromptProfile = "production-two-pass" | "single-pass";
+const DEFAULT_PROMPT_PROFILE: PromptProfile = "production-two-pass";
 
 const EXPECTED = Object.freeze({
   amount: 12_900,
@@ -62,6 +74,8 @@ type Options = {
   origin: string;
   imagePath: string;
   outputPath: string;
+  runs: number;
+  promptProfile: PromptProfile;
 };
 
 type NetworkPhase = "setup" | "preload" | "inference" | "cleanup";
@@ -87,17 +101,51 @@ type ParsedFields = {
   date: string | null;
 };
 
+type ParsedProductionFields = ParsedFields & {
+  note: string | null;
+};
+
+type FocusedDateDiagnostics = {
+  responseCharacters: number;
+  jsonParsed: boolean;
+  outcome:
+    | "iso"
+    | "english_month"
+    | "missing"
+    | "non_string"
+    | "conflicting_alias"
+    | "unsupported"
+    | "unparseable_json";
+  unsupportedFormat?:
+    | "iso_datetime"
+    | "english_month_with_connector"
+    | "english_month_extra"
+    | "numeric_delimited"
+    | "other";
+  unsupportedValueCharacters?: number;
+  unsupportedValueShape?: string;
+};
+
 type SessionEvidence = {
   started: number;
   completed: number;
   lastCompletedMs?: number;
 };
 
+type RetirementEvidence = {
+  started: number;
+  completed: number;
+};
+
 type StageEvidence = {
   sequentialLoaderMarkers: number;
   stagedDecoderMarkers: number;
   tiedEmbeddingReuse: boolean;
+  tiedEmbeddingReuseMarkers: number;
   normalizedImageInputMarkers: number;
+  promptToDecoderRetirements: RetirementEvidence;
+  decoderTeardownRetirements: RetirementEvidence;
+  retirementFailures: number;
   sessions: Record<SessionName, SessionEvidence>;
   sequence: Array<{
     stage:
@@ -105,7 +153,9 @@ type StageEvidence = {
       | "sequential_loader"
       | "staged_decoder"
       | "tied_embedding"
-      | "normalized_image_input";
+      | "normalized_image_input"
+      | "prompt_to_decoder_retirement"
+      | "decoder_teardown_retirement";
     event: "marker" | "started" | "completed";
   }>;
 };
@@ -128,6 +178,25 @@ type BrowserPreflight = {
   wakeLockActive: boolean;
 };
 
+type AttemptEvidence = {
+  attempt: number;
+  elapsedMs: number;
+  result: {
+    kind: string | undefined;
+    failureCategory: FailureCategory | undefined;
+    technicalProductError: string | undefined;
+  };
+  observed: ParsedFields;
+  focusedDateDiagnostics?: FocusedDateDiagnostics;
+  exact: boolean;
+  networkDeltas: {
+    modelRequests: number;
+    ocrRequests: number;
+    blockedOcrRequests: number;
+  };
+  stageDeltas: StageEvidence & { complete: boolean };
+};
+
 function requiredArgument(values: Map<string, string>, name: string): string {
   const value = values.get(name);
   if (value === undefined || value.trim() === "") {
@@ -137,19 +206,55 @@ function requiredArgument(values: Map<string, string>, name: string): string {
 }
 
 function parseArguments(argv: string[]): Options {
-  const supported = new Set(["--cdp", "--origin", "--image", "--output"]);
+  const supported = new Set([
+    "--cdp",
+    "--origin",
+    "--image",
+    "--output",
+    "--runs",
+    "--prompt-profile",
+  ]);
   const values = new Map<string, string>();
   for (let index = 0; index < argv.length; index += 2) {
     const name = argv[index];
     const value = argv[index + 1];
     if (!supported.has(name) || value === undefined || value.startsWith("--")) {
-      throw new Error("usage requires --cdp, --origin, --image, and --output");
+      throw new Error(
+        "usage requires --cdp, --origin, --image, and --output; --runs and --prompt-profile are optional",
+      );
     }
     if (values.has(name)) throw new Error(`${name} must be supplied once`);
     values.set(name, value);
   }
-  if (values.size !== supported.size) {
-    throw new Error("usage requires --cdp, --origin, --image, and --output");
+  if (
+    ["--cdp", "--origin", "--image", "--output"].some(
+      (name) => !values.has(name),
+    )
+  ) {
+    throw new Error(
+      "usage requires --cdp, --origin, --image, and --output; --runs and --prompt-profile are optional",
+    );
+  }
+
+  const rawRuns = values.get("--runs") ?? "1";
+  const runs = Number(rawRuns);
+  if (
+    !/^\d+$/.test(rawRuns) ||
+    !Number.isInteger(runs) ||
+    runs < 1 ||
+    runs > MAX_RUNS
+  ) {
+    throw new Error(`--runs must be an integer from 1 through ${MAX_RUNS}`);
+  }
+  const promptProfile =
+    values.get("--prompt-profile") ?? DEFAULT_PROMPT_PROFILE;
+  if (
+    promptProfile !== "production-two-pass" &&
+    promptProfile !== "single-pass"
+  ) {
+    throw new Error(
+      "--prompt-profile must be production-two-pass or single-pass",
+    );
   }
 
   const cdpUrl = new URL(requiredArgument(values, "--cdp"));
@@ -192,6 +297,8 @@ function parseArguments(argv: string[]): Options {
     origin: originUrl.origin,
     imagePath: resolve(requiredArgument(values, "--image")),
     outputPath,
+    runs,
+    promptProfile,
   };
 }
 
@@ -204,7 +311,11 @@ function emptyStageEvidence(): StageEvidence {
     sequentialLoaderMarkers: 0,
     stagedDecoderMarkers: 0,
     tiedEmbeddingReuse: false,
+    tiedEmbeddingReuseMarkers: 0,
     normalizedImageInputMarkers: 0,
+    promptToDecoderRetirements: { started: 0, completed: 0 },
+    decoderTeardownRetirements: { started: 0, completed: 0 },
+    retirementFailures: 0,
     sessions: {
       embed_tokens: { started: 0, completed: 0 },
       vision_encoder: { started: 0, completed: 0 },
@@ -218,7 +329,9 @@ function appendStageSequence(
   evidence: StageEvidence,
   item: StageEvidence["sequence"][number],
 ): void {
-  if (evidence.sequence.length < 32) evidence.sequence.push(item);
+  if (evidence.sequence.length < MAX_STAGE_SEQUENCE_ENTRIES) {
+    evidence.sequence.push(item);
+  }
 }
 
 function collectQwenStageConsole(text: string, evidence: StageEvidence): void {
@@ -252,10 +365,37 @@ function collectQwenStageConsole(text: string, evidence: StageEvidence): void {
     text === "[qwen-webgpu] reusing decoder tied embeddings for cached tokens"
   ) {
     evidence.tiedEmbeddingReuse = true;
+    evidence.tiedEmbeddingReuseMarkers++;
     appendStageSequence(evidence, {
       stage: "tied_embedding",
       event: "marker",
     });
+    return;
+  }
+
+  const retirement =
+    /^\[qwen-webgpu\] (prompt-to-decoder transition|decoder teardown) retirement (started|completed)$/.exec(
+      text,
+    );
+  if (retirement !== null) {
+    const evidenceKey =
+      retirement[1] === "prompt-to-decoder transition"
+        ? "promptToDecoderRetirements"
+        : "decoderTeardownRetirements";
+    const sequenceStage =
+      evidenceKey === "promptToDecoderRetirements"
+        ? "prompt_to_decoder_retirement"
+        : "decoder_teardown_retirement";
+    const event = retirement[2] as "started" | "completed";
+    evidence[evidenceKey][event]++;
+    appendStageSequence(evidence, { stage: sequenceStage, event });
+    return;
+  }
+  if (
+    text.startsWith("[qwen-webgpu] explicit model release failed") ||
+    text.startsWith("[qwen-webgpu] model release after failure failed")
+  ) {
+    evidence.retirementFailures++;
     return;
   }
 
@@ -376,20 +516,12 @@ function parseAllowedFields(text: string): ParsedFields {
   const currency = /^[A-Z]{3}$/.test(rawCurrency) ? rawCurrency : null;
   const rawKind =
     typeof parsed?.kind === "string" ? parsed.kind.trim().toLowerCase() : "";
-  const kind = [
-    "settlement",
-    "transfer",
-    "payment",
-    "refund",
-    "other",
-  ].includes(rawKind)
-    ? rawKind
-    : null;
+  const kind = ["settlement", "iou"].includes(rawKind) ? rawKind : null;
   const rawDirection =
     typeof parsed?.direction === "string"
       ? parsed.direction.trim().toLowerCase()
       : "";
-  const direction = ["credit", "debit", "unknown"].includes(rawDirection)
+  const direction = ["credit", "debt"].includes(rawDirection)
     ? rawDirection
     : null;
   const date =
@@ -397,6 +529,190 @@ function parseAllowedFields(text: string): ParsedFields {
       ? parsed.date
       : null;
   return { amount, currency, kind, direction, date };
+}
+
+const ENGLISH_MONTH_NUMBER: Readonly<Record<string, string>> = Object.freeze({
+  jan: "01",
+  january: "01",
+  feb: "02",
+  february: "02",
+  mar: "03",
+  march: "03",
+  apr: "04",
+  april: "04",
+  may: "05",
+  jun: "06",
+  june: "06",
+  jul: "07",
+  july: "07",
+  aug: "08",
+  august: "08",
+  sep: "09",
+  sept: "09",
+  september: "09",
+  oct: "10",
+  october: "10",
+  nov: "11",
+  november: "11",
+  dec: "12",
+  december: "12",
+});
+
+function isStrictCalendarDate(value: string): boolean {
+  const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(value);
+  if (match === null) return false;
+  const year = Number(match[1]);
+  const month = Number(match[2]);
+  const day = Number(match[3]);
+  if (year < 1 || month < 1 || month > 12 || day < 1) return false;
+  const leapYear = year % 4 === 0 && (year % 100 !== 0 || year % 400 === 0);
+  const daysInMonth = [31, leapYear ? 29 : 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
+  return day <= daysInMonth[month - 1]!;
+}
+
+function normalizeProductionDate(
+  value: string,
+): { date: string; outcome: "iso" | "english_month" } | undefined {
+  if (value.length > 96) return undefined;
+  const trimmed = value.trim().replace(/^date\s*:\s*/iu, "");
+  if (isStrictCalendarDate(trimmed)) return { date: trimmed, outcome: "iso" };
+  const match = /^(\d{1,2})\s+([a-z]{3,9})\s+(\d{4})(?:\s+\d{1,2}:\d{2}(?::\d{2})?\s*(?:am|pm)?)?$/iu.exec(
+    trimmed,
+  );
+  if (match === null) return undefined;
+  const month = ENGLISH_MONTH_NUMBER[match[2]!.toLowerCase()];
+  if (month === undefined) return undefined;
+  const date = `${match[3]}-${month}-${match[1]!.padStart(2, "0")}`;
+  return isStrictCalendarDate(date) ? { date, outcome: "english_month" } : undefined;
+}
+
+function classifyUnsupportedDateFormat(
+  value: string,
+): FocusedDateDiagnostics["unsupportedFormat"] {
+  const trimmed = value.trim().replace(/^date\s*:\s*/iu, "");
+  if (/^\d{4}-\d{2}-\d{2}(?:[tT]|\s)\d{1,2}:\d{2}/u.test(trimmed)) {
+    return "iso_datetime";
+  }
+  if (/^\d{1,2}\s+[a-z]{3,9}\s+\d{4}\s+(?:at|,)/iu.test(trimmed)) {
+    return "english_month_with_connector";
+  }
+  if (/^\d{1,2}\s+[a-z]{3,9}\s+\d{4}\S+/iu.test(trimmed)) {
+    return "english_month_extra";
+  }
+  if (/\d{1,4}[/.]\d{1,2}[/.]\d{1,4}/u.test(trimmed)) {
+    return "numeric_delimited";
+  }
+  return "other";
+}
+
+function redactDateValueShape(value: string): string {
+  return Array.from(value.trim().slice(0, 96), (character) => {
+    if (/\p{Nd}/u.test(character)) return "0";
+    if (/[a-z]/iu.test(character)) return "A";
+    if (/\p{L}/u.test(character)) return "L";
+    if (/\s/u.test(character)) return " ";
+    return "-/:.,+()[]".includes(character) ? character : "?";
+  }).join("");
+}
+
+function parseProductionFocusedDate(text: string): {
+  fields: ParsedFields;
+  diagnostics: FocusedDateDiagnostics;
+} {
+  const parsed = extractBalancedJson(text);
+  const diagnosticBase = {
+    responseCharacters: text.length,
+    jsonParsed: parsed !== undefined,
+  };
+  if (parsed === undefined) {
+    return {
+      fields: emptyParsedFields(),
+      diagnostics: { ...diagnosticBase, outcome: "unparseable_json" },
+    };
+  }
+  const hasDate = Object.hasOwn(parsed, "date");
+  const hasAlias = Object.hasOwn(parsed, "due_date");
+  if (!hasDate && !hasAlias) {
+    return {
+      fields: emptyParsedFields(),
+      diagnostics: { ...diagnosticBase, outcome: "missing" },
+    };
+  }
+  if (hasDate && hasAlias && !Object.is(parsed.date, parsed.due_date)) {
+    return {
+      fields: emptyParsedFields(),
+      diagnostics: { ...diagnosticBase, outcome: "conflicting_alias" },
+    };
+  }
+  const value = hasDate ? parsed.date : parsed.due_date;
+  if (typeof value !== "string") {
+    return {
+      fields: emptyParsedFields(),
+      diagnostics: { ...diagnosticBase, outcome: "non_string" },
+    };
+  }
+  const normalized = normalizeProductionDate(value);
+  if (normalized === undefined) {
+    return {
+      fields: emptyParsedFields(),
+      diagnostics: {
+        ...diagnosticBase,
+        outcome: "unsupported",
+        unsupportedFormat: classifyUnsupportedDateFormat(value),
+        unsupportedValueCharacters: value.length,
+        unsupportedValueShape: redactDateValueShape(value),
+      },
+    };
+  }
+  return {
+    fields: { ...emptyParsedFields(), date: normalized.date },
+    diagnostics: { ...diagnosticBase, outcome: normalized.outcome },
+  };
+}
+
+function parseProductionFields(text: string): ParsedProductionFields {
+  const parsed = extractBalancedJson(text);
+  const note =
+    typeof parsed?.note === "string" && parsed.note.trim() !== ""
+      ? parsed.note.trim().slice(0, 200)
+      : null;
+  return { ...parseAllowedFields(text), note };
+}
+
+function emptyParsedFields(): ParsedFields {
+  return {
+    amount: null,
+    currency: null,
+    kind: null,
+    direction: null,
+    date: null,
+  };
+}
+
+function mergeProductionImagePasses(
+  primary: ParsedProductionFields,
+  focusedDate: ParsedFields,
+): ParsedProductionFields {
+  return {
+    amount: primary.amount,
+    currency: primary.currency,
+    kind: primary.kind,
+    // Image extraction has no authenticated chat-user viewpoint. Production strips direction
+    // from both bounded image passes, so retain that raw contract in the acceptance evidence.
+    direction: null,
+    date: focusedDate.date,
+    note: primary.note,
+  };
+}
+
+function reportableFields(fields: ParsedProductionFields): ParsedFields {
+  return {
+    amount: fields.amount,
+    currency: fields.currency,
+    kind: fields.kind,
+    direction: fields.direction,
+    date: fields.date,
+  };
 }
 
 function exactExpected(observed: ParsedFields): boolean {
@@ -409,15 +725,97 @@ function exactExpected(observed: ParsedFields): boolean {
   );
 }
 
-function completeStageEvidence(evidence: StageEvidence): boolean {
+function completeStageEvidence(
+  evidence: StageEvidence,
+  requestedRuns: number,
+): boolean {
   return (
-    evidence.stagedDecoderMarkers >= 2 &&
-    evidence.tiedEmbeddingReuse &&
-    evidence.normalizedImageInputMarkers >= 1 &&
+    evidence.stagedDecoderMarkers >= 2 * requestedRuns &&
+    evidence.tiedEmbeddingReuseMarkers >= requestedRuns &&
+    evidence.normalizedImageInputMarkers >= requestedRuns &&
+    evidence.promptToDecoderRetirements.started >= requestedRuns &&
+    evidence.promptToDecoderRetirements.completed >= requestedRuns &&
+    evidence.decoderTeardownRetirements.started >= requestedRuns &&
+    evidence.decoderTeardownRetirements.completed >= requestedRuns &&
+    evidence.retirementFailures === 0 &&
     Object.values(evidence.sessions).every(
-      (session) => session.started >= 1 && session.completed >= 1,
+      (session) =>
+        session.started >= requestedRuns && session.completed >= requestedRuns,
     )
   );
+}
+
+function snapshotStageEvidence(evidence: StageEvidence): StageEvidence {
+  return {
+    sequentialLoaderMarkers: evidence.sequentialLoaderMarkers,
+    stagedDecoderMarkers: evidence.stagedDecoderMarkers,
+    tiedEmbeddingReuse: evidence.tiedEmbeddingReuse,
+    tiedEmbeddingReuseMarkers: evidence.tiedEmbeddingReuseMarkers,
+    normalizedImageInputMarkers: evidence.normalizedImageInputMarkers,
+    promptToDecoderRetirements: { ...evidence.promptToDecoderRetirements },
+    decoderTeardownRetirements: { ...evidence.decoderTeardownRetirements },
+    retirementFailures: evidence.retirementFailures,
+    sessions: {
+      embed_tokens: { ...evidence.sessions.embed_tokens },
+      vision_encoder: { ...evidence.sessions.vision_encoder },
+      decoder_model_merged: { ...evidence.sessions.decoder_model_merged },
+    },
+    sequence: [...evidence.sequence],
+  };
+}
+
+function stageEvidenceDelta(
+  before: StageEvidence,
+  after: StageEvidence,
+): StageEvidence {
+  const sessionDelta = (session: SessionName): SessionEvidence => {
+    const started =
+      after.sessions[session].started - before.sessions[session].started;
+    const completed =
+      after.sessions[session].completed - before.sessions[session].completed;
+    return {
+      started,
+      completed,
+      ...(completed > 0 && after.sessions[session].lastCompletedMs !== undefined
+        ? { lastCompletedMs: after.sessions[session].lastCompletedMs }
+        : {}),
+    };
+  };
+  const tiedEmbeddingReuseMarkers =
+    after.tiedEmbeddingReuseMarkers - before.tiedEmbeddingReuseMarkers;
+  return {
+    sequentialLoaderMarkers:
+      after.sequentialLoaderMarkers - before.sequentialLoaderMarkers,
+    stagedDecoderMarkers:
+      after.stagedDecoderMarkers - before.stagedDecoderMarkers,
+    tiedEmbeddingReuse: tiedEmbeddingReuseMarkers > 0,
+    tiedEmbeddingReuseMarkers,
+    normalizedImageInputMarkers:
+      after.normalizedImageInputMarkers - before.normalizedImageInputMarkers,
+    promptToDecoderRetirements: {
+      started:
+        after.promptToDecoderRetirements.started -
+        before.promptToDecoderRetirements.started,
+      completed:
+        after.promptToDecoderRetirements.completed -
+        before.promptToDecoderRetirements.completed,
+    },
+    decoderTeardownRetirements: {
+      started:
+        after.decoderTeardownRetirements.started -
+        before.decoderTeardownRetirements.started,
+      completed:
+        after.decoderTeardownRetirements.completed -
+        before.decoderTeardownRetirements.completed,
+    },
+    retirementFailures: after.retirementFailures - before.retirementFailures,
+    sessions: {
+      embed_tokens: sessionDelta("embed_tokens"),
+      vision_encoder: sessionDelta("vision_encoder"),
+      decoder_model_merged: sessionDelta("decoder_model_merged"),
+    },
+    sequence: after.sequence.slice(before.sequence.length),
+  };
 }
 
 function sanitizeTechnicalProductError(value: unknown): string | undefined {
@@ -444,6 +842,12 @@ function sanitizeTechnicalProductError(value: unknown): string | undefined {
   return sanitized.length <= MAX_TECHNICAL_ERROR_LENGTH
     ? sanitized
     : `${sanitized.slice(0, MAX_TECHNICAL_ERROR_LENGTH - 3)}...`;
+}
+
+function sanitizeProductResultKind(value: unknown): string {
+  return value === "ok" || value === "unavailable" || value === "error"
+    ? value
+    : "invalid_result";
 }
 
 function classifyFailure(error: unknown, phase: NetworkPhase): FailureCategory {
@@ -487,6 +891,8 @@ async function releaseWakeLock(page: Page): Promise<void> {
 
 async function run(options: Options): Promise<boolean> {
   const startedAt = Date.now();
+  const inferencesPerAttempt =
+    options.promptProfile === "production-two-pass" ? 2 : 1;
   let activePhase: NetworkPhase = "setup";
   let page: Page | undefined;
   let cdpSession: CDPSession | undefined;
@@ -501,15 +907,7 @@ async function run(options: Options): Promise<boolean> {
   };
   let preloadMs: number | undefined;
   let inferenceMs: number | undefined;
-  let resultKind: string | undefined;
-  let technicalProductError: string | undefined;
-  let observed: ParsedFields = {
-    amount: null,
-    currency: null,
-    kind: null,
-    direction: null,
-    date: null,
-  };
+  const attempts: AttemptEvidence[] = [];
   const stageEvidence = emptyStageEvidence();
   const network = {
     modelRequests: emptyPhaseCounts(),
@@ -712,56 +1110,179 @@ async function run(options: Options): Promise<boolean> {
 
     activePhase = "inference";
     const inferenceStartedAt = Date.now();
-    const productResult = await page.evaluate(
-      async ({ imageUrl, inferenceModuleUrl, prompt, maxTokens }) => {
-        const inference = await import(inferenceModuleUrl);
-        const response = await fetch(imageUrl, {
-          cache: "no-store",
-          credentials: "same-origin",
-        });
-        if (!response.ok) throw new Error("receipt image could not be loaded");
-        const image = new Uint8Array(await response.arrayBuffer());
-        try {
-          return await inference.transformersWebGpuInfer({
-            prompt,
-            image,
-            maxTokens,
-          });
-        } finally {
-          await inference.disposeTransformersWebGpuInference();
+    for (let attempt = 1; attempt <= options.runs; attempt++) {
+      const attemptStartedAt = Date.now();
+      const stagesBefore = snapshotStageEvidence(stageEvidence);
+      const modelRequestsBefore = network.modelRequests.inference;
+      const ocrRequestsBefore = network.ocrRequests.inference;
+      const blockedOcrRequestsBefore = network.blockedOcrRequests;
+      let resultKind = "exception";
+      let attemptFailureCategory: FailureCategory | undefined;
+      let technicalProductError: string | undefined;
+      let observed = emptyParsedFields();
+      let focusedDateDiagnostics: FocusedDateDiagnostics | undefined;
+
+      try {
+        const productResult = await page.evaluate(
+          async ({
+            imageUrl,
+            inferenceModuleUrl,
+            promptProfile,
+            singlePassPrompt,
+            primaryPrompt,
+            datePrompt,
+            singlePassMaxTokens,
+            primaryMaxTokens,
+            focusedDateMaxTokens,
+          }) => {
+            const inference = await import(inferenceModuleUrl);
+            const response = await fetch(imageUrl, {
+              cache: "no-store",
+              credentials: "same-origin",
+            });
+            if (!response.ok) {
+              throw new Error("receipt image could not be loaded");
+            }
+            const image = new Uint8Array(await response.arrayBuffer());
+            const runPass = async (prompt: string, maxTokens: number) => {
+              try {
+                return await inference.transformersWebGpuInfer({
+                  prompt,
+                  image,
+                  maxTokens,
+                });
+              } finally {
+                await inference.disposeTransformersWebGpuInference();
+              }
+            };
+            if (promptProfile === "single-pass") {
+              const single = await runPass(
+                singlePassPrompt,
+                singlePassMaxTokens,
+              );
+              return { profile: promptProfile, single };
+            }
+            const primary = await runPass(primaryPrompt, primaryMaxTokens);
+            if (primary?.kind !== "ok") {
+              return { profile: promptProfile, primary };
+            }
+            const date = await runPass(datePrompt, focusedDateMaxTokens);
+            return { profile: promptProfile, primary, date };
+          },
+          {
+            imageUrl: `${options.origin}${IMAGE_PATH}`,
+            inferenceModuleUrl: `${options.origin}${INFERENCE_MODULE_PATH}`,
+            promptProfile: options.promptProfile,
+            singlePassPrompt: PROMPT,
+            primaryPrompt: IOU_IMAGE_EXTRACTION_PROMPT,
+            datePrompt: IOU_IMAGE_DATE_EXTRACTION_PROMPT,
+            singlePassMaxTokens: SINGLE_PASS_MAX_OUTPUT_TOKENS,
+            primaryMaxTokens: PRIMARY_MAX_OUTPUT_TOKENS,
+            focusedDateMaxTokens: FOCUSED_DATE_MAX_OUTPUT_TOKENS,
+          },
+        );
+        const singleResult = productResult?.single;
+        const primaryResult = productResult?.primary;
+        const dateResult = productResult?.date;
+        const passes =
+          options.promptProfile === "single-pass"
+            ? [singleResult]
+            : [primaryResult, dateResult];
+        const failedPass = passes.find((pass) => pass?.kind !== "ok");
+        resultKind = sanitizeProductResultKind(
+          failedPass?.kind ?? passes.at(-1)?.kind,
+        );
+        if (
+          options.promptProfile === "single-pass" &&
+          singleResult?.kind === "ok" &&
+          typeof singleResult.text === "string"
+        ) {
+          // The raw string remains in process memory only long enough to retain the five
+          // allowlisted fields. It is never logged, hashed, or written to the report.
+          observed = parseAllowedFields(singleResult.text);
+        } else if (
+          options.promptProfile === "production-two-pass" &&
+          primaryResult?.kind === "ok" &&
+          typeof primaryResult.text === "string" &&
+          dateResult?.kind === "ok" &&
+          typeof dateResult.text === "string"
+        ) {
+          const focusedDate = parseProductionFocusedDate(dateResult.text);
+          focusedDateDiagnostics = focusedDate.diagnostics;
+          observed = reportableFields(
+            mergeProductionImagePasses(
+              parseProductionFields(primaryResult.text),
+              focusedDate.fields,
+            ),
+          );
+        } else {
+          technicalProductError = sanitizeTechnicalProductError(
+            failedPass?.error,
+          );
+          const productFailure =
+            technicalProductError !== undefined
+              ? technicalProductError
+              : typeof failedPass?.reason === "string"
+                ? failedPass.reason
+                : "production inference failed";
+          throw new Error(productFailure);
         }
-      },
-      {
-        imageUrl: `${options.origin}${IMAGE_PATH}`,
-        inferenceModuleUrl: `${options.origin}${INFERENCE_MODULE_PATH}`,
-        prompt: PROMPT,
-        maxTokens: MAX_OUTPUT_TOKENS,
-      },
-    );
-    inferenceMs = Date.now() - inferenceStartedAt;
-    resultKind =
-      typeof productResult?.kind === "string"
-        ? productResult.kind
-        : "invalid_result";
-    if (
-      productResult?.kind === "ok" &&
-      typeof productResult.text === "string"
-    ) {
-      // The raw string remains in process memory only long enough to retain the five allowlisted
-      // fields. It is never logged, hashed, or written to the report.
-      observed = parseAllowedFields(productResult.text);
-    } else {
-      technicalProductError = sanitizeTechnicalProductError(
-        productResult?.error,
+      } catch (error) {
+        attemptFailureCategory = classifyFailure(error, "inference");
+        if (technicalProductError === undefined) {
+          technicalProductError = sanitizeTechnicalProductError(
+            error instanceof Error ? error.message : String(error),
+          );
+        }
+      }
+
+      const stageDeltas = stageEvidenceDelta(stagesBefore, stageEvidence);
+      const modelRequests =
+        network.modelRequests.inference - modelRequestsBefore;
+      const ocrRequests = network.ocrRequests.inference - ocrRequestsBefore;
+      const blockedOcrRequests =
+        network.blockedOcrRequests - blockedOcrRequestsBefore;
+      if (ocrRequests > 0 || blockedOcrRequests > 0) {
+        attemptFailureCategory = "ocr_request_blocked";
+      }
+      const exact = exactExpected(observed);
+      attempts.push({
+        attempt,
+        elapsedMs: Date.now() - attemptStartedAt,
+        result: {
+          kind: resultKind,
+          failureCategory: attemptFailureCategory,
+          technicalProductError,
+        },
+        observed,
+        focusedDateDiagnostics,
+        exact,
+        networkDeltas: {
+          modelRequests,
+          ocrRequests,
+          blockedOcrRequests,
+        },
+        stageDeltas: {
+          complete: completeStageEvidence(stageDeltas, inferencesPerAttempt),
+          ...stageDeltas,
+        },
+      });
+      process.stdout.write(
+        `${JSON.stringify({
+          attempt,
+          requestedRuns: options.runs,
+          resultKind,
+          failureCategory: attemptFailureCategory,
+          technicalProductError,
+          exact,
+          qwenStageEvidenceComplete: completeStageEvidence(
+            stageDeltas,
+            inferencesPerAttempt,
+          ),
+        })}\n`,
       );
-      const productFailure =
-        technicalProductError !== undefined
-          ? technicalProductError
-          : typeof productResult?.reason === "string"
-            ? productResult.reason
-            : "production inference failed";
-      throw new Error(productFailure);
     }
+    inferenceMs = Date.now() - inferenceStartedAt;
   } catch (error) {
     failureCategory = classifyFailure(error, activePhase);
   } finally {
@@ -776,11 +1297,34 @@ async function run(options: Options): Promise<boolean> {
     Object.values(network.ocrRequests).some((count) => count > 0)
   ) {
     failureCategory = "ocr_request_blocked";
+  } else if (failureCategory === undefined) {
+    failureCategory = attempts.find(
+      (attempt) => attempt.result.failureCategory !== undefined,
+    )?.result.failureCategory;
   }
-  const stageEvidenceComplete = completeStageEvidence(stageEvidence);
-  const exact = exactExpected(observed);
+  const runtimeStable =
+    attempts.length === options.runs &&
+    attempts.every(
+      (attempt) =>
+        attempt.result.kind === "ok" &&
+        attempt.result.failureCategory === undefined,
+    );
+  const stageEvidenceComplete =
+    attempts.length === options.runs &&
+    attempts.every((attempt) => attempt.stageDeltas.complete) &&
+    completeStageEvidence(stageEvidence, options.runs * inferencesPerAttempt);
+  const exact =
+    attempts.length === options.runs &&
+    attempts.every((attempt) => attempt.exact);
+  const lastAttempt = attempts.at(-1);
+  const resultKind = lastAttempt?.result.kind;
+  const technicalProductError = attempts.find(
+    (attempt) => attempt.result.technicalProductError !== undefined,
+  )?.result.technicalProductError;
+  const observed = lastAttempt?.observed ?? emptyParsedFields();
   const pass =
     failureCategory === undefined &&
+    runtimeStable &&
     manifest?.finallyVerified === true &&
     preflight.androidChrome &&
     preflight.crossOriginIsolated &&
@@ -793,11 +1337,12 @@ async function run(options: Options): Promise<boolean> {
     exact;
 
   const report = {
-    format: "iou-physical-android-production-transformers-webgpu-v1",
+    format: "iou-physical-android-production-transformers-webgpu-v2",
     pass,
     privacy: {
       rawImagePersisted: false,
       rawModelOutputPersisted: false,
+      focusedDateDiagnosticsSanitized: true,
       technicalProductErrorSanitized: true,
       imagePathPersisted: false,
       originPersisted: false,
@@ -811,7 +1356,16 @@ async function run(options: Options): Promise<boolean> {
       browserProfilePreserved: true,
       ocrImported: false,
       ocrEnabled: false,
-      maxOutputTokens: MAX_OUTPUT_TOKENS,
+      outputTokenBudgets:
+        options.promptProfile === "production-two-pass"
+          ? {
+              primary: PRIMARY_MAX_OUTPUT_TOKENS,
+              focusedDate: FOCUSED_DATE_MAX_OUTPUT_TOKENS,
+            }
+          : { singlePass: SINGLE_PASS_MAX_OUTPUT_TOKENS },
+      requestedRuns: options.runs,
+      promptProfile: options.promptProfile,
+      inferencesPerAttempt,
     },
     browser: preflight,
     model: manifest,
@@ -820,6 +1374,9 @@ async function run(options: Options): Promise<boolean> {
       modelRequests: network.modelRequests.preload,
     },
     inference: {
+      requestedRuns: options.runs,
+      completedRuns: attempts.length,
+      runtimeStable,
       elapsedMs: inferenceMs,
       resultKind,
       failureCategory,
@@ -829,6 +1386,7 @@ async function run(options: Options): Promise<boolean> {
       exact,
       modelRequests: network.modelRequests.inference,
       ocrRequests: network.ocrRequests.inference,
+      attempts,
     },
     network: {
       modelRequests: network.modelRequests,
@@ -852,6 +1410,9 @@ async function run(options: Options): Promise<boolean> {
     `${JSON.stringify({
       report: safeOutputLabel(options.outputPath),
       pass,
+      requestedRuns: options.runs,
+      completedRuns: attempts.length,
+      runtimeStable,
       failureCategory,
       technicalProductError,
       exact,
@@ -868,7 +1429,7 @@ try {
   options = parseArguments(process.argv.slice(2));
 } catch {
   process.stderr.write(
-    "Usage: provide --cdp, --origin, --image, and a JSON --output under output/playwright.\n",
+    "Usage: provide --cdp, --origin, --image, and a JSON --output under output/playwright; optional --runs must be 1..10 and --prompt-profile must be production-two-pass or single-pass.\n",
   );
   process.exit(2);
 }

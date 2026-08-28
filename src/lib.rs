@@ -8788,6 +8788,50 @@ mod tests {
     }
 
     #[test]
+    fn source_grounded_reservation_range_card_passes_exact_attestation() {
+        let configured = test_ai_app_v2_binding();
+        let link = test_card_link();
+        let mut binding = test_card_attestation_binding();
+        binding.commitment.content.confirm_payload = Some(
+            br#"{"amount":700,"kind":"iou","direction":"debt","message":"Reservation 1-20 August 700 USD","currency":"USD","date":"2026-08-01","note":"Reservation"}"#.to_vec(),
+        );
+        binding.commitment.content.rows = vec![
+            AttestedActionCardRow {
+                label: "Amount".into(),
+                value: "700".into(),
+            },
+            AttestedActionCardRow {
+                label: "Currency".into(),
+                value: "USD".into(),
+            },
+            AttestedActionCardRow {
+                label: "Type".into(),
+                value: "iou".into(),
+            },
+            AttestedActionCardRow {
+                label: "Direction".into(),
+                value: "debt".into(),
+            },
+            AttestedActionCardRow {
+                label: "Date".into(),
+                value: "2026-08-01".into(),
+            },
+            AttestedActionCardRow {
+                label: "Note".into(),
+                value: "Reservation".into(),
+            },
+        ];
+
+        assert!(attests_exact_iou_card(
+            &binding,
+            Some(&configured),
+            Some(&link),
+            p(3),
+            p(1),
+        ));
+    }
+
+    #[test]
     fn multi_card_attestation_requires_labeled_manifest_order_summaries() {
         let configured = test_ai_app_v2_binding();
         let link = test_card_link();

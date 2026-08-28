@@ -29,6 +29,7 @@
     "test:ui": "playwright test",
     "test:live:openchat:propose": "tsx scripts/live/verify-nomodel-guide.ts",
     "test:live:openchat:journey": "tsx scripts/live/journey-fanout.ts",
+    "test:live:openchat:models": "tsx scripts/live/model-acceptance-matrix.ts",
     "ui:demo": "tsx scripts/ui-multiuser-demo.ts",
     "mcp:serve": "pnpm exec tsx scripts/iou-mcp/server.ts",
     "mcp:selftest": "pnpm exec tsx scripts/iou-mcp/selftest.ts",

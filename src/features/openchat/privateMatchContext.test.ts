@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   exactPrivateMatchSource,
+  privateTypeMatchTermSets,
   privateMatchSourceHashV1,
   uniquePrivateKeywordMatch,
 } from "./privateMatchContext";
@@ -26,6 +27,27 @@ describe("private-match exact source commitment", () => {
 });
 
 describe("private Saved-type keyword decision", () => {
+  it("includes the private saved Type name even when no trigger keywords were configured", () => {
+    const terms = privateTypeMatchTermSets([
+      { name: "Reservation", keywords: [] },
+      { name: "School", keywords: ["tuition"] },
+    ]);
+
+    expect(terms).toEqual([["Reservation"], ["School", "tuition"]]);
+    expect(uniquePrivateKeywordMatch(terms, "Reservation 1-20 August 700 USD")).toBe(true);
+    expect(uniquePrivateKeywordMatch(terms, "PreReservation 1-20 August 700 USD")).toBe(false);
+  });
+
+  it("deduplicates a Type name repeated as a trigger without hiding cross-Type ambiguity", () => {
+    const terms = privateTypeMatchTermSets([
+      { name: "Reservation", keywords: [" reservation ", "BOOKING"] },
+      { name: "Booking", keywords: ["reservation"] },
+    ]);
+
+    expect(terms).toEqual([["Reservation", "BOOKING"], ["Booking", "reservation"]]);
+    expect(uniquePrivateKeywordMatch(terms, "reservation 700 USD")).toBe(false);
+  });
+
   it("returns true for exactly one Saved type and fails collisions closed", () => {
     expect(uniquePrivateKeywordMatch([["school", "tuition"], ["groceries"]], "School fee 350")).toBe(true);
     expect(uniquePrivateKeywordMatch([["school"], ["fee"]], "School fee 350")).toBe(false);

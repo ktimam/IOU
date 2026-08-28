@@ -521,8 +521,8 @@ export function TemplatesManager({
               placeholder="reservation, deposit, booking"
             />
             <span className="muted small">
-              Comma-separated and encrypted with this account. The type name is not an automatic
-              trigger; add the name here too if you want it to match. In OpenChat, connect IOU for a
+              Comma-separated and encrypted with this account. The Type name matches automatically.
+              Add only extra words or phrases here. In OpenChat, connect IOU for a
               direct chat; for a group or channel, connect IOU and have an admin enable it there. Then
               link that exact chat to this IOU account. New matching messages observed while that
               chat is open then suggest IOU automatically and select this Saved type without

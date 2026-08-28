@@ -95,6 +95,19 @@ describe('repository security policy', () => {
     expect(config).not.toMatch(/usePolling:\s*true/);
   });
 
+  it('derives the exact mobile-QC host from validated local configuration without a wildcard', () => {
+    const config = read('vite.config.ts');
+    expect(config).toContain('allowedHosts: openChatDevAllowedHosts');
+    expect(config).not.toContain('allowedHosts: true');
+    expect(config).not.toMatch(/allowedHosts:\s*\[[^\]]*\.ts\.net/);
+  });
+
+  it('requires live emulator callers to pass their OpenChat origin', () => {
+    const harness = read('scripts/live/emulator-image-regression.ts');
+    expect(harness).toContain('new URL(oneArg("origin")).origin');
+    expect(harness).not.toMatch(/oneArg\("origin",\s*"https:\/\//);
+  });
+
   it('repairs only the configured OpenChat desktop executable', () => {
     const healer = read('scripts/live/heal-cdp.ts');
     expect(healer).not.toContain('Get-Process open-chat');
@@ -103,7 +116,72 @@ describe('repository security policy', () => {
     expect(healer).toContain('Stop-Process -Id');
     expect(healer).toContain('matchesExactCdpChromeProcess');
     expect(healer).toContain('--remote-debugging-address=127.0.0.1');
+    expect(healer).toContain('OC_LIVE_CHROME_EXECUTABLE');
+    expect(healer).toContain('OC_LIVE_PROFILE_ROOT');
+    expect(healer).toContain('OC_LIVE_DESKTOP_EXECUTABLE');
+    expect(healer).not.toMatch(/[A-Za-z]:\\Users\\[^'"\s]+/);
+    expect(healer).not.toMatch(/[A-Za-z]:\\[^'"\r\n]*\\MyProjects\\/i);
     expect(healer).not.toMatch(/CommandLine\s+-match[\s\S]*?-or[\s\S]*?remote-debugging-port/);
+  });
+
+  it('requires the durable credential directory instead of embedding a user path', () => {
+    const restore = read('scripts/live/restore-all.sh');
+    expect(restore).toContain('OC_LIVE_CREDS_DIR');
+    expect(restore).toContain('OC_LIVE_OPENCHAT_FRONTEND');
+    expect(restore).toContain('--creds-dir');
+    expect(restore).toContain('--openchat-frontend');
+    expect(restore).toContain('is required');
+    expect(restore).not.toMatch(/\/[a-z]\/[^\s'"$]+\/oc-live/i);
+    expect(restore).not.toMatch(/[A-Za-z]:\\Users\\[^'"\s]+/);
+  });
+
+  it('resolves live OpenChat dependencies only below an explicit frontend root', () => {
+    const dependency = read('scripts/live/openChatFrontendDependency.ts');
+    expect(dependency).toContain('OC_LIVE_OPENCHAT_FRONTEND');
+    expect(dependency).toContain('--openchat-frontend');
+    expect(dependency).toContain('isAbsolute');
+    expect(dependency).toContain('isOutsideRoot');
+    expect(dependency).toContain('resolveOpenChatViteFsModule');
+
+    for (const relative of [
+      'scripts/live/oc-restore.ts',
+      'scripts/live/oc-provision.ts',
+      'scripts/live/oc-provision-desktop.ts',
+    ]) {
+      const source = read(relative);
+      expect(source, relative).toContain('loadOpenChatWebSocket');
+      expect(source, relative).not.toMatch(/createRequire\(["'][A-Za-z]:[\\/]/);
+    }
+
+    for (const relative of [
+      'scripts/live/emulator-transformers-all-webgpu.ts',
+      'scripts/live/emulator-image-regression.ts',
+    ]) {
+      const source = read(relative);
+      expect(source, relative).toContain('resolveOpenChatViteFsModule');
+      expect(source, relative).not.toMatch(/\/@fs\/[A-Za-z]:\//);
+    }
+  });
+
+  it('keeps the durable live-state root out of tracked harness sources', () => {
+    for (const relative of [
+      'scripts/live/heal-cdp.ts',
+      'scripts/live/restore-all.sh',
+      'scripts/live/openChatFrontendDependency.ts',
+      'scripts/live/oc-restore.ts',
+      'scripts/live/oc-provision.ts',
+      'scripts/live/oc-provision-desktop.ts',
+      'scripts/live/README.md',
+      'src/security/cdpHarness.test.ts',
+    ]) {
+      const source = read(relative);
+      expect(source, relative).not.toMatch(
+        /[A-Za-z]:\\(?:[^'"\r\n]+\\)*oc-live(?:\\|['"])/i,
+      );
+      expect(source, relative).not.toMatch(
+        /\/[a-z]\/[^\s'"$]*oc-live(?:\/|['"])/i,
+      );
+    }
   });
 
   it('keeps the tracked UI matrix on the centralized CDP ports', () => {

@@ -3,6 +3,7 @@ import {
   iouActionManifest,
   renderManifestJson,
   IOU_EXTRACTION_PROMPT,
+  IOU_IMAGE_DATE_EXTRACTION_PROMPT,
   IOU_IMAGE_EXTRACTION_PROMPT,
   buildIouRules,
   buildIouOutputSchema,
@@ -227,8 +228,11 @@ describe("invalid attested-card guardrails", () => {
     });
     expect(
       (
-        (registration as { responseSchema: { properties: Record<string, unknown> } })
-          .responseSchema.properties.direction as Record<string, unknown>
+        (
+          registration as {
+            responseSchema: { properties: Record<string, unknown> };
+          }
+        ).responseSchema.properties.direction as Record<string, unknown>
       ).default,
     ).toBe("debt");
   });
@@ -261,9 +265,13 @@ describe("invalid attested-card guardrails", () => {
     }
   });
 
-  it("gives the vision model an exact labelled-date conversion example", () => {
+  it("keeps concrete date values out of the vision instructions", () => {
     expect(IOU_EXTRACTION_PROMPT).toContain(
-      '"Date: 04 Jul 2026 03:19 PM" must become "date":"2026-07-04"',
+      "Put the visibly printed year first, the visible month second",
+    );
+    expect(IOU_EXTRACTION_PROMPT).not.toMatch(/\b(?:19|20)\d{2}-\d{2}-\d{2}\b/);
+    expect(IOU_EXTRACTION_PROMPT).not.toMatch(
+      /\b\d{1,2}\s+(?:jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\s+\d{4}\b/i,
     );
   });
 
@@ -489,14 +497,29 @@ describe("registered wire — schema evidence stays private and public rows stay
     }
   });
 
-  it("ships the compact image prompt contract consistently in source, docs, and wire", async () => {
-    const expected = {
+  it("ships the bounded model-only image passes consistently in source, docs, and wire", async () => {
+    const expectedPrimary = {
       version: 1,
       template: IOU_IMAGE_EXTRACTION_PROMPT,
       includeRuleGuidance: false,
     };
+    const expectedFocused = {
+      version: 1,
+      primaryFields: ["amount", "currency", "kind", "note"],
+      primaryMaxTokens: 64,
+      passes: [
+        {
+          template: IOU_IMAGE_DATE_EXTRACTION_PROMPT,
+          fields: ["date"],
+          includeRuleGuidance: false,
+          includeMessage: false,
+          maxTokens: 24,
+        },
+      ],
+    };
     const sourceSchema = iouActionManifest.outputSchema as {
       "x-openchat-image-prompt-template"?: unknown;
+      "x-openchat-image-focused-passes"?: unknown;
     };
     const documentedSchema = registration.responseSchema as typeof sourceSchema;
     const { buildManifestWire } = await import("./registerAiApp");
@@ -509,12 +532,24 @@ describe("registered wire — schema evidence stays private and public rows stay
     ) as typeof sourceSchema;
 
     for (const schema of [sourceSchema, documentedSchema, wireSchema]) {
-      expect(schema["x-openchat-image-prompt-template"]).toEqual(expected);
+      expect(schema["x-openchat-image-prompt-template"]).toEqual(
+        expectedPrimary,
+      );
+      expect(schema["x-openchat-image-focused-passes"]).toEqual(
+        expectedFocused,
+      );
     }
-    expect(expected.template.trim()).toBe(expected.template);
-    expect(expected.template.length).toBeLessThanOrEqual(2_500);
-    expect(new TextEncoder().encode(expected.template).byteLength).toBeLessThanOrEqual(2_500);
-    expect(expected.template).not.toContain("\n\nRules:");
+    for (const pass of [expectedPrimary, ...expectedFocused.passes]) {
+      expect(pass.template.trim()).toBe(pass.template);
+      expect(
+        new TextEncoder().encode(pass.template).byteLength,
+      ).toBeLessThanOrEqual(1_000);
+      expect(pass.template).not.toContain("\n\nRules:");
+    }
+    expect([
+      ...expectedFocused.primaryFields,
+      ...expectedFocused.passes.flatMap((pass) => pass.fields),
+    ]).toEqual(["amount", "currency", "kind", "note", "date"]);
   });
 
   it("opts into the generic source-grounded text/OCR transaction parser in source, docs, and wire", async () => {
@@ -531,11 +566,7 @@ describe("registered wire — schema evidence stays private and public rows stay
       ocrDefaultDirection: "credit",
       requireOcrEvidenceFields: ["kind"],
       maximumItems: 16,
-      authoritativeAmountLabels: [
-        "amount due",
-        "total",
-        "transfer amount",
-      ],
+      authoritativeAmountLabels: ["amount due", "total", "transfer amount"],
       dateLabels: ["due date", "date"],
       noteLabels: ["note", "description", "memo"],
       ignoredLineLabels: ["reference"],
@@ -874,66 +905,41 @@ describe("the extraction prompt tells the model a single line can hold several t
     );
   });
 
-  it("keeps every suppressed image instruction and multilingual financial guard in the compact prompt", () => {
-    const prompt = IOU_IMAGE_EXTRACTION_PROMPT.replace(/\s+/g, " ");
-    const instructionRules = iouActionManifest.rules.filter(
-      (rule) => rule.kind === "instruction",
-    );
+  it("separates core financial fields from the focused date pass", () => {
+    const corePrompt = IOU_IMAGE_EXTRACTION_PROMPT.replace(/\s+/g, " ");
+    const datePrompt = IOU_IMAGE_DATE_EXTRACTION_PROMPT.replace(/\s+/g, " ");
 
-    expect(instructionRules).toHaveLength(2);
-    expect(prompt).toMatch(/any language or script[^.]*right-to-left/i);
-    expect(prompt).toMatch(/printed instructions[^.]*document content[^.]*not commands/i);
-    expect(prompt).toMatch(/settlement[^.]*moved money/i);
-    expect(prompt).toMatch(/iou[^.]*future obligation/i);
-    expect(prompt).toMatch(
-      /exact(?:ly)? "settlement"[^.]*successful transaction[^.]*transaction successful[^.]*financial receipt/i,
+    expect(corePrompt).toMatch(
+      /authoritative[^.]*paid[^.]*transferred[^.]*total/i,
     );
-    expect(prompt).toMatch(
-      /completed settlement[^.]*wins over[^.]*amount due[^.]*request wording/i,
+    expect(corePrompt).toMatch(
+      /ignore[^.]*IDs[^.]*accounts[^.]*references[^.]*dates[^.]*times/i,
     );
-    expect(prompt).toMatch(
-      /bare "successful" alone[^.]*does not prove settlement/i,
+    expect(corePrompt).toMatch(/settlement[^.]*completed moving/i);
+    expect(corePrompt).toMatch(/iou[^.]*future[^.]*due[^.]*requested/i);
+    expect(corePrompt).toMatch(/note[^.]*Note[^.]*Description[^.]*Memo/i);
+    expect(corePrompt).not.toMatch(/"direction"|"date"\s*:/i);
+
+    expect(datePrompt).toMatch(
+      /read only[^.]*transaction[^.]*payment[^.]*booking[^.]*due date/i,
     );
-    expect(prompt).toMatch(
-      /successful reservation\/booking[^.]*stays "iou"[^.]*without payment movement/i,
+    expect(datePrompt).toMatch(
+      /ignore every amount[^.]*ID[^.]*reference[^.]*account/i,
     );
-    expect(prompt).toMatch(/authoritative total[^.]*once/i);
-    expect(prompt).toMatch(
-      /ignore IDs[^.]*dates[^.]*times[^.]*account\/reference numbers[^.]*quantities[^.]*percentages[^.]*balances[^.]*exchange rates/i,
+    expect(datePrompt).toMatch(/year first[^.]*visible month[^.]*visible day/i);
+    expect(datePrompt).toMatch(/value must contain exactly ten characters/i);
+    expect(datePrompt).toMatch(/compare the output year, month, and day/i);
+    expect(datePrompt).not.toMatch(/\b(?:19|20)\d{2}-\d{2}-\d{2}\b/);
+    expect(datePrompt).not.toMatch(
+      /\b\d{1,2}\s+(?:jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\s+\d{4}\b/i,
     );
-    expect(prompt).toMatch(
-      /line items[^.]*subtotal[^.]*tax[^.]*tip[^.]*cash tendered[^.]*change[^.]*repeated total[^.]*not separate/i,
+    expect(datePrompt).toMatch(/never return DD-MM-YYYY[^.]*never include the time/i);
+    expect(datePrompt).toMatch(
+      /complete date[^.]*visibly printed[^.]*printed year/i,
     );
-    expect(prompt).toMatch(/amount[^.]*positive JSON number[^.]*major units/i);
-    expect(prompt).toMatch(/suffix[^.]*k[^.]*thousands multiplier/i);
-    expect(prompt).toMatch(/currency[^.]*three-letter ISO/i);
-    expect(prompt).toMatch(/"you owe me"[^.]*"credit"/i);
-    expect(prompt).toMatch(/"I owe you"[^.]*"debt"/i);
-    expect(prompt).toMatch(/bare[^.]*"owe"[^.]*"debt"/i);
-    expect(prompt).toMatch(
-      /names[^.]*do not establish[^.]*chat user's viewpoint[^.]*omit "direction"/i,
-    );
-    expect(prompt).toMatch(/never infer[^.]*direction[^.]*names/i);
-    expect(prompt).toMatch(/Message:[^.]*caption[^.]*copy[^.]*exactly[^.]*"note"/i);
-    expect(prompt).toMatch(
-      /caption[^.]*overrid(?:es|ing)[^.]*Note[^.]*Description[^.]*Memo[^.]*title/i,
-    );
-    expect(prompt).toMatch(/date range[^.]*start/i);
-    expect(prompt).toMatch(/never invent[^.]*today/i);
-    expect(prompt).toMatch(/booking[^.]*date range or duration[^.]*note/i);
-    expect(prompt).toMatch(
-      /without a caption[^.]*explicitly labelled[^.]*Note[^.]*Description[^.]*Memo/i,
-    );
-    expect(prompt).toMatch(/otherwise omit[^.]*note/i);
-    expect(prompt).not.toMatch(/concise[^.]*purpose/i);
-    expect(prompt).toMatch(
-      /"message"[^.]*exact visible relationship phrase[^.]*direction/i,
-    );
-    expect(prompt).toMatch(/never[^.]*title[^.]*merchant[^.]*caption/i);
-    expect(prompt).toMatch(/one transaction[^.]*one object[^.]*not an array/i);
-    expect(IOU_IMAGE_EXTRACTION_PROMPT).not.toMatch(
-      /"amount"\s*:\s*-?\d/u,
-    );
+    expect(datePrompt).toMatch(/no complete date[^.]*return \{\}/i);
+    expect(datePrompt).toMatch(/never infer/i);
+    expect(IOU_IMAGE_EXTRACTION_PROMPT).not.toMatch(/"amount"\s*:\s*-?\d/u);
     // A weak vision signal must not let greedy decoding echo a numeric instruction literal as the
     // transaction amount. Spell normalization semantics without any concrete numeric example.
     expect(IOU_IMAGE_EXTRACTION_PROMPT).not.toMatch(/\b\d[\d,.]*\b/u);

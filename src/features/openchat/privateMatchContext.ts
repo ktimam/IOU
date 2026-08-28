@@ -7,11 +7,13 @@
 import { Actor, HttpAgent } from "@dfinity/agent";
 import { sha256 } from "@noble/hashes/sha256";
 import { concatBytes, utf8ToBytes } from "@noble/hashes/utils";
+import { shouldFetchLocalRootKey } from "../../config/devLanQcRuntime";
 import { canisterId, host } from "../auth/config";
 import { unwrapSheetKeyProd } from "../crypto/prodVetkd";
 import { decryptSlot } from "../templates/pairTemplatesActor";
 import { mergePairTemplates, visibleTemplates } from "../templates/pairTemplates";
-import { keywordMatches } from "../entries/resolveTemplateBase";
+import type { TxnTemplate } from "../templates/TemplatesContext";
+import { keywordMatches, templateMatchTerms } from "../entries/resolveTemplateBase";
 import {
   decodeCanonicalCapability,
   type CardTransportSession,
@@ -47,8 +49,9 @@ type RawResult =
   | { KeyUnavailable: null };
 
 export type LoadedPrivateMatchContext = {
-  // Only keyword sets survive the immediate decrypted-roster projection. Names, ids, defaults,
-  // fees and schedules are erased before this function returns.
+  // Only per-Type private match terms survive the immediate decrypted-roster projection. Each set
+  // contains the display name followed by explicit trigger keywords. Ids, defaults, fees and
+  // schedules are erased before this function returns.
   keywordSets: string[][];
   sheetKey: Uint8Array;
   sourceBinding: Uint8Array;
@@ -201,6 +204,15 @@ export function uniquePrivateKeywordMatch(
   return matchingTypes === 1;
 }
 
+/** Project a decrypted roster to the minimum private vocabulary needed for one boolean decision. */
+export function privateTypeMatchTermSets(
+  templates: readonly Pick<TxnTemplate, "name" | "keywords">[],
+): string[][] {
+  return templates
+    .map((template) => templateMatchTerms(template))
+    .filter((terms) => terms.length > 0);
+}
+
 function eraseDecryptedTemplate(value: object): void {
   const record = value as Record<string, unknown>;
   const keywords = record.keywords;
@@ -226,7 +238,7 @@ export async function preparePrivateMatchContext(
 ): Promise<LoadedPrivateMatchContext> {
   const token = decodeCanonicalCapability(capability);
   const agent = new HttpAgent({ host });
-  if (host.includes("127.0.0.1") || host.includes("localhost")) {
+  if (shouldFetchLocalRootKey()) {
     await agent.fetchRootKey();
   }
   const actor = Actor.createActor(idl as never, { agent, canisterId }) as {
@@ -303,9 +315,7 @@ export async function preparePrivateMatchContext(
       decryptSlot(sheetKey, templatesBEnc, templatesBIv),
     ]);
     const visible = visibleTemplates(mergePairTemplates(slotA.templates, slotB.templates));
-    const keywordSets = visible
-      .map((template) => [...(template.keywords ?? [])])
-      .filter((keywords) => keywords.length > 0);
+    const keywordSets = privateTypeMatchTermSets(visible);
     // mergePairTemplates retains references into the two decrypted slots. Erasing both slots covers
     // winners, losers and tombstones before the caller receives the minimal keyword-only projection.
     for (const template of [...slotA.templates, ...slotB.templates]) {

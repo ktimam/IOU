@@ -66,6 +66,27 @@ export function keywordMatches(text: string, keyword: string): boolean {
 }
 
 /**
+ * Private match vocabulary for one saved Type. The display name is an implicit
+ * trigger because it is already private account data, just like explicit
+ * trigger keywords. Terms are trimmed and de-duplicated case-insensitively so
+ * repeating the name in the keyword field cannot change collision semantics.
+ */
+export function templateMatchTerms(
+  template: Pick<TxnTemplate, "name" | "keywords">,
+): string[] {
+  const seen = new Set<string>();
+  const terms: string[] = [];
+  for (const raw of [template.name, ...(template.keywords ?? [])]) {
+    const term = raw.trim();
+    const key = term.toLowerCase();
+    if (!term || seen.has(key)) continue;
+    seen.add(key);
+    terms.push(term);
+  }
+  return terms;
+}
+
+/**
  * Select exactly one account-local type from the draft's message evidence.
  *
  * This is shared by the signed-in import page and the credentialless OpenChat
@@ -85,7 +106,7 @@ export function matchTemplateForDraft(
     : messageEvidence(draft);
   if (!evidence.trim()) return undefined;
   const matches = allTemplates.filter((template) =>
-    (template.keywords ?? []).some((keyword) => keywordMatches(evidence, keyword)),
+    templateMatchTerms(template).some((term) => keywordMatches(evidence, term)),
   );
   return matches.length === 1 ? matches[0] : undefined;
 }

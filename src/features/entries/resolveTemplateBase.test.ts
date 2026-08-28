@@ -195,6 +195,37 @@ describe("resolveTemplateBase private local keyword matching", () => {
     );
   });
 
+  it("uses an exact whole-word saved Type name as a private implicit trigger", () => {
+    const reservation = { ...HOUSE_RESERVATION, keywords: [] };
+
+    expect(
+      matchTemplateForDraft([reservation], {
+        note: "Reservation 1-20 August 700 USD",
+      })?.id,
+    ).toBe(reservation.id);
+    expect(
+      matchTemplateForDraft([reservation], {
+        note: "PreReservation 1-20 August 700 USD",
+      }),
+    ).toBeUndefined();
+  });
+
+  it("fails saved Type-name matching closed when another Type also matches", () => {
+    const reservation = { ...HOUSE_RESERVATION, id: "reservation", keywords: [] };
+    const booking = {
+      ...HOUSE_RESERVATION,
+      id: "booking",
+      name: "Booking",
+      keywords: ["reservation"],
+    };
+
+    expect(
+      matchTemplateForDraft([reservation, booking], {
+        note: "Reservation 1-20 August 700 USD",
+      }),
+    ).toBeUndefined();
+  });
+
   it("cannot match a private type belonging only to another account", () => {
     const raw = { amount: 1000, message: "Booked a reservation for 3 July" };
     expect(resolveTemplateBase([CHILD_ALLOWANCE], raw)).toEqual({});

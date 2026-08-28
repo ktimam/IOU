@@ -57,5 +57,7 @@ So it is a **readiness/timing** failure, not a permanent rejection and not a mod
 is `no_extraction` = "The model found no action in this message"). **Retrying "Propose action" on the
 same image succeeds once the image has finished loading** (blobUrl populated) — observed directly: a
 just-sent image failed, the same receipt once settled extracted `Amount=50 USD → consumed:confirmed`.
-Note the auto-propose *chip* is dismissed on click and the message is marked evaluated, so retry via
-the message's **"Propose action" menu item**, not the chip.
+The auto-propose *chip* now disappears only after the vouched card is posted successfully. A model,
+transport, or card-verification failure leaves that exact suggestion available for retry. A full
+page refresh still does not backfill suggestions for old messages, so after refreshing use the
+message's **"Propose action" menu item**.

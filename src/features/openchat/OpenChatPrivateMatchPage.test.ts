@@ -67,9 +67,9 @@ describe("IOU private matcher isolation", () => {
     );
   });
 
-  it("explains explicit Trigger words and the required OpenChat account link", () => {
-    expect(templatesManager).toContain("type name is not an automatic");
-    expect(templatesManager).toContain("add the name here too if you want it to match");
+  it("explains implicit Type-name matching, extra Trigger words, and the required account link", () => {
+    expect(templatesManager).toContain("The Type name matches automatically");
+    expect(templatesManager).toContain("Add only extra words or phrases here");
     expect(templatesManager).toContain("connect IOU for a");
     expect(templatesManager).toContain("direct chat");
     expect(templatesManager).toContain("have an admin enable it there");
