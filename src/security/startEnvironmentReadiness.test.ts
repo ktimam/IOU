@@ -214,6 +214,13 @@ describe("live environment readiness contract", () => {
     expect(script).toContain(".codex-openchat-vite.environment.sha256");
     expect(script).toContain("startTimeUtc");
     expect(script).toContain("processId = $process.Id");
+    expect(script).toContain("$storedStartTimeUtc.Ticks");
+    expect(script).toContain(
+      "$process.StartTime.ToUniversalTime().Ticks",
+    );
+    expect(script).not.toContain(
+      '"$($stored[\'startTimeUtc\'])" -cne $startTimeUtc',
+    );
     expect(script).toContain("BaseResponse.RequestMessage.RequestUri.AbsoluteUri");
     expect(script).toContain("delegate_permission/common.get_login_creds");
     expect(script).toContain(

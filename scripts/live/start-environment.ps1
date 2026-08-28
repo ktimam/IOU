@@ -256,9 +256,22 @@ function Test-OpenChatEnvironmentStale {
     $listenerPid = Get-LoopbackListenerPid -Port 5003
     if ($null -eq $listenerPid -or [int]$stored['processId'] -ne $listenerPid) { return $true }
     $process = Get-Process -Id $listenerPid -ErrorAction Stop
-    $startTimeUtc = $process.StartTime.ToUniversalTime().ToString('O')
+    $storedStartTime = $stored['startTimeUtc']
+    if ($null -eq $storedStartTime) { return $true }
+    # PowerShell 7.5+ deserializes an ISO-8601 JSON value into DateTime. Comparing its default
+    # locale-formatted interpolation with ToString('O') makes every healthy restarted listener look
+    # stale. Normalize both values to UTC ticks so string and DateTime deserializers behave equally.
+    $storedStartTimeUtc = if ($storedStartTime -is [DateTime]) {
+      $storedStartTime.ToUniversalTime()
+    } else {
+      [DateTime]::Parse(
+        "$storedStartTime",
+        [Globalization.CultureInfo]::InvariantCulture,
+        [Globalization.DateTimeStyles]::RoundtripKind
+      ).ToUniversalTime()
+    }
     "$($stored['fingerprint'])" -cne $OpenChatEnvironmentFingerprint -or
-      "$($stored['startTimeUtc'])" -cne $startTimeUtc
+      $storedStartTimeUtc.Ticks -ne $process.StartTime.ToUniversalTime().Ticks
   } catch {
     $true
   }
