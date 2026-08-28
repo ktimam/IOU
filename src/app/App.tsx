@@ -19,6 +19,7 @@ import { SettingsPage } from "../features/settings/SettingsPage";
 import { TemplatesProvider } from "../features/templates/TemplatesContext";
 import { ConsumerKeypairSync } from "../features/openchat/ConsumerKeypairSync";
 import { DefaultCurrencySync } from "../features/settings/DefaultCurrencySync";
+import { ProfileNameSync } from "../features/settings/ProfileNameSync";
 import { ManifestTypesSync } from "../features/openchat/ManifestTypesSync";
 import { EmbeddedBanner } from "../features/openchat/EmbeddedBanner";
 import { OpenChatCardPage } from "../features/openchat/OpenChatCardPage";
@@ -81,6 +82,9 @@ function SessionProviders() {
             {/* Pulls the user's ONE default currency from the canister (and pushes a
                 browser-only value up once), so it follows them across devices. */}
             <DefaultCurrencySync />
+            {/* Hydrates the caller's global name from its encrypted UserRecord and migrates the
+                old browser-only/plaintext-sentinel states without clearing a good local cache. */}
+            <ProfileNameSync />
             {/* Refreshes IOU's static public OpenChat manifest. Private
                 account templates never enter registration. */}
             <ManifestTypesSync />

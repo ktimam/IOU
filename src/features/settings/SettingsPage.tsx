@@ -26,6 +26,10 @@ import {
   captureOpenChatRoutingLaunch,
   clearOpenChatRoutingLaunch,
 } from "../openchat/chatLinkLaunch";
+import {
+  normalizeProfileName,
+  persistEncryptedProfileName,
+} from "./profileName";
 
 export function SettingsPage() {
   // Capture before the auth branch: the OS default browser may be signed out or signed in as a
@@ -46,8 +50,15 @@ export function SettingsPage() {
   const { actor } = useActor();
   const { unwrapFor } = useSheetKey();
   const [name, setName] = useState(prefs.profileName);
+  const [nameDirty, setNameDirty] = useState(false);
   const [status, setStatus] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+
+  // ProfileNameSync may hydrate after this page first renders. Adopt it unless the user has already
+  // started typing; a slow canister read must never replace an in-progress edit.
+  useEffect(() => {
+    if (!nameDirty) setName(prefs.profileName);
+  }, [prefs.profileName, nameDirty]);
 
   // Local first so every picker updates instantly, then persist to the canister so the choice
   // follows the user to their other devices (DefaultCurrencySync pulls it on load there).
@@ -64,37 +75,64 @@ export function SettingsPage() {
   }
 
   async function saveUsername() {
-    const trimmed = name.trim();
+    const trimmed = normalizeProfileName(name);
+    if (trimmed === undefined) {
+      setStatus("Username must be 1 to 32 characters.");
+      return;
+    }
+    if (state.kind !== "authenticated") {
+      setStatus("Sign in before saving your username.");
+      return;
+    }
     setBusy(true);
     setStatus(null);
-    // Persist locally first (so create/open of future accounts uses it too)…
+    // Persist locally first so future account creation and an offline retry use the same value.
     setProfileName(trimmed);
-    // …then eagerly push it to every existing account.
-    try {
-      if (!actor) {
-        setStatus("Saved. It’ll publish when you next open an account.");
-      } else if (!trimmed) {
-        setStatus("Cleared.");
-      } else {
-        const { published, total } = await publishUsernameToAllPairs(
-          actor,
-          unwrapFor,
-          trimmed,
-        );
-        setStatus(
-          total === 0
-            ? "Saved. It’ll publish to accounts as you create them."
-            : `Saved and published to ${published} of ${total} account${total === 1 ? "" : "s"}.`,
-        );
-      }
-    } catch (e) {
-      setStatus(
-        "Saved locally, but publishing to accounts failed: " +
-          String((e as Error)?.message ?? e).slice(0, 120),
-      );
-    } finally {
+    setName(trimmed);
+    setNameDirty(false);
+    if (!actor) {
+      setStatus("Saved on this device only — your account connection is not ready.");
       setBusy(false);
+      return;
     }
+
+    let accountError: string | undefined;
+    let publishError: string | undefined;
+    let published = 0;
+    let total = 0;
+    try {
+      await persistEncryptedProfileName(actor, state.principal, trimmed);
+    } catch (error) {
+      accountError = String((error as Error)?.message ?? error).slice(0, 120);
+    }
+    try {
+      ({ published, total } = await publishUsernameToAllPairs(
+        actor,
+        unwrapFor,
+        trimmed,
+      ));
+    } catch (error) {
+      publishError = String((error as Error)?.message ?? error).slice(0, 120);
+    }
+
+    if (accountError !== undefined && publishError !== undefined) {
+      setStatus(
+        `Saved on this device, but encrypted account sync failed (${accountError}) and publishing to accounts failed (${publishError}).`,
+      );
+    } else if (accountError !== undefined) {
+      setStatus(
+        `Published to ${published} of ${total} account${total === 1 ? "" : "s"}, but encrypted account sync failed: ${accountError}`,
+      );
+    } else if (publishError !== undefined) {
+      setStatus(`Saved to your encrypted account, but publishing failed: ${publishError}`);
+    } else {
+      setStatus(
+        total === 0
+          ? "Saved to your encrypted account. It’ll publish to accounts as you create them."
+          : `Saved to your encrypted account and published to ${published} of ${total} account${total === 1 ? "" : "s"}.`,
+      );
+    }
+    setBusy(false);
   }
 
   if (state.kind === "loading") return <p className="muted">Loading…</p>;
@@ -146,13 +184,14 @@ export function SettingsPage() {
           value={name}
           onChange={(e) => {
             setName(e.target.value);
+            setNameDirty(true);
             setStatus(null);
           }}
         />
-        <span className="lock-cue">🔒 published encrypted to every account</span>
+        <span className="lock-cue">🔒 encrypted on your account and shared accounts</span>
         <div className="cta">
           <button disabled={busy} onClick={saveUsername}>
-            {busy ? "Publishing…" : "Save username"}
+            {busy ? "Saving…" : "Save username"}
           </button>
         </div>
         {status && <p className="muted small">{status}</p>}

@@ -5,12 +5,47 @@
 // the VITE_IOU_PROD_VETKD env var. We pin that behavior here.
 
 import { describe, it, expect } from "vitest";
+import { bls12_381 } from "@noble/curves/bls12-381";
+import { DerivedPublicKey, augmentedHashToG1 } from "@dfinity/vetkeys";
 import { isDevVetkd, isProdVetkd } from "./devVetkd";
 import {
   isProdVetkd as isProdVetkdFromProd,
   newTransportKey,
+  deriveConsumerWrapKeyProd,
   deriveSheetKey,
+  type VetkdTransportKey,
 } from "./prodVetkd";
+
+function concatBytes(...parts: Uint8Array[]): Uint8Array {
+  const result = new Uint8Array(parts.reduce((total, part) => total + part.length, 0));
+  let offset = 0;
+  for (const part of parts) {
+    result.set(part, offset);
+    offset += part.length;
+  }
+  return result;
+}
+
+// Build the exact 48+96+48-byte envelope returned by vetkd_derive_encrypted_key. This exercises
+// EncryptedVetKey.decryptAndVerify rather than mocking away transport-key independence.
+function encryptVetKeyForTransport(
+  derivedPublicKey: DerivedPublicKey,
+  signingSecret: bigint,
+  input: Uint8Array,
+  transport: VetkdTransportKey,
+  randomness: bigint,
+): Uint8Array {
+  const signature = bls12_381.G1.ProjectivePoint.fromHex(
+    augmentedHashToG1(derivedPublicKey, input)
+      .multiply(signingSecret)
+      .toRawBytes(true),
+  );
+  const transportPublicKey = bls12_381.G1.ProjectivePoint.fromHex(transport.publicKey);
+  const c1 = bls12_381.G1.ProjectivePoint.BASE.multiply(randomness);
+  const c2 = bls12_381.G2.ProjectivePoint.BASE.multiply(randomness);
+  const c3 = signature.add(transportPublicKey.multiply(randomness));
+  return concatBytes(c1.toRawBytes(true), c2.toRawBytes(true), c3.toRawBytes(true));
+}
 
 describe("prod-path guard", () => {
   it("the dev adapter is the default", () => {
@@ -40,6 +75,50 @@ describe("prod-path guard", () => {
     const t = newTransportKey();
     expect(t.secretKey.length).toBe(32);
     expect(t.publicKey.length).toBe(48);
+  });
+
+  it("derives the same production user key through two fresh device transport keys", async () => {
+    const principal = "rrkah-fqaaa-aaaaa-aaaaq-cai";
+    const input = new TextEncoder().encode("iou-consumer:" + principal);
+    const signingSecret = 0x1234_5678_9abcn;
+    const derivedPublicKeyBytes = bls12_381.G2.ProjectivePoint.BASE
+      .multiply(signingSecret)
+      .toRawBytes(true);
+    const derivedPublicKey = DerivedPublicKey.deserialize(derivedPublicKeyBytes);
+    const firstTransport = newTransportKey();
+    const secondTransport = newTransportKey();
+    expect(firstTransport.publicKey).not.toEqual(secondTransport.publicKey);
+
+    const firstEncrypted = encryptVetKeyForTransport(
+      derivedPublicKey,
+      signingSecret,
+      input,
+      firstTransport,
+      17n,
+    );
+    const secondEncrypted = encryptVetKeyForTransport(
+      derivedPublicKey,
+      signingSecret,
+      input,
+      secondTransport,
+      23n,
+    );
+    expect(firstEncrypted).not.toEqual(secondEncrypted);
+
+    const firstKey = await deriveConsumerWrapKeyProd(
+      principal,
+      firstTransport,
+      derivedPublicKeyBytes,
+      firstEncrypted,
+    );
+    const secondKey = await deriveConsumerWrapKeyProd(
+      principal,
+      secondTransport,
+      derivedPublicKeyBytes,
+      secondEncrypted,
+    );
+    expect(firstKey).toHaveLength(32);
+    expect(secondKey).toEqual(firstKey);
   });
 
   it("deriveSheetKey signature is the 5-arg form (canisterId is now a no-op)", () => {

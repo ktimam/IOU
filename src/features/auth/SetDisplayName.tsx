@@ -2,13 +2,15 @@ import { useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { useAuth, buildAgent } from "./AuthProvider";
 import { createActor } from "../../backend/declarations";
-
-function utf8ToBlob(s: string): Uint8Array {
-  return new TextEncoder().encode(s);
-}
+import { usePreferences } from "../settings/usePreferences";
+import {
+  normalizeProfileName,
+  persistEncryptedProfileName,
+} from "../settings/profileName";
 
 export function SetDisplayName() {
   const { state } = useAuth();
+  const { setProfileName } = usePreferences();
   const nav = useNavigate();
   const [name, setName] = useState("");
   const [busy, setBusy] = useState(false);
@@ -24,7 +26,8 @@ export function SetDisplayName() {
   if (state.kind !== "authenticated") return null;
 
   async function submit() {
-    if (!name.trim() || name.length > 32) {
+    const normalized = normalizeProfileName(name);
+    if (normalized === undefined) {
       setErr("Name must be 1..=32 characters");
       return;
     }
@@ -37,18 +40,12 @@ export function SetDisplayName() {
     setBusy(true);
     setErr(null);
     try {
-      // Build an authenticated agent + actor and call the canister.
-      // The display name is currently stored as raw UTF-8 bytes; in
-      // Phase 1.2 it gets wrapped with vetkd before being sent.
+      // Build an authenticated actor, derive the account's existing prod/dev user key, and send
+      // only fresh AES-GCM ciphertext. The obsolete plaintext sentinel is never written again.
       const agent = await buildAgent(state.identity);
       const actor = createActor(agent);
-      const wrapped = utf8ToBlob(name.trim());
-      const iv = utf8ToBlob("v1-dev-iv-not-secure");
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      await (actor as any).set_display_name(
-        Array.from(wrapped),
-        Array.from(iv),
-      );
+      await persistEncryptedProfileName(actor as any, state.principal, normalized);
+      setProfileName(normalized);
       nav("/", { replace: true });
     } catch (e) {
       setErr((e as Error).message ?? "Failed to save");
