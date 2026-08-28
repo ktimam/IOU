@@ -6,6 +6,11 @@
 import { Actor, HttpAgent, type Identity } from "@dfinity/agent";
 import { Principal } from "@dfinity/principal";
 import {
+  DEV_LAN_QC_IC_ORIGIN,
+  shouldFetchLocalRootKey,
+} from "../../config/devLanQcRuntime";
+import { isLocalDevelopmentIcOrigin } from "../../config/devLanQc";
+import {
   acknowledgementSecretHashV1,
   aiAppCardConfirmPayloadHashV1,
   actionCardContextHashV2,
@@ -321,7 +326,7 @@ export type ActionInboxConfig = {
   signingKeyIds?: readonly string[];
 };
 
-function parseOpenChatHost(host: string): { isLoopback: boolean } {
+function parseOpenChatHost(host: string): { isLocalDevelopment: boolean } {
   if (typeof host !== "string" || host.length === 0 || host !== host.trim()) {
     throw new Error("OpenChat host must be an exact absolute HTTP(S) origin");
   }
@@ -341,25 +346,26 @@ function parseOpenChatHost(host: string): { isLoopback: boolean } {
   ) {
     throw new Error("OpenChat host must be an exact absolute HTTP(S) origin without credentials, path, query, or fragment");
   }
-  const hostname = url.hostname.toLowerCase();
-  const isLoopback = hostname === "localhost" || hostname === "127.0.0.1" || hostname === "[::1]";
-  if (!isLoopback && url.protocol !== "https:") {
-    throw new Error("OpenChat host must use HTTPS unless it is an exact loopback origin");
+  const isLocalDevelopment = isLocalDevelopmentIcOrigin(host, DEV_LAN_QC_IC_ORIGIN);
+  if (!isLocalDevelopment && url.protocol !== "https:") {
+    throw new Error(
+      "OpenChat host must use HTTPS unless it is an exact configured local-development origin",
+    );
   }
-  return { isLoopback };
+  return { isLocalDevelopment };
 }
 
 /**
  * Validate and canonicalize the independently provisioned action-signing key allowlist. Only
- * exact loopback origins may leave it empty; lookalike domains and malformed origins never inherit
- * that local-development exemption. A key returned by UserIndex is usable only if its derived id is
- * in this list.
+ * exact configured local-development origins may leave it empty; lookalike domains and malformed
+ * origins never inherit that exemption. A key returned by UserIndex is usable only if its derived
+ * id is in this list.
  */
 export function resolveOpenChatActionSigningKeyIds(
   host: string,
   configured: string | readonly string[] | undefined,
 ): readonly string[] {
-  const { isLoopback } = parseOpenChatHost(host);
+  const { isLocalDevelopment } = parseOpenChatHost(host);
   let values: readonly string[];
   if (configured === undefined || configured === "") values = [];
   else if (typeof configured === "string") {
@@ -370,7 +376,7 @@ export function resolveOpenChatActionSigningKeyIds(
   } else values = configured;
 
   if (values.length === 0) {
-    if (isLoopback) return [];
+    if (isLocalDevelopment) return [];
     throw new Error("VITE_OPENCHAT_ACTION_SIGNING_KEY_IDS is required for a non-local OpenChat host");
   }
   if (values.length > 3) {
@@ -393,9 +399,9 @@ function bytesToHex(bytes: Uint8Array): string {
 }
 
 async function buildInboxAgent(host: string, identity?: Identity): Promise<HttpAgent> {
-  const { isLoopback } = parseOpenChatHost(host);
+  parseOpenChatHost(host);
   const agent = new HttpAgent({ host, ...(identity ? { identity } : {}) });
-  if (isLoopback) {
+  if (shouldFetchLocalRootKey()) {
     await agent.fetchRootKey();
   }
   return agent;
@@ -811,7 +817,10 @@ export async function getActionInboxConfig(
 ): Promise<ActionInboxConfig | null> {
   const consumerKeySelector = await readOpenChatConsumerQueueSelector(bindingActor);
   if (!consumerKeySelector) return null;
-  const host = readEnv("VITE_OPENCHAT_HOST") ?? "http://127.0.0.1:4943";
+  const host =
+    DEV_LAN_QC_IC_ORIGIN ??
+    readEnv("VITE_OPENCHAT_HOST") ??
+    "http://127.0.0.1:4943";
   const userIndexId = readEnv("VITE_OC_USER_INDEX_CANISTER_ID")?.trim();
   if (!userIndexId) return null;
   const signingKeyIds = resolveOpenChatActionSigningKeyIds(host, readActionSigningKeyIdsEnv());

@@ -3,8 +3,12 @@
 // (ActionInboxSettings) and the auto re-register on a template change (TemplatesContext) import these,
 // so they always target the SAME replica (avoids VITE_OC_IC_URL vs VITE_OPENCHAT_HOST env drift).
 
+import { DEV_LAN_QC_IC_ORIGIN } from "../../config/devLanQcRuntime";
+
 export const OC_IC_URL =
-  (import.meta.env.VITE_OC_IC_URL as string | undefined) ?? "http://127.0.0.1:8080";
+  DEV_LAN_QC_IC_ORIGIN ??
+  (import.meta.env.VITE_OC_IC_URL as string | undefined) ??
+  "http://127.0.0.1:8080";
 
 export const OC_USER_INDEX_CANISTER_ID = (
   import.meta.env.VITE_OC_USER_INDEX_CANISTER_ID as string | undefined

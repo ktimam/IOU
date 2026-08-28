@@ -71,14 +71,14 @@ describe('local browser CDP harness', () => {
   it('matches only the exact Chrome executable, profile, port, and loopback binding', () => {
     const expected = {
       executablePath: 'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe',
-      profilePath: 'C:\\Kiko\\oc-live\\profiles\\manager',
+      profilePath: 'R:\\durable-qc\\profiles\\manager',
       port: CDP_PORTS.manager,
     };
     const exact = {
       processId: 101,
       executablePath: expected.executablePath,
       commandLine:
-        '"C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe" --user-data-dir="C:\\Kiko\\oc-live\\profiles\\manager" --remote-debugging-port=19241 --remote-debugging-address=127.0.0.1',
+        '"C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe" --user-data-dir="R:\\durable-qc\\profiles\\manager" --remote-debugging-port=19241 --remote-debugging-address=127.0.0.1',
     };
 
     expect(matchesExactCdpChromeProcess(exact, expected)).toBe(true);

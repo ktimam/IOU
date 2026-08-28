@@ -18,6 +18,7 @@
 import { Actor, HttpAgent, type Identity } from "@dfinity/agent";
 import { IDL } from "@dfinity/candid";
 import { Principal } from "@dfinity/principal";
+import { shouldFetchLocalRootKey } from "../../config/devLanQcRuntime";
 import { buildIouOutputSchema, buildIouRules, iouActionManifest, resolvePublicOrigin } from "./actionManifest";
 import type { AiActionRule, ManifestTemplate } from "./actionManifest";
 import registrationJson from "../../../docs/openchat-registration.json";
@@ -403,7 +404,7 @@ export async function registerAiApp(opts: RegisterAiAppOptions): Promise<Registe
   const { service } = buildIdl();
 
   const agent = new HttpAgent({ host: opts.host, ...(opts.identity ? { identity: opts.identity } : {}) });
-  if (opts.host.includes("127.0.0.1") || opts.host.includes("localhost")) {
+  if (shouldFetchLocalRootKey()) {
     await agent.fetchRootKey();
   }
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -450,7 +451,7 @@ export async function getRegisteredActionInboxRoute(
 ): Promise<RegisteredActionInboxRoute | null> {
   const { service } = buildIdl();
   const agent = new HttpAgent({ host: opts.host, ...(opts.identity ? { identity: opts.identity } : {}) });
-  if (opts.host.includes("127.0.0.1") || opts.host.includes("localhost")) {
+  if (shouldFetchLocalRootKey()) {
     await agent.fetchRootKey();
   }
   // eslint-disable-next-line @typescript-eslint/no-explicit-any

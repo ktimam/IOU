@@ -1,9 +1,12 @@
 // CDP pre-flight healer: long-driven Chrome/WebView instances occasionally wedge their DevTools
 // WebSocket handshake (the HTTP /json endpoints still answer). Test each port with a real
 // connectOverCDP and RELAUNCH any wedged profile (sessions are durable — a relaunch costs ~10s).
-//   pnpm exec tsx scripts/live/heal-cdp.ts 19241 19242 [19243 19231 19222]
+// Machine-specific paths are required either as CLI options or OC_LIVE_* environment variables:
+//   pnpm exec tsx scripts/live/heal-cdp.ts --chrome-executable <chrome.exe> \
+//     --profile-root <profiles-dir> 19241 19242
 import { chromium } from "@playwright/test";
 import { execFileSync } from "node:child_process";
+import { statSync } from "node:fs";
 import { win32 } from "node:path";
 import {
   assertLoopbackPortAvailable,
@@ -12,9 +15,28 @@ import {
   type CdpProcessSnapshot,
 } from "./cdpPorts";
 
-const CHROME = "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe";
-const EXE = "C:\\Kiko\\MyProjects\\Blockchain\\ICP\\open-chat-cycle\\target\\debug\\open-chat.exe";
 const HERE = new URL(".", import.meta.url).pathname.replace(/^\/([A-Za-z]:)/, "$1");
+
+const USAGE = `usage: heal-cdp.ts [options] <port> [port…]
+  --chrome-executable <path>   or OC_LIVE_CHROME_EXECUTABLE
+  --profile-root <path>        or OC_LIVE_PROFILE_ROOT
+  --desktop-executable <path>  or OC_LIVE_DESKTOP_EXECUTABLE`;
+
+type PathOption =
+  | "chrome-executable"
+  | "profile-root"
+  | "desktop-executable";
+
+type Invocation = Readonly<{
+  ports: number[];
+  paths: Partial<Record<PathOption, string>>;
+}>;
+
+type HarnessPaths = Readonly<{
+  chromeExecutable?: string;
+  profileRoot?: string;
+  desktopExecutable?: string;
+}>;
 
 type Profile = { name: string; kind: "chrome" | "exe"; args: string[] };
 const PROFILES: Record<number, Profile> = {
@@ -25,6 +47,126 @@ const PROFILES: Record<number, Profile> = {
   [CDP_PORTS.fatherIou]: { name: "father-iou", kind: "chrome", args: ["http://127.0.0.1:3000/"] },
   [CDP_PORTS.fatherOpenChat]: { name: "father-exe", kind: "exe", args: [] },
 };
+
+function parseInvocation(args: string[]): Invocation {
+  const paths: Partial<Record<PathOption, string>> = {};
+  const ports: number[] = [];
+  const supported = new Set<PathOption>([
+    "chrome-executable",
+    "profile-root",
+    "desktop-executable",
+  ]);
+
+  for (let index = 0; index < args.length; index++) {
+    const token = args[index];
+    if (token.startsWith("--")) {
+      const equals = token.indexOf("=");
+      const name = token.slice(2, equals < 0 ? undefined : equals) as PathOption;
+      if (!supported.has(name)) throw new Error(`unknown option --${name}\n${USAGE}`);
+      if (paths[name] !== undefined) throw new Error(`duplicate option --${name}`);
+      const value = equals < 0 ? args[++index] : token.slice(equals + 1);
+      if (!value || value.startsWith("--")) {
+        throw new Error(`--${name} requires a path\n${USAGE}`);
+      }
+      paths[name] = value;
+      continue;
+    }
+
+    if (!/^\d+$/.test(token)) throw new Error(`invalid CDP port ${token}\n${USAGE}`);
+    const port = Number(token);
+    if (!Number.isSafeInteger(port) || port < 1 || port > 65_535) {
+      throw new Error(`invalid CDP port ${token}\n${USAGE}`);
+    }
+    ports.push(port);
+  }
+
+  if (ports.length === 0) throw new Error(USAGE);
+  if (new Set(ports).size !== ports.length) throw new Error("duplicate CDP port");
+  return { ports, paths };
+}
+
+function configuredPath(
+  invocation: Invocation,
+  option: PathOption,
+  environmentName: string,
+  kind: "file" | "directory",
+): string {
+  const raw = invocation.paths[option] ?? process.env[environmentName];
+  if (!raw?.trim()) {
+    throw new Error(`--${option} or ${environmentName} is required\n${USAGE}`);
+  }
+  if (!win32.isAbsolute(raw)) {
+    throw new Error(`Configured --${option} must be an absolute Windows path`);
+  }
+  const resolved = win32.normalize(raw.trim());
+  let stats;
+  try {
+    stats = statSync(resolved);
+  } catch {
+    throw new Error(`Configured --${option} does not exist: ${resolved}`);
+  }
+  if (kind === "file" ? !stats.isFile() : !stats.isDirectory()) {
+    throw new Error(`Configured --${option} is not a ${kind}: ${resolved}`);
+  }
+  return resolved;
+}
+
+function configuredProfilePath(profileRoot: string, profile: Profile): string {
+  const profilePath = win32.join(profileRoot, profile.name);
+  let stats;
+  try {
+    stats = statSync(profilePath);
+  } catch {
+    throw new Error(`Configured durable profile does not exist: ${profilePath}`);
+  }
+  if (!stats.isDirectory()) {
+    throw new Error(`Configured durable profile is not a directory: ${profilePath}`);
+  }
+  return profilePath;
+}
+
+function resolveHarnessPaths(invocation: Invocation): HarnessPaths {
+  const profiles = invocation.ports.map((port) => {
+    const profile = PROFILES[port];
+    if (!profile) throw new Error(`unknown port ${port}`);
+    return profile;
+  });
+  const needsChrome = profiles.some((profile) => profile.kind === "chrome");
+  const needsDesktop = profiles.some((profile) => profile.kind === "exe");
+  const paths: HarnessPaths = {
+    chromeExecutable: needsChrome
+      ? configuredPath(
+          invocation,
+          "chrome-executable",
+          "OC_LIVE_CHROME_EXECUTABLE",
+          "file",
+        )
+      : undefined,
+    profileRoot: needsChrome
+      ? configuredPath(
+          invocation,
+          "profile-root",
+          "OC_LIVE_PROFILE_ROOT",
+          "directory",
+        )
+      : undefined,
+    desktopExecutable: needsDesktop
+      ? configuredPath(
+          invocation,
+          "desktop-executable",
+          "OC_LIVE_DESKTOP_EXECUTABLE",
+          "file",
+        )
+      : undefined,
+  };
+
+  if (paths.profileRoot) {
+    for (const profile of profiles.filter((item) => item.kind === "chrome")) {
+      configuredProfilePath(paths.profileRoot, profile);
+    }
+  }
+  return paths;
+}
 
 function ps(command: string): string {
   return execFileSync("powershell.exe", ["-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", command], {
@@ -61,19 +203,23 @@ function sameExecutablePath(actual: string, expected: string): boolean {
     win32.normalize(expected).toLocaleLowerCase("en-US");
 }
 
-function exactChromeOwners(port: number, profilePath: string): CdpProcessSnapshot[] {
-  return processSnapshots("chrome.exe").filter((process) =>
+function exactChromeOwners(
+  port: number,
+  profilePath: string,
+  chromeExecutable: string,
+): CdpProcessSnapshot[] {
+  return processSnapshots(win32.basename(chromeExecutable)).filter((process) =>
     matchesExactCdpChromeProcess(process, {
-      executablePath: CHROME,
+      executablePath: chromeExecutable,
       profilePath,
       port,
     }),
   );
 }
 
-function exactDesktopOwners(): CdpProcessSnapshot[] {
-  return processSnapshots("open-chat.exe").filter((process) =>
-    sameExecutablePath(process.executablePath, EXE),
+function exactDesktopOwners(desktopExecutable: string): CdpProcessSnapshot[] {
+  return processSnapshots(win32.basename(desktopExecutable)).filter((process) =>
+    sameExecutablePath(process.executablePath, desktopExecutable),
   );
 }
 
@@ -112,22 +258,43 @@ while ($candidatePid -gt 0 -and -not $seen.ContainsKey($candidatePid)) {
 }
 
 function stopExactConfiguredExecutable(executablePath: string): void {
-  if (!sameExecutablePath(executablePath, EXE)) {
-    throw new Error("Refusing to stop an executable outside the configured OpenChat desktop path");
-  }
-  const owner = requireUnambiguousOwner(exactDesktopOwners(), "OpenChat desktop owner");
+  const owner = requireUnambiguousOwner(
+    exactDesktopOwners(executablePath),
+    "OpenChat desktop owner",
+  );
   if (owner) stopExactProcess(owner);
 }
 
-async function healthy(port: number, profile: Profile): Promise<boolean> {
+function requirePath(value: string | undefined, label: string): string {
+  if (!value) throw new Error(`Missing validated ${label}`);
+  return value;
+}
+
+async function healthy(
+  port: number,
+  profile: Profile,
+  paths: HarnessPaths,
+): Promise<boolean> {
   try {
     const owner =
       profile.kind === "chrome"
         ? requireUnambiguousOwner(
-            exactChromeOwners(port, `C:\\Kiko\\oc-live\\profiles\\${profile.name}`),
+            exactChromeOwners(
+              port,
+              configuredProfilePath(
+                requirePath(paths.profileRoot, "profile root"),
+                profile,
+              ),
+              requirePath(paths.chromeExecutable, "Chrome executable"),
+            ),
             `${profile.name} Chrome owner`,
           )
-        : requireUnambiguousOwner(exactDesktopOwners(), "OpenChat desktop owner");
+        : requireUnambiguousOwner(
+            exactDesktopOwners(
+              requirePath(paths.desktopExecutable, "desktop executable"),
+            ),
+            "OpenChat desktop owner",
+          );
     if (!owner || !loopbackListenerBelongsToProcessTree(port, owner.processId)) return false;
     const b = await chromium.connectOverCDP(`http://127.0.0.1:${port}`, { timeout: 12000 });
     await b.close(); // connectOverCDP close() only disconnects; the browser keeps running
@@ -137,38 +304,54 @@ async function healthy(port: number, profile: Profile): Promise<boolean> {
   }
 }
 
-async function relaunch(port: number, p: Profile): Promise<void> {
+async function relaunch(
+  port: number,
+  p: Profile,
+  paths: HarnessPaths,
+): Promise<void> {
   if (p.kind === "chrome") {
-    const udd = `C:\\Kiko\\oc-live\\profiles\\${p.name}`;
+    const chromeExecutable = requirePath(
+      paths.chromeExecutable,
+      "Chrome executable",
+    );
+    const udd = configuredProfilePath(
+      requirePath(paths.profileRoot, "profile root"),
+      p,
+    );
     const owner = requireUnambiguousOwner(
-      exactChromeOwners(port, udd),
+      exactChromeOwners(port, udd, chromeExecutable),
       `${p.name} Chrome owner`,
     );
     if (owner) stopExactProcess(owner);
     ps(`Get-ChildItem ${powershellLiteral(udd)} -Filter 'Singleton*' -Force -ErrorAction SilentlyContinue | Remove-Item -Force -ErrorAction SilentlyContinue`);
     await assertLoopbackPortAvailable(port);
     const args = [`--remote-debugging-port=${port}`, "--remote-debugging-address=127.0.0.1", `--user-data-dir=${udd}`, "--no-first-run", "--no-default-browser-check", "--restore-last-session=false", ...p.args];
-    ps(`Start-Process -FilePath '${CHROME}' -ArgumentList @(${args.map((a) => `'${a}'`).join(",")})`);
+    ps(`Start-Process -FilePath ${powershellLiteral(chromeExecutable)} -ArgumentList @(${args.map(powershellLiteral).join(",")})`);
   } else {
-    stopExactConfiguredExecutable(EXE);
+    const desktopExecutable = requirePath(
+      paths.desktopExecutable,
+      "desktop executable",
+    );
+    stopExactConfiguredExecutable(desktopExecutable);
     await assertLoopbackPortAvailable(port);
-    ps(`$env:WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS='--remote-debugging-port=${port} --remote-debugging-address=127.0.0.1'; Start-Process '${EXE}'`);
+    ps(`$env:WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS='--remote-debugging-port=${port} --remote-debugging-address=127.0.0.1'; Start-Process ${powershellLiteral(desktopExecutable)}`);
   }
 }
 
 async function main() {
-  const ports = process.argv.slice(2).map(Number).filter(Boolean);
-  if (ports.length === 0) throw new Error("usage: heal-cdp.ts <port> [port…]");
+  const invocation = parseInvocation(process.argv.slice(2));
+  const paths = resolveHarnessPaths(invocation);
+  const { ports } = invocation;
   let healed = 0;
   for (const port of ports) {
     const p = PROFILES[port];
     if (!p) throw new Error(`unknown port ${port}`);
-    if (await healthy(port, p)) {
+    if (await healthy(port, p, paths)) {
       console.log(`[heal] :${port} (${p.name}) OK`);
       continue;
     }
     console.log(`[heal] :${port} (${p.name}) WEDGED — relaunching`);
-    await relaunch(port, p);
+    await relaunch(port, p, paths);
     await new Promise((r) => setTimeout(r, p.kind === "exe" ? 12000 : 9000));
     if (p.kind === "exe") {
       // Per preference the desktop exe runs the v1 (classic) tree: widen past the 768px breakpoint
@@ -180,7 +363,7 @@ async function main() {
         console.log(`[heal] exe v1 restore step failed (non-fatal): ${(e as Error).message.slice(0, 100)}`);
       }
     }
-    if (!(await healthy(port, p))) {
+    if (!(await healthy(port, p, paths))) {
       console.error(`[heal] :${port} STILL WEDGED after relaunch`);
       process.exit(1);
     }

@@ -31,16 +31,48 @@ pwsh -NoProfile -File scripts/live/start-environment.ps1 -Action Status `
   -EnvironmentConfigPath scripts/live/start-environment.local.json
 pwsh -NoProfile -File scripts/live/start-environment.ps1 -Action ValidateConfig `
   -EnvironmentConfigPath scripts/live/start-environment.local.json
+pwsh -NoProfile -File scripts/live/start-environment.ps1 -Action FrontendRestart `
+  -EnvironmentConfigPath scripts/live/start-environment.local.json
+pwsh -NoProfile -File scripts/live/start-environment.ps1 -Action OpenChatFrontendRestart `
+  -EnvironmentConfigPath scripts/live/start-environment.local.json
 ```
 
 The start command reopens only the authoritative recovered PocketIC state, starts the exact OpenChat
 and IOU Vite processes, and verifies the published IOU app, background/model workers, all-WebGPU
-model routes, a restored original image, and both phone-facing Tailscale origins. The launcher and
+model routes, a restored original image, and both phone-facing Tailscale origins. An ephemeral
+headless browser also loads OpenChat through loopback and Tailscale and requires successful
+`worker.js` init plus anonymous-auth responses; it never opens a durable user profile. Set
+`browserProbe.channel` to an installed `chrome` or `msedge` channel, or to `chromium` after running
+`pnpm exec playwright install chromium`. The launcher and
 PocketIC manager receive the same explicit JSON; neither script embeds a machine path, Tailnet host,
 canister/app coordinate, topology fingerprint, model revision, or image blob identity. The local JSON
 is ignored by git; the checked-in example contains placeholders only. Startup does not clean,
 deploy, register, publish, reset, or repair canister state. Use `-RestartFrontends` when a Vite config
-has changed; crash-incomplete PocketIC repair remains a separate explicit recovery action.
+has changed. If the existing replica is healthy but its WSL process-manager context is temporarily
+unavailable, `-Action FrontendRestart` first verifies the live replica and exact published IOU app,
+then replaces only the two exact Vite processes. Crash-incomplete PocketIC repair remains a separate
+explicit recovery action.
+Use `-Action OpenChatFrontendRestart` only for scoped OpenChat browser/account-link diagnostics: it
+still verifies the live replica, restarts only the exact OpenChat Vite process, and reports the IOU
+registration as unchecked instead of treating an unrelated registration mismatch as link readiness.
+
+Set `openChat.canisterIdsFile` to the exact deployment's `.dfx/local/canister_ids.json`. Startup
+requires every local canister alias consumed by both OpenChat roots (including `identity`) and passes
+those values to Vite; it also requires the two external OneSec canister principals as explicit config
+values. The browser readiness probe rejects a worker whose `init` payload omits Identity or contains a
+different Identity principal, so a responsive anonymous worker can no longer hide this configuration
+error.
+
+The optional `openChat.androidLink` object supplies the Android package name and colon-separated
+SHA-256 signing-certificate fingerprint as `OC_ANDROID_LINK_PACKAGE` and
+`OC_ANDROID_LINK_CERT_SHA256`. Omit the whole object for browser-only startup; no package or signing
+identity is inferred from the current machine.
+
+The optional `androidDevice` config names one exact ADB executable and device serial. With
+`requiredForReady: true`, startup fails until that device reports `state=device`; with `false`, it
+reports the device separately without weakening service readiness. A disconnected or unauthorized
+device produces copyable `adb kill-server`, `start-server`, `devices -l`, and `get-state` guidance.
+The environment script never launches a switch-selection/device-selection window.
 
 ## Durability mechanism
 
@@ -77,25 +109,67 @@ has changed; crash-incomplete PocketIC repair remains a separate explicit recove
   the current app bundle without removing the signed-in session.
 - `reload-iou.ts --port <p>` — perform a full IOU navigation so a durable profile fetches the
   current Vite module graph without changing its dev identity.
+- `emulator-transformers-all-webgpu.ts` and artifact-seeding runs of
+  `emulator-image-regression.ts` require `--openchat-frontend <absolute-path>` or
+  `OC_LIVE_OPENCHAT_FRONTEND`. They validate the required browser module exists below that frontend
+  before connecting to Chrome; there is no machine-specific repository fallback.
 
 ## First-time provisioning (fresh replica)
 
-```
+```powershell
 # after the replica + OC/IOU canisters are up and :5003/:3000 vite are serving:
-powershell -File scripts/live/launch.ps1                       # launch all profiles + desktop
+$liveRoot = 'C:\path\to\durable-live-state'
+$openChatFrontend = 'C:\path\to\open-chat\frontend'
+$launchArgs = @{
+  ChromeExecutable = 'C:\path\to\chrome.exe'
+  ProfileRoot = Join-Path $liveRoot 'profiles'
+  DesktopExecutable = 'C:\path\to\open-chat.exe'
+}
+pwsh -NoProfile -File scripts/live/launch.ps1 @launchArgs      # launch all profiles + desktop
 # OpenChat signups (durable creds saved):
-pnpm exec tsx scripts/live/oc-provision.ts --port 9241 --user manager --out <live-profile-root>/creds/manager.json
-pnpm exec tsx scripts/live/oc-provision.ts --port 9242 --user mother  --out <live-profile-root>/creds/mother.json
-pnpm exec tsx scripts/live/oc-provision.ts --port 9243 --user child   --out <live-profile-root>/creds/child.json
-pnpm exec tsx scripts/live/oc-provision.ts --port 9222 --user father  --out <live-profile-root>/creds/father.json
+pnpm exec tsx scripts/live/oc-provision.ts --openchat-frontend $openChatFrontend --port 9241 --user manager --out <live-profile-root>/creds/manager.json
+pnpm exec tsx scripts/live/oc-provision.ts --openchat-frontend $openChatFrontend --port 9242 --user mother  --out <live-profile-root>/creds/mother.json
+pnpm exec tsx scripts/live/oc-provision.ts --openchat-frontend $openChatFrontend --port 9243 --user child   --out <live-profile-root>/creds/child.json
+pnpm exec tsx scripts/live/oc-provision.ts --openchat-frontend $openChatFrontend --port 9222 --user father  --out <live-profile-root>/creds/father.json
 # IOU dev sign-ins:
 for p in 9241 9242 9243 9231; do pnpm exec tsx scripts/live/iou-signin.ts --port $p; done
 ```
 
+All machine-specific launcher paths are required inputs. For browser profiles without the desktop
+app, pass `-NoDesktop` and omit `DesktopExecutable`. `-DesktopOnly` still requires all three paths
+because the desktop app opens external surfaces in the configured Chrome profile.
+
+The CDP healer uses the same paths, passed explicitly or through environment variables. The profile
+root is the directory that directly contains `manager`, `mother`, `child`, and `father-iou`:
+
+```powershell
+$env:OC_LIVE_CHROME_EXECUTABLE = $launchArgs.ChromeExecutable
+$env:OC_LIVE_PROFILE_ROOT = $launchArgs.ProfileRoot
+$env:OC_LIVE_DESKTOP_EXECUTABLE = $launchArgs.DesktopExecutable
+pnpm exec tsx scripts/live/heal-cdp.ts 19241 19242
+```
+
+The healer refuses relative/missing paths and never creates a replacement durable profile. CLI
+options `--chrome-executable`, `--profile-root`, and `--desktop-executable` override the matching
+environment values for a one-off run.
+
 ## Restore after a restart
 
-```
+```powershell
 pwsh -NoProfile -File scripts/live/start-environment.ps1 -EnvironmentConfigPath scripts/live/start-environment.local.json
-powershell -File scripts/live/launch.ps1     # relaunch browsers + desktop from persistent profiles
+$liveRoot = 'C:\path\to\durable-live-state'
+$launchArgs = @{
+  ChromeExecutable = 'C:\path\to\chrome.exe'
+  ProfileRoot = Join-Path $liveRoot 'profiles'
+  DesktopExecutable = 'C:\path\to\open-chat.exe'
+}
+pwsh -NoProfile -File scripts/live/launch.ps1 @launchArgs
+$env:OC_LIVE_CREDS_DIR = Join-Path $liveRoot 'creds'
+$env:OC_LIVE_OPENCHAT_FRONTEND = 'C:\path\to\open-chat\frontend'
 bash scripts/live/restore-all.sh             # re-establish every OpenChat + IOU session
 ```
+
+`restore-all.sh` has no machine-specific fallback. Pass both `--creds-dir <absolute-path>` and
+`--openchat-frontend <absolute-path>`, or set `OC_LIVE_CREDS_DIR` and
+`OC_LIVE_OPENCHAT_FRONTEND`. It validates all four credential files plus the frontend's pinned `ws`
+dependency before changing any browser session.

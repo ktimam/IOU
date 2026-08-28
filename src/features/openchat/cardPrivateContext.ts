@@ -5,6 +5,7 @@
 // to this iframe's fresh transport key.
 
 import { Actor, HttpAgent } from "@dfinity/agent";
+import { shouldFetchLocalRootKey } from "../../config/devLanQcRuntime";
 import { canisterId, host } from "../auth/config";
 import {
   newTransportKey,
@@ -264,7 +265,7 @@ export async function loadCardPrivateContext(
 ): Promise<LoadedCardPrivateContext> {
   const token = decodeCanonicalCapability(capability);
   const agent = new HttpAgent({ host });
-  if (host.includes("127.0.0.1") || host.includes("localhost")) {
+  if (shouldFetchLocalRootKey()) {
     await agent.fetchRootKey();
   }
   const actor = Actor.createActor(idl as never, { agent, canisterId }) as {

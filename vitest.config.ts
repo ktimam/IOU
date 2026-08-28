@@ -34,14 +34,18 @@ export default defineConfig({
   // .env.local remains production-vetKD for the real four-profile runtime.
   define: {
     "import.meta.env.VITE_IOU_PROD_VETKD": JSON.stringify("0"),
+    // A developer's physical-device/Tailscale origin belongs to the live runtime, not the unit
+    // bundle. Leaving this to Vite's normal .env.local expansion makes otherwise isolated tests
+    // silently target whichever private host happens to be configured on the current machine.
+    "import.meta.env.VITE_IC_URL": "undefined",
   },
   test: {
     environment: "node",
     // The four-profile runtime deliberately uses production vetKD locally.
     // Unit fixtures remain deterministic/dev-mode unless a test explicitly
     // exercises or stubs the production adapter.
-    env: { VITE_IOU_PROD_VETKD: "0" },
-    include: ["src/**/*.test.ts", "src/**/*.test.tsx"],
+    env: { VITE_IOU_PROD_VETKD: "0", VITE_IC_URL: "" },
+    include: ["src/**/*.test.ts", "src/**/*.test.tsx", "vite.devLanQc.test.ts"],
     coverage: {
       provider: "v8",
       reporter: ["text-summary", "json-summary"],

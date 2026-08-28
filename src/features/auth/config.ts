@@ -1,5 +1,7 @@
 // II + canister configuration. Vite reads VITE_* env vars at build time.
 
+import { DEV_LAN_QC_IC_ORIGIN } from "../../config/devLanQcRuntime";
+
 const network = (import.meta.env.VITE_DFX_NETWORK as string) ?? "local";
 const isLocal = network === "local";
 
@@ -9,7 +11,7 @@ const isLocal = network === "local";
 const port = (import.meta.env.VITE_DFX_PORT as string) ?? "4943";
 
 export const host = isLocal
-  ? `http://127.0.0.1:${port}`
+  ? (DEV_LAN_QC_IC_ORIGIN ?? `http://127.0.0.1:${port}`)
   : "https://icp-api.io";
 
 // `.localhost` (not `.127.0.0.1`) so the browser resolves the II canister

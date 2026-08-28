@@ -3,11 +3,20 @@
 // This deliberately uses an anonymous `ai_apps` query. UserIndex exposes only published apps to an
 // anonymous caller, so finding the exact registration proves substantially more than a generic
 // `/api/v2/status` response: the expected UserIndex canister exists, answers the expected API, and
-// the IOU registration is public. It never calls register_ai_app, publish_ai_app, or any update.
+// the IOU registration is public. Optional strict checks compare the complete response schema and
+// the backend's manifest commitment. It never calls register_ai_app, publish_ai_app, or any update.
 
+import { createHash } from "node:crypto";
+import { readFileSync } from "node:fs";
+import { isDeepStrictEqual } from "node:util";
 import { Actor, HttpAgent } from "@dfinity/agent";
 import { Principal } from "@dfinity/principal";
+import { idlFactory as iouIdlFactory } from "../../src/backend/declarations";
 import { buildIdl, type CandidOpt } from "../../src/features/openchat/registerAiApp";
+import {
+  encodeManifestCommitmentV2,
+  MANIFEST_COMMITMENT_DOMAIN_V2,
+} from "../../src/features/openchat/manifestCommitmentV2";
 
 type Options = {
   host: string;
@@ -17,6 +26,8 @@ type Options = {
   expectedAppCanister?: string;
   expectedInbox?: string;
   expectedSurfaceOrigin?: string;
+  expectedResponseSchemaFile?: string;
+  verifyAppBinding: boolean;
 };
 
 function usage(): string {
@@ -25,6 +36,7 @@ function usage(): string {
     "  [--app-name iou] [--expected-app-id <nat32>]",
     "  [--expected-app-canister <principal>] [--expected-inbox <principal>]",
     "  [--expected-surface-origin <https-origin>]",
+    "  [--expected-response-schema-file <registration-json>] [--verify-app-binding true]",
     "",
     "Read-only: performs only fetchRootKey + anonymous UserIndex ai_apps query.",
   ].join("\n");
@@ -51,6 +63,8 @@ function parseOptions(argv: string[]): Options {
     "--expected-app-canister",
     "--expected-inbox",
     "--expected-surface-origin",
+    "--expected-response-schema-file",
+    "--verify-app-binding",
   ]);
   for (let index = 0; index < argv.length; index += 2) {
     if (!known.has(argv[index])) throw new Error(`unknown argument '${argv[index]}'\n${usage()}`);
@@ -93,6 +107,8 @@ function parseOptions(argv: string[]): Options {
     expectedAppCanister,
     expectedInbox,
     expectedSurfaceOrigin,
+    expectedResponseSchemaFile: option(argv, "expected-response-schema-file"),
+    verifyAppBinding: option(argv, "verify-app-binding") === "true",
   };
 }
 
@@ -150,6 +166,23 @@ async function main(): Promise<void> {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const actions: any[] = app.manifest.actions ?? [];
   if (actions.length < 1) fail("published IOU app has no actions");
+  let responseSchemaVerified = false;
+  if (options.expectedResponseSchemaFile !== undefined) {
+    let expectedSchema: unknown;
+    let liveSchema: unknown;
+    try {
+      expectedSchema = JSON.parse(
+        readFileSync(options.expectedResponseSchemaFile, "utf8"),
+      ).responseSchema;
+      liveSchema = JSON.parse(actions[0]?.response_schema ?? "");
+    } catch {
+      fail("published IOU response schema or expected registration JSON is invalid");
+    }
+    if (!isDeepStrictEqual(liveSchema, expectedSchema)) {
+      fail("published IOU response schema does not match the local registration contract");
+    }
+    responseSchemaVerified = true;
+  }
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const surfaces: any[] = app.manifest.surfaces ?? [];
   const secureSurfaces = surfaces.filter((surface) => {
@@ -171,10 +204,52 @@ async function main(): Promise<void> {
     fail(`published IOU app has no surface at ${options.expectedSurfaceOrigin}`);
   }
 
+  let appBindingVerified = false;
+  if (options.verifyAppBinding) {
+    if (!options.expectedAppCanister) {
+      fail("--verify-app-binding requires --expected-app-canister");
+    }
+    const backend = Actor.createActor(iouIdlFactory, {
+      agent,
+      canisterId: options.expectedAppCanister,
+    }) as any;
+    const config = await backend.get_config();
+    const configured = config.ai_app_verification_binding?.[0];
+    if (configured === undefined) fail("IOU backend has no AI app verification binding");
+
+    const encodedCommitment = encodeManifestCommitmentV2({
+      user_index_canister_id: Principal.fromText(options.userIndex),
+      app_id: appId,
+      app_revision: revision,
+      owner: app.owner,
+      canonical_name: options.appName,
+      manifest: app.manifest,
+    });
+    const expectedHash = createHash("sha256")
+      .update(Buffer.from(MANIFEST_COMMITMENT_DOMAIN_V2))
+      .update(Buffer.from(encodedCommitment))
+      .digest();
+    const configuredInbox = principalOpt(configured.inbox_canister_id);
+    const bindingMatches =
+      configured.user_index_canister_id.toText() === options.userIndex &&
+      Number(configured.app_id) === appId &&
+      configured.app_revision === revision &&
+      configured.owner.toText() === app.owner.toText() &&
+      configured.canonical_name === options.appName &&
+      configured.app_canister_id.toText() === options.expectedAppCanister &&
+      configuredInbox === inbox &&
+      Buffer.from(configured.manifest_hash).equals(expectedHash);
+    if (!bindingMatches) {
+      fail("IOU backend verification binding does not match the exact published manifest");
+    }
+    appBindingVerified = true;
+  }
+
   console.log(
     JSON.stringify({
       ready: true,
       scope: "anonymous-published-registration",
+      endToEndReady: false,
       userIndex: options.userIndex,
       app: {
         id: appId,
@@ -184,11 +259,17 @@ async function main(): Promise<void> {
         appCanister,
         inbox,
         perUserKeys: true,
+        responseSchemaVerified,
+        appBindingVerified,
         actions: actions.map((action) => action.name),
         surfaces: secureSurfaces.map((surface) => ({ kind: surface.kind, url: surface.url })),
       },
-      directChatConnection:
-        "not checked: each signed-in OpenChat account still needs its own active app key",
+      accountConnection: {
+        checked: false,
+        ready: false,
+        reason:
+          "not checked: each signed-in account must have an exact-current-revision app link; manifest updates require reconnect verification",
+      },
     }),
   );
 }

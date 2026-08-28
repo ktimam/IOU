@@ -2,10 +2,25 @@
   "openChatRepo": "C:\\path\\to\\openchat-checkout",
   "tailscaleExecutable": "C:\\path\\to\\tailscale.exe",
   "tailnetHost": "device-name.tailnet-name.ts.net",
+  "browserProbe": {
+    "channel": "chrome"
+  },
+  "androidDevice": {
+    "adbExecutable": "C:\\path\\to\\adb.exe",
+    "serial": "configured-device-serial",
+    "requiredForReady": false
+  },
   "openChat": {
+    "canisterIdsFile": "C:\\path\\to\\openchat-deployment\\.dfx\\local\\canister_ids.json",
+    "oneSecForwarderCanisterId": "one-sec-forwarder-canister-id",
+    "oneSecMinterCanisterId": "one-sec-minter-canister-id",
     "internetIdentityCanisterId": "local-internet-identity-canister-id",
     "vapidPublicKey": "local-openchat-vapid-public-key",
-    "walletConnectProjectId": "local-wallet-connect-project-id"
+    "walletConnectProjectId": "local-wallet-connect-project-id",
+    "androidLink": {
+      "packageName": "com.example.openchat",
+      "certificateSha256": "00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00"
+    }
   },
   "aiApp": {
     "name": "app-name",

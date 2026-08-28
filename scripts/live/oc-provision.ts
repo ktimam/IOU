@@ -3,16 +3,16 @@
 // the page's create() doesn't use — the raw page-target WS is what actually injects it). After signup
 // it EXPORTS the credential's private key (WebAuthn.getCredentials) so oc-restore can re-inject it.
 //
-//   pnpm exec tsx scripts/live/oc-provision.ts --port 9241 --user manager --out C:/Kiko/oc-live/creds/manager.json
+//   pnpm exec tsx scripts/live/oc-provision.ts --openchat-frontend <frontend-dir> \
+//     --port 9241 --user manager --out <live-profile-root>/creds/manager.json
 import { chromium, type Page } from "@playwright/test";
 import { writeFileSync, mkdirSync } from "node:fs";
 import { dirname } from "node:path";
 import { execFileSync, spawn } from "node:child_process";
-import { createRequire } from "node:module";
 import http from "node:http";
+import { loadOpenChatWebSocket } from "./openChatFrontendDependency";
 
-const require = createRequire("C:/Kiko/MyProjects/Blockchain/ICP/open-chat-cycle/frontend/package.json");
-const WebSocket = require("ws");
+const WebSocket = loadOpenChatWebSocket();
 
 function arg(name: string, def?: string): string {
   const i = process.argv.indexOf(`--${name}`);

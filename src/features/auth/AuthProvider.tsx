@@ -2,6 +2,7 @@ import { createContext, useContext, useEffect, useState, type ReactNode } from "
 import { AuthClient } from "@dfinity/auth-client";
 import { HttpAgent, type Identity } from "@dfinity/agent";
 import { Secp256k1KeyIdentity } from "@dfinity/identity-secp256k1";
+import { shouldFetchLocalRootKey } from "../../config/devLanQcRuntime";
 import { canisterId, host, internetIdentityUrl } from "./config";
 
 type AuthState =
@@ -198,7 +199,7 @@ export function useAuth(): AuthCtx {
 // that need to make canister calls.
 export async function buildAgent(identity: Identity): Promise<HttpAgent> {
   const agent = new HttpAgent({ identity, host });
-  if (host.includes("127.0.0.1") || host.includes("localhost")) {
+  if (shouldFetchLocalRootKey()) {
     await agent.fetchRootKey();
   }
   return agent;

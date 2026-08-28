@@ -21,6 +21,7 @@
 import type { Identity } from "@dfinity/agent";
 import { HttpAgent } from "@dfinity/agent";
 import { createActor } from "../../backend/declarations";
+import { shouldFetchLocalRootKey } from "../../config/devLanQcRuntime";
 import { host } from "../auth/config";
 import { deriveUserKey, isProdVetkd } from "../crypto/devVetkd";
 import { loadOrCreateTransportKey, deriveConsumerWrapKeyProd } from "../crypto/prodVetkd";
@@ -398,7 +399,7 @@ async function buildBackendActor(identity: Identity): Promise<any> {
   // explicit host + AWAITED fetchRootKey (see the SheetKeyContext note on
   // the un-awaited default causing certificate errors).
   const agent = new HttpAgent({ identity, host });
-  if (host.includes("127.0.0.1") || host.includes("localhost")) {
+  if (shouldFetchLocalRootKey()) {
     await agent.fetchRootKey();
   }
   // eslint-disable-next-line @typescript-eslint/no-explicit-any

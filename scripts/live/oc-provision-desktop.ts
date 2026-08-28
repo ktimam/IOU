@@ -8,14 +8,14 @@
 // for — navigate, evaluate, bringToFront — has a direct CDP equivalent, so we just talk to the page
 // target's webSocketDebuggerUrl (which is what WebAuthn needs anyway, see oc-provision.ts's header).
 //
-//   pnpm exec tsx scripts/live/oc-provision-desktop.ts --port 9222 --user father --out C:/Kiko/oc-live/creds/father.json
+//   pnpm exec tsx scripts/live/oc-provision-desktop.ts --openchat-frontend <frontend-dir> \
+//     --port 9222 --user father --out <live-profile-root>/creds/father.json
 import { writeFileSync, mkdirSync } from "node:fs";
 import { dirname } from "node:path";
 import { spawn } from "node:child_process";
-import { createRequire } from "node:module";
+import { loadOpenChatWebSocket } from "./openChatFrontendDependency";
 
-const require = createRequire("C:/Kiko/MyProjects/Blockchain/ICP/open-chat-cycle/frontend/package.json");
-const WebSocket = require("ws");
+const WebSocket = loadOpenChatWebSocket();
 
 function arg(name: string, def?: string): string {
   const i = process.argv.indexOf(`--${name}`);
