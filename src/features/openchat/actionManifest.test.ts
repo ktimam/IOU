@@ -504,16 +504,17 @@ describe("registered wire — schema evidence stays private and public rows stay
       includeRuleGuidance: false,
     };
     const expectedFocused = {
-      version: 1,
-      primaryFields: ["amount", "currency", "kind", "note"],
+      version: 2,
+      primaryFields: ["amount", "currency", "kind"],
       primaryMaxTokens: 64,
       passes: [
         {
           template: IOU_IMAGE_DATE_EXTRACTION_PROMPT,
-          fields: ["date"],
+          fields: ["date", "note"],
           includeRuleGuidance: false,
           includeMessage: false,
-          maxTokens: 24,
+          maxTokens: 48,
+          imageRegion: "lower_half",
         },
       ],
     };
@@ -543,13 +544,13 @@ describe("registered wire — schema evidence stays private and public rows stay
       expect(pass.template.trim()).toBe(pass.template);
       expect(
         new TextEncoder().encode(pass.template).byteLength,
-      ).toBeLessThanOrEqual(1_000);
+      ).toBeLessThanOrEqual(4_096);
       expect(pass.template).not.toContain("\n\nRules:");
     }
     expect([
       ...expectedFocused.primaryFields,
       ...expectedFocused.passes.flatMap((pass) => pass.fields),
-    ]).toEqual(["amount", "currency", "kind", "note", "date"]);
+    ]).toEqual(["amount", "currency", "kind", "date", "note"]);
   });
 
   it("opts into the generic source-grounded text/OCR transaction parser in source, docs, and wire", async () => {
@@ -905,7 +906,7 @@ describe("the extraction prompt tells the model a single line can hold several t
     );
   });
 
-  it("separates core financial fields from the focused date pass", () => {
+  it("separates core financial fields from the focused labelled-detail pass", () => {
     const corePrompt = IOU_IMAGE_EXTRACTION_PROMPT.replace(/\s+/g, " ");
     const datePrompt = IOU_IMAGE_DATE_EXTRACTION_PROMPT.replace(/\s+/g, " ");
 
@@ -917,27 +918,45 @@ describe("the extraction prompt tells the model a single line can hold several t
     );
     expect(corePrompt).toMatch(/settlement[^.]*completed moving/i);
     expect(corePrompt).toMatch(/iou[^.]*future[^.]*due[^.]*requested/i);
-    expect(corePrompt).toMatch(/note[^.]*Note[^.]*Description[^.]*Memo/i);
+    expect(corePrompt).toMatch(/currency[^.]*exact visible[^.]*three-letter/i);
+    expect(corePrompt).toMatch(/compare all three printed letters/i);
+    expect(corePrompt).toMatch(/receipt or total alone[^.]*not proof of payment/i);
+    expect(corePrompt).toMatch(/ignore[^.]*parties[^.]*descriptions/i);
+    expect(corePrompt).not.toMatch(/explicitly labelled Note/i);
     expect(corePrompt).not.toMatch(/"direction"|"date"\s*:/i);
 
     expect(datePrompt).toMatch(
-      /read only[^.]*transaction[^.]*payment[^.]*booking[^.]*due date/i,
+      /read only[^.]*Date[^.]*Transaction date[^.]*Payment date[^.]*Booking date[^.]*Due date/i,
     );
     expect(datePrompt).toMatch(
-      /ignore every amount[^.]*ID[^.]*reference[^.]*account/i,
+      /Note[^.]*Description[^.]*Memo label[^.]*image detail/i,
     );
-    expect(datePrompt).toMatch(/year first[^.]*visible month[^.]*visible day/i);
-    expect(datePrompt).toMatch(/value must contain exactly ten characters/i);
-    expect(datePrompt).toMatch(/compare the output year, month, and day/i);
+    expect(datePrompt).toMatch(/transcribe[^.]*instead of[^.]*calendar conversion/i);
+    expect(datePrompt).toMatch(
+      /English month name[^.]*copy the visible day[^.]*month word[^.]*four-digit year/i,
+    );
+    expect(datePrompt).toMatch(/do not translate[^.]*or reorder/i);
+    expect(datePrompt).toMatch(/already strict YYYY-MM-DD[^.]*unchanged/i);
+    expect(datePrompt).toMatch(/numeric-only date[^.]*ambiguous[^.]*omit "date"/i);
+    expect(datePrompt).toMatch(/compare every copied date token[^.]*image/i);
+    expect(datePrompt).toMatch(/four year digits[^.]*printed shapes[^.]*final digit/i);
+    expect(datePrompt).toMatch(/month word is printed[^.]*retain[^.]*never output month digits/i);
     expect(datePrompt).not.toMatch(/\b(?:19|20)\d{2}-\d{2}-\d{2}\b/);
     expect(datePrompt).not.toMatch(
       /\b\d{1,2}\s+(?:jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\s+\d{4}\b/i,
     );
-    expect(datePrompt).toMatch(/never return DD-MM-YYYY[^.]*never include the time/i);
+    expect(datePrompt).toMatch(/English month name[^.]*omit the time/i);
     expect(datePrompt).toMatch(
-      /complete date[^.]*visibly printed[^.]*printed year/i,
+      /complete visible date[^.]*calendar conversion/i,
     );
-    expect(datePrompt).toMatch(/no complete date[^.]*return \{\}/i);
+    expect(datePrompt).toMatch(/"note"[^.]*explicit Note[^.]*Description[^.]*Memo/i);
+    expect(datePrompt).toMatch(
+      /if none exists[^.]*transaction or item description[^.]*authoritative amount/i,
+    );
+    expect(datePrompt).toMatch(/never use[^.]*status/i);
+    expect(datePrompt).toMatch(/footer instruction[^.]*keep[^.]*retain[^.]*not a note/i);
+    expect(datePrompt).toMatch(/never use[^.]*sender[^.]*receiver[^.]*From[^.]*To/i);
+    expect(datePrompt).toMatch(/omit either field[^.]*not visible/i);
     expect(datePrompt).toMatch(/never infer/i);
     expect(IOU_IMAGE_EXTRACTION_PROMPT).not.toMatch(/"amount"\s*:\s*-?\d/u);
     // A weak vision signal must not let greedy decoding echo a numeric instruction literal as the

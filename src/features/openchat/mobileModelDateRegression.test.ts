@@ -7,6 +7,7 @@ import {
   iouActionManifest,
 } from "./actionManifest";
 import {
+  MODEL_ACCEPTANCE_CASES,
   scoreModelAcceptanceCase,
   type ModelAcceptanceCase,
   type ModelAcceptanceObservation,
@@ -114,35 +115,62 @@ describe("mobile portrait model date regression", () => {
       );
     }
     expect(IOU_IMAGE_DATE_EXTRACTION_PROMPT).toContain(
-      "compare the output year, month, and day",
+      "compare every copied date token to the image",
     );
     expect(IOU_IMAGE_DATE_EXTRACTION_PROMPT).toContain(
-      "filename, metadata, and date from the instructions",
+      "sender, receiver, From, To, account, reference",
     );
   });
 
-  it("binds date to a disjoint model-only focused pass", () => {
+  it("runs a distinct portrait August image through the real-model matrix", () => {
+    const realCase = MODEL_ACCEPTANCE_CASES.find(
+      (candidate) => candidate.id === "portrait-date-image",
+    );
+    expect(realCase).toMatchObject({
+      modality: "image",
+      imageFixture: {
+        path: "test/fixtures/openchat/model-acceptance/portrait-transfer-14-aug.png",
+        width: 909,
+        height: 1600,
+      },
+      expected: [
+        {
+          amount: 12_900,
+          currency: "EGP",
+          kind: "settlement",
+          date: "2026-08-14",
+        },
+      ],
+      expectedInferCalls: 2,
+    });
+  });
+
+  it("binds labelled date and note to one cropped model-only focused pass", () => {
     const pipeline = iouActionManifest.outputSchema[
       "x-openchat-image-focused-passes"
     ] as {
       primaryFields: string[];
       primaryMaxTokens: number;
-      passes: { fields: string[]; maxTokens: number; template: string }[];
+      version: number;
+      passes: {
+        fields: string[];
+        maxTokens: number;
+        template: string;
+        imageRegion: string;
+      }[];
     };
-    expect(pipeline.primaryFields).toEqual([
-      "amount",
-      "currency",
-      "kind",
-      "note",
-    ]);
+    expect(pipeline.version).toBe(2);
+    expect(pipeline.primaryFields).toEqual(["amount", "currency", "kind"]);
     expect(pipeline.passes).toEqual([
       expect.objectContaining({
-        fields: ["date"],
-        maxTokens: 24,
+        fields: ["date", "note"],
+        maxTokens: 48,
         template: IOU_IMAGE_DATE_EXTRACTION_PROMPT,
+        imageRegion: "lower_half",
       }),
     ]);
     expect(pipeline.primaryFields).not.toContain("date");
+    expect(pipeline.primaryFields).not.toContain("note");
   });
 
   it("accepts the visible August date and rejects the reported July result", () => {

@@ -56,7 +56,7 @@ function passingObservation(
 }
 
 describe("real-model IOU acceptance cases", () => {
-  it("pins text regressions plus fixed clean-document and receipt-photo OCR fixtures", () => {
+  it("pins text regressions plus three distinct fixed image fixtures", () => {
     expect(
       MODEL_ACCEPTANCE_CASES.map((testCase) => [
         testCase.id,
@@ -68,6 +68,7 @@ describe("real-model IOU acceptance cases", () => {
       ["delimited-multi-entry", "text"],
       ["multi-entry", "text"],
       ["dated-image", "image"],
+      ["portrait-date-image", "image"],
       ["receipt-photo", "image"],
     ]);
     expect(MODEL_ACCEPTANCE_CASES[1].text).toBe(
@@ -117,12 +118,12 @@ describe("real-model IOU acceptance cases", () => {
     },
   );
 
-  it("binds both fixed image fixture identities into the cases digest", () => {
+  it("binds every fixed image fixture identity into the cases digest", () => {
     expect(
       createHash("sha256")
         .update(JSON.stringify(MODEL_ACCEPTANCE_CASES))
         .digest("hex"),
-    ).toBe("5dab0ae3870984a6ff6af9e6b93a562dd6ae17676da049d869dd556c386e4314");
+    ).toBe("5e52d56b582497828b7ac6c2b9279efca66bbde90f568f2e76f237be4fce907c");
   });
 
   it("rejects a repair pass even when the repaired extraction is correct", () => {
@@ -192,8 +193,92 @@ describe("real-model IOU acceptance cases", () => {
       "utf8",
     );
     expect(runner).toContain('purpose: "acceptance-runner"');
-    expect(runner).toContain("qualification.modelArtifactFingerprint(entry)");
-    expect(runner).toContain("qualification.MODEL_ACCEPTANCE_RUNTIME_DIGEST");
+    expect(runner).toContain("modelArtifactFingerprint(entry)");
+    expect(runner).toContain('"/src/utils/aiActionRunner.ts"');
+    expect(runner).toContain('"/src/utils/onDeviceInference.ts"');
+    expect(runner).toContain('"/src/utils/inferenceImage.ts"');
+    expect(runner).toContain('sources[actionUrl].includes("function runAiAction")');
+    expect(runner).toContain("typeof shared.runAiAction");
+    expect(runner).toContain("device!.inferOnDevice(request)");
+    expect(runner).toContain("productionImageRegion");
+    expect(runner).not.toContain('import("/src/utils/modelQualification.ts")');
+    expect(runner).not.toContain('import("/src/utils/modelAcceptanceRuntime.ts")');
     expect(runner).toContain("runtimeDigest: live.runtimeDigest");
+    expect(runner).toContain('valueAfter(argv, "--cases")');
+    expect(runner).toContain(
+      'valueAfter(argv, "--cached-attach-timeout-ms") ?? 10 * 60_000',
+    );
+    expect(runner).toContain(
+      'throw new Error("--cached-attach-timeout-ms must be 30000..1200000")',
+    );
+    expect(runner).toContain("args.cachedAttachTimeoutMs");
+    expect(runner).toContain("unknown --cases id(s)");
+    expect(runner).toContain("--cases contains duplicate ids");
+    expect(runner).toContain(
+      "if (textCases.length > 0) await runAndScore(textCases[0], 0, true)",
+    );
+    expect(runner).toContain(
+      'model.modalities.includes("image") && imageCases.length > 0',
+    );
+  });
+
+  it("qualifies Qwen against its pinned Transformers all-WebGPU manifest and cache", () => {
+    const runner = readFileSync(
+      resolve(__dirname, "../../../scripts/live/model-acceptance-matrix.ts"),
+      "utf8",
+    );
+
+    expect(runner).toContain(
+      'const PHONE_QWEN3_VL_2B_MODEL_ID = "qwen3-vl-2b-instruct-q4"',
+    );
+    expect(runner).toContain(
+      'const protocol = await import("/src/utils/transformersWebGpuProtocol.ts")',
+    );
+    expect(runner).toContain("protocol.TRANSFORMERS_QWEN_ARTIFACTS.map");
+    expect(runner).toContain("protocol.TRANSFORMERS_QWEN_ARTIFACT_BYTES");
+    expect(runner).toContain("repository: protocol.TRANSFORMERS_QWEN_MODEL_ID");
+    expect(runner).toContain("revision: protocol.TRANSFORMERS_QWEN_REVISION");
+    expect(runner).toContain("protocol.TRANSFORMERS_WEBGPU_MODEL_PROXY_BASE");
+    expect(runner).not.toContain(
+      "https://huggingface.co/${protocol.TRANSFORMERS_QWEN_MODEL_ID}",
+    );
+    expect(runner).toContain("runtime: \"transformers-webgpu\"");
+    expect(runner).toContain("runtimeAssets: protocol.TRANSFORMERS_WEBGPU_RUNTIME_ASSETS.map");
+    expect(runner).toContain("const qwenDeviceMap = protocol.TRANSFORMERS_QWEN_DEVICE_MAP");
+    expect(runner).toContain('qwenDeviceMap.embed_tokens !== "webgpu"');
+    expect(runner).toContain('qwenDeviceMap.vision_encoder !== "webgpu"');
+    expect(runner).toContain('qwenDeviceMap.decoder_model_merged !== "webgpu"');
+    expect(runner).toContain("deviceMap: { ...qwenDeviceMap }");
+    expect(runner).toContain(
+      'const runtime = await import("/src/utils/transformersWebGpuInference.ts")',
+    );
+    expect(runner).toContain("runtime.transformersWebGpuModelDownloaded(options)");
+    expect(runner).toContain("runtime.transformersWebGpuRuntimeAvailableOffline(options)");
+    expect(runner).toContain("isTransformersWebGpuQwen(model)");
+    expect(runner).toContain(
+      "const initialCache = needsGgufCache ? await readCache(existingPage) : []",
+    );
+    expect(runner).toMatch(
+      /const cached = transformersQwen\s*\? \{ entry: undefined, aliases: \[\], missing: \[\] \}\s*: cachedEvaluationEntry\(model, initialCache\)/,
+    );
+    expect(runner).toContain("cacheReadyBefore: transformersReadyBefore");
+    expect(runner).toContain("cacheReadyAfter = await transformersWebGpuCacheReady(scratch)");
+    expect(runner).toContain("repository: entry.repository");
+    expect(runner).toContain("revision: entry.revision");
+    expect(runner).toContain("deviceMap: entry.deviceMap");
+
+    for (const source of [
+      "/src/utils/transformersWebGpuProtocol.ts",
+      "/src/utils/transformersWebGpuInference.ts",
+      "/src/utils/transformersWebGpuImageLayout.ts",
+      "/src/utils/transformersWebGpuProcessorConfig.ts",
+      "/src/utils/transformersWebGpuDevRuntimeVersion.ts",
+      "/src/stores/transformersWebGpuSettings.ts",
+      "/transformersWebGpuFeatureFlag.mjs",
+      "/src/workers/transformersWebGpuInference.worker.ts",
+      "/transformers_webgpu_worker.js",
+    ]) {
+      expect(runner).toContain(`"${source}"`);
+    }
   });
 });

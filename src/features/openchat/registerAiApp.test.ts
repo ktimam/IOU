@@ -70,16 +70,17 @@ describe("buildManifestWire", () => {
       includeRuleGuidance: false,
     });
     expect(schema["x-openchat-image-focused-passes"]).toEqual({
-      version: 1,
-      primaryFields: ["amount", "currency", "kind", "note"],
+      version: 2,
+      primaryFields: ["amount", "currency", "kind"],
       primaryMaxTokens: 64,
       passes: [
         {
           template: IOU_IMAGE_DATE_EXTRACTION_PROMPT,
-          fields: ["date"],
+          fields: ["date", "note"],
           includeRuleGuidance: false,
           includeMessage: false,
-          maxTokens: 24,
+          maxTokens: 48,
+          imageRegion: "lower_half",
         },
       ],
     });

@@ -193,13 +193,21 @@ Do not wrap that object in []. Each object must choose exactly one "kind" and on
 
 // Phone-class WebGPU is most reliable when the small VLM has one bounded attention job per pass.
 // OpenChat's v2 image prompt pipeline projects each pass onto only its declared fields, so this core
-// pass cannot invent a date/direction and the date-only pass cannot alter the amount. Both passes use
-// the selected vision model directly; no OCR or text-reader output participates in model-only mode.
-export const IOU_IMAGE_EXTRACTION_PROMPT = `Read the financial document. Return ONLY one JSON object, or a reading-order JSON array for separate transactions. Each object may use only "amount", "currency", "kind", and "note".
+// pass cannot invent a date/note/direction and the lower-detail pass cannot alter the amount. Both
+// passes use the selected vision model directly; no OCR or text-reader output participates.
+export const IOU_IMAGE_EXTRACTION_PROMPT = `Read the financial document. Return ONLY one JSON object, or a reading-order JSON array for separate transactions. Each object may use only "amount", "currency", and "kind".
 
-Use the single authoritative paid, transferred, total, or amount-due value once per transaction; preserve decimals and standard k-thousands. Ignore balances, IDs, accounts, references, dates, times, quantities, percentages, exchange rates, line-item arithmetic, and repeated totals. Currency is the visible three-letter ISO code or its standard code. "settlement" means money visibly completed moving or a payment/transfer visibly succeeded; "iou" means future, due, requested, reserved, booked, or unpaid money. Copy "note" only from an explicitly labelled Note, Description, or Memo. Omit uncertainty; invent nothing.`;
+Use the single authoritative paid, transferred, total, or amount-due value once per transaction; preserve decimals and standard k-thousands. Ignore balances, IDs, accounts, references, dates, times, quantities, percentages, exchange rates, line-item arithmetic, repeated totals, parties, and descriptions. Currency is the exact visible three-letter ISO code beside that amount; compare all three printed letters before answering. The only permitted "kind" values are "settlement" for money visibly completed moving or a payment/transfer visibly succeeded, and "iou" for future, due, owed, requested, reserved, booked, or unpaid money. Output one of those exact strings; never copy a document label such as total, status, or amount-due as "kind". A receipt or total alone is not proof of payment. Omit uncertainty; invent nothing.`;
 
-export const IOU_IMAGE_DATE_EXTRACTION_PROMPT = `Read only the financial document's visibly printed transaction, payment, booking, or due date. Return ONLY {"date":"YYYY-MM-DD"}, or a reading-order JSON array with one object per separate transaction. Copy all three visible calendar components before reordering: put the printed four-digit year first, the visible month second, and the visible day last. Convert a named month to its two-digit month number. The value must contain exactly ten characters. Before responding, compare the output year, month, and day to the same three components in the image. Never return DD-MM-YYYY and never include the time. Ignore every amount, ID, reference, account number, filename, metadata, and date from the instructions. Use only a complete date visibly printed for that transaction, including the printed year. If no complete date is visible, return {}. Never infer, substitute, or blend calendar components.`;
+// Keep calendar conversion out of the VLM. A phone-sized model is substantially more reliable at
+// copying the visible day/month-name/year than at both reading and reordering those components in
+// one generation. The opted-in schema normalizer below performs the deterministic English-month to
+// ISO conversion after inference; an already-ISO source remains valid unchanged.
+export const IOU_IMAGE_DATE_EXTRACTION_PROMPT = `Read only visibly printed values beside an explicit Date, Transaction date, Payment date, Booking date, Due date, Note, Description, or Memo label in this image detail. Return ONLY one JSON object using only "date" and "note", or a reading-order JSON array for separate transactions.
+
+For "date", transcribe the complete visible date instead of performing a calendar conversion. For an English month name, copy the visible day, month word, and four-digit year in printed order with single spaces; omit the time. If a month word is printed, retain that same word and never output month digits in its place. Read all four year digits from their printed shapes, especially the final digit; never substitute a familiar or likely year. Do not translate the month or reorder components. Copy an already strict YYYY-MM-DD date unchanged. Any other numeric-only date order is ambiguous, so omit "date". Before responding, compare every copied date token to the image.
+
+For "note", prefer the value visibly beside an explicit Note, Description, or Memo label. If none exists, copy only the short transaction or item description directly attached to the authoritative amount. Never use a sender, receiver, From, To, account, reference, total, amount-due label, status, filename, metadata, or text from these instructions as the note. A footer instruction to keep or retain the receipt is not a note. Omit either field when its supported value is not visible. Never infer, substitute, or blend values.`;
 
 // The canister attester rounds major units to integer minor units. Half a minor unit is the exact
 // smallest positive major-unit value that rounds to one; the maximum remains within JavaScript's
@@ -381,16 +389,17 @@ export const iouActionManifest: IouActionManifest = {
     // Additive to the v1 compact prompt above: older OpenChat clients still get the stable compact
     // core extraction, while clients that understand focused passes also read the date separately.
     "x-openchat-image-focused-passes": {
-      version: 1,
-      primaryFields: ["amount", "currency", "kind", "note"],
+      version: 2,
+      primaryFields: ["amount", "currency", "kind"],
       primaryMaxTokens: 64,
       passes: [
         {
           template: IOU_IMAGE_DATE_EXTRACTION_PROMPT,
-          fields: ["date"],
+          fields: ["date", "note"],
           includeRuleGuidance: false,
           includeMessage: false,
-          maxTokens: 24,
+          maxTokens: 48,
+          imageRegion: "lower_half",
         },
       ],
     },
@@ -521,6 +530,9 @@ export const iouActionManifest: IouActionManifest = {
         minLength: 10,
         maxLength: 10,
         format: "date",
+        // The focused VLM copies a visible English named-month date rather than converting it.
+        // OpenChat normalizes that unambiguous source form before enforcing these canonical
+        // ten-character bounds; numeric-only non-ISO dates remain invalid and fail closed.
         "x-openchat-normalize-date": true,
         // For one text transaction, prefer an unambiguous date in the authoritative source over a
         // small model copying the nearby host calendar anchor. Ranges resolve to their start.

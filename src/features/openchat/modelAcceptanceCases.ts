@@ -18,6 +18,7 @@ export type ModelAcceptanceCase = Readonly<{
     | "delimited-multi-entry"
     | "multi-entry"
     | "dated-image"
+    | "portrait-date-image"
     | "receipt-photo";
   modality: ModelAcceptanceModality;
   text?: string;
@@ -189,6 +190,32 @@ export const MODEL_ACCEPTANCE_CASES: readonly ModelAcceptanceCase[] = [
     // Production image extraction is model-only but split into disjoint core + focused-date passes.
     expectedInferCalls: 2,
     warmLatencyMs: 45_000,
+  },
+  {
+    id: "portrait-date-image",
+    modality: "image",
+    imageFixture: {
+      path: "test/fixtures/openchat/model-acceptance/portrait-transfer-14-aug.png",
+      // The exact digest and byte count bind this privacy-safe fixed raster into the gate, so the
+      // regression cannot fall back to a source-only date assertion.
+      sha256: "a8d7ecfb7ee0bacbb6101ca2d503d9857527831663c5dc5d16125bf5c03e4181",
+      bytes: 931_267,
+      width: 909,
+      height: 1_600,
+    },
+    expected: [
+      {
+        kind: "settlement",
+        amount: 12_900,
+        currency: "EGP",
+        direction: "credit",
+        date: "2026-08-14",
+        noteIncludes: ["living", "expenses"],
+        noteAllowedWords: ["living", "expenses"],
+      },
+    ],
+    expectedInferCalls: 2,
+    warmLatencyMs: 60_000,
   },
   {
     id: "receipt-photo",

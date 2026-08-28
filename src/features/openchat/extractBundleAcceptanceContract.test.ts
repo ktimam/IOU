@@ -41,6 +41,7 @@ describe("test-only Extract bundle contract", () => {
       ["delimited-multi-entry", "deterministic"],
       ["multi-entry", "text"],
       ["dated-image", "vision"],
+      ["portrait-date-image", "vision"],
       ["receipt-photo", "vision"],
     ]);
   });
@@ -57,6 +58,7 @@ describe("test-only Extract bundle contract", () => {
       ["delimited-multi-entry", "array"],
       ["multi-entry", "array"],
       ["dated-image", "object"],
+      ["portrait-date-image", "object"],
       ["receipt-photo", "object"],
     ]);
   });

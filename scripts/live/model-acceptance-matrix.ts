@@ -7,6 +7,8 @@
 //
 // Example:
 //   pnpm exec tsx scripts/live/model-acceptance-matrix.ts --port 19241 --models all --runs 3
+//   pnpm exec tsx scripts/live/model-acceptance-matrix.ts --models qwen3-vl-2b-instruct-q4 --cases portrait-date-image --runs 1
+//   pnpm exec tsx scripts/live/model-acceptance-matrix.ts --cached-attach-timeout-ms 600000
 //   pnpm exec tsx scripts/live/model-acceptance-matrix.ts --port 19243 --models qwen2.5-1.5b-instruct-q4 --download-missing
 import { chromium, type Page } from "@playwright/test";
 import { createHash } from "node:crypto";
@@ -33,6 +35,19 @@ import {
 import { CDP_PORTS } from "./cdpPorts";
 
 type CatalogFile = { url: string; sha256: string; bytes: number };
+type TransformersRuntimeAsset =
+  | {
+      kind: "worker";
+      path: string;
+      minimumBytes: number;
+      maximumBytes: number;
+    }
+  | { kind: "pinned"; path: string; bytes: number; sha256: string };
+type TransformersDeviceMap = {
+  embed_tokens: "webgpu";
+  vision_encoder: "webgpu";
+  decoder_model_merged: "webgpu";
+};
 type CatalogEntry = {
   id: string;
   name: string;
@@ -42,6 +57,10 @@ type CatalogEntry = {
   files: CatalogFile[];
   sizeBytes: number;
   fingerprint: string;
+  repository?: string;
+  revision?: string;
+  runtimeAssets?: TransformersRuntimeAsset[];
+  deviceMap?: TransformersDeviceMap;
 };
 
 type CacheRecord = {
@@ -78,7 +97,9 @@ type CaseRun = {
 type Args = {
   port: number;
   modelIds: "all" | string[];
+  caseIds: "all" | ModelAcceptanceCase["id"][];
   runs: number;
+  cachedAttachTimeoutMs: number;
   downloadMissing: boolean;
   profile: "desktop" | "mobile-emulated";
   extractBundle: boolean;
@@ -94,12 +115,23 @@ function valueAfter(argv: string[], name: string): string | undefined {
 function parseArgs(argv: string[]): Args {
   const port = Number(valueAfter(argv, "--port") ?? CDP_PORTS.manager);
   const runs = Number(valueAfter(argv, "--runs") ?? 3);
+  const cachedAttachTimeoutMs = Number(
+    valueAfter(argv, "--cached-attach-timeout-ms") ?? 10 * 60_000,
+  );
   const models = valueAfter(argv, "--models") ?? "all";
+  const cases = valueAfter(argv, "--cases") ?? "all";
   const profile = valueAfter(argv, "--profile") ?? "desktop";
   if (!Number.isSafeInteger(port) || port < 1 || port > 65_535)
     throw new Error("invalid --port");
   if (!Number.isSafeInteger(runs) || runs < 1 || runs > 10)
     throw new Error("--runs must be 1..10");
+  if (
+    !Number.isSafeInteger(cachedAttachTimeoutMs) ||
+    cachedAttachTimeoutMs < 30_000 ||
+    cachedAttachTimeoutMs > 20 * 60_000
+  ) {
+    throw new Error("--cached-attach-timeout-ms must be 30000..1200000");
+  }
   if (profile !== "desktop" && profile !== "mobile-emulated") {
     throw new Error("--profile must be desktop or mobile-emulated");
   }
@@ -116,10 +148,28 @@ function parseArgs(argv: string[]): Args {
           .filter(Boolean);
   if (modelIds !== "all" && modelIds.length === 0)
     throw new Error("--models is empty");
+  const caseIds =
+    cases === "all"
+      ? "all"
+      : cases
+          .split(",")
+          .map((id) => id.trim())
+          .filter(Boolean);
+  if (caseIds !== "all") {
+    if (caseIds.length === 0) throw new Error("--cases is empty");
+    const known = new Set(MODEL_ACCEPTANCE_CASES.map(({ id }) => id));
+    const unknown = caseIds.filter((id) => !known.has(id as ModelAcceptanceCase["id"]));
+    if (unknown.length > 0)
+      throw new Error(`unknown --cases id(s): ${unknown.join(", ")}`);
+    if (new Set(caseIds).size !== caseIds.length)
+      throw new Error("--cases contains duplicate ids");
+  }
   return {
     port,
     modelIds,
+    caseIds: caseIds as Args["caseIds"],
     runs,
+    cachedAttachTimeoutMs,
     downloadMissing: argv.includes("--download-missing"),
     profile,
     extractBundle,
@@ -129,6 +179,87 @@ function parseArgs(argv: string[]): Args {
 
 function sha256(value: string): string {
   return createHash("sha256").update(value).digest("hex");
+}
+
+const PLAYWRIGHT_EVALUATE_NAME_HELPER =
+  "globalThis.__name ??= (target, value) => Object.defineProperty(target, 'name', { value, configurable: true });";
+
+const PHONE_QWEN3_VL_2B_MODEL_ID = "qwen3-vl-2b-instruct-q4";
+
+// These served sources collectively choose, verify, prepare input for, and execute the pinned
+// browser runtime under qualification. Keep the manifest/readiness modules in this digest: a
+// result must become stale when its ONNX revision, artifact hashes, cache proof, WebGPU layout, or
+// runtime settings change even if IOU's prompt and parser do not.
+const QUALIFICATION_RUNTIME_SOURCE_URLS = [
+  "/src/utils/modelCatalog.ts",
+  "/src/utils/webInference.ts",
+  "/src/utils/inferenceImage.ts",
+  "/src/utils/onDeviceInference.ts",
+  "/src/utils/aiActionRunner.ts",
+  "/src/utils/transformersWebGpuProtocol.ts",
+  "/src/utils/transformersWebGpuInference.ts",
+  "/src/utils/transformersWebGpuImageLayout.ts",
+  "/src/utils/transformersWebGpuProcessorConfig.ts",
+  "/src/utils/transformersWebGpuDevRuntimeVersion.ts",
+  "/src/stores/transformersWebGpuSettings.ts",
+  "/transformersWebGpuFeatureFlag.mjs",
+  "/src/workers/transformersWebGpuInference.worker.ts",
+  // Hash the exact executable bundle too. Its build transform and bundled runtime dependencies can
+  // change behavior even when the TypeScript entry point itself is unchanged.
+  "/transformers_webgpu_worker.js",
+] as const;
+
+// OpenChat no longer ships the old acceptance-only modelQualification module. Keep the execution
+// identity canonical here so the gate can run against the current app without weakening the
+// fingerprint: these are exactly the catalog fields that can alter loading or inference.
+function modelArtifactFingerprint(entry: CatalogEntry): string {
+  return sha256(
+    JSON.stringify({
+      id: entry.id,
+      runtime: entry.runtime,
+      repository: entry.repository,
+      revision: entry.revision,
+      modalities: entry.modalities,
+      files: entry.files.map(({ url, sha256: digest, bytes }) => ({
+        url,
+        sha256: digest,
+        bytes,
+      })),
+      runtimeAssets: entry.runtimeAssets,
+      deviceMap: entry.deviceMap,
+      sizeBytes: entry.sizeBytes,
+    }),
+  );
+}
+
+function isTransformersWebGpuQwen(entry: CatalogEntry): boolean {
+  return (
+    entry.id === PHONE_QWEN3_VL_2B_MODEL_ID &&
+    entry.runtime === "transformers-webgpu" &&
+    typeof entry.repository === "string" &&
+    typeof entry.revision === "string" &&
+    entry.files.length > 0
+  );
+}
+
+function modelResultProvenance(entry: CatalogEntry) {
+  return {
+    id: entry.id,
+    name: entry.name,
+    runtime: entry.runtime,
+    fingerprint: entry.fingerprint,
+    artifacts: entry.files,
+    modalities: entry.modalities,
+    sizeBytes: entry.sizeBytes,
+    ...(entry.repository === undefined
+      ? {}
+      : { repository: entry.repository }),
+    ...(entry.revision === undefined ? {} : { revision: entry.revision }),
+    ...(entry.runtimeAssets === undefined
+      ? {}
+      : { runtimeArtifacts: entry.runtimeAssets }),
+    ...(entry.deviceMap === undefined ? {} : { deviceMap: entry.deviceMap }),
+  };
 }
 
 function actionDefinition() {
@@ -179,19 +310,123 @@ async function liveQualification(page: Page): Promise<{
   models: CatalogEntry[];
   runtimeDigest: string;
 }> {
-  return page.evaluate(async () => {
+  const live = await page.evaluate(async (sourceUrls) => {
     const catalog = await import("/src/utils/modelCatalog.ts");
-    const qualification = await import("/src/utils/modelQualification.ts");
-    return {
-      models: catalog
-        .webEligibleModels(catalog.defaultModelCatalog.models)
-        .map((entry: CatalogEntry) => ({
-          ...entry,
-          fingerprint: qualification.modelArtifactFingerprint(entry),
-        })),
-      runtimeDigest: qualification.MODEL_ACCEPTANCE_RUNTIME_DIGEST,
+    const protocol = await import("/src/utils/transformersWebGpuProtocol.ts");
+    const sources: Record<string, string> = {};
+    for (const url of sourceUrls) {
+      const response = await fetch(url, { cache: "no-store" });
+      if (!response.ok)
+        throw new Error(`served source ${url} returned ${response.status}`);
+      sources[url] = await response.text();
+    }
+    const runnerSource = sources["/src/utils/aiActionRunner.ts"];
+    const sharedSpecifier = runnerSource.match(
+      /import\s*\{[\s\S]*?\brunAiAction\b[\s\S]*?\}\s*from\s*["']([^"']+)["']/,
+    )?.[1];
+    if (sharedSpecifier === undefined) {
+      throw new Error("served aiActionRunner has no discoverable shared runAiAction import");
+    }
+    const sharedUrl = new URL(sharedSpecifier, location.origin).href;
+    const sharedResponse = await fetch(sharedUrl, { cache: "no-store" });
+    if (!sharedResponse.ok) {
+      throw new Error(`served shared runtime ${sharedUrl} returned ${sharedResponse.status}`);
+    }
+    sources[sharedUrl] = await sharedResponse.text();
+    const domainSpecifier = sources[sharedUrl].match(
+      /from\s*["']([^"']*\/domain\/index\.ts[^"']*)["']/,
+    )?.[1];
+    if (domainSpecifier === undefined) {
+      throw new Error("served shared runtime has no discoverable domain index import");
+    }
+    const domainUrl = new URL(domainSpecifier, location.origin).href;
+    const domainResponse = await fetch(domainUrl, { cache: "no-store" });
+    if (!domainResponse.ok)
+      throw new Error(`served shared domain ${domainUrl} returned ${domainResponse.status}`);
+    sources[domainUrl] = await domainResponse.text();
+    const actionSpecifier = sources[domainUrl].match(
+      /from\s*["']([^"']*\/domain\/aiAction\.ts[^"']*)["']/,
+    )?.[1];
+    if (actionSpecifier === undefined) {
+      throw new Error("served shared domain has no discoverable aiAction import");
+    }
+    const actionUrl = new URL(actionSpecifier, location.origin).href;
+    const actionResponse = await fetch(actionUrl, { cache: "no-store" });
+    if (!actionResponse.ok)
+      throw new Error(`served aiAction runtime ${actionUrl} returned ${actionResponse.status}`);
+    sources[actionUrl] = await actionResponse.text();
+    const encode = (value: string) => new TextEncoder().encode(value);
+    const hex = (bytes: ArrayBuffer) =>
+      [...new Uint8Array(bytes)]
+        .map((byte) => byte.toString(16).padStart(2, "0"))
+        .join("");
+    const sourceDigests: Record<string, string> = {};
+    for (const url of [...sourceUrls, sharedUrl, domainUrl, actionUrl]) {
+      sourceDigests[url] = hex(
+        await crypto.subtle.digest("SHA-256", encode(sources[url])),
+      );
+    }
+    const catalogModels = catalog.webEligibleModels(catalog.defaultModelCatalog.models);
+    const qwenCatalog = catalogModels.find(
+      (entry) => entry.id === protocol.PHONE_QWEN3_VL_2B_MODEL_ID,
+    );
+    if (qwenCatalog === undefined) {
+      throw new Error("served catalog omits the pinned all-WebGPU Qwen model");
+    }
+    const qwenArtifactBytes = protocol.TRANSFORMERS_QWEN_ARTIFACTS.reduce(
+      (total, artifact) => total + artifact.bytes,
+      0,
+    );
+    if (qwenArtifactBytes !== protocol.TRANSFORMERS_QWEN_ARTIFACT_BYTES) {
+      throw new Error("served all-WebGPU Qwen artifact total is inconsistent");
+    }
+    const qwenDeviceMap = protocol.TRANSFORMERS_QWEN_DEVICE_MAP;
+    if (
+      JSON.stringify(Object.keys(qwenDeviceMap).sort()) !==
+        JSON.stringify(["decoder_model_merged", "embed_tokens", "vision_encoder"]) ||
+      qwenDeviceMap.embed_tokens !== "webgpu" ||
+      qwenDeviceMap.vision_encoder !== "webgpu" ||
+      qwenDeviceMap.decoder_model_merged !== "webgpu"
+    ) {
+      throw new Error("served Qwen session device map is not exactly all-WebGPU");
+    }
+    const qwen = {
+      ...qwenCatalog,
+      runtime: "transformers-webgpu",
+      repository: protocol.TRANSFORMERS_QWEN_MODEL_ID,
+      revision: protocol.TRANSFORMERS_QWEN_REVISION,
+      files: protocol.TRANSFORMERS_QWEN_ARTIFACTS.map((artifact) => ({
+        // This is the exact production route, including audited local graph overrides. A direct
+        // upstream URL would falsely claim that its bytes necessarily match the served hashes.
+        url: `${protocol.TRANSFORMERS_WEBGPU_MODEL_PROXY_BASE}${protocol.TRANSFORMERS_QWEN_MODEL_ID}/resolve/${protocol.TRANSFORMERS_QWEN_REVISION}/${artifact.path}`,
+        sha256: artifact.sha256,
+        bytes: artifact.bytes,
+      })),
+      runtimeAssets: protocol.TRANSFORMERS_WEBGPU_RUNTIME_ASSETS.map((asset) => ({
+        ...asset,
+      })),
+      deviceMap: { ...qwenDeviceMap },
+      sizeBytes: protocol.TRANSFORMERS_QWEN_ARTIFACT_BYTES,
     };
-  });
+    return {
+      models: catalogModels.map((entry) =>
+        entry.id === protocol.PHONE_QWEN3_VL_2B_MODEL_ID ? qwen : entry,
+      ),
+      runtimeDigest: hex(
+        await crypto.subtle.digest(
+          "SHA-256",
+          encode(JSON.stringify(sourceDigests)),
+        ),
+      ),
+    };
+  }, [...QUALIFICATION_RUNTIME_SOURCE_URLS]);
+  return {
+    models: live.models.map((entry: CatalogEntry) => ({
+      ...entry,
+      fingerprint: modelArtifactFingerprint(entry),
+    })),
+    runtimeDigest: live.runtimeDigest,
+  };
 }
 
 async function readCache(page: Page): Promise<CacheRecord[]> {
@@ -232,6 +467,19 @@ async function readCache(page: Page): Promise<CacheRecord[]> {
       }
     }
     return result;
+  });
+}
+
+/** Use the production all-WebGPU cache verifier with an explicit base URL so every qualification
+ * call performs a fresh revision/hash/body proof instead of reusing its per-page memoized result. */
+async function transformersWebGpuCacheReady(page: Page): Promise<boolean> {
+  return page.evaluate(async () => {
+    const runtime = await import("/src/utils/transformersWebGpuInference.ts");
+    const options = { baseUrl: location.href };
+    return (
+      (await runtime.transformersWebGpuModelDownloaded(options)) &&
+      (await runtime.transformersWebGpuRuntimeAvailableOffline(options))
+    );
   });
 }
 
@@ -288,8 +536,7 @@ async function createScratchPage(
   // evaluate callbacks without the module prelude that defines it, so make the standard helper
   // available only in this disposable acceptance page.
   await page.addInitScript({
-    content:
-      "globalThis.__name ??= (target, value) => Object.defineProperty(target, 'name', { value, configurable: true });",
+    content: PLAYWRIGHT_EVALUATE_NAME_HELPER,
   });
   if (profile === "mobile-emulated") {
     await page.addInitScript(() => {
@@ -330,19 +577,52 @@ async function closeScratchPage(page: Page): Promise<void> {
 }
 
 async function pageEnvironment(page: Page) {
-  return page.evaluate(async () => {
+  return page.evaluate(async (sourceUrls) => {
     const sources: Record<string, string> = {};
-    for (const url of [
-      "/src/utils/modelCatalog.ts",
-      "/src/utils/webInference.ts",
-      "/src/utils/inferenceImage.ts",
-      "/src/utils/modelAcceptanceRuntime.ts",
-    ]) {
+    for (const url of sourceUrls) {
       const response = await fetch(url, { cache: "no-store" });
       if (!response.ok)
         throw new Error(`served source ${url} returned ${response.status}`);
       sources[url] = await response.text();
     }
+    const runnerSource = sources["/src/utils/aiActionRunner.ts"];
+    const sharedSpecifier = runnerSource.match(
+      /import\s*\{[\s\S]*?\brunAiAction\b[\s\S]*?\}\s*from\s*["']([^"']+)["']/,
+    )?.[1];
+    if (sharedSpecifier === undefined) {
+      throw new Error("served aiActionRunner has no discoverable shared runAiAction import");
+    }
+    const sharedUrl = new URL(sharedSpecifier, location.origin).href;
+    const sharedResponse = await fetch(sharedUrl, { cache: "no-store" });
+    if (!sharedResponse.ok)
+      throw new Error(`served shared runtime ${sharedUrl} returned ${sharedResponse.status}`);
+    sources[sharedUrl] = await sharedResponse.text();
+    const domainSpecifier = sources[sharedUrl].match(
+      /from\s*["']([^"']*\/domain\/index\.ts[^"']*)["']/,
+    )?.[1];
+    if (domainSpecifier === undefined) {
+      throw new Error("served shared runtime has no discoverable domain index import");
+    }
+    const domainUrl = new URL(domainSpecifier, location.origin).href;
+    const domainResponse = await fetch(domainUrl, { cache: "no-store" });
+    if (!domainResponse.ok)
+      throw new Error(`served shared domain ${domainUrl} returned ${domainResponse.status}`);
+    sources[domainUrl] = await domainResponse.text();
+    const actionSpecifier = sources[domainUrl].match(
+      /from\s*["']([^"']*\/domain\/aiAction\.ts[^"']*)["']/,
+    )?.[1];
+    if (actionSpecifier === undefined) {
+      throw new Error("served shared domain has no discoverable aiAction import");
+    }
+    const actionUrl = new URL(actionSpecifier, location.origin).href;
+    const actionResponse = await fetch(actionUrl, { cache: "no-store" });
+    if (!actionResponse.ok)
+      throw new Error(`served aiAction runtime ${actionUrl} returned ${actionResponse.status}`);
+    sources[actionUrl] = await actionResponse.text();
+    // Import the production leaf rather than the package barrel. The barrel eagerly pulls browser
+    // modules unrelated to action execution and can fail in a disposable mobile-emulated page even
+    // though the exact aiAction leaf is served and runnable.
+    const shared = await import(/* @vite-ignore */ actionUrl);
     const encode = (value: string) => new TextEncoder().encode(value);
     const hex = (bytes: ArrayBuffer) =>
       [...new Uint8Array(bytes)]
@@ -364,15 +644,53 @@ async function pageEnvironment(page: Page) {
       crossOriginIsolated: globalThis.crossOriginIsolated,
       sourceDigests,
       sourceMarkers: {
-        independentPromptState: sources["/src/utils/webInference.ts"].includes(
-          "cache_prompt: false",
-        ),
-        productionRunner: sources[
-          "/src/utils/modelAcceptanceRuntime.ts"
-        ].includes("served-app-shared-alias-v1"),
+        // Qwen's all-WebGPU worker reconstructs the one-turn conversation and processor inputs for
+        // every request, then disposes those tensors. The retired wllama `cache_prompt` marker made
+        // this gate reject the current production engine before any model inference could run.
+        independentPromptState:
+          sources["/src/utils/webInference.ts"].includes(
+            "transformersWebGpuInfer({",
+          ) &&
+          sources[
+            "/src/workers/transformersWebGpuInference.worker.ts"
+          ].includes("const conversation = [") &&
+          sources[
+            "/src/workers/transformersWebGpuInference.worker.ts"
+          ].includes("const inputs = await processor(formatted, image)") &&
+          sources[
+            "/src/workers/transformersWebGpuInference.worker.ts"
+          ].includes("disposeTensors(Object.values(inputs))"),
+        productionRunner:
+          typeof shared.runAiAction === "function" &&
+          runnerSource.includes("runAiAction(") &&
+          sources[actionUrl].includes("function runAiAction"),
+        productionImageRegion:
+          sources["/src/utils/onDeviceInference.ts"].includes(
+            "prepareImageRegionForInference(",
+          ) &&
+          sources["/src/utils/inferenceImage.ts"].includes(
+            'region !== "lower_half"',
+          ) &&
+          sources["/src/utils/inferenceImage.ts"].includes(
+            "async function canvasRegionCrop(",
+          ),
+        pinnedTransformersManifest:
+          sources["/src/utils/transformersWebGpuProtocol.ts"].includes(
+            "TRANSFORMERS_QWEN_ARTIFACTS",
+          ) &&
+          sources["/src/utils/transformersWebGpuProtocol.ts"].includes(
+            "TRANSFORMERS_QWEN_REVISION",
+          ),
+        productionTransformersCacheReadiness:
+          sources["/src/utils/transformersWebGpuInference.ts"].includes(
+            "export async function transformersWebGpuModelDownloaded(",
+          ) &&
+          sources["/src/utils/transformersWebGpuInference.ts"].includes(
+            "TRANSFORMERS_WEBGPU_CACHE_KEY",
+          ),
       },
     };
-  });
+  }, [...QUALIFICATION_RUNTIME_SOURCE_URLS]);
 }
 
 async function attachModel(page: Page, entry: CatalogEntry, timeoutMs: number) {
@@ -429,11 +747,8 @@ function catalogEntryFromExtract(model: ExtractModel): CatalogEntry {
   };
 }
 
-async function fingerprintEntry(page: Page, entry: CatalogEntry): Promise<string> {
-  return page.evaluate(async (model) => {
-    const qualification = await import("/src/utils/modelQualification.ts");
-    return qualification.modelArtifactFingerprint(model);
-  }, entry);
+async function fingerprintEntry(_page: Page, entry: CatalogEntry): Promise<string> {
+  return modelArtifactFingerprint(entry);
 }
 
 async function loadExtractRuntime(page: Page, entry: CatalogEntry, needsImage: boolean) {
@@ -474,7 +789,46 @@ async function runCase(
       extractChat: modelSpecificChat,
     }) => {
       const web = await import("/src/utils/webInference.ts");
-      const ai = await import("/src/utils/modelAcceptanceRuntime.ts");
+      const runnerResponse = await fetch("/src/utils/aiActionRunner.ts", {
+        cache: "no-store",
+      });
+      if (!runnerResponse.ok) {
+        throw new Error(
+          `served aiActionRunner returned ${runnerResponse.status}`,
+        );
+      }
+      const runnerSource = await runnerResponse.text();
+      const sharedSpecifier = runnerSource.match(
+        /import\s*\{[\s\S]*?\brunAiAction\b[\s\S]*?\}\s*from\s*["']([^"']+)["']/,
+      )?.[1];
+      if (sharedSpecifier === undefined) {
+        throw new Error(
+          "served aiActionRunner has no discoverable shared runAiAction import",
+        );
+      }
+      const sharedUrl = new URL(sharedSpecifier, location.origin).href;
+      const sharedSource = await (await fetch(sharedUrl, { cache: "no-store" })).text();
+      const domainSpecifier = sharedSource.match(
+        /from\s*["']([^"']*\/domain\/index\.ts[^"']*)["']/,
+      )?.[1];
+      if (domainSpecifier === undefined) {
+        throw new Error("served shared runtime has no discoverable domain index import");
+      }
+      const domainUrl = new URL(domainSpecifier, location.origin).href;
+      const domainSource = await (await fetch(domainUrl, { cache: "no-store" })).text();
+      const actionSpecifier = domainSource.match(
+        /from\s*["']([^"']*\/domain\/aiAction\.ts[^"']*)["']/,
+      )?.[1];
+      if (actionSpecifier === undefined) {
+        throw new Error("served shared domain has no discoverable aiAction import");
+      }
+      const ai = await import(
+        /* @vite-ignore */ new URL(actionSpecifier, location.origin).href
+      );
+      const device =
+        modelSpecificChat === undefined
+          ? await import("/src/utils/onDeviceInference.ts")
+          : undefined;
       const extract =
         modelSpecificChat === undefined
           ? undefined
@@ -532,7 +886,7 @@ async function runCase(
             const callStarted = performance.now();
             const response =
               extract === undefined
-                ? await web.webInfer(request)
+                ? await device!.inferOnDevice(request)
                 : await extract.inferWithExtractAcceptanceModel({
                     modelId: selectedModelId,
                     systemPrompt: modelSpecificChat.systemPrompt,
@@ -637,6 +991,7 @@ async function extractRuntimeSourceEvidence(page: Page): Promise<{
 
 async function runExtractBundleGate(input: {
   args: Args;
+  cases: readonly ModelAcceptanceCase[];
   context: Awaited<ReturnType<typeof findOpenChatPage>>["context"];
   existingPage: Page;
   origin: string;
@@ -644,7 +999,7 @@ async function runExtractBundleGate(input: {
   initialCache: CacheRecord[];
   checkpoint(result: any): void;
 }): Promise<any> {
-  const { args, context, existingPage, origin, definition, initialCache, checkpoint } = input;
+  const { args, cases, context, existingPage, origin, definition, initialCache, checkpoint } = input;
   const textEntry = catalogEntryFromExtract(EXTRACT_BUNDLE.text);
   const visionEntry = catalogEntryFromExtract(EXTRACT_BUNDLE.vision);
   textEntry.fingerprint = await fingerprintEntry(existingPage, textEntry);
@@ -692,15 +1047,15 @@ async function runExtractBundleGate(input: {
         route: "text" as const,
         entry: textEntry,
         needsImage: false,
-        cases: MODEL_ACCEPTANCE_CASES.filter((candidate) => candidate.modality === "text"),
+        cases: cases.filter((candidate) => candidate.modality === "text"),
       },
       {
         route: "vision" as const,
         entry: visionEntry,
         needsImage: true,
-        cases: MODEL_ACCEPTANCE_CASES.filter((candidate) => candidate.modality === "image"),
+        cases: cases.filter((candidate) => candidate.modality === "image"),
       },
-    ];
+    ].filter((stage) => stage.cases.length > 0);
 
     let failed = false;
     for (let stageIndex = 0; stageIndex < stageDefinitions.length && !failed; stageIndex += 1) {
@@ -805,7 +1160,7 @@ async function runExtractBundleGate(input: {
       }
     }
 
-    const expectedCaseCount = 2 + MODEL_ACCEPTANCE_CASES.length;
+    const expectedCaseCount = stageDefinitions.length + cases.length;
     result.status =
       !failed && result.cases.length === expectedCaseCount ? "passed" : "failed";
     result.failureReasons = result.cases.flatMap((record: CaseRun) =>
@@ -827,10 +1182,27 @@ async function main(): Promise<void> {
   const { context, page: existingPage } = await findOpenChatPage(args.port);
   const existingUrl = new URL(existingPage.url());
   const origin = existingUrl.origin;
+  // Unlike disposable scratch pages, the signed-in source page already exists, so addInitScript
+  // cannot help its first callback. Install the same tsx serialization helper temporarily and
+  // remove it in the outer finally block if the page did not already define one.
+  const installedSourceNameHelper = await existingPage.evaluate(
+    "typeof globalThis.__name !== 'function'",
+  );
+  if (installedSourceNameHelper) {
+    await existingPage.evaluate(PLAYWRIGHT_EVALUATE_NAME_HELPER);
+  }
   const originalSelection = await existingPage.evaluate(() =>
     localStorage.getItem("openchat_web_model_url"),
   );
   const definition = actionDefinition();
+  const selectedCases: readonly ModelAcceptanceCase[] =
+    args.caseIds === "all"
+      ? MODEL_ACCEPTANCE_CASES
+      : args.caseIds.map((id) => {
+          const testCase = MODEL_ACCEPTANCE_CASES.find((candidate) => candidate.id === id);
+          if (testCase === undefined) throw new Error(`unknown --cases id ${id}`);
+          return testCase;
+        });
   const live = await liveQualification(existingPage);
   if (!/^[0-9a-f]{64}$/.test(live.runtimeDigest)) {
     throw new Error("served qualification module has no valid runtime digest");
@@ -846,7 +1218,13 @@ async function main(): Promise<void> {
           if (!model) throw new Error(`unknown/non-browser model ${id}`);
           return model;
         });
-  const initialCache = await readCache(existingPage);
+  // Qwen's production browser path never reads Wllama's GGUF OPFS cache. Avoid even consulting it
+  // when Qwen is the only selected model; mixed/Extract runs retain the existing GGUF preflight for
+  // their non-Transformers stages.
+  const needsGgufCache =
+    args.extractBundle ||
+    selectedModels.some((model) => !isTransformersWebGpuQwen(model));
+  const initialCache = needsGgufCache ? await readCache(existingPage) : [];
   const results: any = {
     format: args.extractBundle
       ? "iou-extract-bundle-acceptance-v1"
@@ -856,7 +1234,7 @@ async function main(): Promise<void> {
     profile: args.profile,
     runsPerCase: args.runs,
     manifestDigest: sha256(JSON.stringify(definition)),
-    casesDigest: sha256(JSON.stringify(MODEL_ACCEPTANCE_CASES)),
+    casesDigest: sha256(JSON.stringify(selectedCases)),
     runtimeDigest: live.runtimeDigest,
     models: [],
   };
@@ -879,6 +1257,7 @@ async function main(): Promise<void> {
     if (args.extractBundle) {
       const bundleResult = await runExtractBundleGate({
         args,
+        cases: selectedCases,
         context,
         existingPage,
         origin,
@@ -895,37 +1274,56 @@ async function main(): Promise<void> {
       console.log(
         `\n[model] ${model.id} (${Math.round(model.sizeBytes / 1024 / 1024)} MiB)`,
       );
-      const cached = cachedEvaluationEntry(model, initialCache);
-      let evaluationEntry = cached.entry;
+      const transformersQwen = isTransformersWebGpuQwen(model);
+      const cached = transformersQwen
+        ? { entry: undefined, aliases: [], missing: [] }
+        : cachedEvaluationEntry(model, initialCache);
+      const transformersReadyBefore = transformersQwen
+        ? await transformersWebGpuCacheReady(existingPage)
+        : undefined;
+      let evaluationEntry = transformersReadyBefore === true ? model : cached.entry;
       if (!evaluationEntry && !args.downloadMissing) {
-        const missingBytes = cached.missing.reduce(
-          (sum, file) => sum + file.bytes,
-          0,
-        );
-        console.log(
-          `  SKIP: ${cached.missing.length} artifact(s), ${missingBytes} bytes not cached`,
-        );
-        results.models.push({
-          id: model.id,
-          fingerprint: model.fingerprint,
-          status: "missing_cache",
-          missing: cached.missing,
-        });
+        if (transformersQwen) {
+          console.log(
+            "  SKIP: pinned all-WebGPU ONNX manifest/runtime did not pass cache readiness",
+          );
+          results.models.push({
+            ...modelResultProvenance(model),
+            cacheReady: false,
+            status: "missing_cache",
+            requiredArtifacts: model.files,
+          });
+        } else {
+          const missingBytes = cached.missing.reduce(
+            (sum, file) => sum + file.bytes,
+            0,
+          );
+          console.log(
+            `  SKIP: ${cached.missing.length} artifact(s), ${missingBytes} bytes not cached`,
+          );
+          results.models.push({
+            ...modelResultProvenance(model),
+            status: "missing_cache",
+            missing: cached.missing,
+          });
+        }
         continue;
       }
       if (!evaluationEntry) {
         const estimate = await existingPage.evaluate(() =>
           navigator.storage.estimate(),
         );
-        const missingBytes = cached.missing.reduce(
-          (sum, file) => sum + file.bytes,
-          0,
-        );
+        const missingBytes = transformersQwen
+          ? model.sizeBytes
+          : cached.missing.reduce((sum, file) => sum + file.bytes, 0);
         // Browser model pairs are transactional: if either weights or projector is incomplete,
         // production preflight deletes both exact entries before retrying. Budget the whole pair,
-        // not only the member that the metadata scan happened to report missing.
+        // not only the member that the metadata scan happened to report missing. The Transformers
+        // path likewise owns one revision-keyed manifest and redownloads through Model Manager.
         const requiredDownloadBytes =
-          model.files.length > 1 ? model.sizeBytes : missingBytes;
+          transformersQwen || model.files.length > 1
+            ? model.sizeBytes
+            : missingBytes;
         const available = (estimate.quota ?? 0) - (estimate.usage ?? 0);
         if (available < Math.ceil(requiredDownloadBytes * 1.15)) {
           throw new Error(
@@ -933,10 +1331,12 @@ async function main(): Promise<void> {
           );
         }
         console.log(
-          `  downloading up to ${requiredDownloadBytes} bytes from immutable catalog URLs`,
+          `  downloading up to ${requiredDownloadBytes} bytes from the immutable ${
+            transformersQwen ? "all-WebGPU ONNX manifest" : "catalog URLs"
+          }`,
         );
         evaluationEntry = model;
-      } else if (cached.aliases.length > 0) {
+      } else if (!transformersQwen && cached.aliases.length > 0) {
         console.log(
           `  reusing ${cached.aliases.length} SHA-matched legacy cache URL(s)`,
         );
@@ -944,13 +1344,11 @@ async function main(): Promise<void> {
 
       const scratch = await createScratchPage(context, origin, args.profile);
       const modelResult: any = {
-        id: model.id,
-        name: model.name,
-        fingerprint: model.fingerprint,
-        artifacts: model.files,
-        modalities: model.modalities,
-        sizeBytes: model.sizeBytes,
+        ...modelResultProvenance(model),
         cacheAliases: cached.aliases,
+        ...(transformersReadyBefore === undefined
+          ? {}
+          : { cacheReadyBefore: transformersReadyBefore }),
         status: "running",
         cases: [] as CaseRun[],
       };
@@ -960,7 +1358,12 @@ async function main(): Promise<void> {
         if (
           modelResult.environment.sourceMarkers.independentPromptState !==
             true ||
-          modelResult.environment.sourceMarkers.productionRunner !== true
+          modelResult.environment.sourceMarkers.productionRunner !== true ||
+          modelResult.environment.sourceMarkers.productionImageRegion !== true ||
+          (transformersQwen &&
+            (modelResult.environment.sourceMarkers.pinnedTransformersManifest !== true ||
+              modelResult.environment.sourceMarkers
+                .productionTransformersCacheReadiness !== true))
         ) {
           throw new Error(
             "live page is not serving the expected production inference/runner source",
@@ -969,11 +1372,23 @@ async function main(): Promise<void> {
         const attached = await attachModel(
           scratch,
           evaluationEntry,
-          cached.entry === undefined ? 20 * 60_000 : 2 * 60_000,
+          (transformersQwen
+            ? transformersReadyBefore !== true
+            : cached.entry === undefined)
+            ? 20 * 60_000
+            : args.cachedAttachTimeoutMs,
         );
         modelResult.attach = attached;
         if (attached.error !== undefined)
           throw new Error(`attach failed: ${attached.error}`);
+        if (transformersQwen) {
+          modelResult.cacheReadyAfter = await transformersWebGpuCacheReady(scratch);
+          if (modelResult.cacheReadyAfter !== true) {
+            throw new Error(
+              "the pinned all-WebGPU ONNX manifest failed production cache verification after attachment",
+            );
+          }
+        }
         console.log(
           `  attached/verified in ${Math.round(attached.durationMs)} ms`,
         );
@@ -1015,18 +1430,21 @@ async function main(): Promise<void> {
           );
         };
 
-        const textCases = MODEL_ACCEPTANCE_CASES.filter(
+        const textCases = selectedCases.filter(
           (candidate) => candidate.modality === "text",
         );
-        const imageCases = MODEL_ACCEPTANCE_CASES.filter(
+        const imageCases = selectedCases.filter(
           (candidate) => candidate.modality === "image",
         );
-        await runAndScore(textCases[0], 0, true);
+        if (textCases.length === 0 && !model.modalities.includes("image")) {
+          throw new Error(`${model.id} does not support any selected --cases`);
+        }
+        if (textCases.length > 0) await runAndScore(textCases[0], 0, true);
         for (const testCase of textCases) {
           for (let run = 1; run <= args.runs; run += 1)
             await runAndScore(testCase, run, false);
         }
-        if (model.modalities.includes("image")) {
+        if (model.modalities.includes("image") && imageCases.length > 0) {
           await runAndScore(imageCases[0], 0, true);
           for (const testCase of imageCases) {
             for (let run = 1; run <= args.runs; run += 1)
@@ -1034,9 +1452,9 @@ async function main(): Promise<void> {
           }
         }
         const expectedCaseCount =
-          1 +
+          (textCases.length > 0 ? 1 : 0) +
           textCases.length * args.runs +
-          (model.modalities.includes("image")
+          (model.modalities.includes("image") && imageCases.length > 0
             ? 1 + imageCases.length * args.runs
             : 0);
         const passed =
@@ -1066,6 +1484,9 @@ async function main(): Promise<void> {
       if (selection === null) localStorage.removeItem("openchat_web_model_url");
       else localStorage.setItem("openchat_web_model_url", selection);
     }, originalSelection);
+    if (installedSourceNameHelper) {
+      await existingPage.evaluate("delete globalThis.__name");
+    }
   }
 
   results.finishedAt = new Date().toISOString();
