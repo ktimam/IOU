@@ -1,0 +1,28 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="909" height="1600" viewBox="0 0 909 1600">
+  <rect width="909" height="1600" fill="#ffffff"/>
+  <g font-family="Arial, 'Segoe UI', sans-serif" fill="#13203c">
+    <text x="454.5" y="120" text-anchor="middle" direction="rtl" unicode-bidi="plaintext" font-size="42">تمت العملية بنجاح</text>
+    <circle cx="454.5" cy="250" r="80" fill="#e6fbf7"/>
+    <path d="M407 251 L441 284 L510 212" fill="none" stroke="#08c7a6" stroke-width="22" stroke-linecap="round" stroke-linejoin="round"/>
+    <text x="525" y="480" text-anchor="end" fill="#000000" font-size="86" font-weight="700">12,900</text>
+    <text x="552" y="480" fill="#ed5b2a" font-size="48" font-weight="700">EGP</text>
+    <text x="454.5" y="555" text-anchor="middle" direction="rtl" unicode-bidi="plaintext" fill="#b5b8c1" font-size="35">المبلغ الإجمالي المحول</text>
+
+    <rect x="48" y="630" width="813" height="290" rx="25" fill="#ffffff" stroke="#eceef2" stroke-width="2"/>
+    <text x="810" y="710" text-anchor="end" direction="rtl" unicode-bidi="plaintext" fill="#b5b8c1" font-size="31">من</text>
+    <text x="90" y="785" font-size="35">SENDER TEST</text>
+    <line x1="48" y1="815" x2="861" y2="815" stroke="#eceef2" stroke-width="2"/>
+    <text x="810" y="875" text-anchor="end" direction="rtl" unicode-bidi="plaintext" fill="#b5b8c1" font-size="31">إلى</text>
+    <text x="90" y="900" font-size="35">RECEIVER TEST</text>
+
+    <rect x="48" y="955" width="813" height="365" rx="25" fill="#ffffff" stroke="#eceef2" stroke-width="2"/>
+    <text x="810" y="1040" text-anchor="end" direction="rtl" unicode-bidi="plaintext" fill="#b5b8c1" font-size="31">المرجع</text>
+    <text x="90" y="1040" font-size="31">000000000001</text>
+    <text x="810" y="1145" text-anchor="end" direction="rtl" unicode-bidi="plaintext" fill="#b5b8c1" font-size="31">التاريخ:</text>
+    <text x="90" y="1145" font-size="34">14 Aug 2026 09:47 PM</text>
+    <text x="810" y="1250" text-anchor="end" direction="rtl" unicode-bidi="plaintext" fill="#b5b8c1" font-size="31">ملاحظة</text>
+    <text x="90" y="1250" font-size="34">Living Expenses</text>
+
+    <text x="454.5" y="1460" text-anchor="middle" fill="#13203c" font-size="26">PRIVACY-SAFE ARABIC-LABEL TEST RECEIPT</text>
+  </g>
+</svg>

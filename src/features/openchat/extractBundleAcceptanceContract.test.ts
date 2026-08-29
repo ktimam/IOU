@@ -42,6 +42,7 @@ describe("test-only Extract bundle contract", () => {
       ["multi-entry", "text"],
       ["dated-image", "vision"],
       ["portrait-date-image", "vision"],
+      ["portrait-date-image-arabic", "vision"],
       ["receipt-photo", "vision"],
     ]);
   });
@@ -59,6 +60,7 @@ describe("test-only Extract bundle contract", () => {
       ["multi-entry", "array"],
       ["dated-image", "object"],
       ["portrait-date-image", "object"],
+      ["portrait-date-image-arabic", "object"],
       ["receipt-photo", "object"],
     ]);
   });

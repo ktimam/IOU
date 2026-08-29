@@ -118,8 +118,10 @@ describe("mobile portrait model date regression", () => {
       "compare every copied date token to the image",
     );
     expect(IOU_IMAGE_DATE_EXTRACTION_PROMPT).toContain(
-      "sender, receiver, From, To, account, reference",
+      "label may be written in any language or script",
     );
+    expect(IOU_IMAGE_DATE_EXTRACTION_PROMPT).toContain("التاريخ means Date");
+    expect(IOU_IMAGE_DATE_EXTRACTION_PROMPT).toContain('exactly the JSON key "date"');
   });
 
   it("runs a distinct portrait August image through the real-model matrix", () => {
@@ -143,9 +145,44 @@ describe("mobile portrait model date regression", () => {
       ],
       expectedInferCalls: 2,
     });
+    const arabicLabelCase = MODEL_ACCEPTANCE_CASES.find(
+      (candidate) => candidate.id === "portrait-date-image-arabic",
+    );
+    expect(arabicLabelCase).toMatchObject({
+      modality: "image",
+      imageFixture: {
+        path: "test/fixtures/openchat/model-acceptance/portrait-transfer-14-aug-arabic.png",
+        sha256:
+          "ec14ae589c22b74ae465fa0f01f3e2ab0f2065efd45c7bc07e59ab2b41acdbf5",
+        bytes: 64_215,
+        width: 909,
+        height: 1_600,
+      },
+      expected: [
+        {
+          amount: 12_900,
+          currency: "EGP",
+          kind: "settlement",
+          date: "2026-08-14",
+          noteIncludes: [],
+          noteAllowedWords: [],
+        },
+      ],
+      expectedInferCalls: 2,
+    });
+    const arabicSource = readFileSync(
+      resolve(
+        __dirname,
+        "../../../test/fixtures/openchat/model-acceptance/portrait-transfer-14-aug-arabic.svg",
+      ),
+      "utf8",
+    );
+    expect(arabicSource).toContain("التاريخ:");
+    expect(arabicSource).toContain("14 Aug 2026 09:47 PM");
+    expect(arabicSource).not.toMatch(/@|iban|account number|bank to trust/i);
   });
 
-  it("binds labelled date and note to one cropped model-only focused pass", () => {
+  it("binds a language-independent date-only cropped model pass", () => {
     const pipeline = iouActionManifest.outputSchema[
       "x-openchat-image-focused-passes"
     ] as {
@@ -163,8 +200,8 @@ describe("mobile portrait model date regression", () => {
     expect(pipeline.primaryFields).toEqual(["amount", "currency", "kind"]);
     expect(pipeline.passes).toEqual([
       expect.objectContaining({
-        fields: ["date", "note"],
-        maxTokens: 48,
+        fields: ["date"],
+        maxTokens: 24,
         template: IOU_IMAGE_DATE_EXTRACTION_PROMPT,
         imageRegion: "detail_card",
       }),

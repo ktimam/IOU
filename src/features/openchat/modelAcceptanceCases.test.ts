@@ -56,7 +56,7 @@ function passingObservation(
 }
 
 describe("real-model IOU acceptance cases", () => {
-  it("pins text regressions plus three distinct fixed image fixtures", () => {
+  it("pins text regressions plus four distinct fixed image fixtures", () => {
     expect(
       MODEL_ACCEPTANCE_CASES.map((testCase) => [
         testCase.id,
@@ -69,6 +69,7 @@ describe("real-model IOU acceptance cases", () => {
       ["multi-entry", "text"],
       ["dated-image", "image"],
       ["portrait-date-image", "image"],
+      ["portrait-date-image-arabic", "image"],
       ["receipt-photo", "image"],
     ]);
     expect(MODEL_ACCEPTANCE_CASES[1].text).toBe(
@@ -123,7 +124,7 @@ describe("real-model IOU acceptance cases", () => {
       createHash("sha256")
         .update(JSON.stringify(MODEL_ACCEPTANCE_CASES))
         .digest("hex"),
-    ).toBe("5e52d56b582497828b7ac6c2b9279efca66bbde90f568f2e76f237be4fce907c");
+    ).toBe("a970c22805f5d0e03521d4f2cf7318922a35aaeec9820acccaa3925ade80ab6d");
   });
 
   it("rejects a repair pass even when the repaired extraction is correct", () => {

@@ -510,10 +510,10 @@ describe("registered wire — schema evidence stays private and public rows stay
       passes: [
         {
           template: IOU_IMAGE_DATE_EXTRACTION_PROMPT,
-          fields: ["date", "note"],
+          fields: ["date"],
           includeRuleGuidance: false,
           includeMessage: false,
-          maxTokens: 48,
+          maxTokens: 24,
           imageRegion: "detail_card",
         },
       ],
@@ -550,7 +550,7 @@ describe("registered wire — schema evidence stays private and public rows stay
     expect([
       ...expectedFocused.primaryFields,
       ...expectedFocused.passes.flatMap((pass) => pass.fields),
-    ]).toEqual(["amount", "currency", "kind", "date", "note"]);
+    ]).toEqual(["amount", "currency", "kind", "date"]);
   });
 
   it("opts into the generic source-grounded text/OCR transaction parser in source, docs, and wire", async () => {
@@ -906,7 +906,7 @@ describe("the extraction prompt tells the model a single line can hold several t
     );
   });
 
-  it("separates core financial fields from the focused labelled-detail pass", () => {
+  it("separates core financial fields from the language-independent date pass", () => {
     const corePrompt = IOU_IMAGE_EXTRACTION_PROMPT.replace(/\s+/g, " ");
     const datePrompt = IOU_IMAGE_DATE_EXTRACTION_PROMPT.replace(/\s+/g, " ");
 
@@ -925,12 +925,10 @@ describe("the extraction prompt tells the model a single line can hold several t
     expect(corePrompt).not.toMatch(/explicitly labelled Note/i);
     expect(corePrompt).not.toMatch(/"direction"|"date"\s*:/i);
 
-    expect(datePrompt).toMatch(
-      /read only[^.]*Date[^.]*Transaction date[^.]*Payment date[^.]*Booking date[^.]*Due date/i,
-    );
-    expect(datePrompt).toMatch(
-      /Note[^.]*Description[^.]*Memo label[^.]*image detail/i,
-    );
+    expect(datePrompt).toMatch(/label may be written in any language or script/i);
+    expect(datePrompt).toContain("التاريخ means Date");
+    expect(datePrompt).toMatch(/exactly the JSON key "date"/i);
+    expect(datePrompt).toMatch(/do not return a note or any other field/i);
     expect(datePrompt).toMatch(/transcribe[^.]*instead of[^.]*calendar conversion/i);
     expect(datePrompt).toMatch(
       /English month name[^.]*copy the visible day[^.]*month word[^.]*four-digit year/i,
@@ -949,14 +947,7 @@ describe("the extraction prompt tells the model a single line can hold several t
     expect(datePrompt).toMatch(
       /complete visible date[^.]*calendar conversion/i,
     );
-    expect(datePrompt).toMatch(/"note"[^.]*explicit Note[^.]*Description[^.]*Memo/i);
-    expect(datePrompt).toMatch(
-      /if none exists[^.]*transaction or item description[^.]*authoritative amount/i,
-    );
-    expect(datePrompt).toMatch(/never use[^.]*status/i);
-    expect(datePrompt).toMatch(/footer instruction[^.]*keep[^.]*retain[^.]*not a note/i);
-    expect(datePrompt).toMatch(/never use[^.]*sender[^.]*receiver[^.]*From[^.]*To/i);
-    expect(datePrompt).toMatch(/omit either field[^.]*not visible/i);
+    expect(datePrompt).not.toMatch(/"note"\s*:/i);
     expect(datePrompt).toMatch(/never infer/i);
     expect(IOU_IMAGE_EXTRACTION_PROMPT).not.toMatch(/"amount"\s*:\s*-?\d/u);
     // A weak vision signal must not let greedy decoding echo a numeric instruction literal as the
@@ -1023,7 +1014,16 @@ describe("the extraction prompt tells the model a single line can hold several t
       .properties as Record<string, Record<string, unknown>>;
     expect(sourceProperties.date).toMatchObject({
       "x-openchat-date-from-text": true,
-      "x-openchat-property-aliases": ["due_date"],
+      "x-openchat-property-aliases": [
+        "due_date",
+        "transaction_date",
+        "payment_date",
+        "booking_date",
+        "Date",
+        "TransactionDate",
+        "PaymentDate",
+        "BookingDate",
+      ],
     });
     expect(registeredSchema.required).not.toContain("message");
     expect(sourceProperties.date).not.toHaveProperty(
@@ -1037,7 +1037,16 @@ describe("the extraction prompt tells the model a single line can hold several t
     );
     expect(registeredSchema.properties?.date).toMatchObject({
       "x-openchat-date-from-text": true,
-      "x-openchat-property-aliases": ["due_date"],
+      "x-openchat-property-aliases": [
+        "due_date",
+        "transaction_date",
+        "payment_date",
+        "booking_date",
+        "Date",
+        "TransactionDate",
+        "PaymentDate",
+        "BookingDate",
+      ],
     });
     expect(registeredSchema.properties?.message).toMatchObject({
       "x-openchat-omit-for-image-only": true,

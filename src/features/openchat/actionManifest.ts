@@ -199,15 +199,13 @@ export const IOU_IMAGE_EXTRACTION_PROMPT = `Read the financial document. Return 
 
 Use the single authoritative paid, transferred, total, or amount-due value once per transaction; preserve decimals and standard k-thousands. Ignore balances, IDs, accounts, references, dates, times, quantities, percentages, exchange rates, line-item arithmetic, repeated totals, parties, and descriptions. Currency is the exact visible three-letter ISO code beside that amount; compare all three printed letters before answering. The only permitted "kind" values are "settlement" for money visibly completed moving or a payment/transfer visibly succeeded, and "iou" for future, due, owed, requested, reserved, booked, or unpaid money. Output one of those exact strings; never copy a document label such as total, status, or amount-due as "kind". A receipt or total alone is not proof of payment. Omit uncertainty; invent nothing.`;
 
-// Keep calendar conversion out of the VLM. A phone-sized model is substantially more reliable at
-// copying the visible day/month-name/year than at both reading and reordering those components in
-// one generation. The opted-in schema normalizer below performs the deterministic English-month to
-// ISO conversion after inference; an already-ISO source remains valid unchanged.
-export const IOU_IMAGE_DATE_EXTRACTION_PROMPT = `Read only visibly printed values beside an explicit Date, Transaction date, Payment date, Booking date, Due date, Note, Description, or Memo label in this image detail. Return ONLY one JSON object using only "date" and "note", or a reading-order JSON array for separate transactions.
+// Keep calendar conversion out of the VLM. This pass owns only `date`, so an uncertain description
+// cannot displace the short date answer on phone-class WebGPU. Labels may be written in any language
+// or script; the model copies the visible value and the schema normalizer performs the deterministic
+// English-month-to-ISO conversion. An already-ISO source remains valid unchanged.
+export const IOU_IMAGE_DATE_EXTRACTION_PROMPT = `Read only the complete calendar date visibly printed for the financial transaction in this image detail. A nearby label may be written in any language or script; for example, the Arabic label التاريخ means Date. Recognize the label's meaning visually, but never copy or translate the label. Return ONLY {"date":"visible date"}, using exactly the JSON key "date", or a reading-order JSON array with one date object per separate transaction. Do not return a note or any other field.
 
-For "date", transcribe the complete visible date instead of performing a calendar conversion. For an English month name, copy the visible day, month word, and four-digit year in printed order with single spaces; omit the time. If a month word is printed, retain that same word and never output month digits in its place. Read all four year digits from their printed shapes, especially the final digit; never substitute a familiar or likely year. Do not translate the month or reorder components. Copy an already strict YYYY-MM-DD date unchanged. Any other numeric-only date order is ambiguous, so omit "date". Before responding, compare every copied date token to the image.
-
-For "note", prefer the value visibly beside an explicit Note, Description, or Memo label. If none exists, copy only the short transaction or item description directly attached to the authoritative amount. Never use a sender, receiver, From, To, account, reference, total, amount-due label, status, filename, metadata, or text from these instructions as the note. A footer instruction to keep or retain the receipt is not a note. Omit either field when its supported value is not visible. Never infer, substitute, or blend values.`;
+Transcribe the complete visible date instead of performing a calendar conversion. For an English month name, copy the visible day, month word, and four-digit year in printed order with single spaces; omit the time. If a month word is printed, retain that same word and never output month digits in its place. Read all four year digits from their printed shapes, especially the final digit; never substitute a familiar or likely year. Do not translate the month or reorder components. Copy an already strict YYYY-MM-DD date unchanged. Any other numeric-only date order is ambiguous, so omit "date". Before responding, compare every copied date token to the image. Ignore every amount, ID, account, reference, filename, metadata, and date from these instructions. If no complete transaction date is visible, return {}. Never infer, substitute, or blend values.`;
 
 // The canister attester rounds major units to integer minor units. Half a minor unit is the exact
 // smallest positive major-unit value that rounds to one; the maximum remains within JavaScript's
@@ -395,10 +393,10 @@ export const iouActionManifest: IouActionManifest = {
       passes: [
         {
           template: IOU_IMAGE_DATE_EXTRACTION_PROMPT,
-          fields: ["date", "note"],
+          fields: ["date"],
           includeRuleGuidance: false,
           includeMessage: false,
-          maxTokens: 48,
+          maxTokens: 24,
           imageRegion: "detail_card",
         },
       ],
@@ -539,7 +537,16 @@ export const iouActionManifest: IouActionManifest = {
         "x-openchat-date-from-text": true,
         // Vision models often use the visible label as the JSON key. OpenChat resolves this alias
         // before date normalization and drops it on any conflicting target/alias values.
-        "x-openchat-property-aliases": ["due_date"],
+        "x-openchat-property-aliases": [
+          "due_date",
+          "transaction_date",
+          "payment_date",
+          "booking_date",
+          "Date",
+          "TransactionDate",
+          "PaymentDate",
+          "BookingDate",
+        ],
       },
       note: { type: "string", maxLength: 4_096, format: "utf8-no-nul" },
       // Declared so conformToSchema keeps it — an undeclared key is dropped before the card is built.

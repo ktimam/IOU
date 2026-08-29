@@ -19,6 +19,7 @@ export type ModelAcceptanceCase = Readonly<{
     | "multi-entry"
     | "dated-image"
     | "portrait-date-image"
+    | "portrait-date-image-arabic"
     | "receipt-photo";
   modality: ModelAcceptanceModality;
   text?: string;
@@ -210,8 +211,34 @@ export const MODEL_ACCEPTANCE_CASES: readonly ModelAcceptanceCase[] = [
         currency: "EGP",
         direction: "credit",
         date: "2026-08-14",
-        noteIncludes: ["living", "expenses"],
-        noteAllowedWords: ["living", "expenses"],
+        noteIncludes: [],
+        noteAllowedWords: [],
+      },
+    ],
+    expectedInferCalls: 2,
+    warmLatencyMs: 60_000,
+  },
+  {
+    id: "portrait-date-image-arabic",
+    modality: "image",
+    imageFixture: {
+      path: "test/fixtures/openchat/model-acceptance/portrait-transfer-14-aug-arabic.png",
+      // This separately pinned fixture exercises the production detail crop with an Arabic date
+      // label, so an English-only prompt or an easier English fixture cannot mask this regression.
+      sha256: "ec14ae589c22b74ae465fa0f01f3e2ab0f2065efd45c7bc07e59ab2b41acdbf5",
+      bytes: 64_215,
+      width: 909,
+      height: 1_600,
+    },
+    expected: [
+      {
+        kind: "settlement",
+        amount: 12_900,
+        currency: "EGP",
+        direction: "credit",
+        date: "2026-08-14",
+        noteIncludes: [],
+        noteAllowedWords: [],
       },
     ],
     expectedInferCalls: 2,

@@ -19,14 +19,13 @@
       "primaryMaxTokens": 64,
       "passes": [
         {
-          "template": "Read only visibly printed values beside an explicit Date, Transaction date, Payment date, Booking date, Due date, Note, Description, or Memo label in this image detail. Return ONLY one JSON object using only \"date\" and \"note\", or a reading-order JSON array for separate transactions.\n\nFor \"date\", transcribe the complete visible date instead of performing a calendar conversion. For an English month name, copy the visible day, month word, and four-digit year in printed order with single spaces; omit the time. If a month word is printed, retain that same word and never output month digits in its place. Read all four year digits from their printed shapes, especially the final digit; never substitute a familiar or likely year. Do not translate the month or reorder components. Copy an already strict YYYY-MM-DD date unchanged. Any other numeric-only date order is ambiguous, so omit \"date\". Before responding, compare every copied date token to the image.\n\nFor \"note\", prefer the value visibly beside an explicit Note, Description, or Memo label. If none exists, copy only the short transaction or item description directly attached to the authoritative amount. Never use a sender, receiver, From, To, account, reference, total, amount-due label, status, filename, metadata, or text from these instructions as the note. A footer instruction to keep or retain the receipt is not a note. Omit either field when its supported value is not visible. Never infer, substitute, or blend values.",
+          "template": "Read only the complete calendar date visibly printed for the financial transaction in this image detail. A nearby label may be written in any language or script; for example, the Arabic label التاريخ means Date. Recognize the label's meaning visually, but never copy or translate the label. Return ONLY {\"date\":\"visible date\"}, using exactly the JSON key \"date\", or a reading-order JSON array with one date object per separate transaction. Do not return a note or any other field.\n\nTranscribe the complete visible date instead of performing a calendar conversion. For an English month name, copy the visible day, month word, and four-digit year in printed order with single spaces; omit the time. If a month word is printed, retain that same word and never output month digits in its place. Read all four year digits from their printed shapes, especially the final digit; never substitute a familiar or likely year. Do not translate the month or reorder components. Copy an already strict YYYY-MM-DD date unchanged. Any other numeric-only date order is ambiguous, so omit \"date\". Before responding, compare every copied date token to the image. Ignore every amount, ID, account, reference, filename, metadata, and date from these instructions. If no complete transaction date is visible, return {}. Never infer, substitute, or blend values.",
           "fields": [
-            "date",
-            "note"
+            "date"
           ],
           "includeRuleGuidance": false,
           "includeMessage": false,
-          "maxTokens": 48,
+          "maxTokens": 24,
           "imageRegion": "detail_card"
         }
       ]
@@ -149,7 +148,14 @@
         "x-openchat-normalize-date": true,
         "x-openchat-date-from-text": true,
         "x-openchat-property-aliases": [
-          "due_date"
+          "due_date",
+          "transaction_date",
+          "payment_date",
+          "booking_date",
+          "Date",
+          "TransactionDate",
+          "PaymentDate",
+          "BookingDate"
         ]
       },
       "note": {

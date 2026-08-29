@@ -76,10 +76,10 @@ describe("buildManifestWire", () => {
       passes: [
         {
           template: IOU_IMAGE_DATE_EXTRACTION_PROMPT,
-          fields: ["date", "note"],
+          fields: ["date"],
           includeRuleGuidance: false,
           includeMessage: false,
-          maxTokens: 48,
+          maxTokens: 24,
           imageRegion: "detail_card",
         },
       ],
