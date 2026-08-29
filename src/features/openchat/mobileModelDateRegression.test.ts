@@ -122,6 +122,15 @@ describe("mobile portrait model date regression", () => {
     );
     expect(IOU_IMAGE_DATE_EXTRACTION_PROMPT).toContain("التاريخ means Date");
     expect(IOU_IMAGE_DATE_EXTRACTION_PROMPT).toContain('exactly the JSON key "date"');
+    expect(IOU_IMAGE_DATE_EXTRACTION_PROMPT).toContain(
+      "label can be at the far right while its value is at the far left",
+    );
+    expect(IOU_IMAGE_DATE_EXTRACTION_PROMPT).toContain(
+      "inspect every horizontal row from the top through the bottom",
+    );
+    expect(IOU_IMAGE_DATE_EXTRACTION_PROMPT).toContain(
+      "Return {} only after checking all visible rows, including the lowest rows",
+    );
   });
 
   it("runs a distinct portrait August image through the real-model matrix", () => {
@@ -153,8 +162,8 @@ describe("mobile portrait model date regression", () => {
       imageFixture: {
         path: "test/fixtures/openchat/model-acceptance/portrait-transfer-14-aug-arabic.png",
         sha256:
-          "ec14ae589c22b74ae465fa0f01f3e2ab0f2065efd45c7bc07e59ab2b41acdbf5",
-        bytes: 64_215,
+          "90f2e0a8f6cdf05a51624ef7bfdade0ff0a6d7f4ecc066d3749904d421e028d7",
+        bytes: 62_985,
         width: 909,
         height: 1_600,
       },
@@ -180,6 +189,19 @@ describe("mobile portrait model date regression", () => {
     expect(arabicSource).toContain("التاريخ:");
     expect(arabicSource).toContain("14 Aug 2026 09:47 PM");
     expect(arabicSource).not.toMatch(/@|iban|account number|bank to trust/i);
+    // The original fixture accidentally made this an easy center-crop case. The real failing
+    // receipt puts a small value at the far left of a row whose Arabic label is at the far right,
+    // about 81% down the portrait image. That exposed the old broad `detail_card` crop's
+    // verification gap; `lower_detail_rows` now keeps the complete 68%-90% details band.
+    expect(arabicSource).toContain(
+      '<text x="815" y="1288" text-anchor="end" direction="rtl"',
+    );
+    expect(arabicSource).toContain(
+      '<text x="80" y="1288" font-size="28">14 Aug 2026 09:47 PM</text>',
+    );
+    const dateRowRatio = 1288 / 1600;
+    expect(dateRowRatio).toBeGreaterThan(0.8);
+    expect(dateRowRatio).toBeLessThan(0.86);
   });
 
   it("binds a language-independent date-only cropped model pass", () => {
@@ -196,14 +218,14 @@ describe("mobile portrait model date regression", () => {
         imageRegion: string;
       }[];
     };
-    expect(pipeline.version).toBe(3);
+    expect(pipeline.version).toBe(4);
     expect(pipeline.primaryFields).toEqual(["amount", "currency", "kind"]);
     expect(pipeline.passes).toEqual([
       expect.objectContaining({
         fields: ["date"],
         maxTokens: 24,
         template: IOU_IMAGE_DATE_EXTRACTION_PROMPT,
-        imageRegion: "detail_card",
+        imageRegion: "lower_detail_rows",
       }),
     ]);
     expect(pipeline.primaryFields).not.toContain("date");

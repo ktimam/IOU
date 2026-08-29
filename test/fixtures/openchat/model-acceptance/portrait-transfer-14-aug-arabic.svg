@@ -8,20 +8,24 @@
     <text x="552" y="480" fill="#ed5b2a" font-size="48" font-weight="700">EGP</text>
     <text x="454.5" y="555" text-anchor="middle" direction="rtl" unicode-bidi="plaintext" fill="#b5b8c1" font-size="35">المبلغ الإجمالي المحول</text>
 
-    <rect x="48" y="630" width="813" height="290" rx="25" fill="#ffffff" stroke="#eceef2" stroke-width="2"/>
-    <text x="810" y="710" text-anchor="end" direction="rtl" unicode-bidi="plaintext" fill="#b5b8c1" font-size="31">من</text>
-    <text x="90" y="785" font-size="35">SENDER TEST</text>
-    <line x1="48" y1="815" x2="861" y2="815" stroke="#eceef2" stroke-width="2"/>
-    <text x="810" y="875" text-anchor="end" direction="rtl" unicode-bidi="plaintext" fill="#b5b8c1" font-size="31">إلى</text>
-    <text x="90" y="900" font-size="35">RECEIVER TEST</text>
+    <!-- Geometry mirrors the real 12,900 EGP portrait receipt while all identifying values remain
+         synthetic. In particular, the lower card starts below 69% of image height and its small
+         Arabic label/value rows span opposite sides of the card. -->
+    <rect x="45" y="628" width="819" height="465" rx="25" fill="#ffffff" stroke="#eceef2" stroke-width="2"/>
+    <text x="815" y="685" text-anchor="end" direction="rtl" unicode-bidi="plaintext" fill="#b5b8c1" font-size="28">من</text>
+    <text x="80" y="748" font-size="28">SENDER TEST</text>
+    <line x1="45" y1="873" x2="864" y2="873" stroke="#eceef2" stroke-width="2"/>
+    <text x="815" y="939" text-anchor="end" direction="rtl" unicode-bidi="plaintext" fill="#b5b8c1" font-size="28">إلى</text>
+    <text x="370" y="997" font-size="28">RECEIVER TEST</text>
+    <text x="275" y="1060" font-size="26">0000000000000000000000000001</text>
 
-    <rect x="48" y="955" width="813" height="365" rx="25" fill="#ffffff" stroke="#eceef2" stroke-width="2"/>
-    <text x="810" y="1040" text-anchor="end" direction="rtl" unicode-bidi="plaintext" fill="#b5b8c1" font-size="31">المرجع</text>
-    <text x="90" y="1040" font-size="31">000000000001</text>
-    <text x="810" y="1145" text-anchor="end" direction="rtl" unicode-bidi="plaintext" fill="#b5b8c1" font-size="31">التاريخ:</text>
-    <text x="90" y="1145" font-size="34">14 Aug 2026 09:47 PM</text>
-    <text x="810" y="1250" text-anchor="end" direction="rtl" unicode-bidi="plaintext" fill="#b5b8c1" font-size="31">ملاحظة</text>
-    <text x="90" y="1250" font-size="34">Living Expenses</text>
+    <rect x="45" y="1116" width="819" height="330" rx="25" fill="#ffffff" stroke="#eceef2" stroke-width="2"/>
+    <text x="815" y="1185" text-anchor="end" direction="rtl" unicode-bidi="plaintext" fill="#b5b8c1" font-size="28">المرجع</text>
+    <text x="80" y="1185" font-size="28">000000000001</text>
+    <text x="815" y="1288" text-anchor="end" direction="rtl" unicode-bidi="plaintext" fill="#b5b8c1" font-size="28">التاريخ:</text>
+    <text x="80" y="1288" font-size="28">14 Aug 2026 09:47 PM</text>
+    <text x="815" y="1385" text-anchor="end" direction="rtl" unicode-bidi="plaintext" fill="#b5b8c1" font-size="28">ملاحظة</text>
+    <text x="80" y="1385" font-size="28">Living Expenses</text>
 
     <text x="454.5" y="1460" text-anchor="middle" fill="#13203c" font-size="26">PRIVACY-SAFE ARABIC-LABEL TEST RECEIPT</text>
   </g>

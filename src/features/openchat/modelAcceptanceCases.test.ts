@@ -124,7 +124,7 @@ describe("real-model IOU acceptance cases", () => {
       createHash("sha256")
         .update(JSON.stringify(MODEL_ACCEPTANCE_CASES))
         .digest("hex"),
-    ).toBe("a970c22805f5d0e03521d4f2cf7318922a35aaeec9820acccaa3925ade80ab6d");
+    ).toBe("1dfffe341636da36e0ee2bcf7faaa031e40b960ffb7af1a40f840ea7ac91108d");
   });
 
   it("rejects a repair pass even when the repaired extraction is correct", () => {
@@ -202,12 +202,12 @@ describe("real-model IOU acceptance cases", () => {
     expect(runner).toContain("typeof shared.runAiAction");
     expect(runner).toContain("device!.inferOnDevice(request)");
     expect(runner).toContain("productionImageRegion");
-    expect(runner).toContain('request.imageRegion !== "detail_card"');
-    expect(runner).toContain("function detailCardCrop(");
-    expect(runner).toContain('region === "detail_card"');
-    expect(runner).toContain("dimensions.height * 58 / 100");
-    expect(runner).toContain("dimensions.height * 86 / 100");
-    expect(runner).toContain("extensionVersion !== 3");
+    expect(runner).toContain('request.imageRegion !== "lower_detail_rows"');
+    expect(runner).toContain("function lowerDetailRowsCrop(");
+    expect(runner).toContain('region === "lower_detail_rows"');
+    expect(runner).toContain("dimensions.height * 68 / 100");
+    expect(runner).toContain("dimensions.height * 90 / 100");
+    expect(runner).toContain("extensionVersion !== 4");
     expect(runner).not.toContain('import("/src/utils/modelQualification.ts")');
     expect(runner).not.toContain('import("/src/utils/modelAcceptanceRuntime.ts")');
     expect(runner).toContain("runtimeDigest: live.runtimeDigest");

@@ -504,7 +504,7 @@ describe("registered wire — schema evidence stays private and public rows stay
       includeRuleGuidance: false,
     };
     const expectedFocused = {
-      version: 3,
+      version: 4,
       primaryFields: ["amount", "currency", "kind"],
       primaryMaxTokens: 64,
       passes: [
@@ -514,7 +514,7 @@ describe("registered wire — schema evidence stays private and public rows stay
           includeRuleGuidance: false,
           includeMessage: false,
           maxTokens: 24,
-          imageRegion: "detail_card",
+          imageRegion: "lower_detail_rows",
         },
       ],
     };
@@ -927,6 +927,9 @@ describe("the extraction prompt tells the model a single line can hold several t
 
     expect(datePrompt).toMatch(/label may be written in any language or script/i);
     expect(datePrompt).toContain("التاريخ means Date");
+    expect(datePrompt).toMatch(/label[^.]*far right[^.]*value[^.]*far left/i);
+    expect(datePrompt).toMatch(/every horizontal row[^.]*top[^.]*bottom/i);
+    expect(datePrompt).toMatch(/lowest rows[^.]*no complete transaction date/i);
     expect(datePrompt).toMatch(/exactly the JSON key "date"/i);
     expect(datePrompt).toMatch(/do not return a note or any other field/i);
     expect(datePrompt).toMatch(/transcribe[^.]*instead of[^.]*calendar conversion/i);

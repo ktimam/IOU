@@ -10,7 +10,7 @@
       "includeRuleGuidance": false
     },
     "x-openchat-image-focused-passes": {
-      "version": 3,
+      "version": 4,
       "primaryFields": [
         "amount",
         "currency",
@@ -19,14 +19,14 @@
       "primaryMaxTokens": 64,
       "passes": [
         {
-          "template": "Read only the complete calendar date visibly printed for the financial transaction in this image detail. A nearby label may be written in any language or script; for example, the Arabic label التاريخ means Date. Recognize the label's meaning visually, but never copy or translate the label. Return ONLY {\"date\":\"visible date\"}, using exactly the JSON key \"date\", or a reading-order JSON array with one date object per separate transaction. Do not return a note or any other field.\n\nTranscribe the complete visible date instead of performing a calendar conversion. For an English month name, copy the visible day, month word, and four-digit year in printed order with single spaces; omit the time. If a month word is printed, retain that same word and never output month digits in its place. Read all four year digits from their printed shapes, especially the final digit; never substitute a familiar or likely year. Do not translate the month or reorder components. Copy an already strict YYYY-MM-DD date unchanged. Any other numeric-only date order is ambiguous, so omit \"date\". Before responding, compare every copied date token to the image. Ignore every amount, ID, account, reference, filename, metadata, and date from these instructions. If no complete transaction date is visible, return {}. Never infer, substitute, or blend values.",
+          "template": "Read only the complete calendar date visibly printed for the financial transaction in this image detail. The image may be a focused crop of the lower transaction-details panel, so inspect every horizontal row from the top through the bottom before deciding that the date is absent. A field label and its value can be separated by a wide blank space. In a right-to-left layout, the label can be at the far right while its value is at the far left of the same horizontal row. A label may be written in any language or script; for example, the Arabic label التاريخ means Date. Read the value horizontally aligned with that date label, not the reference or note on another row. Recognize the label's meaning visually, but never copy or translate the label. Return ONLY {\"date\":\"visible date\"}, using exactly the JSON key \"date\", or a reading-order JSON array with one date object per separate transaction. Do not return a note or any other field.\n\nTranscribe the complete visible date instead of performing a calendar conversion. For an English month name, copy the visible day, month word, and four-digit year in printed order with single spaces; omit the time. If a month word is printed, retain that same word and never output month digits in its place. Read all four year digits from their printed shapes, especially the final digit; never substitute a familiar or likely year. Do not translate the month or reorder components. Copy an already strict YYYY-MM-DD date unchanged. Any other numeric-only date order is ambiguous, so omit \"date\". Before responding, compare every copied date token to the image. Ignore every amount, ID, account, reference, filename, metadata, and date from these instructions. Return {} only after checking all visible rows, including the lowest rows, and finding no complete transaction date. Never infer, substitute, or blend values.",
           "fields": [
             "date"
           ],
           "includeRuleGuidance": false,
           "includeMessage": false,
           "maxTokens": 24,
-          "imageRegion": "detail_card"
+          "imageRegion": "lower_detail_rows"
         }
       ]
     },

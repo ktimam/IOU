@@ -225,8 +225,8 @@ export const MODEL_ACCEPTANCE_CASES: readonly ModelAcceptanceCase[] = [
       path: "test/fixtures/openchat/model-acceptance/portrait-transfer-14-aug-arabic.png",
       // This separately pinned fixture exercises the production detail crop with an Arabic date
       // label, so an English-only prompt or an easier English fixture cannot mask this regression.
-      sha256: "ec14ae589c22b74ae465fa0f01f3e2ab0f2065efd45c7bc07e59ab2b41acdbf5",
-      bytes: 64_215,
+      sha256: "90f2e0a8f6cdf05a51624ef7bfdade0ff0a6d7f4ecc066d3749904d421e028d7",
+      bytes: 62_985,
       width: 909,
       height: 1_600,
     },
