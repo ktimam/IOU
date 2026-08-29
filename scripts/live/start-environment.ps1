@@ -380,7 +380,7 @@ function Wait-OpenChatApplicationModules([string]$Origin) {
       Path = '/src/main.ts'
       Description = 'OpenChat application entry module'
       MinimumBytes = 1000L
-      Contains = @('components_mobile/App.svelte', 'restoreWebModel')
+      Contains = @('components_mobile/App.svelte', 'ensureWebModelRestored')
     },
     [pscustomobject]@{
       Path = '/src/components_mobile/App.svelte'

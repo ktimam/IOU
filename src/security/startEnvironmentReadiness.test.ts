@@ -45,6 +45,12 @@ describe("live environment readiness contract", () => {
     expect(script).toContain("'/src/main.ts'");
     expect(script).toContain("'/src/components_mobile/App.svelte'");
     expect(script).toContain("-ExpectedContentType 'text/javascript'");
+    expect(script).toContain(
+      "Contains = @('components_mobile/App.svelte', 'ensureWebModelRestored')",
+    );
+    expect(script).not.toContain(
+      "Contains = @('components_mobile/App.svelte', 'restoreWebModel')",
+    );
 
     const localWarmup = script.indexOf(
       "Wait-OpenChatApplicationModules -Origin $OpenChatOrigin",
