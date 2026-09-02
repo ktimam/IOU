@@ -3,7 +3,6 @@ import {
   iouActionManifest,
   renderManifestJson,
   IOU_EXTRACTION_PROMPT,
-  IOU_IMAGE_DATE_EXTRACTION_PROMPT,
   IOU_IMAGE_EXTRACTION_PROMPT,
   buildIouRules,
   buildIouOutputSchema,
@@ -497,26 +496,11 @@ describe("registered wire — schema evidence stays private and public rows stay
     }
   });
 
-  it("ships the bounded model-only image passes consistently in source, docs, and wire", async () => {
-    const expectedPrimary = {
+  it("ships the bounded one-pass image prompt consistently in source, docs, and wire", async () => {
+    const expectedPrompt = {
       version: 1,
       template: IOU_IMAGE_EXTRACTION_PROMPT,
       includeRuleGuidance: false,
-    };
-    const expectedFocused = {
-      version: 4,
-      primaryFields: ["amount", "currency", "kind"],
-      primaryMaxTokens: 64,
-      passes: [
-        {
-          template: IOU_IMAGE_DATE_EXTRACTION_PROMPT,
-          fields: ["date"],
-          includeRuleGuidance: false,
-          includeMessage: false,
-          maxTokens: 24,
-          imageRegion: "lower_detail_rows",
-        },
-      ],
     };
     const sourceSchema = iouActionManifest.outputSchema as {
       "x-openchat-image-prompt-template"?: unknown;
@@ -534,23 +518,18 @@ describe("registered wire — schema evidence stays private and public rows stay
 
     for (const schema of [sourceSchema, documentedSchema, wireSchema]) {
       expect(schema["x-openchat-image-prompt-template"]).toEqual(
-        expectedPrimary,
+        expectedPrompt,
       );
-      expect(schema["x-openchat-image-focused-passes"]).toEqual(
-        expectedFocused,
-      );
+      expect(schema).not.toHaveProperty("x-openchat-image-focused-passes");
     }
-    for (const pass of [expectedPrimary, ...expectedFocused.passes]) {
-      expect(pass.template.trim()).toBe(pass.template);
-      expect(
-        new TextEncoder().encode(pass.template).byteLength,
-      ).toBeLessThanOrEqual(4_096);
-      expect(pass.template).not.toContain("\n\nRules:");
+    expect(expectedPrompt.template.trim()).toBe(expectedPrompt.template);
+    expect(
+      new TextEncoder().encode(expectedPrompt.template).byteLength,
+    ).toBeLessThanOrEqual(4_096);
+    expect(expectedPrompt.template).not.toContain("\n\nRules:");
+    for (const field of ["amount", "currency", "kind", "date"]) {
+      expect(expectedPrompt.template).toContain(`"${field}"`);
     }
-    expect([
-      ...expectedFocused.primaryFields,
-      ...expectedFocused.passes.flatMap((pass) => pass.fields),
-    ]).toEqual(["amount", "currency", "kind", "date"]);
   });
 
   it("opts into the generic source-grounded text/OCR transaction parser in source, docs, and wire", async () => {
@@ -906,52 +885,56 @@ describe("the extraction prompt tells the model a single line can hold several t
     );
   });
 
-  it("separates core financial fields from the language-independent date pass", () => {
-    const corePrompt = IOU_IMAGE_EXTRACTION_PROMPT.replace(/\s+/g, " ");
-    const datePrompt = IOU_IMAGE_DATE_EXTRACTION_PROMPT.replace(/\s+/g, " ");
+  it("keeps financial and language-independent date extraction in one grounded prompt", () => {
+    const prompt = IOU_IMAGE_EXTRACTION_PROMPT.replace(/\s+/g, " ");
 
-    expect(corePrompt).toMatch(
+    expect(prompt).toMatch(
       /authoritative[^.]*paid[^.]*transferred[^.]*total/i,
     );
-    expect(corePrompt).toMatch(
-      /ignore[^.]*IDs[^.]*accounts[^.]*references[^.]*dates[^.]*times/i,
+    expect(prompt).toMatch(/copy every visible amount digit[^.]*exact place value/i);
+    expect(prompt).toMatch(/never abbreviate an amount with k or m/i);
+    expect(prompt).not.toContain("standard k-thousands");
+    expect(prompt).toMatch(
+      /thousands comma[^.]*removed only[^.]*JSON number[^.]*never append a digit or zero/i,
     );
-    expect(corePrompt).toMatch(/settlement[^.]*completed moving/i);
-    expect(corePrompt).toMatch(/iou[^.]*future[^.]*due[^.]*requested/i);
-    expect(corePrompt).toMatch(/currency[^.]*exact visible[^.]*three-letter/i);
-    expect(corePrompt).toMatch(/compare all three printed letters/i);
-    expect(corePrompt).toMatch(/receipt or total alone[^.]*not proof of payment/i);
-    expect(corePrompt).toMatch(/ignore[^.]*parties[^.]*descriptions/i);
-    expect(corePrompt).not.toMatch(/explicitly labelled Note/i);
-    expect(corePrompt).not.toMatch(/"direction"|"date"\s*:/i);
+    expect(prompt).toMatch(/ignore[^.]*IDs[^.]*accounts[^.]*references/i);
+    expect(prompt).toMatch(/settlement[^.]*completed moving/i);
+    expect(prompt).toMatch(/iou[^.]*future[^.]*due[^.]*requested/i);
+    expect(prompt).toMatch(/currency[^.]*exact visible[^.]*three-letter/i);
+    expect(prompt).toMatch(/compare all three printed letters/i);
+    expect(prompt).toMatch(/receipt or total alone[^.]*not proof of payment/i);
+    expect(prompt).toMatch(/ignore[^.]*parties[^.]*descriptions/i);
+    expect(prompt).not.toMatch(/explicitly labelled Note/i);
+    expect(prompt).not.toMatch(/"direction"\s*:/i);
+    for (const field of ["amount", "currency", "kind", "date"]) {
+      expect(prompt).toContain(`"${field}"`);
+    }
 
-    expect(datePrompt).toMatch(/label may be written in any language or script/i);
-    expect(datePrompt).toContain("التاريخ means Date");
-    expect(datePrompt).toMatch(/label[^.]*far right[^.]*value[^.]*far left/i);
-    expect(datePrompt).toMatch(/every horizontal row[^.]*top[^.]*bottom/i);
-    expect(datePrompt).toMatch(/lowest rows[^.]*no complete transaction date/i);
-    expect(datePrompt).toMatch(/exactly the JSON key "date"/i);
-    expect(datePrompt).toMatch(/do not return a note or any other field/i);
-    expect(datePrompt).toMatch(/transcribe[^.]*instead of[^.]*calendar conversion/i);
-    expect(datePrompt).toMatch(
-      /English month name[^.]*copy the visible day[^.]*month word[^.]*four-digit year/i,
+    expect(prompt).toMatch(/label may be written in any language or script/i);
+    expect(prompt).toContain("التاريخ means Date");
+    expect(prompt).toMatch(/label[^.]*far right[^.]*value[^.]*far left/i);
+    expect(prompt).toMatch(/every horizontal row[^.]*top[^.]*bottom/i);
+    expect(prompt).toMatch(/lowest rows/i);
+    expect(prompt).toMatch(
+      /complete visibly printed transaction date[^.]*"date":"YYYY-MM-DD"/i,
     );
-    expect(datePrompt).toMatch(/do not translate[^.]*or reorder/i);
-    expect(datePrompt).toMatch(/already strict YYYY-MM-DD[^.]*unchanged/i);
-    expect(datePrompt).toMatch(/numeric-only date[^.]*ambiguous[^.]*omit "date"/i);
-    expect(datePrompt).toMatch(/compare every copied date token[^.]*image/i);
-    expect(datePrompt).toMatch(/four year digits[^.]*printed shapes[^.]*final digit/i);
-    expect(datePrompt).toMatch(/month word is printed[^.]*retain[^.]*never output month digits/i);
-    expect(datePrompt).not.toMatch(/\b(?:19|20)\d{2}-\d{2}-\d{2}\b/);
-    expect(datePrompt).not.toMatch(
+    expect(prompt).toMatch(/ignore the printed time/i);
+    expect(prompt).toMatch(/use only visible date evidence/i);
+    expect(prompt).toMatch(
+      /unambiguous printed month name[^.]*month number/i,
+    );
+    expect(prompt).toMatch(/already strict YYYY-MM-DD[^.]*unchanged/i);
+    expect(prompt).toMatch(/numeric-only date[^.]*ambiguous[^.]*omit "date"/i);
+    expect(prompt).toMatch(
+      /compare every output day and year digit[^.]*printed date/i,
+    );
+    expect(prompt).toMatch(/four year digits[^.]*printed shapes[^.]*final digit/i);
+    expect(prompt).not.toMatch(/\b(?:19|20)\d{2}-\d{2}-\d{2}\b/);
+    expect(prompt).not.toMatch(
       /\b\d{1,2}\s+(?:jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\s+\d{4}\b/i,
     );
-    expect(datePrompt).toMatch(/English month name[^.]*omit the time/i);
-    expect(datePrompt).toMatch(
-      /complete visible date[^.]*calendar conversion/i,
-    );
-    expect(datePrompt).not.toMatch(/"note"\s*:/i);
-    expect(datePrompt).toMatch(/never infer/i);
+    expect(prompt).not.toMatch(/"note"\s*:/i);
+    expect(prompt).toMatch(/never infer/i);
     expect(IOU_IMAGE_EXTRACTION_PROMPT).not.toMatch(/"amount"\s*:\s*-?\d/u);
     // A weak vision signal must not let greedy decoding echo a numeric instruction literal as the
     // transaction amount. Spell normalization semantics without any concrete numeric example.

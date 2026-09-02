@@ -188,8 +188,8 @@ export const MODEL_ACCEPTANCE_CASES: readonly ModelAcceptanceCase[] = [
         noteAllowedWords: ["cleaning", "fee", "owed", "to", "you"],
       },
     ],
-    // Production image extraction is model-only but split into disjoint core + focused-date passes.
-    expectedInferCalls: 2,
+    // Production image extraction is one bounded model-only pass over the original image.
+    expectedInferCalls: 1,
     warmLatencyMs: 45_000,
   },
   {
@@ -215,7 +215,7 @@ export const MODEL_ACCEPTANCE_CASES: readonly ModelAcceptanceCase[] = [
         noteAllowedWords: [],
       },
     ],
-    expectedInferCalls: 2,
+    expectedInferCalls: 1,
     warmLatencyMs: 60_000,
   },
   {
@@ -223,7 +223,7 @@ export const MODEL_ACCEPTANCE_CASES: readonly ModelAcceptanceCase[] = [
     modality: "image",
     imageFixture: {
       path: "test/fixtures/openchat/model-acceptance/portrait-transfer-14-aug-arabic.png",
-      // This separately pinned fixture exercises the production detail crop with an Arabic date
+      // This separately pinned fixture exercises the production one-pass prompt with an Arabic date
       // label, so an English-only prompt or an easier English fixture cannot mask this regression.
       sha256: "90f2e0a8f6cdf05a51624ef7bfdade0ff0a6d7f4ecc066d3749904d421e028d7",
       bytes: 62_985,
@@ -241,7 +241,7 @@ export const MODEL_ACCEPTANCE_CASES: readonly ModelAcceptanceCase[] = [
         noteAllowedWords: [],
       },
     ],
-    expectedInferCalls: 2,
+    expectedInferCalls: 1,
     warmLatencyMs: 60_000,
   },
   {
@@ -266,7 +266,7 @@ export const MODEL_ACCEPTANCE_CASES: readonly ModelAcceptanceCase[] = [
         noteAllowedWords: ["cleaning", "service"],
       },
     ],
-    expectedInferCalls: 2,
+    expectedInferCalls: 1,
     warmLatencyMs: 45_000,
   },
 ] as const;

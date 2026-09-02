@@ -2,7 +2,6 @@ import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { describe, expect, it } from "vitest";
 import {
-  IOU_IMAGE_DATE_EXTRACTION_PROMPT,
   IOU_IMAGE_EXTRACTION_PROMPT,
   iouActionManifest,
 } from "./actionManifest";
@@ -56,7 +55,7 @@ const acceptanceCase: ModelAcceptanceCase = {
       noteAllowedWords: [],
     },
   ],
-  expectedInferCalls: 2,
+  expectedInferCalls: 1,
   warmLatencyMs: 120_000,
 };
 
@@ -74,7 +73,7 @@ function observation(date: string): ModelAcceptanceObservation {
       { label: "Note", value: "" },
     ],
     confirmPayload: extracted,
-    inferCalls: 2,
+    inferCalls: 1,
     actionMs: 1,
   };
 }
@@ -104,32 +103,27 @@ describe("mobile portrait model date regression", () => {
     expect(serialized).not.toMatch(/@|account|iban|reference|sender|receiver/);
   });
 
-  it("keeps concrete calendar examples out of every image-model prompt", () => {
-    for (const prompt of [
-      IOU_IMAGE_EXTRACTION_PROMPT,
-      IOU_IMAGE_DATE_EXTRACTION_PROMPT,
-    ]) {
-      expect(prompt).not.toMatch(/\b(?:19|20)\d{2}-\d{2}-\d{2}\b/);
-      expect(prompt).not.toMatch(
-        /\b\d{1,2}\s+(?:jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\s+\d{4}\b/i,
-      );
-    }
-    expect(IOU_IMAGE_DATE_EXTRACTION_PROMPT).toContain(
-      "compare every copied date token to the image",
+  it("keeps concrete calendar examples out of the unified image-model prompt", () => {
+    const prompt = IOU_IMAGE_EXTRACTION_PROMPT;
+    expect(prompt).not.toMatch(/\b(?:19|20)\d{2}-\d{2}-\d{2}\b/);
+    expect(prompt).not.toMatch(
+      /\b\d{1,2}\s+(?:jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\s+\d{4}\b/i,
     );
-    expect(IOU_IMAGE_DATE_EXTRACTION_PROMPT).toContain(
+    expect(prompt).toContain(
       "label may be written in any language or script",
     );
-    expect(IOU_IMAGE_DATE_EXTRACTION_PROMPT).toContain("التاريخ means Date");
-    expect(IOU_IMAGE_DATE_EXTRACTION_PROMPT).toContain('exactly the JSON key "date"');
-    expect(IOU_IMAGE_DATE_EXTRACTION_PROMPT).toContain(
+    expect(prompt).toContain("التاريخ means Date");
+    expect(prompt).toContain(
       "label can be at the far right while its value is at the far left",
     );
-    expect(IOU_IMAGE_DATE_EXTRACTION_PROMPT).toContain(
+    expect(prompt).toContain(
       "inspect every horizontal row from the top through the bottom",
     );
-    expect(IOU_IMAGE_DATE_EXTRACTION_PROMPT).toContain(
-      "Return {} only after checking all visible rows, including the lowest rows",
+    expect(prompt).toContain("including the lowest rows");
+    expect(prompt).toContain('"date":"YYYY-MM-DD"');
+    expect(prompt).toContain("ignore the printed time");
+    expect(prompt).toMatch(
+      /compare every output day and year digit[^.]*printed date/i,
     );
   });
 
@@ -152,7 +146,7 @@ describe("mobile portrait model date regression", () => {
           date: "2026-08-14",
         },
       ],
-      expectedInferCalls: 2,
+      expectedInferCalls: 1,
     });
     const arabicLabelCase = MODEL_ACCEPTANCE_CASES.find(
       (candidate) => candidate.id === "portrait-date-image-arabic",
@@ -177,7 +171,7 @@ describe("mobile portrait model date regression", () => {
           noteAllowedWords: [],
         },
       ],
-      expectedInferCalls: 2,
+      expectedInferCalls: 1,
     });
     const arabicSource = readFileSync(
       resolve(
@@ -189,10 +183,9 @@ describe("mobile portrait model date regression", () => {
     expect(arabicSource).toContain("التاريخ:");
     expect(arabicSource).toContain("14 Aug 2026 09:47 PM");
     expect(arabicSource).not.toMatch(/@|iban|account number|bank to trust/i);
-    // The original fixture accidentally made this an easy center-crop case. The real failing
+    // The original fixture accidentally made this an easy center-detail case. The real failing
     // receipt puts a small value at the far left of a row whose Arabic label is at the far right,
-    // about 81% down the portrait image. That exposed the old broad `detail_card` crop's
-    // verification gap; `lower_detail_rows` now keeps the complete 68%-90% details band.
+    // about 81% down the portrait image. The one full-image pass must inspect that complete row.
     expect(arabicSource).toContain(
       '<text x="815" y="1288" text-anchor="end" direction="rtl"',
     );
@@ -204,32 +197,25 @@ describe("mobile portrait model date regression", () => {
     expect(dateRowRatio).toBeLessThan(0.86);
   });
 
-  it("binds a language-independent date-only cropped model pass", () => {
-    const pipeline = iouActionManifest.outputSchema[
-      "x-openchat-image-focused-passes"
-    ] as {
-      primaryFields: string[];
-      primaryMaxTokens: number;
-      version: number;
-      passes: {
-        fields: string[];
-        maxTokens: number;
+  it("binds amount, currency, kind, and date to one full-image model pass", () => {
+    const schema = iouActionManifest.outputSchema as {
+      "x-openchat-image-prompt-template"?: {
+        version: number;
         template: string;
-        imageRegion: string;
-      }[];
+        includeRuleGuidance: boolean;
+      };
+      "x-openchat-image-focused-passes"?: unknown;
     };
-    expect(pipeline.version).toBe(4);
-    expect(pipeline.primaryFields).toEqual(["amount", "currency", "kind"]);
-    expect(pipeline.passes).toEqual([
-      expect.objectContaining({
-        fields: ["date"],
-        maxTokens: 24,
-        template: IOU_IMAGE_DATE_EXTRACTION_PROMPT,
-        imageRegion: "lower_detail_rows",
-      }),
-    ]);
-    expect(pipeline.primaryFields).not.toContain("date");
-    expect(pipeline.primaryFields).not.toContain("note");
+    expect(schema["x-openchat-image-prompt-template"]).toEqual({
+      version: 1,
+      template: IOU_IMAGE_EXTRACTION_PROMPT,
+      includeRuleGuidance: false,
+    });
+    expect(schema).not.toHaveProperty("x-openchat-image-focused-passes");
+    for (const field of ["amount", "currency", "kind", "date"]) {
+      expect(IOU_IMAGE_EXTRACTION_PROMPT).toContain(`"${field}"`);
+    }
+    expect(IOU_IMAGE_EXTRACTION_PROMPT).not.toMatch(/"note"\s*:/i);
   });
 
   it("accepts the visible August date and rejects the reported July result", () => {

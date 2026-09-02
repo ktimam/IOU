@@ -191,21 +191,17 @@ One transaction means one object, not an array. For one distinct transaction amo
 non-whitespace output character MUST be { and the last non-whitespace output character MUST be }.
 Do not wrap that object in []. Each object must choose exactly one "kind" and one "direction".`;
 
-// Phone-class WebGPU is most reliable when the small VLM has one bounded attention job per pass.
-// OpenChat's focused image prompt pipeline projects each pass onto only its declared fields, so this
-// core pass cannot invent a date/note/direction and the lower-detail pass cannot alter the amount. Both
-// passes use the selected vision model directly; no OCR or text-reader output participates.
-export const IOU_IMAGE_EXTRACTION_PROMPT = `Read the financial document. Return ONLY one JSON object, or a reading-order JSON array for separate transactions. Each object may use only "amount", "currency", and "kind".
+// Phone-class WebGPU gets one bounded inference over the complete original image. The prompt owns
+// every model-authored field; no OCR, text-reader output, focused crop, or second model pass participates.
+export const IOU_IMAGE_EXTRACTION_PROMPT = `Read the complete original financial image. Return ONLY one JSON object, or a reading-order JSON array for separate transactions. Each object may use only "amount", "currency", "kind", and "date".
 
-Use the single authoritative paid, transferred, total, or amount-due value once per transaction; preserve decimals and standard k-thousands. Ignore balances, IDs, accounts, references, dates, times, quantities, percentages, exchange rates, line-item arithmetic, repeated totals, parties, and descriptions. Currency is the exact visible three-letter ISO code beside that amount; compare all three printed letters before answering. The only permitted "kind" values are "settlement" for money visibly completed moving or a payment/transfer visibly succeeded, and "iou" for future, due, owed, requested, reserved, booked, or unpaid money. Output one of those exact strings; never copy a document label such as total, status, or amount-due as "kind". A receipt or total alone is not proof of payment. Omit uncertainty; invent nothing.`;
+For "amount", use the single authoritative paid, transferred, total, or amount-due value once per transaction. Copy every visible amount digit at its exact place value. Preserve decimals. Never abbreviate an amount with k or m. A thousands comma may be removed only to form the JSON number; never append a digit or zero. Ignore balances, IDs, accounts, references, metadata, instruction values, dates that are not the transaction date, times, quantities, percentages, exchange rates, line-item arithmetic, repeated totals, parties, and descriptions.
 
-// Keep calendar conversion out of the VLM. This pass owns only `date`, so an uncertain description
-// cannot displace the short date answer on phone-class WebGPU. Labels may be written in any language
-// or script; the model copies the visible value and the schema normalizer performs the deterministic
-// English-month-to-ISO conversion. An already-ISO source remains valid unchanged.
-export const IOU_IMAGE_DATE_EXTRACTION_PROMPT = `Read only the complete calendar date visibly printed for the financial transaction in this image detail. The image may be a focused crop of the lower transaction-details panel, so inspect every horizontal row from the top through the bottom before deciding that the date is absent. A field label and its value can be separated by a wide blank space. In a right-to-left layout, the label can be at the far right while its value is at the far left of the same horizontal row. A label may be written in any language or script; for example, the Arabic label التاريخ means Date. Read the value horizontally aligned with that date label, not the reference or note on another row. Recognize the label's meaning visually, but never copy or translate the label. Return ONLY {"date":"visible date"}, using exactly the JSON key "date", or a reading-order JSON array with one date object per separate transaction. Do not return a note or any other field.
+For "currency", use the exact visible three-letter ISO code beside that amount; compare all three printed letters before answering. For "kind", use only "settlement" for money visibly completed moving or a payment/transfer visibly succeeded, and "iou" for future, due, owed, requested, reserved, booked, or unpaid money. Never copy a document label such as total, status, or amount-due as "kind". A receipt or total alone is not proof of payment.
 
-Transcribe the complete visible date instead of performing a calendar conversion. For an English month name, copy the visible day, month word, and four-digit year in printed order with single spaces; omit the time. If a month word is printed, retain that same word and never output month digits in its place. Read all four year digits from their printed shapes, especially the final digit; never substitute a familiar or likely year. Do not translate the month or reorder components. Copy an already strict YYYY-MM-DD date unchanged. Any other numeric-only date order is ambiguous, so omit "date". Before responding, compare every copied date token to the image. Ignore every amount, ID, account, reference, filename, metadata, and date from these instructions. Return {} only after checking all visible rows, including the lowest rows, and finding no complete transaction date. Never infer, substitute, or blend values.`;
+For "date", inspect every horizontal row from the top through the bottom. A field label and its value may be separated by wide blank space. The label may be written in any language or script; the Arabic label التاريخ means Date. In a right-to-left layout, the label can be at the far right while its value is at the far left of the same horizontal row. Read the value aligned with the date label, not a reference or note on another row. Return the complete visibly printed transaction date as "date":"YYYY-MM-DD" and ignore the printed time.
+
+Use only visible date evidence. Convert an unambiguous printed month name to its month number; copy an already strict YYYY-MM-DD date unchanged. Any other numeric-only date order is ambiguous, so omit "date". Before responding, compare every output day and year digit to the printed date. Read all four year digits from their printed shapes, especially the final digit. Check all visible rows, including the lowest rows. If no complete visible transaction date exists, omit "date". Never infer, substitute, or blend values. Omit every uncertain field; invent nothing.`;
 
 // The canister attester rounds major units to integer minor units. Half a minor unit is the exact
 // smallest positive major-unit value that rounds to one; the maximum remains within JavaScript's
@@ -377,29 +373,11 @@ export const iouActionManifest: IouActionManifest = {
   prompt: IOU_EXTRACTION_PROMPT,
   outputSchema: {
     type: "object",
-    // Each selected-model pass owns disjoint fields. OpenChat discards undeclared keys before it
-    // merges the results, then applies the ordinary rules/schema/defaults/required checks.
+    // One selected-model pass reads the complete original image and owns every extracted field.
     "x-openchat-image-prompt-template": {
       version: 1,
       template: IOU_IMAGE_EXTRACTION_PROMPT,
       includeRuleGuidance: false,
-    },
-    // Additive to the v1 compact prompt above: older OpenChat clients still get the stable compact
-    // core extraction, while clients that understand focused passes also read the date separately.
-    "x-openchat-image-focused-passes": {
-      version: 4,
-      primaryFields: ["amount", "currency", "kind"],
-      primaryMaxTokens: 64,
-      passes: [
-        {
-          template: IOU_IMAGE_DATE_EXTRACTION_PROMPT,
-          fields: ["date"],
-          includeRuleGuidance: false,
-          includeMessage: false,
-          maxTokens: 24,
-          imageRegion: "lower_detail_rows",
-        },
-      ],
     },
     // Invocation order belongs to the app manifest. In a browser, try the user's selected image
     // model only after OpenChat proves it has a usable accelerated path; unavailable, failed, empty,

@@ -23,10 +23,7 @@ import {
   type Page,
   type Request,
 } from "@playwright/test";
-import {
-  IOU_IMAGE_DATE_EXTRACTION_PROMPT,
-  IOU_IMAGE_EXTRACTION_PROMPT,
-} from "../../src/features/openchat/actionManifest";
+import { IOU_IMAGE_EXTRACTION_PROMPT } from "../../src/features/openchat/actionManifest";
 
 const REPOSITORY_ROOT = resolve(
   dirname(fileURLToPath(import.meta.url)),
@@ -40,8 +37,7 @@ const PROTOCOL_MODULE_PATH = "/src/utils/transformersWebGpuProtocol.ts";
 const PRELOAD_TIMEOUT_MS = 30 * 60_000;
 const MAX_IMAGE_BYTES = 20 * 1024 * 1024;
 const SINGLE_PASS_MAX_OUTPUT_TOKENS = 96;
-const PRIMARY_MAX_OUTPUT_TOKENS = 64;
-const FOCUSED_DATE_MAX_OUTPUT_TOKENS = 24;
+const PRODUCTION_MAX_OUTPUT_TOKENS = 96;
 const MAX_TECHNICAL_ERROR_LENGTH = 768;
 const MAX_RUNS = 10;
 const MAX_STAGE_SEQUENCE_ENTRIES = 32 * MAX_RUNS;
@@ -57,8 +53,8 @@ const PROMPT =
   "Direction is relative to the chat user: names, sender/receiver rows and account numbers do not identify that user, so use null unless the receipt explicitly states the user viewpoint. " +
   "Preserve visible amount/currency/date exactly; use null rather than infer or invent.";
 
-type PromptProfile = "production-two-pass" | "single-pass";
-const DEFAULT_PROMPT_PROFILE: PromptProfile = "production-two-pass";
+type PromptProfile = "production-one-pass" | "single-pass";
+const DEFAULT_PROMPT_PROFILE: PromptProfile = "production-one-pass";
 
 const EXPECTED = Object.freeze({
   amount: 12_900,
@@ -103,27 +99,6 @@ type ParsedFields = {
 
 type ParsedProductionFields = ParsedFields & {
   note: string | null;
-};
-
-type FocusedDateDiagnostics = {
-  responseCharacters: number;
-  jsonParsed: boolean;
-  outcome:
-    | "iso"
-    | "english_month"
-    | "missing"
-    | "non_string"
-    | "conflicting_alias"
-    | "unsupported"
-    | "unparseable_json";
-  unsupportedFormat?:
-    | "iso_datetime"
-    | "english_month_with_connector"
-    | "english_month_extra"
-    | "numeric_delimited"
-    | "other";
-  unsupportedValueCharacters?: number;
-  unsupportedValueShape?: string;
 };
 
 type SessionEvidence = {
@@ -187,7 +162,6 @@ type AttemptEvidence = {
     technicalProductError: string | undefined;
   };
   observed: ParsedFields;
-  focusedDateDiagnostics?: FocusedDateDiagnostics;
   exact: boolean;
   networkDeltas: {
     modelRequests: number;
@@ -249,11 +223,11 @@ function parseArguments(argv: string[]): Options {
   const promptProfile =
     values.get("--prompt-profile") ?? DEFAULT_PROMPT_PROFILE;
   if (
-    promptProfile !== "production-two-pass" &&
+    promptProfile !== "production-one-pass" &&
     promptProfile !== "single-pass"
   ) {
     throw new Error(
-      "--prompt-profile must be production-two-pass or single-pass",
+      "--prompt-profile must be production-one-pass or single-pass",
     );
   }
 
@@ -586,97 +560,24 @@ function normalizeProductionDate(
   return isStrictCalendarDate(date) ? { date, outcome: "english_month" } : undefined;
 }
 
-function classifyUnsupportedDateFormat(
-  value: string,
-): FocusedDateDiagnostics["unsupportedFormat"] {
-  const trimmed = value.trim().replace(/^date\s*:\s*/iu, "");
-  if (/^\d{4}-\d{2}-\d{2}(?:[tT]|\s)\d{1,2}:\d{2}/u.test(trimmed)) {
-    return "iso_datetime";
-  }
-  if (/^\d{1,2}\s+[a-z]{3,9}\s+\d{4}\s+(?:at|,)/iu.test(trimmed)) {
-    return "english_month_with_connector";
-  }
-  if (/^\d{1,2}\s+[a-z]{3,9}\s+\d{4}\S+/iu.test(trimmed)) {
-    return "english_month_extra";
-  }
-  if (/\d{1,4}[/.]\d{1,2}[/.]\d{1,4}/u.test(trimmed)) {
-    return "numeric_delimited";
-  }
-  return "other";
-}
-
-function redactDateValueShape(value: string): string {
-  return Array.from(value.trim().slice(0, 96), (character) => {
-    if (/\p{Nd}/u.test(character)) return "0";
-    if (/[a-z]/iu.test(character)) return "A";
-    if (/\p{L}/u.test(character)) return "L";
-    if (/\s/u.test(character)) return " ";
-    return "-/:.,+()[]".includes(character) ? character : "?";
-  }).join("");
-}
-
-function parseProductionFocusedDate(text: string): {
-  fields: ParsedFields;
-  diagnostics: FocusedDateDiagnostics;
-} {
-  const parsed = extractBalancedJson(text);
-  const diagnosticBase = {
-    responseCharacters: text.length,
-    jsonParsed: parsed !== undefined,
-  };
-  if (parsed === undefined) {
-    return {
-      fields: emptyParsedFields(),
-      diagnostics: { ...diagnosticBase, outcome: "unparseable_json" },
-    };
-  }
-  const hasDate = Object.hasOwn(parsed, "date");
-  const hasAlias = Object.hasOwn(parsed, "due_date");
-  if (!hasDate && !hasAlias) {
-    return {
-      fields: emptyParsedFields(),
-      diagnostics: { ...diagnosticBase, outcome: "missing" },
-    };
-  }
-  if (hasDate && hasAlias && !Object.is(parsed.date, parsed.due_date)) {
-    return {
-      fields: emptyParsedFields(),
-      diagnostics: { ...diagnosticBase, outcome: "conflicting_alias" },
-    };
-  }
-  const value = hasDate ? parsed.date : parsed.due_date;
-  if (typeof value !== "string") {
-    return {
-      fields: emptyParsedFields(),
-      diagnostics: { ...diagnosticBase, outcome: "non_string" },
-    };
-  }
-  const normalized = normalizeProductionDate(value);
-  if (normalized === undefined) {
-    return {
-      fields: emptyParsedFields(),
-      diagnostics: {
-        ...diagnosticBase,
-        outcome: "unsupported",
-        unsupportedFormat: classifyUnsupportedDateFormat(value),
-        unsupportedValueCharacters: value.length,
-        unsupportedValueShape: redactDateValueShape(value),
-      },
-    };
-  }
-  return {
-    fields: { ...emptyParsedFields(), date: normalized.date },
-    diagnostics: { ...diagnosticBase, outcome: normalized.outcome },
-  };
-}
-
 function parseProductionFields(text: string): ParsedProductionFields {
   const parsed = extractBalancedJson(text);
+  const allowed = parseAllowedFields(text);
+  const hasDate = parsed !== undefined && Object.hasOwn(parsed, "date");
+  const hasAlias = parsed !== undefined && Object.hasOwn(parsed, "due_date");
+  const rawDate =
+    hasDate && hasAlias && !Object.is(parsed?.date, parsed?.due_date)
+      ? undefined
+      : hasDate
+        ? parsed?.date
+        : parsed?.due_date;
+  const normalizedDate =
+    typeof rawDate === "string" ? normalizeProductionDate(rawDate)?.date : undefined;
   const note =
     typeof parsed?.note === "string" && parsed.note.trim() !== ""
       ? parsed.note.trim().slice(0, 200)
       : null;
-  return { ...parseAllowedFields(text), note };
+  return { ...allowed, date: normalizedDate ?? allowed.date, note };
 }
 
 function emptyParsedFields(): ParsedFields {
@@ -686,22 +587,6 @@ function emptyParsedFields(): ParsedFields {
     kind: null,
     direction: null,
     date: null,
-  };
-}
-
-function mergeProductionImagePasses(
-  primary: ParsedProductionFields,
-  focusedDate: ParsedFields,
-): ParsedProductionFields {
-  return {
-    amount: primary.amount,
-    currency: primary.currency,
-    kind: primary.kind,
-    // Image extraction has no authenticated chat-user viewpoint. Production strips direction
-    // from both bounded image passes, so retain that raw contract in the acceptance evidence.
-    direction: null,
-    date: focusedDate.date,
-    note: primary.note,
   };
 }
 
@@ -891,8 +776,7 @@ async function releaseWakeLock(page: Page): Promise<void> {
 
 async function run(options: Options): Promise<boolean> {
   const startedAt = Date.now();
-  const inferencesPerAttempt =
-    options.promptProfile === "production-two-pass" ? 2 : 1;
+  const inferencesPerAttempt = 1;
   let activePhase: NetworkPhase = "setup";
   let page: Page | undefined;
   let cdpSession: CDPSession | undefined;
@@ -1120,8 +1004,6 @@ async function run(options: Options): Promise<boolean> {
       let attemptFailureCategory: FailureCategory | undefined;
       let technicalProductError: string | undefined;
       let observed = emptyParsedFields();
-      let focusedDateDiagnostics: FocusedDateDiagnostics | undefined;
-
       try {
         const productResult = await page.evaluate(
           async ({
@@ -1129,11 +1011,9 @@ async function run(options: Options): Promise<boolean> {
             inferenceModuleUrl,
             promptProfile,
             singlePassPrompt,
-            primaryPrompt,
-            datePrompt,
+            productionPrompt,
             singlePassMaxTokens,
-            primaryMaxTokens,
-            focusedDateMaxTokens,
+            productionMaxTokens,
           }) => {
             const inference = await import(inferenceModuleUrl);
             const response = await fetch(imageUrl, {
@@ -1155,66 +1035,43 @@ async function run(options: Options): Promise<boolean> {
                 await inference.disposeTransformersWebGpuInference();
               }
             };
-            if (promptProfile === "single-pass") {
-              const single = await runPass(
-                singlePassPrompt,
-                singlePassMaxTokens,
-              );
-              return { profile: promptProfile, single };
-            }
-            const primary = await runPass(primaryPrompt, primaryMaxTokens);
-            if (primary?.kind !== "ok") {
-              return { profile: promptProfile, primary };
-            }
-            const date = await runPass(datePrompt, focusedDateMaxTokens);
-            return { profile: promptProfile, primary, date };
+            const result = await runPass(
+              promptProfile === "single-pass" ? singlePassPrompt : productionPrompt,
+              promptProfile === "single-pass"
+                ? singlePassMaxTokens
+                : productionMaxTokens,
+            );
+            return { profile: promptProfile, result };
           },
           {
             imageUrl: `${options.origin}${IMAGE_PATH}`,
             inferenceModuleUrl: `${options.origin}${INFERENCE_MODULE_PATH}`,
             promptProfile: options.promptProfile,
             singlePassPrompt: PROMPT,
-            primaryPrompt: IOU_IMAGE_EXTRACTION_PROMPT,
-            datePrompt: IOU_IMAGE_DATE_EXTRACTION_PROMPT,
+            productionPrompt: IOU_IMAGE_EXTRACTION_PROMPT,
             singlePassMaxTokens: SINGLE_PASS_MAX_OUTPUT_TOKENS,
-            primaryMaxTokens: PRIMARY_MAX_OUTPUT_TOKENS,
-            focusedDateMaxTokens: FOCUSED_DATE_MAX_OUTPUT_TOKENS,
+            productionMaxTokens: PRODUCTION_MAX_OUTPUT_TOKENS,
           },
         );
-        const singleResult = productResult?.single;
-        const primaryResult = productResult?.primary;
-        const dateResult = productResult?.date;
-        const passes =
-          options.promptProfile === "single-pass"
-            ? [singleResult]
-            : [primaryResult, dateResult];
-        const failedPass = passes.find((pass) => pass?.kind !== "ok");
+        const inferenceResult = productResult?.result;
+        const failedPass = inferenceResult?.kind === "ok" ? undefined : inferenceResult;
         resultKind = sanitizeProductResultKind(
-          failedPass?.kind ?? passes.at(-1)?.kind,
+          inferenceResult?.kind,
         );
         if (
           options.promptProfile === "single-pass" &&
-          singleResult?.kind === "ok" &&
-          typeof singleResult.text === "string"
+          inferenceResult?.kind === "ok" &&
+          typeof inferenceResult.text === "string"
         ) {
           // The raw string remains in process memory only long enough to retain the five
           // allowlisted fields. It is never logged, hashed, or written to the report.
-          observed = parseAllowedFields(singleResult.text);
+          observed = parseAllowedFields(inferenceResult.text);
         } else if (
-          options.promptProfile === "production-two-pass" &&
-          primaryResult?.kind === "ok" &&
-          typeof primaryResult.text === "string" &&
-          dateResult?.kind === "ok" &&
-          typeof dateResult.text === "string"
+          options.promptProfile === "production-one-pass" &&
+          inferenceResult?.kind === "ok" &&
+          typeof inferenceResult.text === "string"
         ) {
-          const focusedDate = parseProductionFocusedDate(dateResult.text);
-          focusedDateDiagnostics = focusedDate.diagnostics;
-          observed = reportableFields(
-            mergeProductionImagePasses(
-              parseProductionFields(primaryResult.text),
-              focusedDate.fields,
-            ),
-          );
+          observed = reportableFields(parseProductionFields(inferenceResult.text));
         } else {
           technicalProductError = sanitizeTechnicalProductError(
             failedPass?.error,
@@ -1255,7 +1112,6 @@ async function run(options: Options): Promise<boolean> {
           technicalProductError,
         },
         observed,
-        focusedDateDiagnostics,
         exact,
         networkDeltas: {
           modelRequests,
@@ -1337,12 +1193,11 @@ async function run(options: Options): Promise<boolean> {
     exact;
 
   const report = {
-    format: "iou-physical-android-production-transformers-webgpu-v2",
+    format: "iou-physical-android-production-transformers-webgpu-v3",
     pass,
     privacy: {
       rawImagePersisted: false,
       rawModelOutputPersisted: false,
-      focusedDateDiagnosticsSanitized: true,
       technicalProductErrorSanitized: true,
       imagePathPersisted: false,
       originPersisted: false,
@@ -1357,11 +1212,8 @@ async function run(options: Options): Promise<boolean> {
       ocrImported: false,
       ocrEnabled: false,
       outputTokenBudgets:
-        options.promptProfile === "production-two-pass"
-          ? {
-              primary: PRIMARY_MAX_OUTPUT_TOKENS,
-              focusedDate: FOCUSED_DATE_MAX_OUTPUT_TOKENS,
-            }
+        options.promptProfile === "production-one-pass"
+          ? { production: PRODUCTION_MAX_OUTPUT_TOKENS }
           : { singlePass: SINGLE_PASS_MAX_OUTPUT_TOKENS },
       requestedRuns: options.runs,
       promptProfile: options.promptProfile,
@@ -1429,7 +1281,7 @@ try {
   options = parseArguments(process.argv.slice(2));
 } catch {
   process.stderr.write(
-    "Usage: provide --cdp, --origin, --image, and a JSON --output under output/playwright; optional --runs must be 1..10 and --prompt-profile must be production-two-pass or single-pass.\n",
+    "Usage: provide --cdp, --origin, --image, and a JSON --output under output/playwright; optional --runs must be 1..10 and --prompt-profile must be production-one-pass or single-pass.\n",
   );
   process.exit(2);
 }

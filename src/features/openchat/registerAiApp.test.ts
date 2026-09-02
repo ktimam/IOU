@@ -5,7 +5,6 @@ import { Principal } from "@dfinity/principal";
 import { buildIdl, buildManifestWire } from "./registerAiApp";
 import {
   iouActionManifest,
-  IOU_IMAGE_DATE_EXTRACTION_PROMPT,
   IOU_IMAGE_EXTRACTION_PROMPT,
 } from "./actionManifest";
 import {
@@ -58,7 +57,7 @@ describe("buildManifestWire", () => {
     expect(manifest.actions[0]?.card.disclosure).toEqual([]);
   });
 
-  it("carries the exact image-only prompt contract through the unchanged response-schema wire", () => {
+  it("carries the exact one-pass image prompt contract through the unchanged response-schema wire", () => {
     const manifest = buildManifestWire("", undefined, () => {}) as {
       actions: { response_schema: string }[];
     };
@@ -69,21 +68,10 @@ describe("buildManifestWire", () => {
       template: IOU_IMAGE_EXTRACTION_PROMPT,
       includeRuleGuidance: false,
     });
-    expect(schema["x-openchat-image-focused-passes"]).toEqual({
-      version: 4,
-      primaryFields: ["amount", "currency", "kind"],
-      primaryMaxTokens: 64,
-      passes: [
-        {
-          template: IOU_IMAGE_DATE_EXTRACTION_PROMPT,
-          fields: ["date"],
-          includeRuleGuidance: false,
-          includeMessage: false,
-          maxTokens: 24,
-          imageRegion: "lower_detail_rows",
-        },
-      ],
-    });
+    expect(schema).not.toHaveProperty("x-openchat-image-focused-passes");
+    for (const field of ["amount", "currency", "kind", "date"]) {
+      expect(IOU_IMAGE_EXTRACTION_PROMPT).toContain(`"${field}"`);
+    }
   });
 
   it("sends app_canister_id as an opt principal when a valid one is supplied, [] otherwise", () => {

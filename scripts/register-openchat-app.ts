@@ -10,9 +10,11 @@
 //
 // PUBLISHING (OpenChat Directory Phase B): a registration starts UNPUBLISHED — visible only to
 // its owner (this script's registrar), so it will NOT appear in chats' Apps lists or the explorer
-// for users until published. Re-registering preserves the published flag, so this is a one-time
-// step per environment. Publication is governance-gated on OpenChat (test_mode: also open over
-// msgpack); on a local replica the dfx `default` identity IS governance:
+// for users until published. A byte-identical re-registration preserves publication, but any
+// manifest change advances the revision and makes the app unpublished until the matching backend
+// commitment is installed and the app is published again. Publication is governance-gated on
+// OpenChat (test_mode: also open over msgpack); on a local replica the dfx `default` identity IS
+// governance:
 //   dfx canister call <user_index> publish_ai_app '(record { app_id = <id> : nat32 })'
 //
 // Run:   pnpm register:openchat [-- --dry-run] [-- --key-file <pem-path>]
@@ -280,7 +282,10 @@ async function main(): Promise<void> {
   const apps = listed.Success.apps as { id: number; manifest: { name: string } }[];
   const mine = apps.find((a) => a.id === registration.id);
   if (mine) {
-    console.log(`${TAG} ai_apps confirms "iou" is listed (id ${mine.id}, ${apps.length} app(s) total).`);
+    console.log(
+      `${TAG} ai_apps confirms "iou" is visible to its registrar (id ${mine.id}, ` +
+        `${apps.length} app(s) total). A changed manifest must still be rebound and republished.`,
+    );
   } else {
     throw new Error(`registration succeeded but ai_apps does not list app id ${registration.id}`);
   }
