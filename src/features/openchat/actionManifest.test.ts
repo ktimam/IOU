@@ -58,14 +58,20 @@ describe("private account templates", () => {
       "owe them",
       "instalment",
       "installment",
+      "reservation",
+      "reserved",
+      "booking",
+      "booked",
     ]);
 
-    // These are plausible private Saved-type names, not evidence of ledger intent by themselves.
-    // They must not become public triggers simply because one account happens to use that type.
+    // These bounded terms are app-owned transaction vocabulary already published in the extraction
+    // prompts, so they can supply the explicit kind evidence required by the OCR path. Other
+    // plausible Saved-type names must not become public triggers merely because an account uses one.
+    expect(publicIouKeywords).toEqual(
+      expect.arrayContaining(["reservation", "reserved", "booking", "booked"]),
+    );
     expect(publicIouKeywords).not.toEqual(
       expect.arrayContaining([
-        "reservation",
-        "booking",
         "rent",
         "school",
         "family expense",
@@ -1000,6 +1006,9 @@ describe("the extraction prompt tells the model a single line can hold several t
       .properties as Record<string, Record<string, unknown>>;
     expect(sourceProperties.date).toMatchObject({
       "x-openchat-date-from-text": true,
+      "x-openchat-date-from-message-timestamp-keywords": [
+        "reservation confirmed",
+      ],
       "x-openchat-property-aliases": [
         "due_date",
         "transaction_date",
@@ -1023,6 +1032,9 @@ describe("the extraction prompt tells the model a single line can hold several t
     );
     expect(registeredSchema.properties?.date).toMatchObject({
       "x-openchat-date-from-text": true,
+      "x-openchat-date-from-message-timestamp-keywords": [
+        "reservation confirmed",
+      ],
       "x-openchat-property-aliases": [
         "due_date",
         "transaction_date",
@@ -1037,6 +1049,40 @@ describe("the extraction prompt tells the model a single line can hold several t
     expect(registeredSchema.properties?.message).toMatchObject({
       "x-openchat-omit-for-image-only": true,
     });
+  });
+
+  it("keeps the reservation message-timestamp policy identical in source, docs, and wire", async () => {
+    const expected = ["reservation confirmed"];
+    const sourceDate = (
+      iouActionManifest.outputSchema.properties as Record<
+        string,
+        Record<string, unknown>
+      >
+    ).date;
+    const documentedDate = (
+      registration.responseSchema as {
+        properties?: Record<string, Record<string, unknown>>;
+      }
+    ).properties?.date;
+    const { buildManifestWire } = await import("./registerAiApp");
+    const action = (
+      buildManifestWire("") as unknown as {
+        actions: { response_schema: string }[];
+      }
+    ).actions[0];
+    const wireDate = (
+      JSON.parse(action.response_schema) as {
+        properties?: Record<string, Record<string, unknown>>;
+      }
+    ).properties?.date;
+
+    for (const dateProperty of [sourceDate, documentedDate, wireDate]) {
+      expect(
+        dateProperty?.[
+          "x-openchat-date-from-message-timestamp-keywords"
+        ],
+      ).toEqual(expected);
+    }
   });
 
   it("ships the generic plain-text currency evidence contract and its exact aliases", async () => {

@@ -136,7 +136,16 @@ describe("buildManifestWire", () => {
     const tmplRule = action.rules.find(
       (r) => r.keyword_map?.field === "template",
     );
+    const kindRule = action.rules.find(
+      (r) => r.keyword_map?.field === "kind",
+    );
     expect(tmplRule).toBeUndefined();
+    expect(
+      kindRule?.keyword_map?.map.find((entry) => entry.value === "iou")
+        ?.keywords,
+    ).toEqual(
+      expect.arrayContaining(["reservation", "reserved", "booking", "booked"]),
+    );
     expect(
       JSON.parse(action.response_schema).properties.template,
     ).toBeUndefined();

@@ -374,6 +374,17 @@ describe("OpenChat IOU card account type visibility", () => {
     expect(payload).not.toHaveProperty("templateId");
   });
 
+  it("selects the linked Reservation type from an image reader's source-grounded note", () => {
+    const hydrated = hydrateSavedTypeForCard(
+      { ...FORM, templateId: undefined },
+      { note: "RESERVATION" },
+      [TYPE],
+      { evidence: "row-local" },
+    );
+
+    expect(hydrated.templateId).toBe(TYPE.id);
+  });
+
   it("lets an exact single-card source message select the linked saved Type", () => {
     const schoolType: TxnTemplate = {
       ...TYPE,

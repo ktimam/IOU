@@ -275,6 +275,13 @@ export const IOU_EXTRACTION_RULES: AiActionRule[] = [
           "owe them",
           "instalment",
           "installment",
+          // Public, app-owned transaction vocabulary already defined by the extraction prompt.
+          // This is not sourced from any account's private Saved-type roster. It must remain a
+          // rule keyword because OCR-only image extraction requires visible kind evidence.
+          "reservation",
+          "reserved",
+          "booking",
+          "booked",
         ],
       },
       {
@@ -513,6 +520,10 @@ export const iouActionManifest: IouActionManifest = {
         // For one text transaction, prefer an unambiguous date in the authoritative source over a
         // small model copying the nearby host calendar anchor. Ranges resolve to their start.
         "x-openchat-date-from-text": true,
+        // A bare reservation confirmation denotes an event recorded at the message time even when
+        // the sender omitted a separate calendar phrase. OpenChat supplies the authoritative source
+        // message timestamp; this bounded semantic opt-in never uses wall-clock inference time.
+        "x-openchat-date-from-message-timestamp-keywords": ["reservation confirmed"],
         // Vision models often use the visible label as the JSON key. OpenChat resolves this alias
         // before date normalization and drops it on any conflicting target/alias values.
         "x-openchat-property-aliases": [

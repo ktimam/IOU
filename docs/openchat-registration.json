@@ -126,6 +126,9 @@
         "format": "date",
         "x-openchat-normalize-date": true,
         "x-openchat-date-from-text": true,
+        "x-openchat-date-from-message-timestamp-keywords": [
+          "reservation confirmed"
+        ],
         "x-openchat-property-aliases": [
           "due_date",
           "transaction_date",
@@ -212,7 +215,11 @@
             "owe her",
             "owe them",
             "instalment",
-            "installment"
+            "installment",
+            "reservation",
+            "reserved",
+            "booking",
+            "booked"
           ]
         },
         {
