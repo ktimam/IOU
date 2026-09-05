@@ -41,9 +41,22 @@ describe('dependency audit policy', () => {
       'utf8',
     );
 
-    expect(workspace).toMatch(/^\s+nanoid:\s+3\.3\.17\s*$/m);
-    expect(lockfile).toContain('nanoid@3.3.17:');
-    expect(lockfile).not.toMatch(/nanoid@3\.3\.(?:[0-9]|1[0-6]):/);
+    expect(workspace).toMatch(/^\s+nanoid:\s+3\.3\.18\s*$/m);
+    expect(lockfile).toContain('nanoid@3.3.18:');
+    expect(lockfile).not.toMatch(/nanoid@3\.3\.(?:[0-9]|1[0-7]):/);
+  });
+
+  it.each([
+    ['@xmldom/xmldom', '0.9.10', '0.9.12'],
+    ['fast-uri', '3.1.5', '3.1.7'],
+    ['qs', '6.15.3', '6.16.0'],
+  ])('keeps the reviewed %s transitive update in the lockfile', (name, vulnerable, patched) => {
+    const lockfile = readFileSync(
+      new URL('../../pnpm-lock.yaml', import.meta.url),
+      'utf8',
+    );
+    expect(lockfile).toContain(`${name}@${patched}`);
+    expect(lockfile).not.toContain(`${name}@${vulnerable}`);
   });
 
   it('rejects a command failure disguised as JSON with no advisory map', () => {
