@@ -287,6 +287,17 @@ describe("OpenChat IOU card account type visibility", () => {
     expect(editable).not.toContain(">Auto</option>");
   });
 
+  it("shows a missing public Type as a required choice, not the first valid option", () => {
+    const missing = renderToStaticMarkup(
+      TypeFields({ form: { ...FORM, kind: "" }, onChange: ignoreChange, templates: [] }),
+    );
+    expect(missing).toMatch(/<option[^>]*value=""[^>]*selected=""[^>]*>Choose type<\/option>/);
+    const complete = renderToStaticMarkup(
+      TypeFields({ form: FORM, onChange: ignoreChange, templates: [] }),
+    );
+    expect(complete).not.toContain("Choose type");
+  });
+
   it("requires a valid public Type for both single and multi collection", () => {
     expect(isCardFormValid(FORM)).toBe(true);
     expect(isCardFormValid({ ...FORM, kind: "" })).toBe(false);

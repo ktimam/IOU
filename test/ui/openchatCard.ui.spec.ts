@@ -194,6 +194,17 @@ async function initCard(page: Page, data: Record<string, unknown>): Promise<void
   await awaitRendered(page, data);
 }
 
+// Credentialless fixtures have no viewer default currency. Complete missing required values
+// through real user controls; never make collection tests depend on invented defaults.
+async function completeRequiredFields(page: Page): Promise<void> {
+  for (const select of await page.getByLabel("Type", { exact: true }).all()) {
+    if (await select.inputValue() === "") await select.selectOption("iou");
+  }
+  for (const select of await page.getByLabel("Currency", { exact: true }).all()) {
+    if (await select.inputValue() === "") await select.selectOption("EGP");
+  }
+}
+
 for (const [name, overrides] of [
   ["v1", { version: 1 }],
   ["missing nonce", { frameNonce: null }],
@@ -255,6 +266,7 @@ test("bridge v2 never emits a payload without an exact host collection challenge
   await flushBridgeMessages(page);
   expect(await page.evaluate(() => window.__ocConfirm)).toBeUndefined();
 
+  await completeRequiredFields(page);
   const payload = (await collectAndRead(page)) as Record<string, unknown>;
   expect(payload.amount).toBe(300);
   expect(
@@ -302,6 +314,21 @@ test("host busy freezes the edited values until exact-byte submission finishes",
     );
   });
   await expect(page.getByLabel("Amount", { exact: true })).toBeEnabled();
+});
+
+test("missing Type/currency stay visibly empty and cannot be collected until explicitly chosen", async ({ page }) => {
+  await initCard(page, SINGLE_PLAIN);
+  await expect(page.getByLabel("Type", { exact: true })).toHaveValue("");
+  await expect(page.getByLabel("Currency", { exact: true })).toHaveValue("");
+  await page.evaluate(({ frameNonce, requestNonce }) => {
+    window.postMessage({ type: "oc:card:collect-confirm", version: 2, frameNonce, requestNonce }, "*");
+  }, { frameNonce: FRAME_NONCE, requestNonce: COLLECT_NONCE });
+  await flushBridgeMessages(page);
+  expect(await page.evaluate(() => window.__ocConfirm)).toBeUndefined();
+  await expect(page.locator(".card")).toContainText("Check the amount, currency, Type, direction, and Note before adding.");
+  await completeRequiredFields(page);
+  const payload = (await collectAndRead(page)) as Record<string, unknown>;
+  expect(payload).toMatchObject({ kind: "iou", currency: "EGP", amount: 300 });
 });
 
 // ── D3: editable controls stay inside the card; action controls stay host-owned ──────────────────
@@ -407,6 +434,7 @@ for (const mode of ["single", "multi"] as const) {
     for (const width of [420, 240]) {
       await page.setViewportSize({ width, height: 900 });
       await initCard(page, data);
+      await completeRequiredFields(page);
 
       // The observer is async; wait until the reported height has caught up with the real one, which
       // also proves the bridge is REPORTING (a dead ResizeObserver must not pass by saying nothing).
@@ -504,6 +532,7 @@ test("D8 single: no private roster means Saved type starts empty and adds nothin
   const { savedTypes } = await cardTypeFields(page);
   expect(savedTypes[0]).toBe("");
 
+  await completeRequiredFields(page);
   const payload = (await collectAndRead(page)) as Record<string, unknown>;
   expect("template" in payload).toBe(false);
   expect("template_ref" in payload).toBe(false);
@@ -518,10 +547,12 @@ test("D8 multi: public Type and Date stay row-local and plaintext saved Types st
   expect(dates).toEqual(["2026-08-08", "2026-08-09", "2026-08-10"]);
   await expect(page.locator(".card")).not.toContainText("Reservation");
 
+  await completeRequiredFields(page);
   const rows = (await collectAndRead(page)) as Record<string, unknown>[];
   expect(Array.isArray(rows)).toBe(true);
   expect(rows).toHaveLength(3);
-  expect(rows.map((row) => row.kind)).toEqual(["iou", undefined, undefined]);
+  // Missing public Types were visibly empty above and became valid only after the explicit choices.
+  expect(rows.map((row) => row.kind)).toEqual(["iou", "iou", "iou"]);
   expect(rows.map((row) => row.date)).toEqual(["2026-08-08", "2026-08-09", "2026-08-10"]);
   expect(rows.every((row) => !("template" in row) && !("template_ref" in row))).toBe(true);
 });
@@ -538,6 +569,7 @@ test("D8 multi: a host-supplied plaintext type is never offered to another row",
   );
   expect(options).toEqual([["None"], ["None"], ["None"]]);
 
+  await completeRequiredFields(page);
   const rows = (await collectAndRead(page)) as Record<string, unknown>[];
   expect(rows.every((row) => !("template" in row) && !("template_ref" in row))).toBe(true);
 });

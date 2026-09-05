@@ -1163,6 +1163,7 @@ export function TypeFields({
           onChange={(e) => onChange("kind", e.target.value as CardFormState["kind"])}
           style={inputStyle}
         >
+          {form.kind === "" && <option value="" disabled>Choose type</option>}
           <option value="iou">{KIND_LABELS.iou}</option>
           <option value="settlement">{KIND_LABELS.settlement}</option>
         </select>
