@@ -15,6 +15,7 @@ import {
   buildResize,
   applyDefaultCurrency,
   currencyStatedIn,
+  dateFromSourceInterval,
   initEntries,
   initToFormState,
   parseBootstrap,
@@ -304,6 +305,72 @@ describe("initToFormState and currency evidence", () => {
     });
     expect(state.currency).toBe("USD");
     expect(buildConfirmPayload(state)).toMatchObject({ currency: "USD" });
+  });
+
+  it("lets IOU compose a generic source interval and derive its validated start date", () => {
+    const state = initToFormState(
+      {
+        kind: "iou",
+        amount: 1_912.15,
+        currency: "USD",
+        note: "Workshop",
+        interval_start: "Sun, Jul 19",
+        interval_end: "Thu, Aug 6",
+      },
+      new Date("2026-09-04T12:00:00Z"),
+    );
+
+    expect(state.note).toBe("Workshop | From Sun, Jul 19 to Thu, Aug 6");
+    expect(state.date).toBe("2026-07-19");
+    expect(buildConfirmPayload(state)).toMatchObject({
+      note: "Workshop | From Sun, Jul 19 to Thu, Aug 6",
+      date: "2026-07-19",
+    });
+    expect(buildConfirmPayload(state)).not.toHaveProperty("interval_start");
+    expect(buildConfirmPayload(state)).not.toHaveProperty("interval_end");
+  });
+
+  it("fails yearless interval dates closed when weekday evidence is absent or inconsistent", () => {
+    const now = new Date("2026-09-04T12:00:00Z");
+    expect(dateFromSourceInterval("Jul 19", "Aug 6", now)).toBeUndefined();
+    expect(dateFromSourceInterval("Mon, Jul 19", "Thu, Aug 6", now)).toBeUndefined();
+    expect(dateFromSourceInterval("Sun, Jul 32", "Thu, Aug 6", now)).toBeUndefined();
+  });
+
+  it.each([
+    ["Reservation", "Total Payout"],
+    ["Start date", "End date"],
+    ["Sun, Jul 19", "Total Payout"],
+    ["2026-08-10", "2026-08-06"],
+    ["Sun, Jul 32", "Thu, Aug 6"],
+  ])("never constructs a From-to note from invalid endpoints %s / %s", (start, end) => {
+    const state = initToFormState({ note: "source note", interval_start: start, interval_end: end });
+    expect(state.note).toBe("source note");
+    expect(state.date).toBe("");
+  });
+
+  it("accepts strict source ISO endpoints without using OpenChat date logic", () => {
+    expect(
+      dateFromSourceInterval(
+        "2026-07-19",
+        "2026-08-06",
+        new Date("2031-01-01T00:00:00Z"),
+      ),
+    ).toBe("2026-07-19");
+  });
+
+  it("preserves an explicit reviewed date and avoids duplicating an already composed interval", () => {
+    const state = initToFormState(
+      {
+        note: "Workshop | From Sun, Jul 19 to Thu, Aug 6",
+        date: "2025-01-02",
+        interval_start: "Sun, Jul 19",
+        interval_end: "Thu, Aug 6",
+      },
+      new Date("2026-09-04T12:00:00Z"),
+    );
+    expect(state.note).toBe("Workshop | From Sun, Jul 19 to Thu, Aug 6");
+    expect(state.date).toBe("2025-01-02");
   });
 
   it("honours an explicitly stated code or symbol, using word boundaries", () => {

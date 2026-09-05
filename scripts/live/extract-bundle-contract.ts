@@ -107,7 +107,7 @@ Return only strict JSON and no prose or markdown. Return one JSON object for one
 Use this field schema:
 ${schemaLines(false)}
 
-When a reservation or booking describes a future obligation without an explicit relationship phrase, use kind "iou" and direction "debt".${anchor}
+When a source describes requested, scheduled, due, or unpaid money without an explicit relationship phrase, use kind "iou" and direction "debt".${anchor}
 
 Include only source-supported fields. Never invent a value or copy field descriptions into values. Use greedy deterministic extraction.`;
 }

@@ -8,6 +8,7 @@ import {
 import { buildConfirmPayload, initToFormState } from "./cardBridge";
 import { parseDraft } from "../entries/draft";
 import { buildManifestWire } from "./registerAiApp";
+import { postProcessIouCandidate } from "./localExtraction";
 
 const EXACT_PUBLIC_ROWS = [
   "amount",
@@ -49,11 +50,12 @@ function expectImageSafeOptionalFields(schema: unknown): void {
   });
   expect(properties.date).toMatchObject({
     type: "string",
-    format: "date",
-    minLength: 10,
-    maxLength: 10,
-    "x-openchat-normalize-date": true,
+    format: "utf8-no-nul",
+    minLength: 1,
+    maxLength: 96,
   });
+  expect(properties.date).not.toHaveProperty("x-openchat-normalize-date");
+  expect(properties.date).not.toHaveProperty("x-openchat-date-from-text");
   expect(properties.date).not.toHaveProperty("x-openchat-omit-for-image-only");
   expect(properties.note).toMatchObject({
     type: "string",
@@ -85,15 +87,15 @@ describe("OpenChat image extraction compatibility", () => {
   it("preserves receipt-2's visible 04 Jul 2026 date through card review and explicit import", () => {
     // Regression evidence: receipt-2.png (SHA-256 71BC0C1D...3A8012) visibly contains
     // `Date: 04 Jul 2026 03:19 PM`. IOU stores the date portion as its canonical YYYY-MM-DD value;
-    // model inference/OCR remains an OpenChat responsibility, while this test pins IOU's handoff.
-    const card = initToFormState({
+    // OpenChat transports the visible string; IOU normalizes it before card review and import.
+    const card = initToFormState(postProcessIouCandidate({
       kind: "settlement",
       amount: 9_757,
       currency: "EGP",
       direction: "credit",
-      date: "2026-07-04",
+      date: "04 Jul 2026 03:19 PM",
       note: "Bill Payments - M9-4A-01",
-    });
+    }, { modality: "image" }));
     expect(card.date).toBe("2026-07-04");
 
     const confirmed = buildConfirmPayload(card);

@@ -1,3 +1,6 @@
+import type { EntryDraft } from "../entries/draft";
+import { buildConfirmPayload, initToFormState } from "./cardBridge";
+
 export type ModelAcceptanceModality = "text" | "image";
 
 export type ModelAcceptanceExpectedEntry = Readonly<{
@@ -9,18 +12,30 @@ export type ModelAcceptanceExpectedEntry = Readonly<{
   noteIncludes: readonly string[];
   /** Every alphanumeric note token must be source-grounded in this allowlist. */
   noteAllowedWords: readonly string[];
+  /**
+   * App-declared intermediate fields that the model/OpenChat transport must preserve before IOU
+   * performs its own card projection. When present, raw `date` may be omitted but may never differ
+   * from `date`; the final Date and Note remain the ordinary fields above.
+   */
+  rawIntermediate?: Readonly<{
+    note: string;
+    interval_start: string;
+    interval_end: string;
+    dateMayBeOmitted: true;
+  }>;
 }>;
 
 export type ModelAcceptanceCase = Readonly<{
   id:
     | "ordinary-text"
-    | "reservation-date-type"
+    | "category-date-range-text"
     | "delimited-multi-entry"
     | "multi-entry"
     | "dated-image"
     | "portrait-date-image"
     | "portrait-date-image-arabic"
-    | "receipt-photo";
+    | "receipt-photo"
+    | "category-date-range-image";
   modality: ModelAcceptanceModality;
   text?: string;
   /** Fixed privacy-safe raster fixture. Path is repository-relative and its bytes are SHA-pinned. */
@@ -78,9 +93,9 @@ export const MODEL_ACCEPTANCE_CASES: readonly ModelAcceptanceCase[] = [
     warmLatencyMs: 25_000,
   },
   {
-    id: "reservation-date-type",
+    id: "category-date-range-text",
     modality: "text",
-    text: "reservation 3-8 august 7777 gbp",
+    text: "workshop scheduled 3-8 august 7777 gbp",
     // Freeze only the prompt's `Today is ...` context so this exact user regression remains stable.
     promptNowIso: "2026-08-14T12:00:00+03:00",
     expected: [
@@ -90,8 +105,8 @@ export const MODEL_ACCEPTANCE_CASES: readonly ModelAcceptanceCase[] = [
         currency: "GBP",
         direction: "debt",
         date: "2026-08-03",
-        noteIncludes: ["reservation"],
-        noteAllowedWords: ["reservation", "3", "8", "august", "7777", "gbp"],
+        noteIncludes: ["workshop"],
+        noteAllowedWords: ["workshop", "scheduled", "3", "8", "august", "7777", "gbp"],
       },
     ],
     expectedInferCalls: 1,
@@ -269,6 +284,50 @@ export const MODEL_ACCEPTANCE_CASES: readonly ModelAcceptanceCase[] = [
     expectedInferCalls: 1,
     warmLatencyMs: 45_000,
   },
+  {
+    id: "category-date-range-image",
+    modality: "image",
+    imageFixture: {
+      path: "test/fixtures/openchat/model-acceptance/category-date-range.png",
+      sha256: "088b9b7c14e5b5da35f7b6b5f1450da6f403ba23993857bdedc7353fda909878",
+      bytes: 48_566,
+      width: 900,
+      height: 1_200,
+    },
+    expected: [
+      {
+        kind: "iou",
+        amount: 1_912.15,
+        currency: "USD",
+        direction: "credit",
+        date: "2026-07-19",
+        noteIncludes: [
+          "workshop confirmed | from 2026-07-19 to 2026-08-06",
+        ],
+        noteAllowedWords: [
+          "workshop",
+          "confirmed",
+          "from",
+          "2026",
+          "07",
+          "19",
+          "to",
+          "08",
+          "06",
+        ],
+        rawIntermediate: {
+          note: "Workshop Confirmed",
+          interval_start: "2026-07-19",
+          interval_end: "2026-08-06",
+          dateMayBeOmitted: true,
+        },
+      },
+    ],
+    // The selected image model must preserve the visible arbitrary category and full date range in
+    // the same bounded full-image pass as the financial fields; OCR is not part of this path.
+    expectedInferCalls: 1,
+    warmLatencyMs: 60_000,
+  },
 ] as const;
 
 function sameJson(left: unknown, right: unknown): boolean {
@@ -298,6 +357,8 @@ function scoreCardRows(
 ): void {
   if (testCase.expected.length === 1) {
     const expected = testCase.expected[0];
+    const extracted = observation.extracted[0];
+    const raw = expected.rawIntermediate;
     const rows = new Map(
       observation.cardRows.map((row) => [row.label, row.value]),
     );
@@ -306,7 +367,12 @@ function scoreCardRows(
       ["Currency", expected.currency],
       ["Type", expected.kind],
       ["Direction", expected.direction],
-      ["Date", expected.date],
+      [
+        "Date",
+        raw === undefined || typeof extracted?.date !== "string"
+          ? raw === undefined ? expected.date : undefined
+          : extracted.date,
+      ],
     ];
     for (const [label, value] of exactRows) {
       const actual = rows.get(label);
@@ -316,14 +382,21 @@ function scoreCardRows(
         );
       }
     }
+    if (raw !== undefined && rows.get("Note") !== raw.note) {
+      reasons.push(
+        `card row Note expected exact raw title ${raw.note}, observed ${rows.get("Note") ?? "absent"}`,
+      );
+      return;
+    }
     const note = normalizedText(rows.get("Note"));
+    const noteIncludes = raw === undefined ? expected.noteIncludes : [raw.note];
     if (
-      !expected.noteIncludes.every((part) =>
+      !noteIncludes.every((part) =>
         note.includes(part.toLocaleLowerCase("en-US")),
       )
     ) {
       reasons.push(
-        `card row Note did not contain ${expected.noteIncludes.join(", ")}`,
+        `card row Note did not contain ${noteIncludes.join(", ")}`,
       );
     }
     return;
@@ -355,6 +428,49 @@ function scoreCardRows(
         reasons.push(`multi-entry card row ${index + 1} omitted ${part}`);
       }
     }
+  }
+}
+
+function scoreIouProjection(
+  testCase: ModelAcceptanceCase,
+  expected: ModelAcceptanceExpectedEntry,
+  actual: Record<string, unknown>,
+  index: number,
+  reasons: string[],
+): void {
+  if (expected.rawIntermediate === undefined) return;
+  const now = new Date(testCase.promptNowIso ?? "2000-01-01T00:00:00.000Z");
+  const form = initToFormState(actual as EntryDraft, now);
+  if (form.date !== (expected.date ?? "")) {
+    reasons.push(
+      `IOU projection ${index + 1} date expected ${expected.date ?? "empty"}, observed ${form.date || "empty"}`,
+    );
+  }
+  const note = normalizedText(form.note);
+  if (
+    !expected.noteIncludes.every((part) =>
+      note.includes(part.toLocaleLowerCase("en-US")),
+    )
+  ) {
+    reasons.push(
+      `IOU projection ${index + 1} note did not contain ${expected.noteIncludes.join(", ")}`,
+    );
+  }
+  const allowedWords = new Set(
+    expected.noteAllowedWords.map((word) => word.toLocaleLowerCase("en-US")),
+  );
+  const inventedNoteWords = wordTokens(note).filter((word) => !allowedWords.has(word));
+  if (inventedNoteWords.length > 0) {
+    reasons.push(
+      `IOU projection ${index + 1} note invented ${[...new Set(inventedNoteWords)].join(", ")}`,
+    );
+  }
+  const payload = buildConfirmPayload(form) as Record<string, unknown>;
+  if (payload.date !== expected.date || payload.note !== form.note) {
+    reasons.push(`IOU projection ${index + 1} confirm payload lost its reviewed date or note`);
+  }
+  if ("interval_start" in payload || "interval_end" in payload) {
+    reasons.push(`IOU projection ${index + 1} leaked private interval fields`);
   }
 }
 
@@ -393,7 +509,21 @@ export function scoreModelAcceptanceCase(
         );
       }
     }
-    if (expected.date === undefined) {
+    const raw = expected.rawIntermediate;
+    if (raw !== undefined) {
+      for (const key of ["note", "interval_start", "interval_end"] as const) {
+        if (actual[key] !== raw[key]) {
+          reasons.push(
+            `entry ${index + 1} raw ${key} expected ${raw[key]}, observed ${String(actual[key])}`,
+          );
+        }
+      }
+      if (actual.date !== undefined && actual.date !== expected.date) {
+        reasons.push(
+          `entry ${index + 1} raw date expected absent or ${expected.date}, observed ${String(actual.date)}`,
+        );
+      }
+    } else if (expected.date === undefined) {
       if (actual.date !== undefined) {
         reasons.push(`entry ${index + 1} invented date ${String(actual.date)}`);
       }
@@ -403,17 +533,21 @@ export function scoreModelAcceptanceCase(
       );
     }
     const note = normalizedText(actual.note);
+    const rawNote = raw?.note;
+    const noteIncludes = rawNote === undefined ? expected.noteIncludes : [rawNote];
     if (
-      !expected.noteIncludes.every((part) =>
+      !noteIncludes.every((part) =>
         note.includes(part.toLocaleLowerCase("en-US")),
       )
     ) {
       reasons.push(
-        `entry ${index + 1} note did not contain ${expected.noteIncludes.join(", ")}`,
+        `entry ${index + 1} note did not contain ${noteIncludes.join(", ")}`,
       );
     }
     const allowedWords = new Set(
-      expected.noteAllowedWords.map((word) => word.toLocaleLowerCase("en-US")),
+      (rawNote === undefined ? expected.noteAllowedWords : wordTokens(normalizedText(rawNote))).map(
+        (word) => word.toLocaleLowerCase("en-US"),
+      ),
     );
     const inventedNoteWords = wordTokens(note).filter(
       (word) => !allowedWords.has(word),
@@ -434,6 +568,7 @@ export function scoreModelAcceptanceCase(
         `entry ${index + 1} invented a message for image-only input`,
       );
     }
+    scoreIouProjection(testCase, expected, actual, index, reasons);
   }
 
   if (

@@ -23,6 +23,7 @@ import { ProfileNameSync } from "../features/settings/ProfileNameSync";
 import { ManifestTypesSync } from "../features/openchat/ManifestTypesSync";
 import { EmbeddedBanner } from "../features/openchat/EmbeddedBanner";
 import { OpenChatCardPage } from "../features/openchat/OpenChatCardPage";
+import { OpenChatLocalProcessorPage } from "../features/openchat/OpenChatLocalProcessorPage";
 import { OpenChatPrivateMatchPage } from "../features/openchat/OpenChatPrivateMatchPage";
 import { AcceptInvitePage } from "../features/invite/AcceptInvitePage";
 import { useDeepLinks } from "../features/deeplinks/deepLink";
@@ -43,7 +44,7 @@ export function App() {
           auth/session provider — it only renders + collects values over the
           postMessage bridge and never touches the canister or identity. Kept as
           siblings of the splat below so neither mounts AuthProvider et al. */}
-      <Route path="/openchat/card" element={<OpenChatCardPage />} />
+      <Route path="/openchat/card" element={new URLSearchParams(window.location.search).get("oc-app-process") === "1" ? <OpenChatLocalProcessorPage /> : <OpenChatCardPage />} />
       <Route path="/openchat/private-match" element={<OpenChatPrivateMatchPage />} />
       <Route path="/*" element={<AuthedApp />} />
     </Routes>

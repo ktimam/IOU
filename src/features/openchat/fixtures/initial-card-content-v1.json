@@ -1,0 +1,237 @@
+[
+  {
+    "name": "source-text-complete-interval",
+    "input": {
+      "operation": "extract",
+      "modality": "text",
+      "text": "Reservation Confirmed\nSynthetic property UNIT-A1\nAugust 6-10\n26,400 EGP",
+      "sourceTimestamp": 1788566400000
+    },
+    "content": {
+      "title": "Add to IOU",
+      "rows": [
+        {
+          "label": "Amount",
+          "value": "26400"
+        },
+        {
+          "label": "Currency",
+          "value": "EGP"
+        },
+        {
+          "label": "Type",
+          "value": "iou"
+        },
+        {
+          "label": "Direction",
+          "value": "debt"
+        },
+        {
+          "label": "Date",
+          "value": "2026-08-06"
+        }
+      ],
+      "confirm_label": "Add to IOU",
+      "cancel_label": "Cancel",
+      "action_id": "iou.entry.import",
+      "disclosure": null,
+      "expires_at": null,
+      "confirm_payload": [123, 34, 97, 109, 111, 117, 110, 116, 34, 58, 50, 54, 52, 48, 48, 44, 34, 107, 105, 110, 100, 34, 58, 34, 105, 111, 117, 34, 44, 34, 100, 105, 114, 101, 99, 116, 105, 111, 110, 34, 58, 34, 100, 101, 98, 116, 34, 44, 34, 109, 101, 115, 115, 97, 103, 101, 34, 58, 34, 82, 101, 115, 101, 114, 118, 97, 116, 105, 111, 110, 32, 67, 111, 110, 102, 105, 114, 109, 101, 100, 92, 110, 83, 121, 110, 116, 104, 101, 116, 105, 99, 32, 112, 114, 111, 112, 101, 114, 116, 121, 32, 85, 78, 73, 84, 45, 65, 49, 92, 110, 65, 117, 103, 117, 115, 116, 32, 54, 45, 49, 48, 92, 110, 50, 54, 44, 52, 48, 48, 32, 69, 71, 80, 34, 44, 34, 99, 117, 114, 114, 101, 110, 99, 121, 34, 58, 34, 69, 71, 80, 34, 44, 34, 100, 97, 116, 101, 34, 58, 34, 50, 48, 50, 54, 45, 48, 56, 45, 48, 54, 34, 44, 34, 105, 110, 116, 101, 114, 118, 97, 108, 95, 115, 116, 97, 114, 116, 34, 58, 34, 50, 48, 50, 54, 45, 48, 56, 45, 48, 54, 34, 44, 34, 105, 110, 116, 101, 114, 118, 97, 108, 95, 101, 110, 100, 34, 58, 34, 50, 48, 50, 54, 45, 48, 56, 45, 49, 48, 34, 125]
+    }
+  },
+  {
+    "name": "unrelated-source-text-complete-interval",
+    "input": {
+      "operation": "extract",
+      "modality": "text",
+      "text": "Equipment calibration\nAugust 6-10\n26,400 EGP",
+      "sourceTimestamp": 1788566400000
+    },
+    "content": {
+      "title": "Add to IOU",
+      "rows": [
+        {
+          "label": "Amount",
+          "value": "26400"
+        },
+        {
+          "label": "Currency",
+          "value": "EGP"
+        },
+        {
+          "label": "Type",
+          "value": "iou"
+        },
+        {
+          "label": "Direction",
+          "value": "debt"
+        },
+        {
+          "label": "Date",
+          "value": "2026-08-06"
+        }
+      ],
+      "confirm_label": "Add to IOU",
+      "cancel_label": "Cancel",
+      "action_id": "iou.entry.import",
+      "disclosure": null,
+      "expires_at": null,
+      "confirm_payload": [123, 34, 97, 109, 111, 117, 110, 116, 34, 58, 50, 54, 52, 48, 48, 44, 34, 107, 105, 110, 100, 34, 58, 34, 105, 111, 117, 34, 44, 34, 100, 105, 114, 101, 99, 116, 105, 111, 110, 34, 58, 34, 100, 101, 98, 116, 34, 44, 34, 109, 101, 115, 115, 97, 103, 101, 34, 58, 34, 69, 113, 117, 105, 112, 109, 101, 110, 116, 32, 99, 97, 108, 105, 98, 114, 97, 116, 105, 111, 110, 92, 110, 65, 117, 103, 117, 115, 116, 32, 54, 45, 49, 48, 92, 110, 50, 54, 44, 52, 48, 48, 32, 69, 71, 80, 34, 44, 34, 99, 117, 114, 114, 101, 110, 99, 121, 34, 58, 34, 69, 71, 80, 34, 44, 34, 100, 97, 116, 101, 34, 58, 34, 50, 48, 50, 54, 45, 48, 56, 45, 48, 54, 34, 44, 34, 105, 110, 116, 101, 114, 118, 97, 108, 95, 115, 116, 97, 114, 116, 34, 58, 34, 50, 48, 50, 54, 45, 48, 56, 45, 48, 54, 34, 44, 34, 105, 110, 116, 101, 114, 118, 97, 108, 95, 101, 110, 100, 34, 58, 34, 50, 48, 50, 54, 45, 48, 56, 45, 49, 48, 34, 125]
+    }
+  },
+  {
+    "name": "image-visible-date-normalization",
+    "input": {
+      "operation": "normalize",
+      "modality": "image",
+      "candidates": [
+        {
+          "amount": 12900,
+          "currency": "EGP",
+          "kind": "settlement",
+          "direction": "credit",
+          "date": "14 Aug 2026 09:47 PM"
+        }
+      ]
+    },
+    "content": {
+      "title": "Add to IOU",
+      "rows": [
+        {
+          "label": "Amount",
+          "value": "12900"
+        },
+        {
+          "label": "Currency",
+          "value": "EGP"
+        },
+        {
+          "label": "Type",
+          "value": "settlement"
+        },
+        {
+          "label": "Direction",
+          "value": "credit"
+        },
+        {
+          "label": "Date",
+          "value": "2026-08-14"
+        }
+      ],
+      "confirm_label": "Add to IOU",
+      "cancel_label": "Cancel",
+      "action_id": "iou.entry.import",
+      "disclosure": null,
+      "expires_at": null,
+      "confirm_payload": [123, 34, 97, 109, 111, 117, 110, 116, 34, 58, 49, 50, 57, 48, 48, 44, 34, 99, 117, 114, 114, 101, 110, 99, 121, 34, 58, 34, 69, 71, 80, 34, 44, 34, 107, 105, 110, 100, 34, 58, 34, 115, 101, 116, 116, 108, 101, 109, 101, 110, 116, 34, 44, 34, 100, 105, 114, 101, 99, 116, 105, 111, 110, 34, 58, 34, 99, 114, 101, 100, 105, 116, 34, 44, 34, 100, 97, 116, 101, 34, 58, 34, 50, 48, 50, 54, 45, 48, 56, 45, 49, 52, 34, 125]
+    }
+  },
+  {
+    "name": "image-visible-interval-evidence",
+    "input": {
+      "operation": "normalize",
+      "modality": "image",
+      "sourceTimestamp": 1788566400000,
+      "candidates": [
+        {
+          "amount": 26400,
+          "currency": "EGP",
+          "kind": "iou",
+          "direction": "credit",
+          "note": "Reservation",
+          "interval_start": "Sun, Jul 19",
+          "interval_end": "Thu, Aug 6"
+        }
+      ]
+    },
+    "content": {
+      "title": "Add to IOU",
+      "rows": [
+        {
+          "label": "Amount",
+          "value": "26400"
+        },
+        {
+          "label": "Currency",
+          "value": "EGP"
+        },
+        {
+          "label": "Type",
+          "value": "iou"
+        },
+        {
+          "label": "Direction",
+          "value": "credit"
+        },
+        {
+          "label": "Date",
+          "value": "2026-07-19"
+        },
+        {
+          "label": "Note",
+          "value": "Reservation"
+        }
+      ],
+      "confirm_label": "Add to IOU",
+      "cancel_label": "Cancel",
+      "action_id": "iou.entry.import",
+      "disclosure": null,
+      "expires_at": null,
+      "confirm_payload": [123, 34, 97, 109, 111, 117, 110, 116, 34, 58, 50, 54, 52, 48, 48, 44, 34, 99, 117, 114, 114, 101, 110, 99, 121, 34, 58, 34, 69, 71, 80, 34, 44, 34, 107, 105, 110, 100, 34, 58, 34, 105, 111, 117, 34, 44, 34, 100, 105, 114, 101, 99, 116, 105, 111, 110, 34, 58, 34, 99, 114, 101, 100, 105, 116, 34, 44, 34, 110, 111, 116, 101, 34, 58, 34, 82, 101, 115, 101, 114, 118, 97, 116, 105, 111, 110, 34, 44, 34, 105, 110, 116, 101, 114, 118, 97, 108, 95, 115, 116, 97, 114, 116, 34, 58, 34, 83, 117, 110, 44, 32, 74, 117, 108, 32, 49, 57, 34, 44, 34, 105, 110, 116, 101, 114, 118, 97, 108, 95, 101, 110, 100, 34, 58, 34, 84, 104, 117, 44, 32, 65, 117, 103, 32, 54, 34, 44, 34, 100, 97, 116, 101, 34, 58, 34, 50, 48, 50, 54, 45, 48, 55, 45, 49, 57, 34, 125]
+    }
+  },
+  {
+    "name": "phone-decimal-image-complete-interval",
+    "input": {
+      "operation": "normalize",
+      "modality": "image",
+      "sourceTimestamp": 1783080000000,
+      "candidates": [
+        {
+          "note": "Reservation",
+          "kind": "iou",
+          "currency": "USD",
+          "interval_start": "Sun, Jul 19",
+          "interval_end": "Thu, Aug 6",
+          "amount": 1912.15,
+          "direction": "credit"
+        }
+      ]
+    },
+    "content": {
+      "title": "Add to IOU",
+      "rows": [
+        {
+          "label": "Amount",
+          "value": "1912.15"
+        },
+        {
+          "label": "Currency",
+          "value": "USD"
+        },
+        {
+          "label": "Type",
+          "value": "iou"
+        },
+        {
+          "label": "Direction",
+          "value": "credit"
+        },
+        {
+          "label": "Date",
+          "value": "2026-07-19"
+        },
+        {
+          "label": "Note",
+          "value": "Reservation"
+        }
+      ],
+      "confirm_label": "Add to IOU",
+      "cancel_label": "Cancel",
+      "action_id": "iou.entry.import",
+      "disclosure": null,
+      "expires_at": null,
+      "confirm_payload": [123, 34, 110, 111, 116, 101, 34, 58, 34, 82, 101, 115, 101, 114, 118, 97, 116, 105, 111, 110, 34, 44, 34, 107, 105, 110, 100, 34, 58, 34, 105, 111, 117, 34, 44, 34, 99, 117, 114, 114, 101, 110, 99, 121, 34, 58, 34, 85, 83, 68, 34, 44, 34, 97, 109, 111, 117, 110, 116, 34, 58, 49, 57, 49, 50, 46, 49, 53, 44, 34, 100, 105, 114, 101, 99, 116, 105, 111, 110, 34, 58, 34, 99, 114, 101, 100, 105, 116, 34, 44, 34, 105, 110, 116, 101, 114, 118, 97, 108, 95, 115, 116, 97, 114, 116, 34, 58, 34, 83, 117, 110, 44, 32, 74, 117, 108, 32, 49, 57, 34, 44, 34, 105, 110, 116, 101, 114, 118, 97, 108, 95, 101, 110, 100, 34, 58, 34, 84, 104, 117, 44, 32, 65, 117, 103, 32, 54, 34, 44, 34, 100, 97, 116, 101, 34, 58, 34, 50, 48, 50, 54, 45, 48, 55, 45, 49, 57, 34, 125]
+    }
+  }
+]

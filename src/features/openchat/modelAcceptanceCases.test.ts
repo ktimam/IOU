@@ -15,15 +15,24 @@ function passingObservation(
     (candidate) => candidate.id === id,
   );
   if (!testCase) throw new Error(`missing acceptance case ${id}`);
-  const extracted = testCase.expected.map((entry) => ({
-    kind: entry.kind,
-    amount: entry.amount,
-    currency: entry.currency,
-    direction: entry.direction,
-    ...(entry.date === undefined ? {} : { date: entry.date }),
-    note: entry.noteIncludes.join(" "),
-    ...(testCase.modality === "text" ? { message: testCase.text } : {}),
-  }));
+  const extracted = testCase.expected.map((entry) => {
+    const raw = entry.rawIntermediate;
+    return {
+      kind: entry.kind,
+      amount: entry.amount,
+      currency: entry.currency,
+      direction: entry.direction,
+      ...(raw === undefined && entry.date !== undefined ? { date: entry.date } : {}),
+      note: raw?.note ?? entry.noteIncludes.join(" "),
+      ...(raw === undefined
+        ? {}
+        : {
+            interval_start: raw.interval_start,
+            interval_end: raw.interval_end,
+          }),
+      ...(testCase.modality === "text" ? { message: testCase.text } : {}),
+    };
+  });
   return {
     resultKind: extracted.length === 1 ? "ready" : "ready_multi",
     extracted,
@@ -56,7 +65,7 @@ function passingObservation(
 }
 
 describe("real-model IOU acceptance cases", () => {
-  it("pins text regressions plus four distinct fixed image fixtures", () => {
+  it("pins text regressions plus five distinct fixed image fixtures", () => {
     expect(
       MODEL_ACCEPTANCE_CASES.map((testCase) => [
         testCase.id,
@@ -64,16 +73,17 @@ describe("real-model IOU acceptance cases", () => {
       ]),
     ).toEqual([
       ["ordinary-text", "text"],
-      ["reservation-date-type", "text"],
+      ["category-date-range-text", "text"],
       ["delimited-multi-entry", "text"],
       ["multi-entry", "text"],
       ["dated-image", "image"],
       ["portrait-date-image", "image"],
       ["portrait-date-image-arabic", "image"],
       ["receipt-photo", "image"],
+      ["category-date-range-image", "image"],
     ]);
     expect(MODEL_ACCEPTANCE_CASES[1].text).toBe(
-      "reservation 3-8 august 7777 gbp",
+      "workshop scheduled 3-8 august 7777 gbp",
     );
     expect(MODEL_ACCEPTANCE_CASES[1].expected).toEqual([
       expect.objectContaining({
@@ -107,6 +117,28 @@ describe("real-model IOU acceptance cases", () => {
     }
   });
 
+  it("pins the privacy-safe code-native source for the generic category and date-range image", () => {
+    const source = readFileSync(
+      resolve(
+        __dirname,
+        "../../../test/fixtures/openchat/model-acceptance/category-date-range.svg",
+      ),
+      "utf8",
+    );
+    expect(createHash("sha256").update(source).digest("hex")).toBe(
+      "bfcfaea917524fe35a6c4772184246498f2c65bcaf83dfdbb650f83c4648a27b",
+    );
+    expect(source).toContain('width="900" height="1200"');
+    expect(source).toContain(">Workshop Confirmed</text>");
+    expect(source).toContain(">1,912.15 USD</text>");
+    expect(source).toContain(">START</text>");
+    expect(source).toContain(">2026-07-19</text>");
+    expect(source).toContain(">END</text>");
+    expect(source).toContain(">2026-08-06</text>");
+    expect(source).not.toMatch(/<image\b|href=|data:/iu);
+    expect(source).not.toMatch(/Mariam|Younan|Mangroovy|WA0015|@/iu);
+  });
+
   it.each(MODEL_ACCEPTANCE_CASES)(
     "accepts an exact expected-call $id result",
     (testCase) => {
@@ -124,7 +156,7 @@ describe("real-model IOU acceptance cases", () => {
       createHash("sha256")
         .update(JSON.stringify(MODEL_ACCEPTANCE_CASES))
         .digest("hex"),
-    ).toBe("1dfffe341636da36e0ee2bcf7faaa031e40b960ffb7af1a40f840ea7ac91108d");
+    ).toBe("0bc12879bca0320b5c176678837a6a5d26b79edf5df76e65f9d5637333895eaf");
   });
 
   it("rejects a repair pass even when the repaired extraction is correct", () => {
@@ -153,6 +185,67 @@ describe("real-model IOU acceptance cases", () => {
     expect(score.pass).toBe(false);
     expect(score.reasons).toContain(
       "entry 1 note invented for, alice, tomorrow",
+    );
+  });
+
+  it("accepts raw interval fields only after IOU projects the final date and note", () => {
+    const testCase = MODEL_ACCEPTANCE_CASES.find(
+      (candidate) => candidate.id === "category-date-range-image",
+    )!;
+    const observation = passingObservation(testCase.id);
+
+    expect(observation.extracted[0]).toEqual(
+      expect.objectContaining({
+        note: "Workshop Confirmed",
+        interval_start: "2026-07-19",
+        interval_end: "2026-08-06",
+      }),
+    );
+    expect(observation.extracted[0]).not.toHaveProperty("date");
+    expect(scoreModelAcceptanceCase(testCase, observation)).toEqual({
+      pass: true,
+      reasons: [],
+    });
+  });
+
+  it("rejects the old precomposed result when the raw interval fields are missing", () => {
+    const testCase = MODEL_ACCEPTANCE_CASES.find(
+      (candidate) => candidate.id === "category-date-range-image",
+    )!;
+    const observation = passingObservation(testCase.id);
+    observation.extracted[0] = {
+      kind: "iou",
+      amount: 1_912.15,
+      currency: "USD",
+      direction: "credit",
+      date: "2026-07-19",
+      note: "Workshop Confirmed | From 2026-07-19 to 2026-08-06",
+    };
+    observation.cardRows = observation.cardRows.map((row) =>
+      row.label === "Note"
+        ? { ...row, value: String(observation.extracted[0].note) }
+        : row,
+    );
+    observation.confirmPayload = observation.extracted[0];
+
+    expect(scoreModelAcceptanceCase(testCase, observation).reasons).toEqual(
+      expect.arrayContaining([
+        "entry 1 raw interval_start expected 2026-07-19, observed undefined",
+        "entry 1 raw interval_end expected 2026-08-06, observed undefined",
+      ]),
+    );
+  });
+
+  it("rejects a wrong raw interval end even when visible raw card rows are unchanged", () => {
+    const testCase = MODEL_ACCEPTANCE_CASES.find(
+      (candidate) => candidate.id === "category-date-range-image",
+    )!;
+    const observation = passingObservation(testCase.id);
+    observation.extracted[0].interval_end = "2026-08-09";
+    observation.confirmPayload = observation.extracted[0];
+
+    expect(scoreModelAcceptanceCase(testCase, observation).reasons).toContain(
+      "entry 1 raw interval_end expected 2026-08-06, observed 2026-08-09",
     );
   });
 

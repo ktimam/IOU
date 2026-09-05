@@ -26,6 +26,12 @@ export type EntryDraft = {
   date?: string; // YYYY-MM-DD; default today (UTC)
   counterparty?: string; // informational (folded into the note)
   note?: string;
+  // App-private image-reader intermediates. IOU's app-rendered OpenChat card uses these exact,
+  // source-grounded endpoint strings to compose the reviewed note and, when a yearless pair is
+  // uniquely anchored by its printed weekdays, the Date control. They are never imported as entry
+  // fields and the card deliberately omits them from its confirmation payload.
+  interval_start?: string;
+  interval_end?: string;
   // The RAW message text, stamped by the manifest's `from_message` rule. It used to be written over
   // `note`, which meant every entry of a multi-transaction message got the whole message as its
   // description ("Owe me 300 uber 150 food" on all three rows). `note` is now the model's own

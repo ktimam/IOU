@@ -144,8 +144,12 @@ describe("buildManifestWire", () => {
       kindRule?.keyword_map?.map.find((entry) => entry.value === "iou")
         ?.keywords,
     ).toEqual(
-      expect.arrayContaining(["reservation", "reserved", "booking", "booked"]),
+      expect.arrayContaining(["requested", "scheduled", "unpaid"]),
     );
+    expect(
+      kindRule?.keyword_map?.map.find((entry) => entry.value === "iou")
+        ?.keywords,
+    ).not.toEqual(expect.arrayContaining(["reservation", "booking"]));
     expect(
       JSON.parse(action.response_schema).properties.template,
     ).toBeUndefined();

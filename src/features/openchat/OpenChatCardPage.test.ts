@@ -2,7 +2,14 @@ import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it, vi } from "vitest";
-import { buildConfirmPayload, type CardFormState } from "./cardBridge";
+import {
+  CARD_INIT_VERSION,
+  CARD_MSG,
+  buildConfirmPayload,
+  initToFormState,
+  parseInit,
+  type CardFormState,
+} from "./cardBridge";
 import {
   CARD_RESIZE_SETTLE_MS,
   CardTypesStatus,
@@ -374,15 +381,78 @@ describe("OpenChat IOU card account type visibility", () => {
     expect(payload).not.toHaveProperty("templateId");
   });
 
-  it("selects the linked Reservation type from an image reader's source-grounded note", () => {
+  it("carries an arbitrary model category note through card init into private saved-type hydration", () => {
+    const workshopType: TxnTemplate = {
+      ...TYPE,
+      id: "private-workshop-id",
+      name: "Workshop",
+      keywords: ["workshop"],
+    };
+    const eventType: TxnTemplate = {
+      ...TYPE,
+      id: "private-event-id",
+      name: "Event",
+      keywords: ["event"],
+    };
+    const frameNonce = "AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE";
+    const rawCandidate = {
+      amount: 1_912.15,
+      currency: "USD",
+      kind: "iou",
+      note: "Workshop | From 2026-07-19 to 2026-08-06",
+    };
+    const parsed = parseInit(
+      {
+        type: CARD_MSG.init,
+        version: CARD_INIT_VERSION,
+        frameNonce,
+        data: rawCandidate,
+        context: {
+          appId: 23,
+          appRevision: 5n,
+          actionId: "iou.entry.import",
+          theme: "light",
+          readonly: false,
+        },
+      },
+      frameNonce,
+    );
+
+    expect(parsed).not.toBeNull();
+    const seeded = initToFormState(parsed!.data);
+    expect(seeded.note).toBe(rawCandidate.note);
     const hydrated = hydrateSavedTypeForCard(
-      { ...FORM, templateId: undefined },
-      { note: "RESERVATION" },
-      [TYPE],
+      seeded,
+      parsed!.data,
+      [eventType, workshopType],
       { evidence: "row-local" },
     );
 
-    expect(hydrated.templateId).toBe(TYPE.id);
+    expect(hydrated.templateId).toBe(workshopType.id);
+  });
+
+  it("does not invent a private saved-type match when the model note omits the visible category", () => {
+    const workshopType: TxnTemplate = {
+      ...TYPE,
+      id: "private-workshop-id",
+      name: "Workshop",
+      keywords: ["workshop"],
+    };
+    const rawCandidate = {
+      amount: 1_912.15,
+      currency: "USD",
+      kind: "iou" as const,
+      note: "Total Total coming",
+    };
+
+    const hydrated = hydrateSavedTypeForCard(
+      initToFormState(rawCandidate),
+      rawCandidate,
+      [workshopType],
+      { evidence: "row-local" },
+    );
+
+    expect(hydrated.templateId).toBeUndefined();
   });
 
   it("lets an exact single-card source message select the linked saved Type", () => {

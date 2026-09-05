@@ -37,13 +37,14 @@ describe("test-only Extract bundle contract", () => {
       MODEL_ACCEPTANCE_CASES.map((testCase) => [testCase.id, routeExtractCase(testCase)]),
     ).toEqual([
       ["ordinary-text", "text"],
-      ["reservation-date-type", "text"],
+      ["category-date-range-text", "text"],
       ["delimited-multi-entry", "deterministic"],
       ["multi-entry", "text"],
       ["dated-image", "vision"],
       ["portrait-date-image", "vision"],
       ["portrait-date-image-arabic", "vision"],
       ["receipt-photo", "vision"],
+      ["category-date-range-image", "vision"],
     ]);
   });
 
@@ -55,13 +56,14 @@ describe("test-only Extract bundle contract", () => {
       ]),
     ).toEqual([
       ["ordinary-text", "object"],
-      ["reservation-date-type", "object"],
+      ["category-date-range-text", "object"],
       ["delimited-multi-entry", "array"],
       ["multi-entry", "array"],
       ["dated-image", "object"],
       ["portrait-date-image", "object"],
       ["portrait-date-image-arabic", "object"],
       ["receipt-photo", "object"],
+      ["category-date-range-image", "object"],
     ]);
   });
 

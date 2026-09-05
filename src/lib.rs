@@ -1633,6 +1633,7 @@ const IOU_CARD_CONFIRM_LABEL: &str = "Add to IOU";
 const IOU_CARD_CANCEL_LABEL: &str = "Cancel";
 const MAX_CARD_CONFIRM_PAYLOAD_BYTES: usize = 16_384;
 const MAX_CARD_DRAFTS: usize = 32;
+const MAX_CARD_SOURCE_INTERVAL_CHARS: usize = 96;
 const TEMPLATE_REF_PREFIX: &str = "ioutr1.";
 const TEMPLATE_REF_MAX_LENGTH: usize = 1_416;
 const AI_ACTION_RECIPIENT_GRANT_TTL_MS: u64 = 300_000;
@@ -1646,6 +1647,10 @@ struct AttestedEntryDraft {
     date: Option<String>,
     note: Option<String>,
     message: Option<String>,
+    // Initial card evidence only: IOU's renderer projects these paired endpoint values into the
+    // reviewed note. They are not entry fields and must never enter a final confirmation payload.
+    interval_start: Option<String>,
+    interval_end: Option<String>,
     template_ref: Option<String>,
 }
 
@@ -1677,6 +1682,8 @@ impl<'de> Deserialize<'de> for AttestedEntryDraft {
                 let mut date = None;
                 let mut note = None;
                 let mut message = None;
+                let mut interval_start = None;
+                let mut interval_end = None;
                 let mut template_ref = None;
                 while let Some(key) = map.next_key::<String>()? {
                     if !seen.insert(key.clone()) {
@@ -1690,6 +1697,8 @@ impl<'de> Deserialize<'de> for AttestedEntryDraft {
                         "date" => date = Some(map.next_value()?),
                         "note" => note = Some(map.next_value()?),
                         "message" => message = Some(map.next_value()?),
+                        "interval_start" => interval_start = Some(map.next_value()?),
+                        "interval_end" => interval_end = Some(map.next_value()?),
                         "template_ref" => template_ref = Some(map.next_value()?),
                         _ => {
                             let _: de::IgnoredAny = map.next_value()?;
@@ -1705,6 +1714,8 @@ impl<'de> Deserialize<'de> for AttestedEntryDraft {
                     date,
                     note,
                     message,
+                    interval_start,
+                    interval_end,
                     template_ref,
                 })
             }
@@ -1886,6 +1897,14 @@ fn initial_currency_is_evidenced(draft: &AttestedEntryDraft) -> bool {
             .any(|alias| text_currency_evidence_matches(message, alias))
 }
 
+fn bounded_card_source_interval(value: &str) -> bool {
+    !value.trim().is_empty()
+        && value.chars().count() <= MAX_CARD_SOURCE_INTERVAL_CHARS
+        && !value.chars().any(|ch| {
+            matches!(ch, '\0'..='\u{1f}' | '\u{7f}' | '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}')
+        })
+}
+
 fn validate_attested_entry_draft(draft: &AttestedEntryDraft, allow_template_ref: bool) -> bool {
     let Some(amount) = draft.amount.as_f64() else {
         return false;
@@ -1911,6 +1930,19 @@ fn validate_attested_entry_draft(draft: &AttestedEntryDraft, allow_template_ref:
         // `allow_template_ref=false` is the initial model-produced stored payload. Confirmation
         // payloads use true and may contain a currency the user explicitly edited in the card.
         && (allow_template_ref || initial_currency_is_evidenced(draft))
+        // The app's extraction schema declares these values as paired, bounded source evidence.
+        // Their bytes are covered by initial content attestation, but do not add public summary
+        // rows or bypass canonical `date` validation. Only IOU's renderer interprets them. The
+        // renderer removes both after composing the visible note, before final confirmation.
+        && match (&draft.interval_start, &draft.interval_end) {
+            (None, None) => true,
+            (Some(start), Some(end)) => {
+                !allow_template_ref
+                    && bounded_card_source_interval(start)
+                    && bounded_card_source_interval(end)
+            }
+            _ => false,
+        }
         && match draft.template_ref.as_deref() {
             None => true,
             Some(value) => allow_template_ref && is_structural_encrypted_template_ref(value),
@@ -8829,6 +8861,162 @@ mod tests {
             p(3),
             p(1),
         ));
+    }
+
+    #[test]
+    fn source_interval_evidence_is_initial_only_and_final_note_is_reviewed() {
+        let configured = test_ai_app_v2_binding();
+        let link = test_card_link();
+        let mut binding = test_card_attestation_binding();
+        // The app-local output for the reported message shape, with a synthetic property label.
+        // The public card does
+        // not yet have a Note row: IOU's renderer adds the reviewed range from the paired evidence.
+        let initial_payload = br#"{"amount":26400,"kind":"iou","direction":"debt","message":"Reservation Confirmed\nSynthetic property UNIT-A1\nAugust 6-10\n26,400 EGP","currency":"EGP","date":"2026-08-06","interval_start":"2026-08-06","interval_end":"2026-08-10"}"#.to_vec();
+        binding.commitment.content.confirm_payload = Some(initial_payload.clone());
+        binding.commitment.content.rows = [
+            ("Amount", "26400"),
+            ("Currency", "EGP"),
+            ("Type", "iou"),
+            ("Direction", "debt"),
+            ("Date", "2026-08-06"),
+        ]
+        .into_iter()
+        .map(|(label, value)| AttestedActionCardRow {
+            label: label.into(),
+            value: value.into(),
+        })
+        .collect();
+        assert!(attests_exact_iou_card(
+            &binding,
+            Some(&configured),
+            Some(&link),
+            p(3),
+            p(1),
+        ));
+
+        let final_payload = br#"{"amount":26400,"direction":"debt","note":"From 2026-08-06 to 2026-08-10","currency":"EGP","message":"Reservation Confirmed\nSynthetic property UNIT-A1\nAugust 6-10\n26,400 EGP","kind":"iou","date":"2026-08-06"}"#.to_vec();
+        assert!(attests_exact_iou_card_confirmation(
+            &test_confirmation_binding(final_payload),
+            Some(&configured),
+            Some(&link),
+            p(3),
+            p(1),
+            false,
+        ));
+        // Raw intermediates must not be carried forward as reviewed entry fields.
+        assert!(!attests_exact_iou_card_confirmation(
+            &test_confirmation_binding(initial_payload),
+            Some(&configured),
+            Some(&link),
+            p(3),
+            p(1),
+            false,
+        ));
+        // Adding interval evidence must not weaken exact displayed-row validation.
+        binding.commitment.content.rows[4].value = "2026-07-04".into();
+        assert!(!attests_exact_iou_card(
+            &binding,
+            Some(&configured),
+            Some(&link),
+            p(3),
+            p(1),
+        ));
+    }
+
+    #[test]
+    fn app_local_candidates_built_by_openchat_pass_exact_card_attestation() {
+        #[derive(Deserialize)]
+        struct Fixture {
+            name: String,
+            content: AiAppCardContentV1,
+        }
+        // The TypeScript cross-boundary check runs the real IOU local processor followed by the
+        // real generic OpenChat card builder and compares their exact bytes to this shared fixture.
+        // Consuming those same bytes here prevents app/host tests from bypassing the strict Rust
+        // payload visitor by substituting an older, hand-written subset of extraction fields.
+        let fixtures: Vec<Fixture> = serde_json::from_str(include_str!(
+            "features/openchat/fixtures/initial-card-content-v1.json"
+        ))
+        .unwrap();
+        assert_eq!(fixtures.len(), 5);
+        let configured = test_ai_app_v2_binding();
+        let link = test_card_link();
+        for fixture in fixtures {
+            let mut binding = test_card_attestation_binding();
+            binding.commitment.content = fixture.content;
+            assert!(
+                attests_exact_iou_card(&binding, Some(&configured), Some(&link), p(3), p(1),),
+                "app-produced card rejected: {}",
+                fixture.name,
+            );
+        }
+    }
+
+    #[test]
+    fn source_interval_evidence_rejects_malformed_unpaired_and_ambiguous_fields() {
+        let payload = |start: serde_json::Value, end: serde_json::Value| {
+            serde_json::to_vec(&serde_json::json!({
+                "amount": 26400, "kind": "iou", "direction": "debt",
+                "interval_start": start, "interval_end": end,
+            }))
+            .unwrap()
+        };
+        for invalid in [
+            serde_json::json!(""),
+            serde_json::json!("   "),
+            serde_json::json!("x".repeat(97)),
+            serde_json::json!("ع".repeat(97)),
+            serde_json::json!(null),
+            serde_json::json!(20260806),
+            serde_json::json!(true),
+            serde_json::json!([]),
+            serde_json::json!({"date": "2026-08-06"}),
+        ] {
+            assert!(parse_attested_entry_drafts(
+                &payload(invalid.clone(), serde_json::json!("2026-08-10")),
+                false,
+            )
+            .is_none());
+            assert!(parse_attested_entry_drafts(
+                &payload(serde_json::json!("2026-08-06"), invalid),
+                false,
+            )
+            .is_none());
+        }
+        for control in (0..=0x1f)
+            .chain([0x7f])
+            .chain(0x202a..=0x202e)
+            .chain(0x2066..=0x2069)
+        {
+            let endpoint = format!("August{}6", char::from_u32(control).unwrap());
+            assert!(parse_attested_entry_drafts(
+                &payload(serde_json::json!(endpoint), serde_json::json!("August 10")),
+                false,
+            )
+            .is_none());
+        }
+        for fields in [
+            r#""interval_start":"2026-08-06""#,
+            r#""interval_end":"2026-08-10""#,
+            r#""interval_start":"2026-08-06","interval_end":"2026-08-10","interval_start":"2026-08-06""#,
+            r#""interval_start":"2026-08-06","interval_end":"2026-08-10","interval_end":"2026-08-11""#,
+            r#""interval_start":"2026-08-06","interval_end":"2026-08-10","unknown":"ignored?""#,
+        ] {
+            let invalid = format!(r#"{{"amount":26400,"kind":"iou","direction":"debt",{fields}}}"#);
+            for final_confirmation in [false, true] {
+                assert!(
+                    parse_attested_entry_drafts(invalid.as_bytes(), final_confirmation).is_none()
+                );
+            }
+        }
+        for endpoint in ["Thursday, August 6, 2026".to_string(), "ع".repeat(96)] {
+            let valid = payload(
+                serde_json::json!(endpoint),
+                serde_json::json!("Monday, August 10, 2026"),
+            );
+            assert!(parse_attested_entry_drafts(&valid, false).is_some());
+            assert!(parse_attested_entry_drafts(&valid, true).is_none());
+        }
     }
 
     #[test]

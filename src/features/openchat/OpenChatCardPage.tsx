@@ -1020,7 +1020,7 @@ export function OpenChatCardPage() {
                 value={form.note}
                 maxLength={4_096}
                 onChange={(e) => set("note", e.target.value)}
-                placeholder="lunch, taxi, reservation…"
+                placeholder="description or purpose…"
                 style={inputStyle}
               />
             </Field>
@@ -1298,7 +1298,7 @@ function EntryRow({
            value={entry.note}
           maxLength={4_096}
           onChange={(e) => onChange("note", e.target.value)}
-          placeholder="lunch, taxi, reservation…"
+          placeholder="description or purpose…"
           style={inputStyle}
         />
       </Field>

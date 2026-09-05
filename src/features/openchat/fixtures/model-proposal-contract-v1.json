@@ -1,0 +1,46 @@
+{
+  "version": 1,
+  "source": "Captured physical-phone model responses, 2026-09-05; replayed without model inference",
+  "cases": [
+    {
+      "id": "phone-malformed-wrapper",
+      "raw": "{\"{\"amount\":1912.15,\"interval_start\":\"Sun, Jul 19\",\"interval_end\":\"Thu, Aug 6\",\"note\":\"Reservation\",\"kind\":\"iou\",\"currency\":\"USD\"}}",
+      "hostKind": "no_extraction",
+      "missingFields": [],
+      "strictAccepted": false,
+      "projectedDate": null,
+      "projectedNote": null,
+      "projectedAmount": null
+    },
+    {
+      "id": "phone-nested-endpoints",
+      "raw": "{\"amount\":1912.15,\"interval_start\":{\"date\":\"Jul 19\"},\"interval_end\":{\"date\":\"Aug Aug 6\"},\"note\":\"Reservation\",\"kind\":\"iou\",\"currency\":\"USD\"}",
+      "hostKind": "ready",
+      "missingFields": [],
+      "strictAccepted": false,
+      "projectedDate": null,
+      "projectedNote": "Reservation",
+      "projectedAmount": 1912.15
+    },
+    {
+      "id": "phone-source-label-as-key",
+      "raw": "{\"note\":\"Reservation\",\"kind\":\"iou\",\"currency\":\"USD\",\"interval_start\":\"Sun, Jul 19\",\"interval_end\":\"Thu, Aug 6\",\"total_payout\":1912.15}",
+      "hostKind": "incomplete_extraction",
+      "missingFields": ["amount"],
+      "strictAccepted": false,
+      "projectedDate": null,
+      "projectedNote": null,
+      "projectedAmount": null
+    },
+    {
+      "id": "phone-complete-valid-output",
+      "raw": "{\"note\":\"Reservation\",\"kind\":\"iou\",\"currency\":\"USD\",\"interval_start\":\"Sun, Jul 19\",\"interval_end\":\"Thu, Aug 6\",\"amount\":1912.15}",
+      "hostKind": "ready",
+      "missingFields": [],
+      "strictAccepted": true,
+      "projectedDate": "2026-07-19",
+      "projectedNote": "Reservation | From Sun, Jul 19 to Thu, Aug 6",
+      "projectedAmount": 1912.15
+    }
+  ]
+}

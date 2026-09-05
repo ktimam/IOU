@@ -1,0 +1,28 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="900" height="1200" viewBox="0 0 900 1200">
+  <!-- Privacy-safe, code-native model acceptance source. It contains no copied name, face,
+       account, property code, reference, or other identifier from the reported image. -->
+  <rect width="900" height="1200" fill="#f7f8fa"/>
+  <rect x="42" y="42" width="816" height="1116" rx="34" fill="#ffffff" stroke="#e4e7ec" stroke-width="3"/>
+
+  <g font-family="Arial, 'Segoe UI', sans-serif" fill="#24262b">
+    <text x="84" y="164" font-size="66" font-weight="700">Workshop Confirmed</text>
+
+    <circle cx="450" cy="350" r="106" fill="#e7faf6"/>
+    <path d="M392 354 L430 392 L511 309" fill="none" stroke="#0bbf9a" stroke-width="28" stroke-linecap="round" stroke-linejoin="round"/>
+
+    <line x1="84" y1="535" x2="816" y2="535" stroke="#edf0f3" stroke-width="3"/>
+    <text x="84" y="660" fill="#6d7480" font-size="38" font-weight="600">TOTAL</text>
+    <text x="816" y="660" text-anchor="end" fill="#111318" font-size="66" font-weight="700">1,912.15 USD</text>
+    <line x1="84" y1="725" x2="816" y2="725" stroke="#edf0f3" stroke-width="3"/>
+
+    <text x="84" y="830" fill="#6d7480" font-size="38" font-weight="600">START</text>
+    <text x="816" y="830" text-anchor="end" font-size="44" font-weight="600">2026-07-19</text>
+    <line x1="84" y1="875" x2="816" y2="875" stroke="#edf0f3" stroke-width="3"/>
+
+    <text x="84" y="965" fill="#6d7480" font-size="38" font-weight="600">END</text>
+    <text x="816" y="965" text-anchor="end" font-size="44" font-weight="600">2026-08-06</text>
+    <line x1="84" y1="1010" x2="816" y2="1010" stroke="#edf0f3" stroke-width="3"/>
+
+    <text x="450" y="1110" text-anchor="middle" fill="#89919d" font-size="28" letter-spacing="2">SYNTHETIC TEST FIXTURE</text>
+  </g>
+</svg>

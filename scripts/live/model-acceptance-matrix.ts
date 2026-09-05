@@ -294,7 +294,9 @@ async function findOpenChatPage(port: number): Promise<{
     : never;
   page: Page;
 }> {
-  const browser = await chromium.connectOverCDP(`http://127.0.0.1:${port}`);
+  const browser = await chromium.connectOverCDP(`http://127.0.0.1:${port}`, {
+    timeout: 120_000,
+  });
   const context = browser.contexts()[0];
   if (!context) throw new Error(`CDP ${port} has no browser context`);
   const page = context
@@ -697,10 +699,10 @@ async function pageEnvironment(page: Page) {
           ),
         productionTransformersCacheReadiness:
           sources["/src/utils/transformersWebGpuInference.ts"].includes(
-            "export async function transformersWebGpuModelDownloaded(",
+            "export async function transformersWebGpuModelArtifactsDownloaded(",
           ) &&
           sources["/src/utils/transformersWebGpuInference.ts"].includes(
-            "TRANSFORMERS_WEBGPU_CACHE_KEY",
+            "available.open(spec.cacheKey)",
           ),
       },
     };

@@ -23,9 +23,13 @@ describe("public manifest privacy boundaries", () => {
       rules: buildIouRules(privateTemplates),
       schema: buildIouOutputSchema(privateTemplates),
     });
-    expect(serialized).not.toContain("Private type");
-    expect(serialized).not.toContain("private-keyword");
-    expect(serialized).not.toContain("private-");
+    for (const template of privateTemplates) {
+      expect(serialized).not.toContain(JSON.stringify(template.id));
+      expect(serialized).not.toContain(JSON.stringify(template.name));
+      for (const keyword of template.keywords ?? []) {
+        expect(serialized).not.toContain(JSON.stringify(keyword));
+      }
+    }
     expect((buildIouOutputSchema(privateTemplates).properties as Record<string, unknown>).template)
       .toBeUndefined();
   });

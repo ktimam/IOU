@@ -1,0 +1,20 @@
+{
+  "version": 1,
+  "sourceTimestamp": "2026-07-03T12:00:00.000Z",
+  "raw": {
+    "amount": 1912.15,
+    "kind": "iou",
+    "interval_start": "Sun, Jul 19",
+    "interval_end": "Thu, Aug 6",
+    "note": "Reservation",
+    "date": null
+  },
+  "card": {
+    "date": "2026-07-19",
+    "note": "Reservation | From Sun, Jul 19 to Thu, Aug 6"
+  },
+  "confirmed": {
+    "date": "2026-07-19",
+    "note": "Reservation | From Sun, Jul 19 to Thu, Aug 6"
+  }
+}

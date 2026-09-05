@@ -109,22 +109,12 @@ describe("mobile portrait model date regression", () => {
     expect(prompt).not.toMatch(
       /\b\d{1,2}\s+(?:jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\s+\d{4}\b/i,
     );
-    expect(prompt).toContain(
-      "label may be written in any language or script",
-    );
-    expect(prompt).toContain("التاريخ means Date");
-    expect(prompt).toContain(
-      "label can be at the far right while its value is at the far left",
-    );
-    expect(prompt).toContain(
-      "inspect every horizontal row from the top through the bottom",
-    );
-    expect(prompt).toContain("including the lowest rows");
-    expect(prompt).toContain('"date":"YYYY-MM-DD"');
-    expect(prompt).toContain("ignore the printed time");
     expect(prompt).toMatch(
-      /compare every output day and year digit[^.]*printed date/i,
+      /transaction date[^.]*day[^.]*month[^.]*year[^.]*printed together/i,
     );
+    expect(prompt).toMatch(/without a printed year[^.]*omit "date"/i);
+    expect(prompt).toMatch(/never supply a missing year/i);
+    expect(prompt).toContain("YYYY-MM-DD");
   });
 
   it("runs a distinct portrait August image through the real-model matrix", () => {
@@ -197,7 +187,7 @@ describe("mobile portrait model date regression", () => {
     expect(dateRowRatio).toBeLessThan(0.86);
   });
 
-  it("binds amount, currency, kind, and date to one full-image model pass", () => {
+  it("binds financial fields and a generic source-grounded category to one full-image model pass", () => {
     const schema = iouActionManifest.outputSchema as {
       "x-openchat-image-prompt-template"?: {
         version: number;
@@ -212,10 +202,31 @@ describe("mobile portrait model date regression", () => {
       includeRuleGuidance: false,
     });
     expect(schema).not.toHaveProperty("x-openchat-image-focused-passes");
-    for (const field of ["amount", "currency", "kind", "date"]) {
+    expect(schema).not.toHaveProperty("x-openchat-image-note-composition");
+    for (const field of [
+      "amount",
+      "currency",
+      "kind",
+      "interval_start",
+      "interval_end",
+      "date",
+      "note",
+    ]) {
       expect(IOU_IMAGE_EXTRACTION_PROMPT).toContain(`"${field}"`);
     }
-    expect(IOU_IMAGE_EXTRACTION_PROMPT).not.toMatch(/"note"\s*:/i);
+    expect(IOU_IMAGE_EXTRACTION_PROMPT).toMatch(
+      /"note":[^.]*uppermost prominent standalone heading/i,
+    );
+    expect(IOU_IMAGE_EXTRACTION_PROMPT).toMatch(
+      /complete visible beginning and ending DATE VALUES of one time span/i,
+    );
+    expect(IOU_IMAGE_EXTRACTION_PROMPT).toMatch(
+      /copy each entire value[^.]*weekday[^.]*month[^.]*day number/i,
+    );
+    expect(IOU_IMAGE_EXTRACTION_PROMPT).toContain("Include both endpoints or neither");
+    expect(IOU_IMAGE_EXTRACTION_PROMPT).toContain('Never move part of an endpoint into "date"');
+    expect(IOU_IMAGE_EXTRACTION_PROMPT).toContain('When these fields are present, omit "date" completely.');
+    expect(IOU_IMAGE_EXTRACTION_PROMPT).not.toMatch(/reservation|booking|check-in|check out|total payout|total coming/i);
   });
 
   it("accepts the visible August date and rejects the reported July result", () => {

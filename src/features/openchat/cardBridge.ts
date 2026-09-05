@@ -16,6 +16,8 @@ import type { EntryDraft } from "../entries/draft";
 import { isEncryptedTemplateRef } from "./templateRef";
 import type { Direction } from "../entries/types";
 import { IOU_CURRENCY_EVIDENCE_MAP } from "./actionManifest";
+import { validatedSourceInterval } from "./sourceInterval";
+export { dateFromSourceInterval } from "./sourceInterval";
 
 // The bridge message type strings, both directions. Exactly the values in the
 // build contract; kept in one table so page + tests can't drift.
@@ -365,7 +367,8 @@ export function currencyStatedIn(text: string, code: string): boolean {
   return stated(c) || aliases.some(stated);
 }
 
-export function initToFormState(data: EntryDraft): CardFormState {
+
+export function initToFormState(data: EntryDraft, now: Date = new Date()): CardFormState {
   const kind = data.kind === "settlement" || data.kind === "iou" ? data.kind : "";
   const amount = data.amount != null ? String(data.amount) : "";
   // Empty ("") means the source did not provide trustworthy currency evidence. The credentialless
@@ -386,8 +389,18 @@ export function initToFormState(data: EntryDraft): CardFormState {
       ? claimed.toUpperCase()
       : "";
   const direction: Direction = data.direction === "debt" ? "debt" : "credit";
-  const note = typeof data.note === "string" ? data.note : "";
-  const date = typeof data.date === "string" ? data.date : "";
+  const title = typeof data.note === "string" ? data.note : "";
+  const interval = validatedSourceInterval(data.interval_start, data.interval_end, now);
+  const range = interval !== undefined
+    ? `From ${interval.start} to ${interval.end}`
+    : undefined;
+  const note = range === undefined || title === range || title.endsWith(` | ${range}`)
+    ? title
+    : title.trim() === "" ? range : `${title} | ${range}`;
+  const explicitDate = typeof data.date === "string" ? data.date : "";
+  const date = explicitDate.trim() !== ""
+    ? explicitDate
+    : interval?.date ?? "";
   // Carried only when the extraction actually routed to a type, so a card that never had one gains
   // no empty field (and buildConfirmPayload emits nothing new for it).
   return {
