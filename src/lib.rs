@@ -1634,6 +1634,7 @@ const IOU_CARD_CANCEL_LABEL: &str = "Cancel";
 const MAX_CARD_CONFIRM_PAYLOAD_BYTES: usize = 16_384;
 const MAX_CARD_DRAFTS: usize = 32;
 const MAX_CARD_SOURCE_INTERVAL_CHARS: usize = 96;
+const MAX_CARD_IMAGE_HEADING_CHARS: usize = 200;
 const TEMPLATE_REF_PREFIX: &str = "ioutr1.";
 const TEMPLATE_REF_MAX_LENGTH: usize = 1_416;
 const AI_ACTION_RECIPIENT_GRANT_TTL_MS: u64 = 300_000;
@@ -1651,6 +1652,8 @@ struct AttestedEntryDraft {
     // reviewed note. They are not entry fields and must never enter a final confirmation payload.
     interval_start: Option<String>,
     interval_end: Option<String>,
+    // Initial image evidence for IOU's private type matching. Never an entry field or final payload.
+    image_heading: Option<String>,
     template_ref: Option<String>,
 }
 
@@ -1684,6 +1687,7 @@ impl<'de> Deserialize<'de> for AttestedEntryDraft {
                 let mut message = None;
                 let mut interval_start = None;
                 let mut interval_end = None;
+                let mut image_heading = None;
                 let mut template_ref = None;
                 while let Some(key) = map.next_key::<String>()? {
                     if !seen.insert(key.clone()) {
@@ -1699,6 +1703,7 @@ impl<'de> Deserialize<'de> for AttestedEntryDraft {
                         "message" => message = Some(map.next_value()?),
                         "interval_start" => interval_start = Some(map.next_value()?),
                         "interval_end" => interval_end = Some(map.next_value()?),
+                        "image_heading" => image_heading = Some(map.next_value()?),
                         "template_ref" => template_ref = Some(map.next_value()?),
                         _ => {
                             let _: de::IgnoredAny = map.next_value()?;
@@ -1716,6 +1721,7 @@ impl<'de> Deserialize<'de> for AttestedEntryDraft {
                     message,
                     interval_start,
                     interval_end,
+                    image_heading,
                     template_ref,
                 })
             }
@@ -1905,6 +1911,13 @@ fn bounded_card_source_interval(value: &str) -> bool {
         })
 }
 
+fn bounded_card_image_heading(value: &str) -> bool {
+    !value.is_empty()
+        && value.trim_matches(|ch: char| ch.is_whitespace() || ch == '\u{feff}') == value
+        && value.chars().count() <= MAX_CARD_IMAGE_HEADING_CHARS
+        && !value.chars().any(|ch| ch.is_control() || matches!(ch, '\u{2028}' | '\u{2029}'))
+}
+
 fn validate_attested_entry_draft(draft: &AttestedEntryDraft, allow_template_ref: bool) -> bool {
     let Some(amount) = draft.amount.as_f64() else {
         return false;
@@ -1930,6 +1943,12 @@ fn validate_attested_entry_draft(draft: &AttestedEntryDraft, allow_template_ref:
         // `allow_template_ref=false` is the initial model-produced stored payload. Confirmation
         // payloads use true and may contain a currency the user explicitly edited in the card.
         && (allow_template_ref || initial_currency_is_evidenced(draft))
+        // Match the app-owned imageHeading.ts contract. The exact initial payload is committed;
+        // only IOU may use this bounded evidence for private saved-Type matching. It must be
+        // removed before final confirmation, and must not add or alter any public card row.
+        && draft.image_heading.as_deref().is_none_or(|value| {
+            !allow_template_ref && bounded_card_image_heading(value)
+        })
         // The app's extraction schema declares these values as paired, bounded source evidence.
         // Their bytes are covered by initial content attestation, but do not add public summary
         // rows or bypass canonical `date` validation. Only IOU's renderer interprets them. The
@@ -8007,6 +8026,91 @@ mod tests {
                 br#"{"kind":"iou","amount":25,"currency":"USD","direction":"debt","date":"2026-08-05","note":"rent","message":"I owe 25 USD rent"}"#.to_vec(),
             ),
         }
+    }
+
+    #[test]
+    fn configured_model_cards_pass_backend_attestation() {
+        let fixture: serde_json::Value = serde_json::from_str(include_str!(
+            "../test/fixtures/openchat/model-acceptance/configured-model-attestation-cards.json"
+        )).unwrap();
+        let cases = fixture["cases"].as_array().unwrap();
+        assert_eq!(cases.len(), 16);
+        let mut rejected = Vec::new();
+        for case in cases {
+            let card = &case["card"];
+            let content = AiAppCardContentV1 {
+                title: card["title"].as_str().unwrap().into(),
+                rows: serde_json::from_value(card["rows"].clone()).unwrap(),
+                confirm_label: card["confirm_label"].as_str().unwrap().into(),
+                cancel_label: card["cancel_label"].as_str().unwrap().into(),
+                action_id: card["action_id"].as_str().unwrap().into(),
+                disclosure: None,
+                expires_at: None,
+                confirm_payload: Some(card["confirm_payload_json"].as_str().unwrap().as_bytes().to_vec()),
+            };
+            let mut binding = test_card_attestation_binding();
+            binding.commitment.content = content;
+            if !attests_exact_iou_card(
+                &binding, Some(&test_ai_app_v2_binding()), Some(&test_card_link()), p(3), p(1),
+            ) {
+                rejected.push(format!("{} / {}", case["modelId"], case["imageId"]));
+            }
+            assert!(parse_attested_entry_drafts(
+                case["confirmation_json"].as_str().unwrap().as_bytes(), true,
+            ).is_some(), "invalid final payload: {}", case["imageId"]);
+        }
+        assert!(rejected.is_empty(), "current host/app cards rejected by backend: {rejected:?}");
+    }
+
+    #[test]
+    fn image_heading_card_attestation_accepts_initial_evidence_not_confirmation() {
+        let mut content = test_card_content();
+        let mut payload: serde_json::Value =
+            serde_json::from_slice(content.confirm_payload.as_ref().unwrap()).unwrap();
+        payload["image_heading"] = serde_json::json!("تمت العملية بنجاح");
+        content.confirm_payload = Some(serde_json::to_vec(&payload).unwrap());
+        assert!(exact_iou_card_content_is_valid(&content));
+        assert!(parse_attested_entry_drafts(content.confirm_payload.as_ref().unwrap(), true).is_none());
+
+        let mut binding = test_card_attestation_binding();
+        binding.commitment.content = content.clone();
+        assert!(attests_exact_iou_card(
+            &binding, Some(&test_ai_app_v2_binding()), Some(&test_card_link()), p(3), p(1),
+        ));
+        // Evidence is committed, but is not a public row or authority to change one.
+        content.rows.push(AttestedActionCardRow { label: "Image heading".into(), value: "تمت العملية بنجاح".into() });
+        assert!(!exact_iou_card_content_is_valid(&content));
+    }
+
+    #[test]
+    fn image_heading_card_attestation_keeps_strict_bounds_and_field_validation() {
+        let original = test_card_content();
+        let base: serde_json::Value = serde_json::from_slice(original.confirm_payload.as_ref().unwrap()).unwrap();
+        for value in [
+            serde_json::Value::Null, serde_json::json!(1), serde_json::json!(true),
+            serde_json::json!([]), serde_json::json!({}), serde_json::json!(""),
+            serde_json::json!(" "), serde_json::json!(" untrimmed"),
+            serde_json::json!("trailing "), serde_json::json!("line\nfeed"),
+            serde_json::json!("nul\0byte"), serde_json::json!("c1\u{0085}control"),
+            serde_json::json!("line\u{2028}separator"), serde_json::json!("paragraph\u{2029}separator"),
+            serde_json::json!("🟢".repeat(201)),
+        ] {
+            let mut payload = base.clone();
+            payload["image_heading"] = value.clone();
+            let mut content = original.clone();
+            content.confirm_payload = Some(serde_json::to_vec(&payload).unwrap());
+            assert!(!exact_iou_card_content_is_valid(&content), "accepted {value}");
+        }
+        let mut payload = base;
+        payload["image_heading"] = serde_json::json!("🟢".repeat(200));
+        let mut content = original;
+        content.confirm_payload = Some(serde_json::to_vec(&payload).unwrap());
+        assert!(exact_iou_card_content_is_valid(&content));
+        payload["unexpected_model_field"] = serde_json::json!("not allowed");
+        content.confirm_payload = Some(serde_json::to_vec(&payload).unwrap());
+        assert!(!exact_iou_card_content_is_valid(&content));
+        let duplicate = br#"{"amount":25,"kind":"iou","direction":"debt","image_heading":"one","image_heading":"two"}"#;
+        assert!(parse_attested_entry_drafts(duplicate, false).is_none());
     }
 
     fn test_scoped_card_context() -> AppScopedCardContextV1 {

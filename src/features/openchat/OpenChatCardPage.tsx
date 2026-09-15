@@ -12,6 +12,7 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
 import type { Direction } from "../entries/types";
+import { DIRECTION_LABELS } from "../entries/directionLabels";
 import { matchTemplateForDraft } from "../entries/resolveTemplateBase";
 import { orderedCurrencies } from "../settings/currencies";
 import type { TxnTemplate } from "../templates/TemplatesContext";
@@ -48,13 +49,6 @@ import {
 } from "./cardPrivateContext";
 import { encryptTemplateRef, type TemplateRefContext } from "./templateRef";
 import { IOU_MAX_MAJOR_AMOUNT, IOU_MIN_MAJOR_AMOUNT } from "./actionManifest";
-
-// Plain-language direction labels (same vocabulary the OC-rendered card used, so
-// a human catches an inversion before confirming).
-const DIRECTION_LABELS: Record<Direction, string> = {
-  credit: "Owed to you",
-  debt: "You owe",
-};
 
 // Same vocabulary as the real entry form's "Type" fieldset (IOU = owed, has a due date; Settlement =
 // paid now), short enough for a card row. The classic OC-rendered card printed the raw wire value
@@ -93,25 +87,73 @@ export function hydrateSavedTypeForCard(
   state: CardFormState,
   raw: unknown,
   templates: TxnTemplate[],
-  options: { evidence?: "full" | "row-local" } = { evidence: "full" },
+  options: { evidence?: "full" | "row-local"; readonly?: boolean } = { evidence: "full" },
 ): CardFormState {
   if (state.templateId && templates.some((template) => template.id === state.templateId)) {
     return state;
   }
   const containedState = state.templateId === undefined
     ? state
-    : { ...state, templateId: undefined };
+    : clearSavedTypeSelection(state, { preserveDirection: options.readonly });
+  if (containedState.savedTypeSelectionEdited) return containedState;
   const matched = matchTemplateForDraft(templates, raw, {
     evidence: options.evidence ?? "full",
+    // IOU's image normalizer retains this field; text/audio normalization removes it. Keep this
+    // opt-in local to the normalized card path, never direct paste/connector import matching.
+    allowImageHeading: true,
   });
-  return matched ? { ...containedState, templateId: matched.id } : containedState;
+  return matched
+    ? applySavedTypeForCard(containedState, matched, options.readonly)
+    : containedState;
 }
 
 /** Remove an account-scoped selection whenever its authoritative private grant is no longer live. */
-export function clearSavedTypeSelection(state: CardFormState): CardFormState {
-  if (state.templateId === undefined) return state;
-  const { templateId: _discarded, ...publicState } = state;
-  return publicState;
+export function clearSavedTypeSelection(
+  state: CardFormState,
+  options: { preserveDirection?: boolean } = {},
+): CardFormState {
+  if (state.templateId === undefined && state.directionBeforeSavedType === undefined) return state;
+  const { templateId: _discarded, directionBeforeSavedType, ...publicState } = state;
+  return directionBeforeSavedType !== undefined && !state.directionEdited && !options.preserveDirection
+    ? { ...publicState, direction: directionBeforeSavedType }
+    : publicState;
+}
+
+function applySavedTypeForCard(
+  state: CardFormState,
+  template: TxnTemplate,
+  readonly = false,
+): CardFormState {
+  // The model cannot know this viewer's private type defaults. Apply the configured direction in
+  // IOU's private card, before confirmation, but never overwrite an explicit human edit or a
+  // previously confirmed readonly value. All other extracted fields remain unchanged.
+  return {
+    ...state,
+    templateId: template.id,
+    ...(!readonly && !state.directionEdited ? {
+      directionBeforeSavedType: state.directionBeforeSavedType ?? state.direction,
+      direction: template.direction,
+    } : {}),
+  };
+}
+
+/** Apply a human edit and remember it across delayed hydration and private-context refreshes. */
+export function editCardForm<K extends keyof CardFormState>(
+  state: CardFormState,
+  key: K,
+  value: CardFormState[K],
+  templates: TxnTemplate[],
+): CardFormState {
+  if (key === "direction") {
+    const { directionBeforeSavedType: _discarded, ...edited } = state;
+    return { ...edited, [key]: value, directionEdited: true };
+  }
+  if (key === "templateId") {
+    const cleared = { ...clearSavedTypeSelection(state), savedTypeSelectionEdited: true as const };
+    const selected = templates.find((template) => template.id === value);
+    return selected ? applySavedTypeForCard(cleared, selected) : cleared;
+  }
+  return { ...state, [key]: value };
 }
 
 /**
@@ -351,12 +393,13 @@ export function OpenChatCardPage() {
     };
 
     const clearPrivateSelections = () => {
-      const nextForm = clearSavedTypeSelection(formRef.current);
+      const options = { preserveDirection: ctxRef.current?.readonly === true };
+      const nextForm = clearSavedTypeSelection(formRef.current, options);
       formRef.current = nextForm;
       setForm(nextForm);
       const currentMulti = multiRef.current;
       if (currentMulti) {
-        const nextMulti = currentMulti.map((entry) => clearSavedTypeSelection(entry));
+        const nextMulti = currentMulti.map((entry) => clearSavedTypeSelection(entry, options));
         multiRef.current = nextMulti;
         setMulti(nextMulti);
       }
@@ -748,7 +791,7 @@ export function OpenChatCardPage() {
                   withDefault,
                   rawEntries[index] ?? {},
                   loaded.templates,
-                  { evidence },
+                  { evidence, readonly: ctxRef.current?.readonly },
                 );
               });
               multiRef.current = hydratedMulti;
@@ -762,6 +805,7 @@ export function OpenChatCardPage() {
               withDefault,
               parsed.data,
               loaded.templates,
+              { readonly: ctxRef.current?.readonly },
             );
             formRef.current = hydratedForm;
             setForm(hydratedForm);
@@ -848,7 +892,9 @@ export function OpenChatCardPage() {
 
   const set = <K extends keyof CardFormState>(key: K, value: CardFormState[K]) => {
     if (key === "currency") defaultedCurrencyRef.current = false;
-    setForm((f) => ({ ...f, [key]: value }));
+    const next = editCardForm(formRef.current, key, value, templates);
+    formRef.current = next;
+    setForm(next);
   };
 
 
@@ -857,9 +903,14 @@ export function OpenChatCardPage() {
   const setEntry = useCallback(
     <K extends keyof CardFormState>(idx: number, key: K, value: CardFormState[K]) => {
       if (key === "currency") defaultedMultiCurrencyRef.current[idx] = false;
-      setMulti((m) => (m ? m.map((e, i) => (i === idx ? { ...e, [key]: value } : e)) : m));
+      const current = multiRef.current;
+      const next = current
+        ? current.map((entry, index) => index === idx ? editCardForm(entry, key, value, templates) : entry)
+        : current;
+      multiRef.current = next;
+      setMulti(next);
     },
-    [],
+    [templates],
   );
   const multiAllValid = !!multi && multi.length > 0 && multi.every(isCardFormValid);
 

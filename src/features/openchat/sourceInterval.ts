@@ -12,18 +12,40 @@ const MONTHS = new Map([
 const WEEKDAYS = new Map([
   ["sun", 0], ["mon", 1], ["tue", 2], ["wed", 3], ["thu", 4], ["fri", 5], ["sat", 6],
 ]);
-const MONTH = "(jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|jul(?:y)?|aug(?:ust)?|sep(?:t(?:ember)?)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)\\.?";
-const WEEKDAY = "(?:(sun(?:day)?|mon(?:day)?|tue(?:sday)?|wed(?:nesday)?|thu(?:rsday)?|fri(?:day)?|sat(?:urday)?)\\.?\\s*,?\\s+)?";
+// Gregorian month names only; incomplete كانون/تشرين and Hijri names are not aliases.
+// Fold alef variants/Arabic vowel marks inside a matched name token, never arbitrary text
+// or numbers. In a full date slot this accepts Qwen's أب spelling of آب (August), but it
+// does not establish that the model copied the printed source faithfully.
+function arabicNameKey(value: string): string {
+  return value.normalize("NFC").replace(/[آأإ]/gu, "ا")
+    .replace(/[\u064b-\u065f\u0670]/gu, "").replace(/\s+/gu, " ");
+}
+const ARABIC_MONTHS = new Map([
+  ["يناير", 1], ["كانون الثاني", 1], ["فبراير", 2], ["شباط", 2],
+  ["مارس", 3], ["اذار", 3], ["ابريل", 4], ["نيسان", 4],
+  ["مايو", 5], ["ايار", 5], ["يونيو", 6], ["حزيران", 6],
+  ["يوليو", 7], ["تموز", 7], ["اغسطس", 8], ["اب", 8],
+  ["سبتمبر", 9], ["ايلول", 9], ["اكتوبر", 10], ["تشرين الاول", 10],
+  ["نوفمبر", 11], ["تشرين الثاني", 11], ["ديسمبر", 12], ["كانون الاول", 12],
+]);
+const ARABIC_WEEKDAYS = new Map([
+  ["الاحد", 0], ["الاثنين", 1], ["الثلاثاء", 2], ["الاربعاء", 3],
+  ["الخميس", 4], ["الجمعة", 5], ["السبت", 6],
+]);
+const ARABIC_WORD = "[\\p{Script=Arabic}\\p{M}]+";
+const MONTH = `(jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|jul(?:y)?|aug(?:ust)?|sep(?:t(?:ember)?)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?|${ARABIC_WORD}(?:\\s+${ARABIC_WORD})?)\\.?`;
+const WEEKDAY = "(?:(sun(?:day)?|mon(?:day)?|tue(?:sday)?|wed(?:nesday)?|thu(?:rsday)?|fri(?:day)?|sat(?:urday)?)\\.?\\s*[,،]?\\s+)?";
 const DAY = "(\\d{1,2})(?:st|nd|rd|th)?";
-const YEAR = "(?:(?:\\s*,\\s*|\\s+)(\\d{4}))?";
+const YEAR = "(?:(?:\\s*[,،]\\s*|\\s+)(\\d{4}))?";
 const MONTH_FIRST = new RegExp(`^${WEEKDAY}${MONTH}\\s+${DAY}${YEAR}$`, "iu");
 const DAY_FIRST = new RegExp(`^${WEEKDAY}${DAY}\\s+${MONTH}${YEAR}$`, "iu");
 
 function boundedEndpoint(value: unknown): string | undefined {
-  if (typeof value !== "string") return undefined;
+  if (typeof value !== "string" || value.length > MAX_ENDPOINT_LENGTH || /[\p{Cc}\p{Cf}\p{Cs}]/u.test(value)) {
+    return undefined;
+  }
   const text = value.trim();
-  return text !== "" && text.length <= MAX_ENDPOINT_LENGTH && !/[\p{Cc}\p{Cf}\p{Cs}]/u.test(text)
-    ? text : undefined;
+  return text === "" ? undefined : text;
 }
 
 function endpointTime(endpoint: Endpoint, year: number): number | undefined {
@@ -35,6 +57,15 @@ function endpointTime(endpoint: Endpoint, year: number): number | undefined {
 }
 
 function parseEndpoint(text: string): Endpoint | undefined {
+  // Arabic-Indic and Eastern Arabic-Indic digits have exact decimal values. Work on a copy
+  // so accepted range endpoints retain the model's original spelling in the editable note.
+  text = text.replace(/[٠-٩۰-۹]/gu, (digit) => String(digit.charCodeAt(0) - (digit <= "٩" ? 0x660 : 0x6f0)));
+  // Match only a complete, known weekday at the beginning. A generic optional Arabic word
+  // here would incorrectly steal the first word of two-word months such as كانون الثاني.
+  text = text.replace(new RegExp(`^(${ARABIC_WORD})(?=\\.?\\s*[,،]?\\s+)`, "u"), (token) => {
+    const weekday = ARABIC_WEEKDAYS.get(arabicNameKey(token));
+    return weekday === undefined ? token : [...WEEKDAYS.keys()][weekday];
+  });
   const iso = /^(19\d{2}|20\d{2}|21\d{2}|2200)-(\d{2})-(\d{2})$/u.exec(text);
   let endpoint: Endpoint;
   if (iso !== null) {
@@ -47,12 +78,14 @@ function parseEndpoint(text: string): Endpoint | undefined {
     const yearText = monthFirst?.[4] ?? dayFirst?.[4];
     const weekdayText = monthFirst?.[1] ?? dayFirst?.[1];
     if (monthText === undefined || dayText === undefined) return undefined;
-    const month = MONTHS.get(monthText.toLowerCase().slice(0, 3));
+    const month = MONTHS.get(monthText.toLowerCase().slice(0, 3)) ?? ARABIC_MONTHS.get(arabicNameKey(monthText));
     if (month === undefined) return undefined;
+    const weekday = weekdayText === undefined ? undefined : WEEKDAYS.get(weekdayText.toLowerCase().slice(0, 3));
+    if (weekdayText !== undefined && weekday === undefined) return undefined;
     endpoint = {
       month, day: Number(dayText),
       ...(yearText === undefined ? {} : { year: Number(yearText) }),
-      ...(weekdayText === undefined ? {} : { weekday: WEEKDAYS.get(weekdayText.toLowerCase().slice(0, 3)) }),
+      ...(weekday === undefined ? {} : { weekday }),
     };
   }
   if (endpoint.year !== undefined) {
@@ -89,6 +122,21 @@ function intervalDate(start: Endpoint, end: Endpoint, anchor: Date): string | un
     dates.add(new Date(startTime).toISOString().slice(0, 10));
   }
   return dates.size === 1 ? [...dates][0] : undefined;
+}
+
+/** A single printed date cannot borrow a year from the host calendar or an absent endpoint. */
+export function dateFromPrintedDate(value: unknown): string | undefined {
+  const text = boundedEndpoint(value);
+  if (text === undefined) return undefined;
+  // Only this single-date path accepts a fully validated optional clock: ASCII-space-separated
+  // h:mm[:ss] AM/PM (1–12), or H:mm[:ss] (0–23); minutes/seconds are exactly 00–59.
+  // No timezone, fractional seconds or arbitrary suffix is stripped, and no time conversion
+  // changes the printed calendar day. Interval endpoint semantics stay unchanged.
+  const clock = /^(.+?) +(?:(?:0?[1-9]|1[0-2]):[0-5]\d(?::[0-5]\d)? +(?:AM|PM)|(?:[01]?\d|2[0-3]):[0-5]\d(?::[0-5]\d)?)$/iu.exec(text);
+  const endpoint = parseEndpoint(clock?.[1] ?? text);
+  if (endpoint?.year === undefined) return undefined;
+  const time = endpointTime(endpoint, endpoint.year);
+  return time === undefined ? undefined : new Date(time).toISOString().slice(0, 10);
 }
 
 /** Validate the complete pair before either endpoint can appear in a synthesized note. */

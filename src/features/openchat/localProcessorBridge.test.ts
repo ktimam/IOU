@@ -5,6 +5,29 @@ import { parseProcessorBootstrap, processIouRequest } from "./localProcessorBrid
 const binding = { frameNonce: "a".repeat(48), requestNonce: "b".repeat(48) };
 const request = (input: unknown) => ({ type: "oc:app-process:request", version: 1, ...binding, actionId: iouActionManifest.id, input });
 describe("IOU owns the local processor", () => {
+  it("normalizes app-owned raw image evidence once, preserving source-row indexes and strict canonical money", () => {
+    const candidates = [
+      { note: "Reservation", currency_text: "$", amount_text: "1,912.15", date_text: "Sun, Jul 19 - Thu, Aug 6", kind: "iou" },
+      { note: "REPAIR ESTIMATE", currency_text: "", amount_text: "72.50", date_text: "", kind: "iou" },
+    ];
+    const before = JSON.stringify(candidates);
+    const result = processIouRequest(request({ operation: "normalize_raw", modality: "image", candidates, sourceTimestamp: Date.UTC(2026, 6, 3) }), binding);
+    expect(result).toEqual({ kind: "candidates", sourceIndexes: [0, 1], candidates: [
+      { note: "Reservation", image_heading: "Reservation", currency: "USD", amount: 1912.15, kind: "iou", date: "2026-07-19", interval_start: "Sun, Jul 19", interval_end: "Thu, Aug 6" },
+      { note: "REPAIR ESTIMATE", image_heading: "REPAIR ESTIMATE", amount: 72.5, kind: "iou" },
+    ] });
+    expect(JSON.stringify(candidates)).toBe(before);
+  });
+  it("rejects the whole raw batch for a malformed row, wrong modality, mixed OCR or legacy shape", () => {
+    const raw = { note: "Heading", currency_text: "EGP", amount_text: "350.00", date_text: "04 JUL 2026", kind: "iou" };
+    for (const input of [
+      { modality: "text", candidates: [raw] }, { modality: "audio", candidates: [raw] },
+      { modality: "image", candidates: [raw], ocrTranscripts: [] },
+      { modality: "image", candidates: [raw, { ...raw, date_text: "From Reservation to Total Payout" }] },
+      { modality: "image", candidates: [{ amount: 350, kind: "iou" }] },
+      { modality: "image", candidates: [] }, { modality: "image", candidates: Array.from({ length: 17 }, () => raw) },
+    ]) expect(processIouRequest(request({ operation: "normalize_raw", ...input }), binding)).toEqual({ kind: "error" });
+  });
   it("binds bootstrap and rejects other actions or replayed request ids", () => {
     expect(parseProcessorBootstrap({ type: "oc:app-process:bootstrap", version: 1, ...binding })).toEqual(binding);
     expect(parseProcessorBootstrap({ type: "oc:app-process:bootstrap", version: 1, ...binding, text: "leak" })).toBeUndefined();

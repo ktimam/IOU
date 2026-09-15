@@ -5,13 +5,14 @@
 //   - date (defaults to "now")
 //   - currency (any ISO code; defaults to the user's single default currency)
 //   - amount (in major units, e.g. 12.50)
-//   - direction (credit / debt, with "I am owed" / "I owe" copy)
+//   - direction (credit / debt, with "Owed to you" / "You owe" copy)
 //   - description
 //   - convert toggle: pick target currency, fetch FX rate, show
 //     converted amount
 
 import { useEffect, useState } from "react";
 import type { EntryPayload, Direction, TxnType } from "./types";
+import { DIRECTION_LABELS } from "./directionLabels";
 import { fetchRate, type FxRate } from "./fx";
 import { netAfterFee, formatMinor } from "./balance";
 import { buildEntryPayload } from "./entryMath";
@@ -233,7 +234,7 @@ export function EntryForm({
               checked={direction === "credit"}
               onChange={() => setDirection("credit")}
             />
-            {`Credit (Incoming)`}
+            {DIRECTION_LABELS.credit}
           </label>
           <label>
             <input
@@ -241,7 +242,7 @@ export function EntryForm({
               checked={direction === "debt"}
               onChange={() => setDirection("debt")}
             />
-            {`Debit (Outgoing)`}
+            {DIRECTION_LABELS.debt}
           </label>
         </fieldset>
       </div>

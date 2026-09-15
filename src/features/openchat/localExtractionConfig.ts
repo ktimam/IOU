@@ -1,4 +1,4 @@
-import { iouActionManifest } from "./actionManifest";
+import { IOU_DATE_ALIASES, iouActionManifest } from "./actionManifest";
 
 // IOU's private deterministic reader configuration. These policies never enter the registered
 // OpenChat response schema; the app surface alone assigns financial meanings to their field names.
@@ -60,10 +60,7 @@ export const IOU_LOCAL_EXTRACTION_SCHEMA: Record<string, unknown> = {
             format: "date",
             "x-iou-normalize-date": true,
             "x-iou-date-from-text": true,
-            "x-openchat-property-aliases": [
-                "due_date", "transaction_date", "payment_date", "start_date",
-                "Date", "TransactionDate", "PaymentDate", "StartDate",
-            ],
+            "x-openchat-property-aliases": IOU_DATE_ALIASES,
         },
     },
 };

@@ -56,6 +56,15 @@ Use `-Action OpenChatFrontendRestart` only for scoped OpenChat browser/account-l
 still verifies the live replica, restarts only the exact OpenChat Vite process, and reports the IOU
 registration as unchecked instead of treating an unrelated registration mismatch as link readiness.
 
+This phone-facing launcher sets the browser passkey RP ID to the configured `tailnetHost` and
+checks the served Vite environment before reporting readiness. Use the Tailscale HTTPS address
+for browser passkey sign-in, including on desktop; loopback probes do not establish passkey
+readiness for `localhost`. Passkeys previously created for `localhost` or a production domain
+cannot be moved to this hostname by changing configuration. Keep those credentials and use the
+normal account-linking flow if this hostname has no existing passkey. This does not change APK
+identity settings or reset any stored credentials. The read-only regression checks run with
+`pwsh -NoProfile -File scripts/live/browser-passkey-environment.selftest.ps1`.
+
 Set `openChat.canisterIdsFile` to the exact deployment's `.dfx/local/canister_ids.json`. Startup
 requires every local canister alias consumed by both OpenChat roots (including `identity`) and passes
 those values to Vite; it also requires the two external OneSec canister principals as explicit config
@@ -67,6 +76,66 @@ The optional `openChat.androidLink` object supplies the Android package name and
 SHA-256 signing-certificate fingerprint as `OC_ANDROID_LINK_PACKAGE` and
 `OC_ANDROID_LINK_CERT_SHA256`. Omit the whole object for browser-only startup; no package or signing
 identity is inferred from the current machine.
+
+### Optional local APK update identity
+
+The upstream Android code namespace and Tauri identifier are not the installed application ID.
+To produce a local in-place update for an already linked package, explicitly enable
+`androidBuild.localIdentityProfile` in the ignored local config. The example leaves it disabled.
+The installed package and expected signer come **only** from `openChat.androidLink`; do not put a
+second application ID or certificate in the profile, and do not override the Tauri identifier.
+
+Supply an absolute project-specific `tempRoot` (referred to as `<project-temp>`), a child `taskDirectory`, the independently
+checked installed `minimumVersionCode`, and `signing: { "kind": "existing-debug", "keystorePath":
+"C:\\path\\to\\existing\\debug.keystore" }`. This is the existing Android debug signer, not a
+publisher key. No key is generated or guessed. A different certificate, missing key, ambient
+release-signing variables/`keystore.properties`, or lower version fails. `versionName` and
+`versionCode` are optional explicit native overrides; otherwise Tauri's numeric source version is
+preserved (`0.1.0` yields `1000`). The timestamped `WebsiteVersion` is never used as a native version.
+The builder requires configured SDK build-tools (`buildToolsVersion`) and command-line tools
+`latest/bin/apkanalyzer.bat` for artifact inspection.
+
+```powershell
+pwsh -NoProfile -File scripts/live/build-openchat-android.ps1 `
+  -EnvironmentConfigPath scripts/live/start-environment.local.json -DryRun
+# After reviewing the plan and explicitly selecting the existing signer:
+pwsh -NoProfile -File scripts/live/build-openchat-android.ps1 `
+  -EnvironmentConfigPath scripts/live/start-environment.local.json
+```
+
+The profile uses an input-hashed, isolated `GRADLE_USER_HOME` below the configured task directory.
+Both Tauri and the guarded direct-Gradle fallback inherit that same profile. Its init script changes
+only the app module's installed ID, explicit version and selected local signing config; namespace,
+Kotlin/JNI classes, backend/RP origin, all-WebGPU flags and OTA `none` are preserved. The source must
+already contain application-level registration of notification components; the profile does not
+rewrite classes or patch OpenChat. Existing task homes with unexpected init scripts are rejected.
+The fallback still requires a freshly compiled ARM64 library; it cannot reuse a stale native build.
+
+For optional cache reuse, `readOnlyDependencyCache` names an existing cache directory containing
+`modules-2` and is passed as `GRADLE_RO_DEP_CACHE`. `wrapperCacheDirectory` may name an existing
+`wrapper/dists` directory; its contents are copied, never moved or linked, into a new task home.
+Without these settings, the first Gradle invocation may need to populate its isolated caches.
+Neither option installs a global init script or modifies the original caches.
+
+Dry-run/config validation does not read the key, build an APK or prove Android readiness. A real
+profile build checks the selected certificate before starting, then verifies the APK signature,
+binary manifest ID/version/component classes, DEX class definitions, FileProvider authority and
+the packaged ARM64 library hash before returning `Valid=true`. The existing worker, RP-ID, OTA and
+fresh-artifact gates also remain active. These checks do not prove physical-device inference or
+retention of account/model data.
+
+Servers may start before the first profile APK because the build needs their public-key query.
+Startup preserves the no-profile source-ID mismatch guard. With an explicit profile it reports
+missing, stale or wrong APK evidence as **unverified**, with build guidance, rather than blocking
+the servers or claiming the installed app matches. A built artifact check never verifies installed
+state. Review the actual artifact and installed ID/certificate/version before separately authorizing
+an in-place update; do not uninstall or clear storage to bypass a mismatch.
+
+Fixture-only regressions: `pwsh -NoProfile -File scripts/live/local-apk-identity.selftest.ps1`.
+They use synthetic ZIPs and stubbed verification output, not real keystores or an Android build.
+To also execute the actual Gradle init script against lifecycle fixtures, pass
+`-GradleLib C:\path\to\existing\gradle\lib`; this uses the already installed Groovy jars and
+does not start Gradle, resolve dependencies or read the signing key.
 
 The optional `androidDevice` config names one exact ADB executable and device serial. With
 `requiredForReady: true`, startup fails until that device reports `state=device`; with `false`, it

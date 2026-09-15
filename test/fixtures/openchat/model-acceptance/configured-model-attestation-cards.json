@@ -1,0 +1,614 @@
+{
+  "schemaVersion": 1,
+  "scope": "Exact current host/app cards from retained model captures; not live phone attestation",
+  "cases": [
+    {
+      "modelId": "qwen3-vl-2b-q4-head-f16-diagnostic",
+      "imageId": "dev-real-arabic-transfer",
+      "promptSha256": "2d73ebab0701a7adb4256072ef4625c30964b46766172bae05602bc72e045cc8",
+      "card": {
+        "title": "Add to IOU",
+        "rows": [
+          {
+            "label": "Amount",
+            "value": "12900"
+          },
+          {
+            "label": "Currency",
+            "value": "EGP"
+          },
+          {
+            "label": "Type",
+            "value": "settlement"
+          },
+          {
+            "label": "Direction",
+            "value": "credit"
+          },
+          {
+            "label": "Date",
+            "value": "2026-08-14"
+          },
+          {
+            "label": "Note",
+            "value": "تمت العملية بنجاح"
+          }
+        ],
+        "confirm_label": "Add to IOU",
+        "cancel_label": "Cancel",
+        "action_id": "iou.entry.import",
+        "confirm_payload_json": "{\"amount\":12900,\"currency\":\"EGP\",\"kind\":\"settlement\",\"note\":\"تمت العملية بنجاح\",\"image_heading\":\"تمت العملية بنجاح\",\"date\":\"2026-08-14\",\"direction\":\"credit\"}"
+      },
+      "confirmation_json": "{\"amount\":12900,\"direction\":\"credit\",\"note\":\"تمت العملية بنجاح\",\"currency\":\"EGP\",\"kind\":\"settlement\",\"date\":\"2026-08-14\"}"
+    },
+    {
+      "modelId": "qwen3-vl-2b-q4-head-f16-diagnostic",
+      "imageId": "dev-real-payout-range",
+      "promptSha256": "2d73ebab0701a7adb4256072ef4625c30964b46766172bae05602bc72e045cc8",
+      "card": {
+        "title": "Add to IOU",
+        "rows": [
+          {
+            "label": "Amount",
+            "value": "1912.15"
+          },
+          {
+            "label": "Currency",
+            "value": "USD"
+          },
+          {
+            "label": "Type",
+            "value": "iou"
+          },
+          {
+            "label": "Direction",
+            "value": "credit"
+          },
+          {
+            "label": "Date",
+            "value": "2026-07-19"
+          },
+          {
+            "label": "Note",
+            "value": "Reservation"
+          }
+        ],
+        "confirm_label": "Add to IOU",
+        "cancel_label": "Cancel",
+        "action_id": "iou.entry.import",
+        "confirm_payload_json": "{\"amount\":1912.15,\"currency\":\"USD\",\"kind\":\"iou\",\"note\":\"Reservation\",\"image_heading\":\"Reservation\",\"interval_start\":\"Sun, Jul 19\",\"interval_end\":\"Thu, Aug 6\",\"date\":\"2026-07-19\",\"direction\":\"credit\"}"
+      },
+      "confirmation_json": "{\"amount\":1912.15,\"direction\":\"credit\",\"note\":\"Reservation | From Sun, Jul 19 to Thu, Aug 6\",\"currency\":\"USD\",\"kind\":\"iou\",\"date\":\"2026-07-19\"}"
+    },
+    {
+      "modelId": "qwen3-vl-2b-q4-head-f16-diagnostic",
+      "imageId": "dev-real-english-transfer",
+      "promptSha256": "2d73ebab0701a7adb4256072ef4625c30964b46766172bae05602bc72e045cc8",
+      "card": {
+        "title": "Add to IOU",
+        "rows": [
+          {
+            "label": "Amount",
+            "value": "13500"
+          },
+          {
+            "label": "Currency",
+            "value": "EGP"
+          },
+          {
+            "label": "Type",
+            "value": "settlement"
+          },
+          {
+            "label": "Direction",
+            "value": "credit"
+          },
+          {
+            "label": "Date",
+            "value": "2026-08-13"
+          },
+          {
+            "label": "Note",
+            "value": "Your transaction was successful"
+          }
+        ],
+        "confirm_label": "Add to IOU",
+        "cancel_label": "Cancel",
+        "action_id": "iou.entry.import",
+        "confirm_payload_json": "{\"amount\":13500,\"currency\":\"EGP\",\"kind\":\"settlement\",\"note\":\"Your transaction was successful\",\"image_heading\":\"Your transaction was successful\",\"date\":\"2026-08-13\",\"direction\":\"credit\"}"
+      },
+      "confirmation_json": "{\"amount\":13500,\"direction\":\"credit\",\"note\":\"Your transaction was successful\",\"currency\":\"EGP\",\"kind\":\"settlement\",\"date\":\"2026-08-13\"}"
+    },
+    {
+      "modelId": "qwen3-vl-2b-q4-head-f16-diagnostic",
+      "imageId": "holdout-synthetic-missing-evidence",
+      "promptSha256": "2d73ebab0701a7adb4256072ef4625c30964b46766172bae05602bc72e045cc8",
+      "card": {
+        "title": "Add to IOU",
+        "rows": [
+          {
+            "label": "Amount",
+            "value": "72.5"
+          },
+          {
+            "label": "Type",
+            "value": "iou"
+          },
+          {
+            "label": "Direction",
+            "value": "credit"
+          },
+          {
+            "label": "Note",
+            "value": "REPAIR ESTIMATE"
+          }
+        ],
+        "confirm_label": "Add to IOU",
+        "cancel_label": "Cancel",
+        "action_id": "iou.entry.import",
+        "confirm_payload_json": "{\"amount\":72.5,\"kind\":\"iou\",\"note\":\"REPAIR ESTIMATE\",\"image_heading\":\"REPAIR ESTIMATE\",\"direction\":\"credit\"}"
+      },
+      "confirmation_json": "{\"amount\":72.5,\"direction\":\"credit\",\"note\":\"REPAIR ESTIMATE\",\"kind\":\"iou\"}"
+    },
+    {
+      "modelId": "qwen3-vl-2b-q4-head-f16-diagnostic",
+      "imageId": "dev-synthetic-paper-owed",
+      "promptSha256": "2d73ebab0701a7adb4256072ef4625c30964b46766172bae05602bc72e045cc8",
+      "card": {
+        "title": "Add to IOU",
+        "rows": [
+          {
+            "label": "Amount",
+            "value": "350"
+          },
+          {
+            "label": "Currency",
+            "value": "EGP"
+          },
+          {
+            "label": "Type",
+            "value": "iou"
+          },
+          {
+            "label": "Direction",
+            "value": "credit"
+          },
+          {
+            "label": "Date",
+            "value": "2026-07-04"
+          },
+          {
+            "label": "Note",
+            "value": "RIVER MARKET"
+          }
+        ],
+        "confirm_label": "Add to IOU",
+        "cancel_label": "Cancel",
+        "action_id": "iou.entry.import",
+        "confirm_payload_json": "{\"amount\":350,\"currency\":\"EGP\",\"kind\":\"iou\",\"note\":\"RIVER MARKET\",\"image_heading\":\"RIVER MARKET\",\"date\":\"2026-07-04\",\"direction\":\"credit\"}"
+      },
+      "confirmation_json": "{\"amount\":350,\"direction\":\"credit\",\"note\":\"RIVER MARKET\",\"currency\":\"EGP\",\"kind\":\"iou\",\"date\":\"2026-07-04\"}"
+    },
+    {
+      "modelId": "qwen3-vl-2b-q4-head-f16-diagnostic",
+      "imageId": "dev-synthetic-workshop-range",
+      "promptSha256": "2d73ebab0701a7adb4256072ef4625c30964b46766172bae05602bc72e045cc8",
+      "card": {
+        "title": "Add to IOU",
+        "rows": [
+          {
+            "label": "Amount",
+            "value": "1912.15"
+          },
+          {
+            "label": "Currency",
+            "value": "USD"
+          },
+          {
+            "label": "Type",
+            "value": "iou"
+          },
+          {
+            "label": "Direction",
+            "value": "credit"
+          },
+          {
+            "label": "Date",
+            "value": "2026-07-19"
+          },
+          {
+            "label": "Note",
+            "value": "Workshop Confirmed"
+          }
+        ],
+        "confirm_label": "Add to IOU",
+        "cancel_label": "Cancel",
+        "action_id": "iou.entry.import",
+        "confirm_payload_json": "{\"amount\":1912.15,\"currency\":\"USD\",\"kind\":\"iou\",\"note\":\"Workshop Confirmed\",\"image_heading\":\"Workshop Confirmed\",\"interval_start\":\"2026-07-19\",\"interval_end\":\"2026-08-06\",\"date\":\"2026-07-19\",\"direction\":\"credit\"}"
+      },
+      "confirmation_json": "{\"amount\":1912.15,\"direction\":\"credit\",\"note\":\"Workshop Confirmed | From 2026-07-19 to 2026-08-06\",\"currency\":\"USD\",\"kind\":\"iou\",\"date\":\"2026-07-19\"}"
+    },
+    {
+      "modelId": "qwen3-vl-2b-q4-head-f16-diagnostic",
+      "imageId": "holdout-synthetic-spanish-paid",
+      "promptSha256": "2d73ebab0701a7adb4256072ef4625c30964b46766172bae05602bc72e045cc8",
+      "card": {
+        "title": "Add to IOU",
+        "rows": [
+          {
+            "label": "Amount",
+            "value": "84.7"
+          },
+          {
+            "label": "Currency",
+            "value": "EUR"
+          },
+          {
+            "label": "Type",
+            "value": "settlement"
+          },
+          {
+            "label": "Direction",
+            "value": "credit"
+          },
+          {
+            "label": "Date",
+            "value": "2026-09-08"
+          },
+          {
+            "label": "Note",
+            "value": "PAGO RECIBIDO"
+          }
+        ],
+        "confirm_label": "Add to IOU",
+        "cancel_label": "Cancel",
+        "action_id": "iou.entry.import",
+        "confirm_payload_json": "{\"amount\":84.7,\"currency\":\"EUR\",\"kind\":\"settlement\",\"note\":\"PAGO RECIBIDO\",\"image_heading\":\"PAGO RECIBIDO\",\"date\":\"2026-09-08\",\"direction\":\"credit\"}"
+      },
+      "confirmation_json": "{\"amount\":84.7,\"direction\":\"credit\",\"note\":\"PAGO RECIBIDO\",\"currency\":\"EUR\",\"kind\":\"settlement\",\"date\":\"2026-09-08\"}"
+    },
+    {
+      "modelId": "qwen3-vl-2b-q4-head-f16-diagnostic",
+      "imageId": "holdout-synthetic-unpaid-hire",
+      "promptSha256": "2d73ebab0701a7adb4256072ef4625c30964b46766172bae05602bc72e045cc8",
+      "card": {
+        "title": "Add to IOU",
+        "rows": [
+          {
+            "label": "Amount",
+            "value": "842.65"
+          },
+          {
+            "label": "Currency",
+            "value": "GBP"
+          },
+          {
+            "label": "Type",
+            "value": "iou"
+          },
+          {
+            "label": "Direction",
+            "value": "credit"
+          },
+          {
+            "label": "Date",
+            "value": "2026-09-28"
+          },
+          {
+            "label": "Note",
+            "value": "EQUIPMENT HIRE"
+          }
+        ],
+        "confirm_label": "Add to IOU",
+        "cancel_label": "Cancel",
+        "action_id": "iou.entry.import",
+        "confirm_payload_json": "{\"amount\":842.65,\"currency\":\"GBP\",\"kind\":\"iou\",\"note\":\"EQUIPMENT HIRE\",\"image_heading\":\"EQUIPMENT HIRE\",\"interval_start\":\"28 Sep 2026\",\"interval_end\":\"2 Oct 2026\",\"date\":\"2026-09-28\",\"direction\":\"credit\"}"
+      },
+      "confirmation_json": "{\"amount\":842.65,\"direction\":\"credit\",\"note\":\"EQUIPMENT HIRE | From 28 Sep 2026 to 2 Oct 2026\",\"currency\":\"GBP\",\"kind\":\"iou\",\"date\":\"2026-09-28\"}"
+    },
+    {
+      "modelId": "gemma-4-e2b-it-q4",
+      "imageId": "dev-real-arabic-transfer",
+      "promptSha256": "a84d35c89fb8f3c91979a1954051769417109bb4f6785fea4fea3a3ad72048d8",
+      "card": {
+        "title": "Add to IOU",
+        "rows": [
+          {
+            "label": "Amount",
+            "value": "12900"
+          },
+          {
+            "label": "Currency",
+            "value": "EGP"
+          },
+          {
+            "label": "Type",
+            "value": "settlement"
+          },
+          {
+            "label": "Direction",
+            "value": "credit"
+          },
+          {
+            "label": "Date",
+            "value": "2026-08-14"
+          },
+          {
+            "label": "Note",
+            "value": "تمت العملية بنجاح"
+          }
+        ],
+        "confirm_label": "Add to IOU",
+        "cancel_label": "Cancel",
+        "action_id": "iou.entry.import",
+        "confirm_payload_json": "{\"amount\":12900,\"currency\":\"EGP\",\"kind\":\"settlement\",\"note\":\"تمت العملية بنجاح\",\"image_heading\":\"تمت العملية بنجاح\",\"date\":\"2026-08-14\",\"direction\":\"credit\"}"
+      },
+      "confirmation_json": "{\"amount\":12900,\"direction\":\"credit\",\"note\":\"تمت العملية بنجاح\",\"currency\":\"EGP\",\"kind\":\"settlement\",\"date\":\"2026-08-14\"}"
+    },
+    {
+      "modelId": "gemma-4-e2b-it-q4",
+      "imageId": "dev-real-payout-range",
+      "promptSha256": "a84d35c89fb8f3c91979a1954051769417109bb4f6785fea4fea3a3ad72048d8",
+      "card": {
+        "title": "Add to IOU",
+        "rows": [
+          {
+            "label": "Amount",
+            "value": "1912.15"
+          },
+          {
+            "label": "Currency",
+            "value": "USD"
+          },
+          {
+            "label": "Type",
+            "value": "iou"
+          },
+          {
+            "label": "Direction",
+            "value": "credit"
+          },
+          {
+            "label": "Date",
+            "value": "2026-07-19"
+          },
+          {
+            "label": "Note",
+            "value": "Reservation"
+          }
+        ],
+        "confirm_label": "Add to IOU",
+        "cancel_label": "Cancel",
+        "action_id": "iou.entry.import",
+        "confirm_payload_json": "{\"amount\":1912.15,\"currency\":\"USD\",\"kind\":\"iou\",\"note\":\"Reservation\",\"image_heading\":\"Reservation\",\"interval_start\":\"Sun, Jul 19\",\"interval_end\":\"Thu, Aug 6\",\"date\":\"2026-07-19\",\"direction\":\"credit\"}"
+      },
+      "confirmation_json": "{\"amount\":1912.15,\"direction\":\"credit\",\"note\":\"Reservation | From Sun, Jul 19 to Thu, Aug 6\",\"currency\":\"USD\",\"kind\":\"iou\",\"date\":\"2026-07-19\"}"
+    },
+    {
+      "modelId": "gemma-4-e2b-it-q4",
+      "imageId": "dev-real-english-transfer",
+      "promptSha256": "a84d35c89fb8f3c91979a1954051769417109bb4f6785fea4fea3a3ad72048d8",
+      "card": {
+        "title": "Add to IOU",
+        "rows": [
+          {
+            "label": "Amount",
+            "value": "13500"
+          },
+          {
+            "label": "Currency",
+            "value": "EGP"
+          },
+          {
+            "label": "Type",
+            "value": "settlement"
+          },
+          {
+            "label": "Direction",
+            "value": "credit"
+          },
+          {
+            "label": "Date",
+            "value": "2026-08-13"
+          },
+          {
+            "label": "Note",
+            "value": "Your transaction was successful"
+          }
+        ],
+        "confirm_label": "Add to IOU",
+        "cancel_label": "Cancel",
+        "action_id": "iou.entry.import",
+        "confirm_payload_json": "{\"amount\":13500,\"currency\":\"EGP\",\"kind\":\"settlement\",\"note\":\"Your transaction was successful\",\"image_heading\":\"Your transaction was successful\",\"date\":\"2026-08-13\",\"direction\":\"credit\"}"
+      },
+      "confirmation_json": "{\"amount\":13500,\"direction\":\"credit\",\"note\":\"Your transaction was successful\",\"currency\":\"EGP\",\"kind\":\"settlement\",\"date\":\"2026-08-13\"}"
+    },
+    {
+      "modelId": "gemma-4-e2b-it-q4",
+      "imageId": "holdout-synthetic-missing-evidence",
+      "promptSha256": "a84d35c89fb8f3c91979a1954051769417109bb4f6785fea4fea3a3ad72048d8",
+      "card": {
+        "title": "Add to IOU",
+        "rows": [
+          {
+            "label": "Amount",
+            "value": "72.5"
+          },
+          {
+            "label": "Type",
+            "value": "iou"
+          },
+          {
+            "label": "Direction",
+            "value": "credit"
+          },
+          {
+            "label": "Note",
+            "value": "REPAIR ESTIMATE"
+          }
+        ],
+        "confirm_label": "Add to IOU",
+        "cancel_label": "Cancel",
+        "action_id": "iou.entry.import",
+        "confirm_payload_json": "{\"amount\":72.5,\"kind\":\"iou\",\"note\":\"REPAIR ESTIMATE\",\"image_heading\":\"REPAIR ESTIMATE\",\"direction\":\"credit\"}"
+      },
+      "confirmation_json": "{\"amount\":72.5,\"direction\":\"credit\",\"note\":\"REPAIR ESTIMATE\",\"kind\":\"iou\"}"
+    },
+    {
+      "modelId": "gemma-4-e2b-it-q4",
+      "imageId": "dev-synthetic-paper-owed",
+      "promptSha256": "a84d35c89fb8f3c91979a1954051769417109bb4f6785fea4fea3a3ad72048d8",
+      "card": {
+        "title": "Add to IOU",
+        "rows": [
+          {
+            "label": "Amount",
+            "value": "350"
+          },
+          {
+            "label": "Currency",
+            "value": "EGP"
+          },
+          {
+            "label": "Type",
+            "value": "iou"
+          },
+          {
+            "label": "Direction",
+            "value": "credit"
+          },
+          {
+            "label": "Date",
+            "value": "2026-07-04"
+          },
+          {
+            "label": "Note",
+            "value": "RIVER MARKET"
+          }
+        ],
+        "confirm_label": "Add to IOU",
+        "cancel_label": "Cancel",
+        "action_id": "iou.entry.import",
+        "confirm_payload_json": "{\"amount\":350,\"currency\":\"EGP\",\"kind\":\"iou\",\"note\":\"RIVER MARKET\",\"image_heading\":\"RIVER MARKET\",\"date\":\"2026-07-04\",\"direction\":\"credit\"}"
+      },
+      "confirmation_json": "{\"amount\":350,\"direction\":\"credit\",\"note\":\"RIVER MARKET\",\"currency\":\"EGP\",\"kind\":\"iou\",\"date\":\"2026-07-04\"}"
+    },
+    {
+      "modelId": "gemma-4-e2b-it-q4",
+      "imageId": "dev-synthetic-workshop-range",
+      "promptSha256": "a84d35c89fb8f3c91979a1954051769417109bb4f6785fea4fea3a3ad72048d8",
+      "card": {
+        "title": "Add to IOU",
+        "rows": [
+          {
+            "label": "Amount",
+            "value": "1912.15"
+          },
+          {
+            "label": "Currency",
+            "value": "USD"
+          },
+          {
+            "label": "Type",
+            "value": "iou"
+          },
+          {
+            "label": "Direction",
+            "value": "credit"
+          },
+          {
+            "label": "Date",
+            "value": "2026-07-19"
+          },
+          {
+            "label": "Note",
+            "value": "Workshop Confirmed"
+          }
+        ],
+        "confirm_label": "Add to IOU",
+        "cancel_label": "Cancel",
+        "action_id": "iou.entry.import",
+        "confirm_payload_json": "{\"amount\":1912.15,\"currency\":\"USD\",\"kind\":\"iou\",\"note\":\"Workshop Confirmed\",\"image_heading\":\"Workshop Confirmed\",\"interval_start\":\"2026-07-19\",\"interval_end\":\"2026-08-06\",\"date\":\"2026-07-19\",\"direction\":\"credit\"}"
+      },
+      "confirmation_json": "{\"amount\":1912.15,\"direction\":\"credit\",\"note\":\"Workshop Confirmed | From 2026-07-19 to 2026-08-06\",\"currency\":\"USD\",\"kind\":\"iou\",\"date\":\"2026-07-19\"}"
+    },
+    {
+      "modelId": "gemma-4-e2b-it-q4",
+      "imageId": "holdout-synthetic-spanish-paid",
+      "promptSha256": "a84d35c89fb8f3c91979a1954051769417109bb4f6785fea4fea3a3ad72048d8",
+      "card": {
+        "title": "Add to IOU",
+        "rows": [
+          {
+            "label": "Amount",
+            "value": "84.7"
+          },
+          {
+            "label": "Currency",
+            "value": "EUR"
+          },
+          {
+            "label": "Type",
+            "value": "settlement"
+          },
+          {
+            "label": "Direction",
+            "value": "credit"
+          },
+          {
+            "label": "Date",
+            "value": "2026-09-08"
+          },
+          {
+            "label": "Note",
+            "value": "PAGO RECIBIDO"
+          }
+        ],
+        "confirm_label": "Add to IOU",
+        "cancel_label": "Cancel",
+        "action_id": "iou.entry.import",
+        "confirm_payload_json": "{\"amount\":84.7,\"currency\":\"EUR\",\"kind\":\"settlement\",\"note\":\"PAGO RECIBIDO\",\"image_heading\":\"PAGO RECIBIDO\",\"date\":\"2026-09-08\",\"direction\":\"credit\"}"
+      },
+      "confirmation_json": "{\"amount\":84.7,\"direction\":\"credit\",\"note\":\"PAGO RECIBIDO\",\"currency\":\"EUR\",\"kind\":\"settlement\",\"date\":\"2026-09-08\"}"
+    },
+    {
+      "modelId": "gemma-4-e2b-it-q4",
+      "imageId": "holdout-synthetic-unpaid-hire",
+      "promptSha256": "a84d35c89fb8f3c91979a1954051769417109bb4f6785fea4fea3a3ad72048d8",
+      "card": {
+        "title": "Add to IOU",
+        "rows": [
+          {
+            "label": "Amount",
+            "value": "842.65"
+          },
+          {
+            "label": "Currency",
+            "value": "GBP"
+          },
+          {
+            "label": "Type",
+            "value": "iou"
+          },
+          {
+            "label": "Direction",
+            "value": "credit"
+          },
+          {
+            "label": "Date",
+            "value": "2026-09-28"
+          },
+          {
+            "label": "Note",
+            "value": "EQUIPMENT HIRE"
+          }
+        ],
+        "confirm_label": "Add to IOU",
+        "cancel_label": "Cancel",
+        "action_id": "iou.entry.import",
+        "confirm_payload_json": "{\"amount\":842.65,\"currency\":\"GBP\",\"kind\":\"iou\",\"note\":\"EQUIPMENT HIRE\",\"image_heading\":\"EQUIPMENT HIRE\",\"interval_start\":\"28 Sep 2026\",\"interval_end\":\"2 Oct 2026\",\"date\":\"2026-09-28\",\"direction\":\"credit\"}"
+      },
+      "confirmation_json": "{\"amount\":842.65,\"direction\":\"credit\",\"note\":\"EQUIPMENT HIRE | From 28 Sep 2026 to 2 Oct 2026\",\"currency\":\"GBP\",\"kind\":\"iou\",\"date\":\"2026-09-28\"}"
+    }
+  ]
+}

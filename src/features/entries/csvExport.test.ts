@@ -27,13 +27,13 @@ describe("csvExport", () => {
     );
   });
 
-  it("emits ISO date, net amount, txn_type and Credit/Debit direction", () => {
+  it("emits ISO date, net amount, txn_type and plain-language direction", () => {
     const csv = entriesToCsv([
       { payload: sampleRow, created_by_me: true, edited: false },
     ]);
     // date,kind,txn_type,currency,amount,gross,fee%,feeFixed,direction,due_dates,note
     expect(csv).toContain(
-      "2026-06-12,expense,iou,USD,12.50,,,,Debit,2026-06-12:100%,lunch",
+      "2026-06-12,expense,iou,USD,12.50,,,,You owe,2026-06-12:100%,lunch",
     );
   });
 
@@ -52,8 +52,20 @@ describe("csvExport", () => {
       },
     ]);
     const line = csv.split("\n").find((l) => l.startsWith("2026-06-12"))!;
-    // amount(net)=750.00, gross=1000.00, fee%=20, fee_fixed=50.00, Credit
-    expect(line).toContain("iou,USD,750.00,1000.00,20,50.00,Credit,");
+    // amount(net)=750.00, gross=1000.00, fee%=20, fee_fixed=50.00, Owed to you
+    expect(line).toContain("iou,USD,750.00,1000.00,20,50.00,Owed to you,");
+  });
+
+  it.each([
+    ["credit", true, "Owed to you"], ["credit", false, "You owe"],
+    ["debt", true, "You owe"], ["debt", false, "Owed to you"],
+  ] as const)("orients exported direction to the viewer without mutating %s (%s)", (direction, mine, label) => {
+    const payload = { ...sampleRow, direction };
+    const before = JSON.stringify(payload);
+    const cells = entriesToCsv([{ payload, created_by_me: mine, edited: false }]).split("\n")[1].split(",");
+    expect(cells[8]).toBe(label);
+    expect(cells[4]).toBe("12.50");
+    expect(JSON.stringify(payload)).toBe(before);
   });
 
   it("escapes commas, quotes, and newlines", () => {

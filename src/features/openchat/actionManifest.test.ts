@@ -1,4 +1,5 @@
 import { describe, it, expect } from "vitest";
+import { createHash } from "node:crypto";
 import {
   iouActionManifest,
   renderManifestJson,
@@ -9,9 +10,11 @@ import {
   buildIouOutputSchema,
   IOU_CURRENCY_EVIDENCE_MAP,
   IOU_MIN_MAJOR_AMOUNT,
+  IOU_DATE_ALIASES,
 } from "./actionManifest";
 import { parseDraft } from "../entries/draft";
 import { IOU_LOCAL_EXTRACTION_SCHEMA } from "./localExtractionConfig";
+import { imageCurrencySymbolPolicy } from "./currencyEvidencePolicy";
 import registration from "../../../docs/openchat-registration.json";
 
 describe("private account templates", () => {
@@ -526,20 +529,23 @@ describe("registered wire — schema evidence stays private and public rows stay
       );
       expect(schema).not.toHaveProperty("x-openchat-image-focused-passes");
     }
-    expect(expectedPrompt.template.trim()).toBe(expectedPrompt.template);
+    expect(expectedPrompt.template.trimEnd() + "\n").toBe(expectedPrompt.template);
     expect(
       new TextEncoder().encode(expectedPrompt.template).byteLength,
     ).toBeLessThanOrEqual(4_096);
     expect(expectedPrompt.template).not.toContain("\n\nRules:");
-    expect(expectedPrompt.template).toContain("Use these fields:");
+    expect(expectedPrompt.template).toContain("Use these fields in the listed order:");
+    expect(expectedPrompt.template.match(/^"[a-z_]+":/gm)).toEqual([
+      '"kind":', '"currency":', '"amount":', '"printed_date":', '"printed_end_date":', '"note":',
+    ]);
     expect(expectedPrompt.template).toContain("Use one object when there is one transaction");
     expect(expectedPrompt.template).toContain(
       "copy only the uppermost prominent standalone heading",
     );
     expect(expectedPrompt.template).toContain("stopping at its line break");
-    expect(expectedPrompt.template).toContain("beginning and ending DATE VALUES of one time span");
-    expect(expectedPrompt.template).toContain('Never move part of an endpoint into "date"');
-    expect(expectedPrompt.template).toContain("Include both endpoints or neither");
+    expect(expectedPrompt.template).toContain("copy the complete visible transaction date");
+    expect(expectedPrompt.template).toContain('Always include this field whenever "printed_date" is present');
+    expect(expectedPrompt.template).toContain('If a date is visible, include BOTH "printed_date" and "printed_end_date"');
     expect(expectedPrompt.template).toContain(
       "The JSON object itself is the answer; do not enclose the entire object in quotation marks",
     );
@@ -547,9 +553,8 @@ describe("registered wire — schema evidence stays private and public rows stay
       "amount",
       "currency",
       "kind",
-      "interval_start",
-      "interval_end",
-      "date",
+      "printed_date",
+      "printed_end_date",
       "note",
     ]) {
       expect(expectedPrompt.template).toContain(`"${field}"`);
@@ -993,6 +998,9 @@ describe("the extraction prompt tells the model a single line can hold several t
 
   it("keeps a concise app-owned image contract with exact-value and interval guards", () => {
     const prompt = IOU_IMAGE_EXTRACTION_PROMPT.replace(/\s+/g, " ");
+    expect(createHash("sha256").update(IOU_IMAGE_EXTRACTION_PROMPT).digest("hex"))
+      .toBe("a921746fc62f9e7fe3d8bc4d89f766f92fa57530e832832b0fdd5b97454fcb82");
+    expect(IOU_IMAGE_EXTRACTION_PROMPT.endsWith("\n")).toBe(true);
 
     expect(
       new TextEncoder().encode(IOU_IMAGE_EXTRACTION_PROMPT).byteLength,
@@ -1006,16 +1014,19 @@ describe("the extraction prompt tells the model a single line can hold several t
     expect(prompt).toMatch(/ignore counts[^.]*IDs[^.]*balances[^.]*repeated totals/i);
     expect(prompt).toMatch(/use "iou" unless[^.]*explicitly states[^.]*money[^.]*already paid[^.]*sent[^.]*transferred[^.]*received/i);
     expect(prompt).toMatch(/only then use "settlement"/i);
-    expect(prompt).toMatch(/currency[^.]*visibly printed three-letter ISO code/i);
+    expect(prompt).toMatch(/currency[^.]*visibly printed currency code or symbol exactly/i);
+    expect(prompt).toContain(`or its mapped code from this IOU symbol policy: ${JSON.stringify(imageCurrencySymbolPolicy())}`);
+    expect(prompt).toContain("Use a mapping only when its exact symbol is visible");
+    expect(prompt).toContain("Preserve explicit ISO codes; omit missing, unknown or conflicting currency");
+    expect(prompt).toContain("Never use text/OCR aliases or guess");
     expect(prompt).toMatch(/confirmed status or a displayed monetary total does not establish completed money movement/i);
     expect(prompt).not.toMatch(/"direction"\s*:/i);
     for (const field of [
       "amount",
       "currency",
       "kind",
-      "interval_start",
-      "interval_end",
-      "date",
+      "printed_date",
+      "printed_end_date",
       "note",
     ]) {
       expect(prompt).toContain(`"${field}"`);
@@ -1024,21 +1035,17 @@ describe("the extraction prompt tells the model a single line can hold several t
     expect(prompt).toMatch(
       /"note": copy only the uppermost prominent standalone heading[^.]*line break/i,
     );
-    expect(prompt).toMatch(/complete visible beginning and ending date values[^.]*not their labels/i);
-    expect(prompt).toMatch(/copy each entire value[^.]*weekday[^.]*month[^.]*day number[^.]*printed year/i);
+    expect(prompt).toMatch(/copy the complete visible transaction date/i);
+    expect(prompt).toMatch(/keep its weekday[^.]*month[^.]*day number[^.]*printed year exactly as shown/i);
     expect(prompt).toMatch(/a month alone is invalid/i);
-    expect(prompt).toMatch(/keep each date together in its own field/i);
-    expect(prompt).toMatch(/never move part of an endpoint into "date"/i);
-    expect(prompt).toMatch(/include both endpoints or neither/i);
-    expect(prompt).toMatch(/when these fields are present, omit "date" completely/i);
-    expect(prompt).toMatch(/each endpoint contains its visible day number, not just its month/i);
+    expect(prompt).toContain('Always include this field whenever "printed_date" is present');
+    expect(prompt).toContain('Otherwise write the empty string ""');
+    expect(prompt).toContain('Both date fields are strings, never nested objects or null');
+    expect(prompt).toContain('If no date is visible, omit both fields');
+    expect(prompt).toContain('Never use any other date field');
     expect(prompt).not.toMatch(/image-note-composition/i);
 
-    expect(prompt).toMatch(
-      /only when there is no interval[^.]*"date"[^.]*YYYY-MM-DD[^.]*transaction date[^.]*day[^.]*month[^.]*year[^.]*printed together/i,
-    );
-    expect(prompt).toMatch(/without a printed year, omit "date"/i);
-    expect(prompt).toMatch(/never supply a missing year/i);
+    expect(prompt).toMatch(/never invent a year or an endpoint/i);
     expect(prompt).not.toMatch(/\b(?:19|20)\d{2}-\d{2}-\d{2}\b/);
     expect(prompt).not.toMatch(
       /\b\d{1,2}\s+(?:jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\s+\d{4}\b/i,
@@ -1048,7 +1055,11 @@ describe("the extraction prompt tells the model a single line can hold several t
     // A weak vision signal must not let greedy decoding echo a numeric instruction literal as the
     // transaction amount. Spell normalization semantics without any concrete numeric example.
     expect(IOU_IMAGE_EXTRACTION_PROMPT).not.toMatch(/\b\d[\d,.]*\b/u);
-    const lowerPrompt = IOU_IMAGE_EXTRACTION_PROMPT.toLocaleLowerCase();
+    // The existing app-owned symbol policy is the sole allowed currency vocabulary. Do not
+    // introduce a separate currency example or make an OCR/text alias into image guidance.
+    const declaredSymbolPolicy = JSON.stringify(imageCurrencySymbolPolicy());
+    expect(IOU_IMAGE_EXTRACTION_PROMPT.split(declaredSymbolPolicy)).toHaveLength(2);
+    const lowerPrompt = IOU_IMAGE_EXTRACTION_PROMPT.replace(declaredSymbolPolicy, "").toLocaleLowerCase();
     for (const { value, keywords } of IOU_CURRENCY_EVIDENCE_MAP) {
       for (const concreteCurrency of [value, ...keywords]) {
         expect(lowerPrompt).not.toContain(concreteCurrency.toLocaleLowerCase());
@@ -1112,16 +1123,6 @@ describe("the extraction prompt tells the model a single line can hold several t
       minLength: 1,
       maxLength: 96,
       format: "utf8-no-nul",
-      "x-openchat-property-aliases": [
-        "due_date",
-        "transaction_date",
-        "payment_date",
-        "start_date",
-        "Date",
-        "TransactionDate",
-        "PaymentDate",
-        "StartDate",
-      ],
     });
     expect(sourceProperties.date).not.toHaveProperty(
       "x-openchat-date-from-message-timestamp-keywords",
@@ -1141,17 +1142,15 @@ describe("the extraction prompt tells the model a single line can hold several t
       minLength: 1,
       maxLength: 96,
       format: "utf8-no-nul",
-      "x-openchat-property-aliases": [
-        "due_date",
-        "transaction_date",
-        "payment_date",
-        "start_date",
-        "Date",
-        "TransactionDate",
-        "PaymentDate",
-        "StartDate",
-      ],
     });
+    for (const properties of [sourceProperties, registeredSchema.properties!]) {
+      expect(properties.date).not.toHaveProperty("x-openchat-property-aliases");
+      for (const alias of IOU_DATE_ALIASES) {
+        expect(properties[alias]).toEqual({ type: "string", minLength: 1, maxLength: 96, format: "utf8-no-nul" });
+      }
+      expect(properties.printed_date).toEqual({ type: "string", minLength: 1, maxLength: 96, format: "utf8-no-nul" });
+      expect(properties.printed_end_date).toEqual({ type: "string", minLength: 0, maxLength: 96, format: "utf8-no-nul" });
+    }
     expect(registeredSchema.properties?.date).not.toHaveProperty(
       "x-openchat-date-from-message-timestamp-keywords",
     );

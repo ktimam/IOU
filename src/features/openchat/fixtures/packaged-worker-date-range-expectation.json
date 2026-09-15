@@ -3,6 +3,7 @@
   "sourceTimestamp": "2026-07-03T12:00:00.000Z",
   "raw": {
     "amount": 1912.15,
+    "currency": null,
     "kind": "iou",
     "interval_start": "Sun, Jul 19",
     "interval_end": "Thu, Aug 6",

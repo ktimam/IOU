@@ -69,9 +69,24 @@ describe("buildManifestWire", () => {
       includeRuleGuidance: false,
     });
     expect(schema).not.toHaveProperty("x-openchat-image-focused-passes");
-    for (const field of ["amount", "currency", "kind", "date"]) {
+    for (const field of ["amount", "currency", "kind", "printed_date", "printed_end_date", "note"]) {
       expect(IOU_IMAGE_EXTRACTION_PROMPT).toContain(`"${field}"`);
     }
+    expect(IOU_IMAGE_EXTRACTION_PROMPT).not.toMatch(/"(?:date|interval_start|interval_end)"/);
+    expect(schema.properties.currency).toEqual({
+      type: "string", minLength: 1, maxLength: 16, format: "utf8-no-nul",
+      "x-openchat-require-text-evidence": true,
+    });
+    expect(schema.properties.printed_date).toEqual({
+      type: "string", minLength: 1, maxLength: 96, format: "utf8-no-nul",
+    });
+    expect(schema.properties.printed_end_date).toEqual({
+      type: "string", minLength: 0, maxLength: 96, format: "utf8-no-nul",
+    });
+    expect(schema.required).toEqual(["amount", "kind", "direction"]);
+    expect(schema.properties.date).not.toHaveProperty("x-openchat-property-aliases");
+    expect(schema.properties.printed_date).not.toHaveProperty("x-openchat-normalize-date");
+    expect(schema.properties.printed_end_date).not.toHaveProperty("x-openchat-normalize-date");
   });
 
   it("sends app_canister_id as an opt principal when a valid one is supplied, [] otherwise", () => {

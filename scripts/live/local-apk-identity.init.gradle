@@ -1,0 +1,66 @@
+// Loaded only from the task-scoped GRADLE_USER_HOME. No production source defaults change.
+import groovy.json.JsonSlurper
+import java.security.KeyStore
+import java.security.MessageDigest
+
+def profilePath = System.getenv('OC_LOCAL_APK_IDENTITY_PROFILE')
+if (!profilePath) throw new GradleException('Missing explicit local APK identity profile')
+def profile = new JsonSlurper().parse(new File(profilePath))
+if (profile.schemaVersion != 1) throw new GradleException('Unsupported local APK identity profile')
+def expectedRoot = new File(profile.androidRoot).canonicalFile
+gradle.settingsEvaluated { settings ->
+    // Gradle also applies user-home init scripts to buildSrc/included builds.
+    // Same-root descendants may configure normally, but are never modified below.
+    if (!settings.settingsDir.canonicalFile.toPath().startsWith(expectedRoot.toPath())) {
+        throw new GradleException('Local APK identity profile was applied to a different project')
+    }
+}
+gradle.beforeProject { project ->
+    if (project.rootDir.canonicalFile != expectedRoot || project.path != ':app') return
+    project.pluginManager.withPlugin('com.android.application') {
+        project.extensions.getByName('androidComponents').finalizeDsl { android ->
+            if (android.namespace != profile.namespace || android.defaultConfig.applicationId != profile.namespace) {
+                throw new GradleException('Source namespace/applicationId changed; refusing local identity override')
+            }
+            if (System.getenv('OC_ANDROID_OTA_UPDATES') != 'none' || System.getenv('OC_APP_STORE') || System.getenv('OC_DEVTOOLS')) {
+                throw new GradleException('Local APK profile requires OTA none and the non-store, non-devtools build')
+            }
+            ['OC_ANDROID_KEYSTORE_PATH', 'OC_ANDROID_KEYSTORE_PASSWORD', 'OC_ANDROID_KEY_ALIAS',
+             'OC_ANDROID_KEY_PASSWORD', 'OC_ANDROID_REQUIRE_RELEASE_SIGNING', 'OC_ANDROID_VERSION_NAME'].each { name ->
+                if (System.getenv(name)) throw new GradleException("Local identity profile conflicts with ambient ${name}")
+            }
+            if (new File(expectedRoot, 'keystore.properties').exists()) {
+                throw new GradleException('Local identity profile conflicts with keystore.properties')
+            }
+            // Tauri may add its own merged config to child processes. The builder
+            // rejects caller-supplied TAURI_CONFIG; a child must still retain this identifier.
+            def childConfig = System.getenv('TAURI_CONFIG')
+            if (childConfig) {
+                def merged = new JsonSlurper().parseText(childConfig)
+                if (merged.identifier && merged.identifier != profile.namespace) {
+                    throw new GradleException('Tauri child configuration changed the source identifier')
+                }
+            }
+            def keyFile = new File(profile.keystorePath)
+            if (!keyFile.isFile()) throw new GradleException('Existing local debug key is missing; key generation is forbidden')
+            def keyStore = KeyStore.getInstance(keyFile, 'android'.toCharArray())
+            if (!keyStore.isKeyEntry('androiddebugkey')) throw new GradleException('Existing debug signing alias is missing')
+            def certificate = keyStore.getCertificate('androiddebugkey')
+            def digest = MessageDigest.getInstance('SHA-256').digest(certificate.encoded).encodeHex().toString().toUpperCase(Locale.ROOT)
+            if (digest != profile.certificateSha256) throw new GradleException('Existing signing certificate does not match linked identity')
+            if (profile.versionCode < profile.minimumVersionCode || profile.versionCode > 2100000000) {
+                throw new GradleException('Local APK version would downgrade the installed app')
+            }
+            android.defaultConfig.applicationId = profile.applicationId
+            android.defaultConfig.versionCode = profile.versionCode as int
+            android.defaultConfig.versionName = profile.versionName
+            def signing = android.signingConfigs.maybeCreate('localExistingDebugIdentity')
+            signing.storeFile = keyFile
+            signing.storePassword = 'android'
+            signing.keyAlias = 'androiddebugkey'
+            signing.keyPassword = 'android'
+            android.buildTypes.getByName('release').signingConfig = signing
+            if (android.namespace != profile.namespace) throw new GradleException('Local profile changed the code namespace')
+        }
+    }
+}

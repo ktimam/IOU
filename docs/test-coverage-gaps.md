@@ -593,7 +593,24 @@ Generated from an adversarial multi-agent coverage sweep. **284 scenarios analyz
   - expected: payload.schedule=[{due_ts, percent:100}] — the length===1 branch overrides the typed percent. parseDraft's equivalent is tested; buildEntryPayload's is not.
   - sketch: entryMath.test: single-row schedule percent:40 → assert emitted percent is 100.
 
-## TYPES/TEMPLATES ↔ OpenChat MANIFEST SYNC — do a user's saved transaction types actually reach the REGISTERED OpenChat ma
+## Historical, superseded: saved types in the public OpenChat manifest
+
+**Do not implement the publication or re-registration expectations in this historical section.**
+The current privacy boundary deliberately excludes private account type names, identifiers and
+keywords from public manifests and model prompts. `buildIouRules` and `buildIouOutputSchema`
+ignore their legacy template argument; see
+[the actual boundary](../src/features/openchat/actionManifest.ts) and
+[its non-disclosure tests](../src/features/openchat/actionManifest.test.ts).
+Fresh deployment, linking, reconnecting or editing a type must not restore the obsolete
+public `template` keyword map described below.
+
+Current acceptance instead checks matching against the linked account's private roster after
+extraction, current roster refresh, ambiguity rejection and the saved type's direction. Note
+and optional image-heading evidence remain separate; neither a private roster nor a model's
+unverified type identifier becomes public extraction metadata. See
+[recorded image/type regressions](../src/features/openchat/recordedImageSavedTypes.test.ts) and
+[separate heading/memo coverage](../src/features/openchat/imageHeadingSavedTypes.test.ts).
+The following old scenarios are retained as history, not release requirements or test recipes.
 
 - **[P0/regression]** Caller wiring — connected-only user's type-save actually re-registers the manifest
   - layer: `vitest-unit`

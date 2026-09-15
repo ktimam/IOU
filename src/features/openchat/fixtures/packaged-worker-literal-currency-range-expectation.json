@@ -1,0 +1,17 @@
+{
+  "version": 1,
+  "sourceTimestamp": "2026-07-03T12:00:00.000Z",
+  "raw": {
+    "amount": 1912.15,
+    "currency": "$",
+    "kind": "iou",
+    "printed_date": "Sun, Jul 19",
+    "printed_end_date": "Thu, Aug 6",
+    "date": null,
+    "interval_start": null,
+    "interval_end": null,
+    "note": "Reservation"
+  },
+  "card": { "date": "2026-07-19", "currency": "USD", "note": "Reservation | From Sun, Jul 19 to Thu, Aug 6" },
+  "confirmed": { "date": "2026-07-19", "currency": "USD", "note": "Reservation | From Sun, Jul 19 to Thu, Aug 6" }
+}

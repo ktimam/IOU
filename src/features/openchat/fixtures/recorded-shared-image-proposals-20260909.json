@@ -1,0 +1,757 @@
+{
+  "version": 1,
+  "mode": "recorded-shared-image-proposal-regressions",
+  "scope": "Immutable selected historical completions, not new inference or a claim that a shared prompt passed. The parent diagnostic phase completed 111 inferences; only 14 selected source-bound records are retained here. No image pixels/model weights/accounts are included. Tests are IOU-owned app-unit replays, not the actual OpenChat host parser, UI, GPU, phone, or posting.",
+  "sourceCorpus": {
+    "artifact": "admin/common-image-corpus-20260909.resolved.json",
+    "sha256": "d8b63be981cdb22d286f59aebadbc08a2f419a6daa3cb174321382650f040798",
+    "oraclesFrozenBeforeInference": true,
+    "calendarPolicy": "Calendar-date substring only; the independently transcribed full visible timestamp is checked separately, never substituted into an old oracle.",
+    "absentPolicy": "Currency and printed date keys must be absent when absent in source. Empty-string candidate compatibility does not weaken these historical source checks."
+  },
+  "build": {
+    "artifact": "tmp/qwen-production-worker-only-20260909-SudX1I/build-summary.json",
+    "sha256": "c6edf739464782f6b0da28de2db1b03d563818a25e9d38f21c0c165165ff6e8d",
+    "workerSha256": "5c86880afd9105ca2f5fd26427420a702ff6719e46397e4f7fb08909c5ca38ea",
+    "productionWorkerUnmodified": true
+  },
+  "prompts": [
+    {
+      "id": "proof-heading-second",
+      "text": "Read the image as data. Return only compact JSON, without markdown. Use one object when there is one transaction, or an array when there are several.\n\nUse these fields in the listed order:\n\"kind\": use \"settlement\" only for proof of a successful payment or transfer of funds. An agreement or expected payout is \"iou\", even if confirmed. A monetary total is not proof of payment. When no completed transfer is shown, use \"iou\".\n\"note\": copy only the uppermost prominent standalone heading, stopping at its line break.\n\"currency\": copy the visibly printed currency code or symbol exactly, or its mapped code from this IOU symbol policy: {\"$\":\"USD\",\"£\":\"GBP\",\"€\":\"EUR\",\"¥\":\"JPY\",\"₹\":\"INR\",\"E£\":\"EGP\",\"ج.م\":\"EGP\"}. Use a mapping only when its exact symbol is visible. Preserve explicit ISO codes; omit missing, unknown or conflicting currency. Never use text/OCR aliases or guess.\n\"amount\": the authoritative monetary total as a JSON number, never a quoted string. Remove digit-grouping commas but preserve the decimal point and every decimal digit. Copy every digit exactly. Ignore counts, IDs, balances, and repeated totals.\n\"printed_date\": copy the complete visible transaction date. For a time span, copy its complete beginning date instead. Keep its weekday, month, day number and any printed year exactly as shown. Copy the date value, not its label. A month alone is invalid. Never invent a year or an endpoint.\n\"printed_end_date\": copy the complete visible ending date only when the image shows a time span. Otherwise write the empty string \"\". Always include this field whenever \"printed_date\" is present, even when its value is empty. Both date fields are strings, never nested objects or null.\n\nIf a date is visible, include BOTH \"printed_date\" and \"printed_end_date\". A single date has an empty ending date. If no date is visible, omit both fields. Never use any other date field.\n\nThe JSON object itself is the answer; do not enclose the entire object in quotation marks.\n",
+      "sha256": "384c3fae9474a0a6bb996e63b7f106194fa954d53c6e4f4b2289f81bf3c1f2f6",
+      "productionAppPromptChanged": false
+    },
+    {
+      "id": "explicit-empty-strings",
+      "text": "Read the image as data. Return only compact JSON, without markdown. Use one object when there is one transaction, or an array when there are several.\n\nUse these fields in the listed order:\n\"kind\": use \"settlement\" only for proof of a successful payment or transfer of funds. An agreement or expected payout is \"iou\", even if confirmed. A monetary total is not proof of payment. When no completed transfer is shown, use \"iou\".\n\"note\": copy only the uppermost prominent standalone heading, stopping at its line break.\n\"currency\": copy only the currency code or symbol printed beside the amount, exactly as shown. If none is printed, use the empty string \"\". Never infer currency from language, location or document type.\n\"amount\": the authoritative monetary total as a JSON number, never a quoted string. Remove digit-grouping commas but preserve the decimal point and every decimal digit. Copy every digit exactly. Ignore counts, IDs, balances, and repeated totals.\n\"printed_date\": copy the complete visible transaction date. For a time span, copy its complete beginning date instead. Keep its weekday, month, day number and any printed year exactly as shown. Copy the date value, not its label. A month alone is invalid. Never invent a year or an endpoint.\n\"printed_end_date\": copy the complete visible ending date only when the image shows a time span. Otherwise write the empty string \"\". Always include this field whenever \"printed_date\" is present, even when its value is empty. Both date fields are strings, never nested objects or null.\n\nIf a date is visible, include BOTH \"printed_date\" and \"printed_end_date\". A single date has an empty ending date. If no date is visible, set both date fields to the empty string \"\". Never use any other date field.\n\nThe JSON object itself is the answer; do not enclose the entire object in quotation marks.\n",
+      "sha256": "0ba65e0875aad21b7c5a60d7f145db66f2768bfef6fa55a5316a25ccbd00be3d",
+      "productionAppPromptChanged": false
+    }
+  ],
+  "runs": [
+    {
+      "id": "gemma-proof",
+      "artifact": "output/playwright/gemma-retained-cache-20260909-MRJHTg/result.json",
+      "sha256": "423f590bf9117b957d9c1f545e4df5cb28a59214e7da02d742c11430c5073dcf",
+      "modelId": "gemma-4-e2b-it-q4",
+      "modelRevision": "9f4bef82ea6e296bc69f8a2f5939f73af81b07a6",
+      "promptSha256": "384c3fae9474a0a6bb996e63b7f106194fa954d53c6e4f4b2289f81bf3c1f2f6",
+      "manifestSha256": "2197598a96e160dd766c6e95a311a4d92014b346fe1511f19bb30fb6f294646e",
+      "completedRequests": 10,
+      "recordedRuntimePassed": true,
+      "recordedSourceUnchanged": true,
+      "recordedPhysicalPhoneVerified": false,
+      "offlineActualHostReplay": {
+        "artifact": "admin/current-corpus-replay-gemma-broad-proof-20260909.json",
+        "sha256": "bab6a7f95295408f41d2dd3038dd2b32fb22cbefa8a20d4f36ffc66c67fc6545",
+        "hostSourceSha256": "380673dfd5795470a0ce5b0d7979ac2e57be6a98b9ca6def141dac3c9fa6de83"
+      }
+    },
+    {
+      "id": "qwen-proof",
+      "artifact": "output/playwright/qwen-production-full-model-20260909-voKRPY/result.json",
+      "sha256": "bda7b3d8016cebb11bb4ea5c266241f47d85e71b07b6b21d796209d47af855eb",
+      "modelId": "qwen3-vl-2b-instruct-q4",
+      "modelRevision": "3e4136ea66ae6e07c110e64fe07da2e029517ab5",
+      "promptSha256": "384c3fae9474a0a6bb996e63b7f106194fa954d53c6e4f4b2289f81bf3c1f2f6",
+      "manifestSha256": "2197598a96e160dd766c6e95a311a4d92014b346fe1511f19bb30fb6f294646e",
+      "completedRequests": 10,
+      "recordedRuntimePassed": true,
+      "recordedSourceUnchanged": true,
+      "recordedPhysicalPhoneVerified": false,
+      "offlineActualHostReplay": {
+        "artifact": "admin/current-corpus-replay-qwen-broad-proof-20260909.json",
+        "sha256": "b91ec24bfc519e4ee9992cca62f1a653b75bbe3b5644192fe32349dc3e63b2ec",
+        "hostSourceSha256": "380673dfd5795470a0ce5b0d7979ac2e57be6a98b9ca6def141dac3c9fa6de83"
+      }
+    },
+    {
+      "id": "qwen-empty",
+      "artifact": "output/playwright/qwen-production-full-model-20260909-LBSCcX/result.json",
+      "sha256": "c53f23e3189f9d332ac6c904fd51517274fd890d536ec86366e72f889e3f532b",
+      "modelId": "qwen3-vl-2b-instruct-q4",
+      "modelRevision": "3e4136ea66ae6e07c110e64fe07da2e029517ab5",
+      "promptSha256": "0ba65e0875aad21b7c5a60d7f145db66f2768bfef6fa55a5316a25ccbd00be3d",
+      "manifestSha256": "866cd2cc24d9f8b79b9bbccefebd09da00fa7aea4a9462ccc04843b06fe837f6",
+      "completedRequests": 10,
+      "recordedRuntimePassed": true,
+      "recordedSourceUnchanged": true,
+      "recordedPhysicalPhoneVerified": false,
+      "offlineActualHostReplay": {
+        "artifact": "admin/current-corpus-replay-qwen-explicit-broad-20260909.json",
+        "sha256": "e0f26935fdea8e1d28db71cc4fcd4db43e58182543bb79e566d275a9cbb00b51",
+        "hostSourceSha256": "380673dfd5795470a0ce5b0d7979ac2e57be6a98b9ca6def141dac3c9fa6de83"
+      }
+    }
+  ],
+  "sources": [
+    {
+      "id": "dev-real-arabic-transfer",
+      "sourceKind": "user-provided-real-image",
+      "image": {
+        "sha256": "b93fbf4cb198c70f5da865e98d1b17ac5c2da465c09e8ff60b4ec01d8cc0f68f",
+        "bytes": 58873,
+        "width": 909,
+        "height": 1600
+      },
+      "sourceTimestamp": "2026-09-08T09:43:14.229Z",
+      "raw": {
+        "kind": "settlement",
+        "currency": "EGP",
+        "amount": 12900,
+        "printed_date": "14 Aug 2026",
+        "printed_end_date": "",
+        "note": "تمت العملية بنجاح"
+      },
+      "permittedRawCurrency": [
+        "EGP"
+      ],
+      "card": {
+        "kind": "settlement",
+        "currency": "EGP",
+        "amount": 12900,
+        "date": "2026-08-14",
+        "note": "تمت العملية بنجاح"
+      },
+      "sourceCurrencyPresent": true,
+      "sourceDatePresent": true,
+      "visibleDateBeforePolicy": "14 Aug 2026 09:47 PM"
+    },
+    {
+      "id": "dev-real-payout-range",
+      "sourceKind": "user-provided-real-image",
+      "image": {
+        "sha256": "b7acf1d1c8b54aa54d48af29ff9cb022a9a36c59f6144e623519d86e7531e6f1",
+        "bytes": 77389,
+        "width": 1124,
+        "height": 1397
+      },
+      "sourceTimestamp": "2026-07-03T12:00:00.000Z",
+      "raw": {
+        "kind": "iou",
+        "currency": "$",
+        "amount": 1912.15,
+        "printed_date": "Sun, Jul 19",
+        "printed_end_date": "Thu, Aug 6",
+        "note": "Reservation"
+      },
+      "permittedRawCurrency": [
+        "$",
+        "USD"
+      ],
+      "card": {
+        "kind": "iou",
+        "currency": "USD",
+        "amount": 1912.15,
+        "date": "2026-07-19",
+        "note": "Reservation | From Sun, Jul 19 to Thu, Aug 6"
+      },
+      "sourceCurrencyPresent": true,
+      "sourceDatePresent": true
+    },
+    {
+      "id": "dev-real-english-transfer",
+      "sourceKind": "user-provided-real-image",
+      "image": {
+        "sha256": "df79335ced32f46553cfceaa907a5f1bf4c93c5bb0905a032af5e2c536edfed8",
+        "bytes": 48058,
+        "width": 809,
+        "height": 1280
+      },
+      "sourceTimestamp": "2026-09-09T12:00:00.000Z",
+      "raw": {
+        "kind": "settlement",
+        "currency": "EGP",
+        "amount": 13500,
+        "printed_date": "13 Aug 2026",
+        "printed_end_date": "",
+        "note": "Your transaction was successful"
+      },
+      "permittedRawCurrency": [
+        "EGP"
+      ],
+      "card": {
+        "kind": "settlement",
+        "currency": "EGP",
+        "amount": 13500,
+        "date": "2026-08-13",
+        "note": "Your transaction was successful"
+      },
+      "sourceCurrencyPresent": true,
+      "sourceDatePresent": true,
+      "visibleDateBeforePolicy": "13 Aug 2026 11:59 AM"
+    },
+    {
+      "id": "dev-synthetic-workshop-range",
+      "sourceKind": "existing-synthetic-raster",
+      "image": {
+        "sha256": "088b9b7c14e5b5da35f7b6b5f1450da6f403ba23993857bdedc7353fda909878",
+        "bytes": 48566,
+        "width": 900,
+        "height": 1200
+      },
+      "sourceTimestamp": "2026-09-09T12:00:00.000Z",
+      "raw": {
+        "kind": "iou",
+        "currency": "USD",
+        "amount": 1912.15,
+        "printed_date": "2026-07-19",
+        "printed_end_date": "2026-08-06",
+        "note": "Workshop Confirmed"
+      },
+      "permittedRawCurrency": [
+        "USD"
+      ],
+      "card": {
+        "kind": "iou",
+        "currency": "USD",
+        "amount": 1912.15,
+        "date": "2026-07-19",
+        "note": "Workshop Confirmed | From 2026-07-19 to 2026-08-06"
+      },
+      "sourceCurrencyPresent": true,
+      "sourceDatePresent": true
+    },
+    {
+      "id": "holdout-synthetic-unpaid-hire",
+      "sourceKind": "new-synthetic-text-card",
+      "image": {
+        "sha256": "0736054bdf8937890b28cbe5ccce2e772b536022b07e86bdfef5334176b121ea",
+        "bytes": 41034,
+        "width": 820,
+        "height": 1060
+      },
+      "sourceTimestamp": "2026-09-09T12:00:00.000Z",
+      "raw": {
+        "kind": "iou",
+        "currency": "£",
+        "amount": 842.65,
+        "printed_date": "28 Sep 2026",
+        "printed_end_date": "2 Oct 2026",
+        "note": "EQUIPMENT HIRE"
+      },
+      "permittedRawCurrency": [
+        "£",
+        "GBP"
+      ],
+      "card": {
+        "kind": "iou",
+        "currency": "GBP",
+        "amount": 842.65,
+        "date": "2026-09-28",
+        "note": "EQUIPMENT HIRE | From 28 Sep 2026 to 2 Oct 2026"
+      },
+      "sourceCurrencyPresent": true,
+      "sourceDatePresent": true
+    },
+    {
+      "id": "holdout-synthetic-missing-evidence",
+      "sourceKind": "new-synthetic-text-card",
+      "image": {
+        "sha256": "9455c552a8122b9f356ca0f6de30f99928073be254030bb5be7f4dd6939d9b90",
+        "bytes": 22423,
+        "width": 820,
+        "height": 620
+      },
+      "sourceTimestamp": "2026-09-09T12:00:00.000Z",
+      "raw": {
+        "kind": "iou",
+        "amount": 72.5,
+        "note": "REPAIR ESTIMATE"
+      },
+      "permittedRawCurrency": [],
+      "card": {
+        "kind": "iou",
+        "currency": null,
+        "amount": 72.5,
+        "date": null,
+        "note": "REPAIR ESTIMATE"
+      },
+      "sourceCurrencyPresent": false,
+      "sourceDatePresent": false
+    },
+    {
+      "id": "dev-synthetic-paper-owed",
+      "sourceKind": "existing-synthetic-raster",
+      "image": {
+        "sha256": "dd473ba928f5f4ab015b7803b65825dec5ccfd4941a544b6d66fbc0a78e3c479",
+        "bytes": 156669,
+        "width": 1200,
+        "height": 900
+      },
+      "sourceTimestamp": "2026-09-09T12:00:00.000Z",
+      "raw": {
+        "kind": "iou",
+        "currency": "EGP",
+        "amount": 350,
+        "printed_date": "04 JUL 2026",
+        "printed_end_date": "",
+        "note": "RIVER MARKET"
+      },
+      "permittedRawCurrency": [
+        "EGP"
+      ],
+      "card": {
+        "kind": "iou",
+        "currency": "EGP",
+        "amount": 350,
+        "date": "2026-07-04",
+        "note": "RIVER MARKET"
+      },
+      "sourceCurrencyPresent": true,
+      "sourceDatePresent": true,
+      "visibleDateBeforePolicy": "04 JUL 2026 14:32"
+    }
+  ],
+  "captures": [
+    {
+      "id": "gemma-proof-real-arabic-transfer",
+      "runId": "gemma-proof",
+      "sourceId": "dev-real-arabic-transfer",
+      "requestId": 1,
+      "requestCaseId": "dev-real-arabic-transfer-first",
+      "maxTokens": 96,
+      "raw": "{\"kind\": \"settlement\", \"note\": \"تمت العملية بنجاح\", \"currency\": \"EGP\", \"amount\": 12900.00, \"printed_date\": \"14 Aug 2026\", \"printed_end_date\": \"\"}",
+      "rawSha256": "125baebf7821ea649018850c18d693cd1923164be41fcce138cc58af80f5ca42",
+      "wrapper": "object",
+      "expected": {
+        "sourceValuesAccepted": true,
+        "calendarOnlyValuesAccepted": true,
+        "strictObject": true,
+        "cardMatchesSource": true,
+        "confirmedMatchesSource": true
+      },
+      "observedCard": {
+        "kind": "settlement",
+        "currency": "EGP",
+        "amount": 12900,
+        "date": "2026-08-14",
+        "note": "تمت العملية بنجاح"
+      },
+      "observedConfirmation": {
+        "kind": "settlement",
+        "currency": "EGP",
+        "amount": 12900,
+        "date": "2026-08-14",
+        "note": "تمت العملية بنجاح"
+      }
+    },
+    {
+      "id": "gemma-proof-real-payout-range",
+      "runId": "gemma-proof",
+      "sourceId": "dev-real-payout-range",
+      "requestId": 2,
+      "requestCaseId": "dev-real-payout-range-first",
+      "maxTokens": 96,
+      "raw": "{\"kind\": \"iou\", \"note\": \"Reservation\", \"currency\": \"USD\", \"amount\": 1912.15, \"printed_date\": \"Sun, Jul 19\", \"printed_end_date\": \"Thu, Aug 6\"}",
+      "rawSha256": "015969dfc564710186a290ff8e0c59838a56af4d8509b76dd960fa8d06912518",
+      "wrapper": "object",
+      "expected": {
+        "sourceValuesAccepted": true,
+        "calendarOnlyValuesAccepted": true,
+        "strictObject": true,
+        "cardMatchesSource": true,
+        "confirmedMatchesSource": true
+      },
+      "observedCard": {
+        "kind": "iou",
+        "currency": "USD",
+        "amount": 1912.15,
+        "date": "2026-07-19",
+        "note": "Reservation | From Sun, Jul 19 to Thu, Aug 6"
+      },
+      "observedConfirmation": {
+        "kind": "iou",
+        "currency": "USD",
+        "amount": 1912.15,
+        "date": "2026-07-19",
+        "note": "Reservation | From Sun, Jul 19 to Thu, Aug 6"
+      }
+    },
+    {
+      "id": "gemma-proof-real-english-transfer",
+      "runId": "gemma-proof",
+      "sourceId": "dev-real-english-transfer",
+      "requestId": 3,
+      "requestCaseId": "dev-real-english-transfer-first",
+      "maxTokens": 96,
+      "raw": "{\"kind\": \"settlement\", \"note\": \"Your transaction was successful\", \"currency\": \"EGP\", \"amount\": 13500.00, \"printed_date\": \"13 Aug 2026\", \"printed_end_date\": \"\"}",
+      "rawSha256": "12004e6f182dfa646adbe16a24eeb8cfd26b8f41418c34e5cfe9f4f2f974a57d",
+      "wrapper": "object",
+      "expected": {
+        "sourceValuesAccepted": true,
+        "calendarOnlyValuesAccepted": true,
+        "strictObject": true,
+        "cardMatchesSource": true,
+        "confirmedMatchesSource": true
+      },
+      "observedCard": {
+        "kind": "settlement",
+        "currency": "EGP",
+        "amount": 13500,
+        "date": "2026-08-13",
+        "note": "Your transaction was successful"
+      },
+      "observedConfirmation": {
+        "kind": "settlement",
+        "currency": "EGP",
+        "amount": 13500,
+        "date": "2026-08-13",
+        "note": "Your transaction was successful"
+      }
+    },
+    {
+      "id": "gemma-proof-synthetic-workshop-range",
+      "runId": "gemma-proof",
+      "sourceId": "dev-synthetic-workshop-range",
+      "requestId": 5,
+      "requestCaseId": "dev-synthetic-workshop-range-first",
+      "maxTokens": 96,
+      "raw": "{\"kind\": \"iou\", \"note\": \"Workshop Confirmed\", \"currency\": \"USD\", \"amount\": 1912.15, \"printed_date\": \"2026-07-19\", \"printed_end_date\": \"2026-08-06\"}",
+      "rawSha256": "59643355c608e84949d4ffddf32870c6b44ffe0ba6541e5d1670dd0c5e00b0a3",
+      "wrapper": "object",
+      "expected": {
+        "sourceValuesAccepted": true,
+        "calendarOnlyValuesAccepted": true,
+        "strictObject": true,
+        "cardMatchesSource": true,
+        "confirmedMatchesSource": true
+      },
+      "observedCard": {
+        "kind": "iou",
+        "currency": "USD",
+        "amount": 1912.15,
+        "date": "2026-07-19",
+        "note": "Workshop Confirmed | From 2026-07-19 to 2026-08-06"
+      },
+      "observedConfirmation": {
+        "kind": "iou",
+        "currency": "USD",
+        "amount": 1912.15,
+        "date": "2026-07-19",
+        "note": "Workshop Confirmed | From 2026-07-19 to 2026-08-06"
+      }
+    },
+    {
+      "id": "gemma-proof-synthetic-unpaid-hire",
+      "runId": "gemma-proof",
+      "sourceId": "holdout-synthetic-unpaid-hire",
+      "requestId": 7,
+      "requestCaseId": "holdout-synthetic-unpaid-hire-first",
+      "maxTokens": 96,
+      "raw": "{\"kind\": \"iou\", \"note\": \"EQUIPMENT HIRE\", \"currency\": \"GBP\", \"amount\": 842.65, \"printed_date\": \"28 Sep 2026\", \"printed_end_date\": \"2 Oct 2026\"}",
+      "rawSha256": "ac4bfb8a473a8047e9fc34735b14f3e802d30611312eee99adca113b313c4d42",
+      "wrapper": "object",
+      "expected": {
+        "sourceValuesAccepted": true,
+        "calendarOnlyValuesAccepted": true,
+        "strictObject": true,
+        "cardMatchesSource": true,
+        "confirmedMatchesSource": true
+      },
+      "observedCard": {
+        "kind": "iou",
+        "currency": "GBP",
+        "amount": 842.65,
+        "date": "2026-09-28",
+        "note": "EQUIPMENT HIRE | From 28 Sep 2026 to 2 Oct 2026"
+      },
+      "observedConfirmation": {
+        "kind": "iou",
+        "currency": "GBP",
+        "amount": 842.65,
+        "date": "2026-09-28",
+        "note": "EQUIPMENT HIRE | From 28 Sep 2026 to 2 Oct 2026"
+      }
+    },
+    {
+      "id": "gemma-proof-synthetic-missing-evidence",
+      "runId": "gemma-proof",
+      "sourceId": "holdout-synthetic-missing-evidence",
+      "requestId": 8,
+      "requestCaseId": "holdout-synthetic-missing-evidence-first",
+      "maxTokens": 96,
+      "raw": "{\"kind\": \"iou\", \"note\": \"REPAIR ESTIMATE\", \"currency\": \"USD\", \"amount\": 72.50, \"printed_date\": \"\", \"printed_end_date\": \"\"}",
+      "rawSha256": "a96f15701d9d9ac0ee7b02129e1d8ed974472669eb9fdc11346c0bf257234067",
+      "wrapper": "object",
+      "expected": {
+        "sourceValuesAccepted": false,
+        "calendarOnlyValuesAccepted": false,
+        "strictObject": true,
+        "cardMatchesSource": false,
+        "confirmedMatchesSource": false
+      },
+      "observedCard": {
+        "kind": "iou",
+        "currency": "USD",
+        "amount": 72.5,
+        "date": null,
+        "note": "REPAIR ESTIMATE"
+      },
+      "observedConfirmation": {
+        "kind": "iou",
+        "currency": "USD",
+        "amount": 72.5,
+        "date": null,
+        "note": "REPAIR ESTIMATE"
+      }
+    },
+    {
+      "id": "qwen-proof-real-arabic-transfer",
+      "runId": "qwen-proof",
+      "sourceId": "dev-real-arabic-transfer",
+      "requestId": 1,
+      "requestCaseId": "dev-real-arabic-transfer-first",
+      "maxTokens": 96,
+      "raw": "```json\n{\n\"kind\": \"settlement\",\n\"note\": \"تمت العملية بنجاح\",\n\"currency\": \"EGP\",\n\"amount\": 12900,\n\"printed_date\": \"14 Aug 2026 09:47 PM\",\n\"printed_end_date\": \"\"\n}\n```",
+      "rawSha256": "a85b8620b10ae05bc0378833665724b18a6390b8e20d18dc1ec5a6d92fc817ee",
+      "wrapper": "json-fence",
+      "expected": {
+        "sourceValuesAccepted": true,
+        "calendarOnlyValuesAccepted": false,
+        "strictObject": false,
+        "cardMatchesSource": true,
+        "confirmedMatchesSource": true
+      },
+      "observedCard": {
+        "kind": "settlement",
+        "currency": "EGP",
+        "amount": 12900,
+        "date": "2026-08-14",
+        "note": "تمت العملية بنجاح"
+      },
+      "observedConfirmation": {
+        "kind": "settlement",
+        "currency": "EGP",
+        "amount": 12900,
+        "date": "2026-08-14",
+        "note": "تمت العملية بنجاح"
+      }
+    },
+    {
+      "id": "qwen-proof-real-payout-range",
+      "runId": "qwen-proof",
+      "sourceId": "dev-real-payout-range",
+      "requestId": 2,
+      "requestCaseId": "dev-real-payout-range-first",
+      "maxTokens": 96,
+      "raw": "```json\n{\n  \"kind\": \"iou\",\n  \"note\": \"Reservation\",\n  \"currency\": \"USD\",\n  \"amount\": 1912.15,\n  \"printed_date\": \"Sun, Jul 19\",\n  \"printed_end_date\": \"Thu, Aug 6\"\n}\n```",
+      "rawSha256": "83ef186d0c72b27a3f2024ad423fc85ee561b3e118eca007e04fd52378cc71e0",
+      "wrapper": "json-fence",
+      "expected": {
+        "sourceValuesAccepted": true,
+        "calendarOnlyValuesAccepted": true,
+        "strictObject": false,
+        "cardMatchesSource": true,
+        "confirmedMatchesSource": true
+      },
+      "observedCard": {
+        "kind": "iou",
+        "currency": "USD",
+        "amount": 1912.15,
+        "date": "2026-07-19",
+        "note": "Reservation | From Sun, Jul 19 to Thu, Aug 6"
+      },
+      "observedConfirmation": {
+        "kind": "iou",
+        "currency": "USD",
+        "amount": 1912.15,
+        "date": "2026-07-19",
+        "note": "Reservation | From Sun, Jul 19 to Thu, Aug 6"
+      }
+    },
+    {
+      "id": "qwen-proof-real-english-transfer",
+      "runId": "qwen-proof",
+      "sourceId": "dev-real-english-transfer",
+      "requestId": 3,
+      "requestCaseId": "dev-real-english-transfer-first",
+      "maxTokens": 96,
+      "raw": "```json\n{\n \"kind\": \"settlement\",\n \"note\": \"Living Expenses\",\n \"currency\": \"EGP\",\n \"amount\": 13500,\n \"printed_date\": \"13 Aug 2026\",\n \"printed_end_date\": \"\"\n}\n```",
+      "rawSha256": "f8eb388191fa7745af5116258f23ea0dbb9685c518067b10d0b17f7852918e9a",
+      "wrapper": "json-fence",
+      "expected": {
+        "sourceValuesAccepted": false,
+        "calendarOnlyValuesAccepted": false,
+        "strictObject": false,
+        "cardMatchesSource": false,
+        "confirmedMatchesSource": false
+      },
+      "observedCard": {
+        "kind": "settlement",
+        "currency": "EGP",
+        "amount": 13500,
+        "date": "2026-08-13",
+        "note": "Living Expenses"
+      },
+      "observedConfirmation": {
+        "kind": "settlement",
+        "currency": "EGP",
+        "amount": 13500,
+        "date": "2026-08-13",
+        "note": "Living Expenses"
+      }
+    },
+    {
+      "id": "qwen-proof-synthetic-workshop-range",
+      "runId": "qwen-proof",
+      "sourceId": "dev-synthetic-workshop-range",
+      "requestId": 5,
+      "requestCaseId": "dev-synthetic-workshop-range-first",
+      "maxTokens": 96,
+      "raw": "```json\n{\n  \"kind\": \"iou\",\n  \"note\": \"Workshop Confirmed\",\n  \"currency\": \"$\",\n  \"amount\": 1912.15,\n  \"printed_date\": \"2026-07-19\",\n  \"printed_end_date\": \"2026-08-06\"\n}\n```",
+      "rawSha256": "1ffd1d323a264257166010a9581e0c13818d31610d1ff57e40349967c37087c6",
+      "wrapper": "json-fence",
+      "expected": {
+        "sourceValuesAccepted": false,
+        "calendarOnlyValuesAccepted": false,
+        "strictObject": false,
+        "cardMatchesSource": true,
+        "confirmedMatchesSource": true
+      },
+      "observedCard": {
+        "kind": "iou",
+        "currency": "USD",
+        "amount": 1912.15,
+        "date": "2026-07-19",
+        "note": "Workshop Confirmed | From 2026-07-19 to 2026-08-06"
+      },
+      "observedConfirmation": {
+        "kind": "iou",
+        "currency": "USD",
+        "amount": 1912.15,
+        "date": "2026-07-19",
+        "note": "Workshop Confirmed | From 2026-07-19 to 2026-08-06"
+      }
+    },
+    {
+      "id": "qwen-proof-synthetic-unpaid-hire",
+      "runId": "qwen-proof",
+      "sourceId": "holdout-synthetic-unpaid-hire",
+      "requestId": 7,
+      "requestCaseId": "holdout-synthetic-unpaid-hire-first",
+      "maxTokens": 96,
+      "raw": "```json\n{\n  \"kind\": \"iou\",\n  \"note\": \"EQUIPMENT HIRE\",\n  \"currency\": \"GBP\",\n  \"amount\": 842.65,\n  \"printed_date\": \"28 Sep 2026\",\n  \"printed_end_date\": \"2 Oct 2026\"\n}\n```",
+      "rawSha256": "826bbd358eb9d527c8c4c0496fcdb20fe404cbafaff58daa317b7db672fff58c",
+      "wrapper": "json-fence",
+      "expected": {
+        "sourceValuesAccepted": true,
+        "calendarOnlyValuesAccepted": true,
+        "strictObject": false,
+        "cardMatchesSource": true,
+        "confirmedMatchesSource": true
+      },
+      "observedCard": {
+        "kind": "iou",
+        "currency": "GBP",
+        "amount": 842.65,
+        "date": "2026-09-28",
+        "note": "EQUIPMENT HIRE | From 28 Sep 2026 to 2 Oct 2026"
+      },
+      "observedConfirmation": {
+        "kind": "iou",
+        "currency": "GBP",
+        "amount": 842.65,
+        "date": "2026-09-28",
+        "note": "EQUIPMENT HIRE | From 28 Sep 2026 to 2 Oct 2026"
+      }
+    },
+    {
+      "id": "qwen-proof-synthetic-missing-evidence",
+      "runId": "qwen-proof",
+      "sourceId": "holdout-synthetic-missing-evidence",
+      "requestId": 8,
+      "requestCaseId": "holdout-synthetic-missing-evidence-first",
+      "maxTokens": 96,
+      "raw": "```json\n{\n  \"kind\": \"iou\",\n  \"note\": \"REPAIR ESTIMATE\",\n  \"currency\": \"$\",\n  \"amount\": 72.5,\n  \"printed_date\": \"\",\n  \"printed_end_date\": \"\"\n}\n```",
+      "rawSha256": "9e8c203ea4e2e8af9cac932ac91933b6331ff449cb5936c6875b26366f4c64a9",
+      "wrapper": "json-fence",
+      "expected": {
+        "sourceValuesAccepted": false,
+        "calendarOnlyValuesAccepted": false,
+        "strictObject": false,
+        "cardMatchesSource": false,
+        "confirmedMatchesSource": false
+      },
+      "observedCard": {
+        "kind": "iou",
+        "currency": "USD",
+        "amount": 72.5,
+        "date": null,
+        "note": "REPAIR ESTIMATE"
+      },
+      "observedConfirmation": {
+        "kind": "iou",
+        "currency": "USD",
+        "amount": 72.5,
+        "date": null,
+        "note": "REPAIR ESTIMATE"
+      }
+    },
+    {
+      "id": "qwen-empty-synthetic-paper-owed",
+      "runId": "qwen-empty",
+      "sourceId": "dev-synthetic-paper-owed",
+      "requestId": 4,
+      "requestCaseId": "dev-synthetic-paper-owed-first",
+      "maxTokens": 96,
+      "raw": "```json\n{\n  \"kind\": \"iou\",\n  \"note\": \"RIVER MARKET\",\n  \"currency\": \"EGP\",\n  \"amount\": 350.0,\n  \"printed_date\": \"04 JUL 2026\",\n  \"printed_end_date\": \"\"\n}\n```",
+      "rawSha256": "827ee13d5d1d398c6c43f5f39d954e05f6fc535e7d909370ed53c5974cee79cf",
+      "wrapper": "json-fence",
+      "expected": {
+        "sourceValuesAccepted": true,
+        "calendarOnlyValuesAccepted": true,
+        "strictObject": false,
+        "cardMatchesSource": true,
+        "confirmedMatchesSource": true
+      },
+      "observedCard": {
+        "kind": "iou",
+        "currency": "EGP",
+        "amount": 350,
+        "date": "2026-07-04",
+        "note": "RIVER MARKET"
+      },
+      "observedConfirmation": {
+        "kind": "iou",
+        "currency": "EGP",
+        "amount": 350,
+        "date": "2026-07-04",
+        "note": "RIVER MARKET"
+      }
+    },
+    {
+      "id": "qwen-empty-synthetic-unpaid-hire",
+      "runId": "qwen-empty",
+      "sourceId": "holdout-synthetic-unpaid-hire",
+      "requestId": 7,
+      "requestCaseId": "holdout-synthetic-unpaid-hire-first",
+      "maxTokens": 96,
+      "raw": "```json\n{\n  \"kind\": \"iou\",\n  \"note\": \"EQUIPMENT HIRE\",\n  \"currency\": \"£\",\n  \"amount\": 84265.0,\n  \"printed_date\": \"28 Sep 2026\",\n  \"printed_end_date\": \"2 Oct 2026\"\n}\n```",
+      "rawSha256": "78dd5d151ca31a13e85e60aa9215075ee1474e7d065200103f4bc007952fc9ca",
+      "wrapper": "json-fence",
+      "expected": {
+        "sourceValuesAccepted": false,
+        "calendarOnlyValuesAccepted": false,
+        "strictObject": false,
+        "cardMatchesSource": false,
+        "confirmedMatchesSource": false
+      },
+      "observedCard": {
+        "kind": "iou",
+        "currency": "GBP",
+        "amount": 84265,
+        "date": "2026-09-28",
+        "note": "EQUIPMENT HIRE | From 28 Sep 2026 to 2 Oct 2026"
+      },
+      "observedConfirmation": {
+        "kind": "iou",
+        "currency": "GBP",
+        "amount": 84265,
+        "date": "2026-09-28",
+        "note": "EQUIPMENT HIRE | From 28 Sep 2026 to 2 Oct 2026"
+      }
+    }
+  ]
+}

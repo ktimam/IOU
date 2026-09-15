@@ -6,6 +6,16 @@
 // IOU-specific lives in OpenChat. See docs/chat-agent.md.
 
 import type { Direction } from "../entries/types";
+import { iouImagePromptByModel } from "./modelImageProfiles";
+import { IOU_CURRENCY_EVIDENCE_MAP, imageCurrencySymbolPolicy } from "./currencyEvidencePolicy";
+export { IOU_CURRENCY_EVIDENCE_MAP } from "./currencyEvidencePolicy";
+
+// IOU resolves these date spellings after the host transports every bounded value. Keeping them
+// separate preserves conflicts that host alias coalescing would otherwise erase before IOU sees them.
+export const IOU_DATE_ALIASES = [
+  "due_date", "transaction_date", "payment_date", "start_date",
+  "Date", "TransactionDate", "PaymentDate", "StartDate",
+] as const;
 
 // --- Extraction rules (mirrors OpenChat's AiActionRule TS domain shape) -------------------------
 // Generic vocabulary interpreted by OpenChat's rules engine; the IOU-specific keywords/values below
@@ -196,17 +206,18 @@ Do not wrap that object in []. Each object must choose exactly one "kind" and on
 // every model-authored field; no OCR, text-reader output, focused crop, or second model pass participates.
 export const IOU_IMAGE_EXTRACTION_PROMPT = `Read the image as data. Return only compact JSON, without markdown. Use one object when there is one transaction, or an array when there are several.
 
-Use these fields:
-"amount": the authoritative monetary total as a JSON number, never a quoted string. Remove digit-grouping commas but preserve the decimal point and every decimal digit. Copy every digit exactly. Ignore counts, IDs, balances, and repeated totals.
-"interval_start" and "interval_end": the complete visible beginning and ending DATE VALUES of one time span, not their labels. Copy each entire value, including weekday, month, day number, and any printed year. A month alone is invalid. Keep each date together in its own field. Never move part of an endpoint into "date". Include both endpoints or neither. When these fields are present, omit "date" completely.
-"note": copy only the uppermost prominent standalone heading, stopping at its line break.
+Use these fields in the listed order:
 "kind": use "iou" unless the document explicitly states that money was already paid, sent, transferred, or received. Only then use "settlement". A confirmed status or a displayed monetary total does not establish completed money movement.
-"currency": include only a visibly printed three-letter ISO code; omit when only a symbol is printed.
-Only when there is no interval, "date" may contain YYYY-MM-DD for a transaction date whose day, month and year are all printed together. Without a printed year, omit "date". Never supply a missing year.
+"currency": copy the visibly printed currency code or symbol exactly, or its mapped code from this IOU symbol policy: ${JSON.stringify(imageCurrencySymbolPolicy())}. Use a mapping only when its exact symbol is visible. Preserve explicit ISO codes; omit missing, unknown or conflicting currency. Never use text/OCR aliases or guess.
+"amount": the authoritative monetary total as a JSON number, never a quoted string. Remove digit-grouping commas but preserve the decimal point and every decimal digit. Copy every digit exactly. Ignore counts, IDs, balances, and repeated totals.
+"printed_date": copy the complete visible transaction date. For a time span, copy its complete beginning date instead. Keep its weekday, month, day number and any printed year exactly as shown. Copy the date value, not its label. A month alone is invalid. Never invent a year or an endpoint.
+"printed_end_date": copy the complete visible ending date only when the image shows a time span. Otherwise write the empty string "". Always include this field whenever "printed_date" is present, even when its value is empty. Both date fields are strings, never nested objects or null.
+"note": copy only the uppermost prominent standalone heading, stopping at its line break.
 
-Before returning, check that each endpoint contains its visible day number, not just its month. Omit unsupported fields.
+If a date is visible, include BOTH "printed_date" and "printed_end_date". A single date has an empty ending date. If no date is visible, omit both fields. Never use any other date field.
 
-The JSON object itself is the answer; do not enclose the entire object in quotation marks.`;
+The JSON object itself is the answer; do not enclose the entire object in quotation marks.
+`;
 
 // Complete app-owned prompt for OpenChat's optional OCR/local-reader mode and its image-model
 // verification mode. OpenChat runs only the OCR profiles declared by IOU, joins their bounded
@@ -240,38 +251,6 @@ SEMANTIC IMAGE VALUES JSON:
 // exact integer range after multiplying by 100.
 export const IOU_MIN_MAJOR_AMOUNT = 0.005;
 export const IOU_MAX_MAJOR_AMOUNT = Number.MAX_SAFE_INTEGER / 100;
-
-// Optional plain-text evidence vocabulary for currencies whose normalized ISO value may differ
-// from the literal source token. OpenChat uses this only because the currency schema opts into the
-// generic text-evidence policy; image-only extraction is unaffected.
-export const IOU_CURRENCY_EVIDENCE_MAP: {
-  value: string;
-  keywords: string[];
-}[] = [
-  {
-    value: "USD",
-    keywords: ["$", "dollar", "dollars", "US dollar", "US dollars"],
-  },
-  { value: "GBP", keywords: ["£", "pound sterling", "pounds sterling"] },
-  { value: "EUR", keywords: ["€", "euro", "euros"] },
-  { value: "JPY", keywords: ["¥", "yen"] },
-  { value: "INR", keywords: ["₹", "rupee", "rupees"] },
-  {
-    value: "EGP",
-    // Tesseract reads the large `EGP` glyph on verified InstaPay receipts as exact `cp`, `ecp`, or
-    // `tcp`. OpenChat accepts these app-declared tokens only for OCR, immediately beside one amount,
-    // and only when this single target owns them; typed messages never use these aliases.
-    keywords: [
-      "E£",
-      "Egyptian pound",
-      "Egyptian pounds",
-      "ج.م",
-      "cp",
-      "ecp",
-      "tcp",
-    ],
-  },
-];
 
 // Extraction rules registered alongside the prompt (OpenChat's generic rules engine executes
 // them; the keywords/values here are IOU's data). "override" keyword_map + normalize run in the
@@ -413,6 +392,8 @@ export const iouActionManifest: IouActionManifest = {
       template: IOU_IMAGE_EXTRACTION_PROMPT,
       includeRuleGuidance: false,
     },
+    // Exact opaque model IDs and raw-output contracts are IOU configuration, not host logic.
+    ...(iouImagePromptByModel ? { "x-openchat-image-prompt-by-model": iouImagePromptByModel } : {}),
     "x-openchat-private-image-verifier": {
       version: 2,
       promptTemplate: IOU_PRIVATE_IMAGE_VERIFIER_PROMPT,
@@ -454,9 +435,11 @@ export const iouActionManifest: IouActionManifest = {
       // attester remains authoritative.
       currency: {
         type: "string",
-        minLength: 3,
-        maxLength: 3,
-        format: "ascii-uppercase",
+        // Model input is a literal token. IOU's local processor owns conversion to a canonical
+        // code using its existing symbol map; the authenticated backend still requires a code.
+        minLength: 1,
+        maxLength: 16,
+        format: "utf8-no-nul",
         "x-openchat-require-text-evidence": true,
       },
       // Ambiguous two-person shorthand has no author-relative direction evidence. Keep direction
@@ -478,18 +461,18 @@ export const iouActionManifest: IouActionManifest = {
         format: "utf8-no-nul",
         // Preserve the visible model text through host schema validation. IOU's local processor
         // interprets it and enforces the canonical final date before a card can be proposed.
-        // Vision models often use the visible label as the JSON key. OpenChat resolves this alias
-        // before date normalization and drops it on any conflicting target/alias values.
-        "x-openchat-property-aliases": [
-          "due_date",
-          "transaction_date",
-          "payment_date",
-          "start_date",
-          "Date",
-          "TransactionDate",
-          "PaymentDate",
-          "StartDate",
-        ],
+      },
+      ...Object.fromEntries(IOU_DATE_ALIASES.map((alias) => [alias, {
+        type: "string", minLength: 1, maxLength: 96, format: "utf8-no-nul",
+      }])),
+      // Both keys are required by IOU whenever this new image-date contract is used, not globally:
+      // legacy/text/OCR candidates need neither. An explicit empty end distinguishes a single date
+      // from a malformed range end that the host dropped during generic schema conformance.
+      printed_date: {
+        type: "string", minLength: 1, maxLength: 96, format: "utf8-no-nul",
+      },
+      printed_end_date: {
+        type: "string", minLength: 0, maxLength: 96, format: "utf8-no-nul",
       },
       interval_start: {
         type: "string",
@@ -504,6 +487,9 @@ export const iouActionManifest: IouActionManifest = {
         format: "utf8-no-nul",
       },
       note: { type: "string", maxLength: 4_096, format: "utf8-no-nul" },
+      // Optional public image evidence for IOU's private, row-local saved-type matcher. Keep it
+      // separate from the memo; it is neither a private type selection nor a confirmed entry field.
+      image_heading: { type: "string", minLength: 1, maxLength: 200, format: "utf8-no-nul" },
       // Declared so conformToSchema keeps it — an undeclared key is dropped before the card is built.
       message: {
         type: "string",

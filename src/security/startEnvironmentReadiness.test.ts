@@ -327,11 +327,10 @@ describe("live environment readiness contract", () => {
 
   it("requires the live published schema and backend binding to match before READY", () => {
     expect(script).toContain(
-      "$OpenChatRegistration = Join-Path $RepoRoot 'docs\\openchat-registration.json'",
+      "'--expected-current-manifest', 'true'",
     );
-    expect(script).toContain(
-      "'--expected-response-schema-file', $OpenChatRegistration",
-    );
+    expect(script).not.toContain("'--expected-response-schema-file'");
+    expect(appChecker).toContain("assertCurrentAppResponseSchemas(actions)");
     expect(script).toContain("'--verify-app-binding', 'true'");
     expect(script).toContain("$result.app.responseSchemaVerified -ne $true");
     expect(script).toContain("$result.app.appBindingVerified -ne $true");

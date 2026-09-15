@@ -1,7 +1,43 @@
 import { describe, expect, it } from "vitest";
-import { dateFromSourceInterval, validatedSourceInterval } from "./sourceInterval";
+import { dateFromPrintedDate, dateFromSourceInterval, validatedSourceInterval } from "./sourceInterval";
 
 const anchor = new Date("2026-09-05T12:00:00Z");
+
+describe("single printed date with a bounded clock suffix", () => {
+  it.each([
+    ["14 Aug 2026 09:47 PM", "2026-08-14"],
+    ["February 29, 2024 12:00 AM", "2024-02-29"],
+    ["2025-12-31 23:59:59", "2025-12-31"],
+    ["1 January 2027 0:00", "2027-01-01"],
+    ["Fri, Aug 14 2026 9:47:05 pm", "2026-08-14"],
+    ["2024-02-29 12:00:00 PM", "2024-02-29"],
+    ["14 آب 2026 09:47 PM", "2026-08-14"],
+    ["١٤ أغسطس ٢٠٢٦ 21:47", "2026-08-14"],
+  ])("keeps the explicit calendar day, without timezone conversion, from %s", (value, expected) => {
+    expect(dateFromPrintedDate(value)).toBe(expected);
+  });
+
+  it.each([
+    "14 Aug 2026 00:47 PM", "14 Aug 2026 13:47 PM", "14 Aug 2026 24:00",
+    "14 Aug 2026 09:60 PM", "14 Aug 2026 09:47:60 PM", "14 Aug 2026 23:60",
+    "14 Aug 2026 09:7 PM", "14 Aug 2026 09:47:5 PM", "14 Aug 2026 009:47 PM",
+    "14 Aug 2026 09 PM", "14 Aug 2026 09:47PM", "14 Aug 2026 09:47 XM",
+    "14 Aug 2026 09:47 PM UTC", "14 Aug 2026 09:47 +03:00", "2026-08-14T21:47:00Z",
+    "14 Aug 2026 09:47:00.123 PM", "14 Aug 2026 at 09:47 PM",
+    "14 Aug 2026 09:47 PM extra", "14 Aug 2026 09:47 PM 10:00 PM",
+    "14 Aug 09:47 PM", "Fri, Aug 14 09:47 PM", "30 Feb 2026 09:47 PM",
+    "Mon, Aug 14 2026 09:47 PM", "14/08/2026 09:47 PM",
+    "14 Aug 2026\n09:47 PM", "14 Aug 2026 09:47\tPM", "14 Aug 2026 09:47 PM\u202e",
+    `${" ".repeat(97)}14 Aug 2026 09:47 PM`,
+  ])("rejects invalid clocks, unsupported suffixes and invalid or incomplete dates: %s", (value) => {
+    expect(dateFromPrintedDate(value)).toBeUndefined();
+  });
+
+  it("does not silently extend interval endpoint syntax", () => {
+    expect(validatedSourceInterval("14 Aug 2026 09:47 PM", "15 Aug 2026", anchor)).toBeUndefined();
+    expect(validatedSourceInterval("14 Aug 2026", "15 Aug 2026 09:47 PM", anchor)).toBeUndefined();
+  });
+});
 
 describe("IOU source interval evidence", () => {
   it.each([

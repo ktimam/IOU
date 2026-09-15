@@ -1,0 +1,21 @@
+{
+  "provenance": {
+    "receipt": "F:/Temp/OpenChat-IOU/output/playwright/phone-release-20260908/qwen-arabic-first-proposal-trace.json",
+    "receiptSha256": "dea608aa9f113939a3eae56404a9dbf578bebffe08b6c0bbf4a7cce09b54004d",
+    "modelId": "qwen3-vl-2b-instruct-q4",
+    "imageSha256": "b93fbf4cb198c70f5da865e98d1b17ac5c2da465c09e8ff60b4ec01d8cc0f68f",
+    "promptSha256": "2ed2358df07dc8c42a25eb8c3b6b27f183202c384dc460335d7d476fde34bda1",
+    "elapsedMs": 44716,
+    "literalCopyConformant": false,
+    "deviation": "The source prints Aug; Qwen returned the Arabic token أب instead of copying Aug. Semantic normalization does not establish literal-copy fidelity."
+  },
+  "rawText": "```json\n{\n\"amount\": 12900,\n\"printed_date\": \"14 أب 2026\",\n\"printed_end_date\": \"\",\n\"note\": \"تمت العملية بنجاح\",\n\"kind\": \"settlement\",\n\"currency\": \"EGP\"\n}\n```",
+  "capturedCandidateBeforeFix": {
+    "amount": 12900,
+    "currency": "EGP",
+    "note": "تمت العملية بنجاح",
+    "kind": "settlement",
+    "direction": "credit"
+  },
+  "expectedDate": "2026-08-14"
+}

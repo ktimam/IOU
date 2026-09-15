@@ -52,6 +52,12 @@ coverage/
 playwright-report/
 test-results/
 
+# Project-local diagnostics, browser snapshots, package caches and environment state
+/output/
+/.playwright-cli/
+/.pnpm-store/
+/.codex-openchat-vite.environment.sha256
+
 # OS
 Thumbs.db
 

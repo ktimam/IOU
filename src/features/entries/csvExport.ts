@@ -9,6 +9,7 @@
 
 import type { EntryPayload } from "./types";
 import { orientDirection } from "./balance";
+import { DIRECTION_LABELS } from "./directionLabels";
 
 const COLUMNS = [
   "date", // YYYY-MM-DD
@@ -19,7 +20,7 @@ const COLUMNS = [
   "gross_amount", // pre-fee face value (empty if no fee)
   "fee_percent", // fee % deducted (empty if no fee)
   "fee_fixed", // flat fee deducted (empty if none)
-  "direction", // Credit | Debit
+  "direction", // Owed to you | You owe
   "due_dates", // "YYYY-MM-DD:NN%; …" for IOUs (empty for settlements)
   "note", // free text
   "convert_from_currency", // empty if not a conversion
@@ -50,7 +51,7 @@ export function entriesToCsv(
       p.fee ? String(p.fee.percent) : "",
       p.fee && p.fee.fixed_minor ? (p.fee.fixed_minor / 100).toFixed(2) : "",
       // Orient the stored (author-relative) direction to the exporting viewer, matching the UI.
-      orientDirection(p.direction, r.created_by_me) === "credit" ? "Credit" : "Debit",
+      DIRECTION_LABELS[orientDirection(p.direction, r.created_by_me)],
       dueDatesCsv(p),
       p.note,
       p.convert?.from_currency ?? "",

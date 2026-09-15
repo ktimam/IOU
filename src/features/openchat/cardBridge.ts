@@ -104,6 +104,11 @@ export type CardFormState = {
   // for this card's exact linked sheet and exists only in iframe memory. Confirmation carries an
   // encrypted template_ref, never this id or its display name.
   templateId?: string;
+  // Private UI-only default/edit bookkeeping. These are never read from host init or emitted by
+  // buildConfirmPayload; a late private roster must not overwrite a human's direction/None choice.
+  directionBeforeSavedType?: Direction;
+  directionEdited?: true;
+  savedTypeSelectionEdited?: true;
   amount: string;
   currency: string;
   direction: Direction;

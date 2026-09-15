@@ -53,13 +53,14 @@ $ProgressPreference = 'SilentlyContinue'
 # Capture a caller-supplied relative path while the process is still in the caller's directory.
 # All later script/helper location changes must use this immutable absolute path.
 . (Join-Path $PSScriptRoot 'environment-config.ps1')
+. (Join-Path $PSScriptRoot 'browser-passkey-environment.ps1')
+. (Join-Path $PSScriptRoot 'local-apk-identity.ps1')
 $EnvironmentConfigPath = Resolve-EnvironmentConfigPath -Path $EnvironmentConfigPath
 
 $RepoRoot = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..\..'))
 $RecoveredManager = Join-Path $PSScriptRoot 'pocketic-recovered.ps1'
 $AiAppChecker = Join-Path $PSScriptRoot 'check-openchat-ai-app.ts'
 $OpenChatBrowserChecker = Join-Path $PSScriptRoot 'check-openchat-browser-readiness.ts'
-$OpenChatRegistration = Join-Path $RepoRoot 'docs\openchat-registration.json'
 $IouEnvFile = Join-Path $RepoRoot '.env.local'
 $OpenChatEnvironmentFingerprintPath = Join-Path $RepoRoot '.codex-openchat-vite.environment.sha256'
 $Node = (Get-Command node.exe -ErrorAction Stop).Source
@@ -395,9 +396,12 @@ function Wait-OpenChatApplicationModules([string]$Origin) {
     $lastError = $null
     do {
       try {
-        Assert-HttpShape -Uri $uri -Description $probe.Description `
+        $response = Assert-HttpShape -Uri $uri -Description $probe.Description `
           -MinimumBytes $probe.MinimumBytes -ExpectedContentType 'text/javascript' `
-          -Contains $probe.Contains | Out-Null
+          -Contains $probe.Contains
+        if ($probe.Path -eq '/src/main.ts') {
+          Assert-BrowserPasskeyEnvironment -Module "$($response.Content)" -ExpectedRpId $TailnetHost
+        }
         $lastError = $null
         break
       } catch {
@@ -593,7 +597,8 @@ function Start-OpenChatVite {
     OC_ACCOUNT_LINKING_CODES_ENABLED = 'true'
     OC_BLOB_URL_PATTERN = "http://{canisterId}.raw.localhost:$GatewayPort/{blobType}"
     OC_BUILD_ENV = 'development'
-    OC_WEBAUTHN_ORIGIN = 'localhost'
+    # This launcher serves the phone-facing HTTPS origin; loopback is for service probes only.
+    OC_WEBAUTHN_ORIGIN = $TailnetHost
     OC_DEV_PORT = '5003'
     OC_WSL_DISTRO = $PocketIcDistro
     OC_DFX_NETWORK = 'local'
@@ -651,7 +656,6 @@ function Start-IouVite {
 
 function Assert-PublishedIouApp {
   Assert-File -Path $AiAppChecker -Description 'AI app readiness checker'
-  Assert-File -Path $OpenChatRegistration -Description 'OpenChat registration contract'
   Assert-File -Path $Tsx -Description 'tsx command (run pnpm install if dependencies are absent)'
   $userIndex = Get-DotEnvValue -Path $IouEnvFile -Name 'VITE_OC_USER_INDEX_CANISTER_ID'
   $appCanister = Get-DotEnvValue -Path $IouEnvFile -Name 'VITE_IOU_BACKEND_CANISTER_ID'
@@ -669,7 +673,7 @@ function Assert-PublishedIouApp {
     '--expected-app-canister', $ExpectedAppCanister,
     '--expected-inbox', $ExpectedInbox,
     '--expected-surface-origin', $ExpectedSurfaceOrigin,
-    '--expected-response-schema-file', $OpenChatRegistration,
+    '--expected-current-manifest', 'true',
     '--verify-app-binding', 'true'
   )
   $output = @(& $Tsx @arguments 2>&1)
@@ -981,6 +985,8 @@ $OpenChatVapidPublicKey = Get-RequiredConfigString `
   -Config $openChatConfig -Name 'vapidPublicKey'
 $WalletConnectProjectId = Get-RequiredConfigString `
   -Config $openChatConfig -Name 'walletConnectProjectId'
+$LocalApkIdentityProfile = Get-LocalApkIdentityProfile -Config $EnvironmentConfig `
+  -Repo $OpenChatRepo -ConfigDirectory $configDirectory
 $AndroidLinkPackage = $null
 $AndroidLinkCertSha256 = $null
 $androidLinkConfig = Get-OptionalConfigMap -Config $openChatConfig -Name 'androidLink'
@@ -1009,7 +1015,7 @@ if ($null -ne $androidLinkConfig) {
     throw "Expected exactly one literal Android applicationId in $androidGradlePath"
   }
   $AndroidApplicationId = $applicationIdMatches[0].Groups[1].Value
-  if ($AndroidLinkPackage -cne $AndroidApplicationId) {
+  if ($null -eq $LocalApkIdentityProfile -and $AndroidLinkPackage -cne $AndroidApplicationId) {
     throw (
       "Environment config openChat.androidLink.packageName '$AndroidLinkPackage' does not match " +
       "the APK applicationId '$AndroidApplicationId'"
@@ -1119,7 +1125,7 @@ if ($Action -eq 'ValidateConfig') {
   if ($null -eq $managerValidation -or $managerValidation.Valid -ne $true) {
     throw 'PocketIC manager did not accept the environment config'
   }
-  [pscustomobject]@{ Valid = $true }
+  [pscustomobject]@{ Valid = $true; LocalIdentityProfile = ($null -ne $LocalApkIdentityProfile); AndroidApkVerified = $false; AndroidInstalledStateVerified = $false }
   return
 }
 if ($Action -in @('FrontendRestart', 'OpenChatFrontendRestart')) {
@@ -1201,9 +1207,16 @@ Assert-AndroidAssetLinks -Origin $TailOpenChatOrigin
 Write-Step 'OpenChat application + background worker are healthy through the Tailscale HTTPS route'
 
 $androidStatus = Confirm-ConfiguredAndroidDevice
+$apkReadiness = Get-LocalApkReadiness $LocalApkIdentityProfile $OpenChatRepo
 
 Write-Host ''
 Write-Host 'Environment services READY (account link not verified)'
+if ($null -ne $LocalApkIdentityProfile) {
+  Write-Host "  Local Android APK identity verified: $($apkReadiness.Verified). $($apkReadiness.Reason)"
+  if (-not $apkReadiness.Verified) {
+    Write-Warning 'Services can start before the first APK build. Run build-openchat-android.ps1 with this same config and verify the artifact before an in-place update; no installed APK identity has been verified.'
+  }
+}
 Write-Host "  OpenChat: $TailOpenChatOrigin"
 Write-Host "  IOU:      $TailIouOrigin"
 Write-Host "  Model $ModelId`: embed_tokens=webgpu, vision_encoder=webgpu, decoder_model_merged=webgpu"

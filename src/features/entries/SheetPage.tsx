@@ -15,6 +15,7 @@ import {
   encryptName,
 } from "../crypto/devVetkd";
 import type { EntryPayload } from "./types";
+import { DIRECTION_LABELS } from "./directionLabels";
 import { decryptEntryRecords, type DecryptedEntry } from "./decryptEntries";
 import {
   computeBalances,
@@ -1567,7 +1568,7 @@ export function SheetPage() {
                         {" · "}
                         {mine ? "you" : themShort}
                         {" · "}
-                        {dir === "credit" ? "Credit" : "Debit"}
+                        {DIRECTION_LABELS[dir]}
                         {" · "}
                         {e.payload.txn_type === "settlement" ? "settlement" : "IOU"}
                         {e.history.length > 0 ? ` · edited ${e.history.length}×` : ""}

@@ -13,6 +13,7 @@ import { Actor, HttpAgent } from "@dfinity/agent";
 import { Principal } from "@dfinity/principal";
 import { idlFactory as iouIdlFactory } from "../../src/backend/declarations";
 import { buildIdl, type CandidOpt } from "../../src/features/openchat/registerAiApp";
+import { assertCurrentAppResponseSchemas } from "./current-app-schema";
 import {
   encodeManifestCommitmentV2,
   MANIFEST_COMMITMENT_DOMAIN_V2,
@@ -27,6 +28,7 @@ type Options = {
   expectedInbox?: string;
   expectedSurfaceOrigin?: string;
   expectedResponseSchemaFile?: string;
+  expectedCurrentManifest: boolean;
   verifyAppBinding: boolean;
 };
 
@@ -36,9 +38,10 @@ function usage(): string {
     "  [--app-name iou] [--expected-app-id <nat32>]",
     "  [--expected-app-canister <principal>] [--expected-inbox <principal>]",
     "  [--expected-surface-origin <https-origin>]",
-    "  [--expected-response-schema-file <registration-json>] [--verify-app-binding true]",
+    "  [--expected-current-manifest true | --expected-response-schema-file <registration-json>]",
+    "  [--verify-app-binding true]",
     "",
-    "Read-only: performs only fetchRootKey + anonymous UserIndex ai_apps query.",
+    "Read-only: fetchRootKey + anonymous ai_apps and optional backend get_config queries.",
   ].join("\n");
 }
 
@@ -64,6 +67,7 @@ function parseOptions(argv: string[]): Options {
     "--expected-inbox",
     "--expected-surface-origin",
     "--expected-response-schema-file",
+    "--expected-current-manifest",
     "--verify-app-binding",
   ]);
   for (let index = 0; index < argv.length; index += 2) {
@@ -99,6 +103,16 @@ function parseOptions(argv: string[]): Options {
     throw new Error("--expected-surface-origin must be an exact origin without a path");
   }
 
+  const expectedResponseSchemaFile = option(argv, "expected-response-schema-file");
+  const expectedCurrentManifestText = option(argv, "expected-current-manifest");
+  if (expectedCurrentManifestText !== undefined && expectedCurrentManifestText !== "true") {
+    throw new Error("--expected-current-manifest only accepts true");
+  }
+  const expectedCurrentManifest = expectedCurrentManifestText === "true";
+  if (expectedCurrentManifest && expectedResponseSchemaFile !== undefined) {
+    throw new Error("choose the current manifest or a response schema file, not both");
+  }
+
   return {
     host,
     userIndex,
@@ -107,7 +121,8 @@ function parseOptions(argv: string[]): Options {
     expectedAppCanister,
     expectedInbox,
     expectedSurfaceOrigin,
-    expectedResponseSchemaFile: option(argv, "expected-response-schema-file"),
+    expectedResponseSchemaFile,
+    expectedCurrentManifest,
     verifyAppBinding: option(argv, "verify-app-binding") === "true",
   };
 }
@@ -167,6 +182,10 @@ async function main(): Promise<void> {
   const actions: any[] = app.manifest.actions ?? [];
   if (actions.length < 1) fail("published IOU app has no actions");
   let responseSchemaVerified = false;
+  if (options.expectedCurrentManifest) {
+    assertCurrentAppResponseSchemas(actions);
+    responseSchemaVerified = true;
+  }
   if (options.expectedResponseSchemaFile !== undefined) {
     let expectedSchema: unknown;
     let liveSchema: unknown;

@@ -10,6 +10,23 @@
     "serial": "configured-device-serial",
     "requiredForReady": false
   },
+  "androidBuild": {
+    "sdkRoot": "C:\\path\\to\\Android\\Sdk",
+    "ndkVersion": "26.1.10909125",
+    "buildToolsVersion": "35.0.0",
+    "toolPath": "C:\\path\\to\\build-tools",
+    "mingwBinPath": "C:\\path\\to\\mingw\\bin",
+    "localIdentityProfile": {
+      "enabled": false,
+      "tempRoot": "F:\\Temp\\OpenChat-IOU",
+      "taskDirectory": "openchat-local-apk-profile",
+      "minimumVersionCode": 1000,
+      "signing": {
+        "kind": "existing-debug",
+        "keystorePath": "C:\\path\\to\\existing\\debug.keystore"
+      }
+    }
+  },
   "openChat": {
     "canisterIdsFile": "C:\\path\\to\\openchat-deployment\\.dfx\\local\\canister_ids.json",
     "oneSecForwarderCanisterId": "one-sec-forwarder-canister-id",

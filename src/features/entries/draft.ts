@@ -26,6 +26,9 @@ export type EntryDraft = {
   date?: string; // YYYY-MM-DD; default today (UTC)
   counterparty?: string; // informational (folded into the note)
   note?: string;
+  // Visible image heading used only as separate evidence for IOU's private saved-type matching.
+  // It never replaces the reviewed note and is omitted from confirmation/storage fields.
+  image_heading?: string;
   // App-private image-reader intermediates. IOU's app-rendered OpenChat card uses these exact,
   // source-grounded endpoint strings to compose the reviewed note and, when a yearless pair is
   // uniquely anchored by its printed weekdays, the Date control. They are never imported as entry

@@ -26,6 +26,7 @@ import {
 } from "./TemplatesContext";
 import type { PairTemplatesApi } from "./PairTemplatesContext";
 import type { Direction, TxnType } from "../entries/types";
+import { DIRECTION_LABELS } from "../entries/directionLabels";
 
 function fmtMajor(minor?: number): string {
   return minor ? (minor / 100).toFixed(2) : "";
@@ -208,7 +209,7 @@ export function TemplatesManager({
 
   function summary(t: TxnTemplate): string {
     const parts: string[] = [
-      t.direction === "credit" ? "Credit" : "Debit",
+      DIRECTION_LABELS[t.direction],
       t.txn_type === "settlement" ? "Settlement" : "IOU",
     ];
     if (t.currency) parts.push(t.currency);
@@ -362,8 +363,8 @@ export function TemplatesManager({
               value={direction}
               onChange={(e) => setDirection(e.target.value as Direction)}
             >
-              <option value="credit">Credit (Incoming)</option>
-              <option value="debt">Debit (Outgoing)</option>
+              <option value="credit">{DIRECTION_LABELS.credit}</option>
+              <option value="debt">{DIRECTION_LABELS.debt}</option>
             </select>
           </label>
           <label>

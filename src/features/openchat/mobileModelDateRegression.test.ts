@@ -110,11 +110,11 @@ describe("mobile portrait model date regression", () => {
       /\b\d{1,2}\s+(?:jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\s+\d{4}\b/i,
     );
     expect(prompt).toMatch(
-      /transaction date[^.]*day[^.]*month[^.]*year[^.]*printed together/i,
+      /keep its weekday[^.]*month[^.]*day number[^.]*printed year exactly as shown/i,
     );
-    expect(prompt).toMatch(/without a printed year[^.]*omit "date"/i);
-    expect(prompt).toMatch(/never supply a missing year/i);
-    expect(prompt).toContain("YYYY-MM-DD");
+    expect(prompt).toMatch(/never invent a year or an endpoint/i);
+    expect(prompt).toContain('Both date fields are strings, never nested objects or null');
+    expect(prompt).toContain('If no date is visible, omit both fields');
   });
 
   it("runs a distinct portrait August image through the real-model matrix", () => {
@@ -207,9 +207,8 @@ describe("mobile portrait model date regression", () => {
       "amount",
       "currency",
       "kind",
-      "interval_start",
-      "interval_end",
-      "date",
+      "printed_date",
+      "printed_end_date",
       "note",
     ]) {
       expect(IOU_IMAGE_EXTRACTION_PROMPT).toContain(`"${field}"`);
@@ -218,14 +217,14 @@ describe("mobile portrait model date regression", () => {
       /"note":[^.]*uppermost prominent standalone heading/i,
     );
     expect(IOU_IMAGE_EXTRACTION_PROMPT).toMatch(
-      /complete visible beginning and ending DATE VALUES of one time span/i,
+      /copy the complete visible transaction date/i,
     );
     expect(IOU_IMAGE_EXTRACTION_PROMPT).toMatch(
-      /copy each entire value[^.]*weekday[^.]*month[^.]*day number/i,
+      /keep its weekday[^.]*month[^.]*day number/i,
     );
-    expect(IOU_IMAGE_EXTRACTION_PROMPT).toContain("Include both endpoints or neither");
-    expect(IOU_IMAGE_EXTRACTION_PROMPT).toContain('Never move part of an endpoint into "date"');
-    expect(IOU_IMAGE_EXTRACTION_PROMPT).toContain('When these fields are present, omit "date" completely.');
+    expect(IOU_IMAGE_EXTRACTION_PROMPT).toContain('include BOTH "printed_date" and "printed_end_date"');
+    expect(IOU_IMAGE_EXTRACTION_PROMPT).toContain('A single date has an empty ending date');
+    expect(IOU_IMAGE_EXTRACTION_PROMPT).toContain('Never use any other date field');
     expect(IOU_IMAGE_EXTRACTION_PROMPT).not.toMatch(/reservation|booking|check-in|check out|total payout|total coming/i);
   });
 

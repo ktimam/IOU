@@ -1,6 +1,8 @@
-import { IOU_EXTRACTION_RULES } from "./actionManifest";
+import { IOU_DATE_ALIASES, IOU_EXTRACTION_RULES } from "./actionManifest";
 import { IOU_LOCAL_EXTRACTION_SCHEMA } from "./localExtractionConfig";
-import { validatedSourceInterval } from "./sourceInterval";
+import { dateFromPrintedDate, validatedSourceInterval } from "./sourceInterval";
+import { normalizeImageCurrencyToken } from "./imageCurrency";
+import { validateImageHeading } from "./imageHeading";
 import {
     applyTextDateSchemaProperties,
     matchesKeyword,
@@ -38,16 +40,54 @@ export function postProcessIouCandidate(
     const timestamp = dateAnchor(source.sourceTimestamp);
     const calendar = source.now ?? timestamp ?? new Date();
     const normalized = normalizeIouCandidateDates(candidate, IOU_LOCAL_EXTRACTION_SCHEMA);
-    const candidateInterval = validatedSourceInterval(candidate.interval_start, candidate.interval_end, calendar);
-    // Validate before the host signs the app-authored content. A bounded arbitrary string is
-    // not date evidence; never let a row label become a synthesized From-to note.
-    delete normalized.interval_start;
-    delete normalized.interval_end;
-    if (candidateInterval !== undefined) {
-        normalized.interval_start = candidateInterval.start;
-        normalized.interval_end = candidateInterval.end;
-        if (normalized.date === undefined && candidateInterval.date !== undefined) {
-            normalized.date = candidateInterval.date;
+    const imageHeading = source.modality === "image" ? validateImageHeading(candidate.image_heading) : undefined;
+    if (imageHeading === undefined) delete normalized.image_heading;
+    else normalized.image_heading = imageHeading;
+    if (source.modality === "image" && Object.hasOwn(candidate, "currency")) {
+        const currency = normalizeImageCurrencyToken(candidate.currency);
+        if (currency === undefined) delete normalized.currency;
+        else normalized.currency = currency;
+    }
+    const hasLegacyDate = ["date", ...IOU_DATE_ALIASES].some((field) => Object.hasOwn(candidate, field));
+    for (const alias of IOU_DATE_ALIASES) delete normalized[alias];
+    const hasPrintedDate = Object.hasOwn(candidate, "printed_date") || Object.hasOwn(candidate, "printed_end_date");
+    delete normalized.printed_date;
+    delete normalized.printed_end_date;
+    if (hasPrintedDate && source.modality === "image") {
+        // Do not choose between new and legacy date representations. Incomplete, invalid or mixed
+        // evidence cannot fall through to another date source and resurrect a rejected value.
+        delete normalized.date;
+        delete normalized.interval_start;
+        delete normalized.interval_end;
+        if (hasLegacyDate || Object.hasOwn(candidate, "interval_start") || Object.hasOwn(candidate, "interval_end") ||
+            !Object.hasOwn(candidate, "printed_date") || !Object.hasOwn(candidate, "printed_end_date") ||
+            typeof candidate.printed_date !== "string" || typeof candidate.printed_end_date !== "string") return normalized;
+        if (candidate.printed_end_date === "") {
+            const date = dateFromPrintedDate(candidate.printed_date);
+            if (date === undefined) return normalized;
+            normalized.date = date;
+        } else {
+            const interval = validatedSourceInterval(candidate.printed_date, candidate.printed_end_date, calendar);
+            if (interval === undefined) return normalized;
+            normalized.interval_start = interval.start;
+            normalized.interval_end = interval.end;
+            if (interval.date !== undefined) normalized.date = interval.date;
+        }
+        // Valid image evidence still follows the existing attached-text date/range precedence below.
+    } else {
+        const candidateInterval = validatedSourceInterval(candidate.interval_start, candidate.interval_end, calendar);
+        // Validate before the host signs the app-authored content. A bounded arbitrary string is
+        // not date evidence; never let a row label become a synthesized From-to note.
+        delete normalized.interval_start;
+        delete normalized.interval_end;
+        // The card can derive Date from retained endpoints too, so a rejected explicit date/alias
+        // must suppress the pair as well instead of reappearing during editable-card projection.
+        if (candidateInterval !== undefined && (!hasLegacyDate || normalized.date !== undefined)) {
+            normalized.interval_start = candidateInterval.start;
+            normalized.interval_end = candidateInterval.end;
+            if (!hasLegacyDate && normalized.date === undefined && candidateInterval.date !== undefined) {
+                normalized.date = candidateInterval.date;
+            }
         }
     }
     if (!source.text?.trim()) return normalized;

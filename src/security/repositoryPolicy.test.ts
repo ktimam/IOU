@@ -6,6 +6,32 @@ const root = process.cwd();
 const read = (relative: string): string => readFileSync(path.join(root, relative), 'utf8');
 
 describe('repository security policy', () => {
+  it('keeps local publication artifacts out of the repository root', () => {
+    const ignore = read('.gitignore').split(/\r?\n/);
+    for (const entry of [
+      '/output/',
+      '/.playwright-cli/',
+      '/.pnpm-store/',
+      '/.codex-openchat-vite.environment.sha256',
+    ]) {
+      expect(ignore, `missing root-scoped local artifact exclusion: ${entry}`).toContain(entry);
+    }
+  });
+
+  it('uses portable evidence references in the boundary review and live guide', () => {
+    for (const relative of [
+      'docs/openchat-app-boundary-review.md',
+      'scripts/live/README.md',
+    ]) {
+      const source = read(relative);
+      expect(source.includes('<project-temp>'), `${relative}: portable evidence root`).toBe(true);
+      const absolutePaths = [...source.matchAll(/\b[A-Za-z]:[\\/]+([^\\/\s"'`]+)/g)];
+      expect(absolutePaths.every(([, directory]) => directory.toLowerCase() === 'path'),
+        `${relative}: only neutral path/to placeholders are allowed`).toBe(true);
+      expect(/\b[a-z0-9-]+\.tail[a-z0-9]+\.ts\.net\b/i.test(source), `${relative}: private tailnet host`).toBe(false);
+    }
+  });
+
   it('ignores every in-repository Playwright browser-profile directory', () => {
     const ignore = read('.gitignore');
     expect(ignore).toMatch(/^\.pw-profiles\/$/m);

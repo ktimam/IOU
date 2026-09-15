@@ -2,6 +2,7 @@
 import { buildConfirmPayload, initToFormState } from "../../src/features/openchat/cardBridge";
 import { postProcessIouCandidate } from "../../src/features/openchat/localExtraction";
 import type { EntryDraft } from "../../src/features/entries/draft";
+import { normalizeImageCurrencyToken, permittedImageCurrencyOutputs } from "../../src/features/openchat/currencyEvidencePolicy";
 
 type Fields = {
   amount: number;
@@ -10,15 +11,19 @@ type Fields = {
   date?: string | null;
   interval_start?: string | null;
   interval_end?: string | null;
+  printed_date?: string | null;
+  printed_end_date?: string | null;
   note?: string;
 };
-type ProjectedFields = { date: string | null; note?: string };
+type ProjectedFields = { date: string | null; note?: string; currency?: string | null };
 export type PackagedExpectation = {
   version: 1;
   sourceTimestamp: string;
   raw: Fields;
   card: ProjectedFields;
   confirmed: ProjectedFields;
+  // Prospective opt-in only. raw.currency remains the independently reviewed source token.
+  currencyPolicy?: { version: 1; mode: "literal-or-declared-symbol" };
 };
 
 export const DEFAULT_PACKAGED_EXPECTATION: PackagedExpectation = {
@@ -79,26 +84,45 @@ function uniqueTopLevelKeys(text: string): boolean {
 /** Bounded JSON expectations are local test data, not additional model evidence. */
 export function parsePackagedExpectation(value: unknown): PackagedExpectation {
   const invalid = () => { throw new Error("invalid expectation"); };
-  if (!record(value) || !onlyKeys(value, ["version", "sourceTimestamp", "raw", "card", "confirmed"]) ||
+  if (!record(value) || !onlyKeys(value, ["version", "sourceTimestamp", "raw", "card", "confirmed", "currencyPolicy"]) ||
       value.version !== 1 || typeof value.sourceTimestamp !== "string" ||
       !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{3})?Z$/.test(value.sourceTimestamp) ||
       !Number.isFinite(Date.parse(value.sourceTimestamp)) || !calendarDate(value.sourceTimestamp.slice(0, 10)) ||
       !record(value.raw)) return invalid();
   const raw = value.raw;
-  if (!onlyKeys(raw, ["amount", "currency", "kind", "date", "interval_start", "interval_end", "note"]) ||
+  if (!onlyKeys(raw, ["amount", "currency", "kind", "date", "interval_start", "interval_end", "printed_date", "printed_end_date", "note"]) ||
       typeof raw.amount !== "number" || !Number.isFinite(raw.amount) || raw.amount <= 0 || raw.amount > 1e12 ||
       (Object.hasOwn(raw, "currency") && raw.currency !== null &&
-        (typeof raw.currency !== "string" || !/^[A-Z]{3}$/.test(raw.currency))) ||
+        (!boundedString(raw.currency, 16) || /\s|[\p{Cc}\p{Cf}\p{Cs}]/u.test(raw.currency))) ||
       (Object.hasOwn(raw, "kind") && raw.kind !== "iou" && raw.kind !== "settlement")) return invalid();
   for (const field of ["date", "interval_start", "interval_end"] as const) {
     if (Object.hasOwn(raw, field) && raw[field] !== null && !boundedString(raw[field])) return invalid();
   }
+  if (Object.hasOwn(raw, "printed_date") || Object.hasOwn(raw, "printed_end_date")) {
+    if (!boundedString(raw.printed_date) ||
+        (raw.printed_end_date !== "" && !boundedString(raw.printed_end_date))) return invalid();
+  }
   if (Object.hasOwn(raw, "note") && !boundedString(raw.note, 4096)) return invalid();
   for (const key of ["card", "confirmed"] as const) {
     const projected = value[key];
-    if (!record(projected) || !onlyKeys(projected, ["date", "note"]) ||
+    if (!record(projected) || !onlyKeys(projected, ["date", "note", "currency"]) ||
         (projected.date !== null && !calendarDate(projected.date)) ||
+        (Object.hasOwn(projected, "currency") && projected.currency !== null &&
+          (typeof projected.currency !== "string" || !/^[A-Z]{3}$/.test(projected.currency))) ||
         (Object.hasOwn(projected, "note") && !boundedString(projected.note, 4096))) return invalid();
+  }
+  if (typeof raw.currency === "string" && !/^[A-Z]{3}$/.test(raw.currency) &&
+      (!Object.hasOwn(value.card as object, "currency") || !Object.hasOwn(value.confirmed as object, "currency"))) return invalid();
+  if ((Object.hasOwn(value.card as object, "currency") || Object.hasOwn(value.confirmed as object, "currency")) &&
+      (!Object.hasOwn(raw, "currency") || !Object.hasOwn(value.card as object, "currency") ||
+        !Object.hasOwn(value.confirmed as object, "currency"))) return invalid();
+  if (Object.hasOwn(value, "currencyPolicy")) {
+    const policy = value.currencyPolicy;
+    const canonical = normalizeImageCurrencyToken(raw.currency);
+    if (!record(policy) || !onlyKeys(policy, ["version", "mode"]) || policy.version !== 1 ||
+        policy.mode !== "literal-or-declared-symbol" || canonical === undefined ||
+        (value.card as Record<string, unknown>).currency !== canonical ||
+        (value.confirmed as Record<string, unknown>).currency !== canonical) return invalid();
   }
   return value as unknown as PackagedExpectation;
 }
@@ -114,17 +138,28 @@ export type PackagedResponseEvidence = {
     date: string | null;
     interval_start: string | null;
     interval_end: string | null;
+    printed_date: string | null;
+    printed_end_date: string | null;
     noteMatches: boolean | null;
   };
   projected: {
     amount: number | null;
+    currency: string | null;
+    kind: "settlement" | "iou" | null;
     date: string | null;
     noteMatches: boolean | null;
     confirmedAmount: number | null;
+    confirmedCurrency: string | null;
+    confirmedKind: "settlement" | "iou" | null;
     confirmedDate: string | null;
     confirmedNoteMatches: boolean | null;
     notePreservedInConfirmation: boolean;
   };
+  // A targeted regression can pass while full image grounding fails (for example, a guessed
+  // ISO currency from an ambiguous symbol). Never use this partial result as full qualification.
+  dateTypeNoteAccepted: boolean;
+  currencyAccepted: boolean | null;
+  literalCurrencyAccepted: boolean | null;
   exact: boolean;
 };
 
@@ -135,7 +170,7 @@ export function checkPackagedResponse(text: string, expected: PackagedExpectatio
     try {
       const parsed: unknown = JSON.parse(text.trim());
       if (record(parsed) && uniqueTopLevelKeys(text) && onlyKeys(parsed,
-        ["amount", "currency", "kind", "date", "interval_start", "interval_end", "note"]) &&
+        ["amount", "currency", "kind", "date", "interval_start", "interval_end", "printed_date", "printed_end_date", "note"]) &&
         Object.values(parsed).every((value) => value === null || typeof value === "number" ||
           (typeof value === "string" && value.length <= 4096))) candidate = parsed;
     } catch { /* Malformed, fenced, prose-suffixed, or truncated generation is not a pass. */ }
@@ -144,12 +179,14 @@ export function checkPackagedResponse(text: string, expected: PackagedExpectatio
   const observed: PackagedResponseEvidence["observed"] = {
     amount: typeof candidate?.amount === "number" && Number.isFinite(candidate.amount) &&
       candidate.amount > 0 && candidate.amount <= 1e12 ? candidate.amount : null,
-    currency: typeof candidate?.currency === "string" && /^[A-Z]{3}$/.test(candidate.currency)
+    currency: boundedString(candidate?.currency, 16)
       ? candidate.currency : null,
     kind: candidate?.kind === "iou" || candidate?.kind === "settlement" ? candidate.kind : null,
     date: nullableString(candidate?.date),
     interval_start: nullableString(candidate?.interval_start),
     interval_end: nullableString(candidate?.interval_end),
+    printed_date: nullableString(candidate?.printed_date),
+    printed_end_date: candidate?.printed_end_date === "" ? "" : nullableString(candidate?.printed_end_date),
     noteMatches: expected.raw.note === undefined ? null : candidate?.note === expected.raw.note,
   };
   const calendar = new Date(expected.sourceTimestamp);
@@ -161,29 +198,54 @@ export function checkPackagedResponse(text: string, expected: PackagedExpectatio
   const projectedAmount = Number(card.amount);
   const projected: PackagedResponseEvidence["projected"] = {
     amount: card.amount.trim() !== "" && Number.isFinite(projectedAmount) ? projectedAmount : null,
+    currency: card.currency || null,
+    kind: card.kind === "iou" || card.kind === "settlement" ? card.kind : null,
     date: calendarDate(card.date) ? card.date : null,
     noteMatches: expected.card.note === undefined ? null : card.note === expected.card.note,
     confirmedAmount: typeof confirmed.amount === "number" && Number.isFinite(confirmed.amount) ? confirmed.amount : null,
+    confirmedCurrency: confirmed.currency ?? null,
+    confirmedKind: confirmed.kind === "iou" || confirmed.kind === "settlement" ? confirmed.kind : null,
     confirmedDate: calendarDate(confirmed.date) ? confirmed.date : null,
     confirmedNoteMatches: expected.confirmed.note === undefined ? null : confirmed.note === expected.confirmed.note,
     notePreservedInConfirmation: (confirmed.note ?? "") === card.note,
   };
-  const rawMatches = Object.entries(expected.raw).every(([key, value]) => {
+  const matchesRawField = ([key, value]: [string, unknown]) => {
     if (key === "note") return observed.noteMatches;
+    if (key === "currency" && expected.currencyPolicy !== undefined) {
+      return expected.currencyPolicy.version === 1 && expected.currencyPolicy.mode === "literal-or-declared-symbol" &&
+        permittedImageCurrencyOutputs(value).includes(candidate?.currency as string);
+    }
     // null explicitly requires the field to be absent/null, never merely failed sanitization.
     return value === null ? candidate?.[key] === undefined || candidate[key] === null
       : candidate?.[key] === value;
-  });
+  };
+  const rawMatches = Object.entries(expected.raw).every(matchesRawField);
+  const printedEvidenceRequested = candidate !== undefined &&
+    (!(Object.hasOwn(candidate, "printed_date") || Object.hasOwn(candidate, "printed_end_date")) ||
+      (Object.hasOwn(expected.raw, "printed_date") && Object.hasOwn(expected.raw, "printed_end_date")));
+  const dateTypeNoteAccepted = candidate !== undefined && printedEvidenceRequested &&
+    Object.entries(expected.raw).filter(([key]) => key !== "amount" && key !== "currency").every(matchesRawField) &&
+    (expected.raw.kind === undefined || (projected.kind === expected.raw.kind && projected.confirmedKind === expected.raw.kind)) &&
+    projected.date === expected.card.date && projected.confirmedDate === expected.confirmed.date &&
+    projected.noteMatches !== false && projected.confirmedNoteMatches !== false && projected.notePreservedInConfirmation;
+  const currencyAccepted = expected.raw.currency === undefined ? null : candidate !== undefined &&
+    matchesRawField(["currency", expected.raw.currency]) === true &&
+    projected.currency === (Object.hasOwn(expected.card, "currency") ? expected.card.currency : expected.raw.currency) &&
+    projected.confirmedCurrency === (Object.hasOwn(expected.confirmed, "currency") ? expected.confirmed.currency : expected.raw.currency);
   return {
     completeJsonObject: candidate !== undefined,
     invalidOrTruncatedOutput: candidate === undefined,
     outputCharacters: Math.min(text.length, 16_385),
     observed,
     projected,
-    exact: candidate !== undefined && rawMatches && projected.amount === expected.raw.amount &&
-      projected.confirmedAmount === expected.raw.amount && projected.date === expected.card.date &&
-      projected.confirmedDate === expected.confirmed.date && projected.noteMatches !== false &&
-      projected.confirmedNoteMatches !== false && projected.notePreservedInConfirmation,
+    dateTypeNoteAccepted,
+    currencyAccepted,
+    literalCurrencyAccepted: expected.raw.currency === undefined ? null : candidate !== undefined &&
+      (expected.raw.currency === null ? candidate.currency === undefined || candidate.currency === null
+        : candidate.currency === expected.raw.currency),
+    exact: candidate !== undefined && rawMatches && dateTypeNoteAccepted && currencyAccepted !== false &&
+      projected.amount === expected.raw.amount &&
+      projected.confirmedAmount === expected.raw.amount,
   };
 }
 
@@ -192,9 +254,12 @@ export function safePackagedExpectation(expected: PackagedExpectation) {
   const { note: rawNote, ...raw } = expected.raw;
   return {
     version: expected.version,
+    ...(expected.currencyPolicy === undefined ? {} : { currencyPolicy: expected.currencyPolicy }),
     sourceCalendarDate: expected.sourceTimestamp.slice(0, 10),
     raw: { ...raw, noteChecked: rawNote !== undefined },
-    card: { date: expected.card.date, noteChecked: expected.card.note !== undefined },
-    confirmed: { date: expected.confirmed.date, noteChecked: expected.confirmed.note !== undefined },
+    card: { date: expected.card.date, noteChecked: expected.card.note !== undefined,
+      ...(Object.hasOwn(expected.card, "currency") ? { currency: expected.card.currency } : {}) },
+    confirmed: { date: expected.confirmed.date, noteChecked: expected.confirmed.note !== undefined,
+      ...(Object.hasOwn(expected.confirmed, "currency") ? { currency: expected.confirmed.currency } : {}) },
   };
 }

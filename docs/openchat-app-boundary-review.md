@@ -1,5 +1,8 @@
 # OpenChat application boundary review — 2026-09-05
 
+Local artifact references use `<project-temp>` for the operator-configured evidence location.
+Artifact filenames and recorded hashes are unchanged; these are not published downloads.
+
 The active OpenChat working tree no longer owns IOU transaction parsing, date inference,
 financial text-sequence grammars, field-role declarations, or IOU-specific fixtures. Those
 implementations and their app regression coverage now live under `src/features/openchat/`
@@ -248,6 +251,179 @@ cause. The bounded model/device report and emulator replay report are under `out
 Their filenames are `phone-model-proposal-acceptance-20260905.json` and
 `emulator-model-proposal-contract-20260905.json`, respectively.
 
+### September 8 paired-image contract and phone verification
+
+The subsequent phone regression was real: the receipt's full single date was generated as an
+incomplete interval after the range-oriented prompt rewrite. IOU correctly rejected that pair,
+leaving Date empty. Earlier parser/range tests did not qualify both original images under the
+same prompt. The acceptance suite now keeps all captured failures, distinguishes synthetic
+controls from actual phone outputs, and pins the pair to the tested prompt bytes.
+
+The new IOU-owned image contract uses `printed_date` and `printed_end_date`; a single date
+requires the explicit empty ending string. IOU alone converts the full printed date or valid
+range to its canonical fields. Incomplete/malformed pairs and mixed legacy representations
+cannot revive a rejected date through card fallback. Legacy aliases are transported separately
+and conflict-checked inside IOU. No app date fields, aliases, parsing rules or image fixtures
+were added to OpenChat. The tested prompt's final newline is part of its byte identity.
+
+Under the earlier `c79e08cbf13abd38dab634420664cb6dfeea09260b3ed373978db5057477b6dd`
+prompt, both exact images produced repeatable date/type/note outputs in the packaged physical-phone
+Gemma worker. After the local manifest and backend binding were refreshed, the user made fresh
+proposals for both. The receipt card showed 12,900 EGP and 2026-08-14 with its Arabic heading;
+the range card showed 1,912.15, saved type Reservation, 2026-07-19, and the complete From-to
+note without the unrelated row-label text. Both were verified/editable with confirmation
+enabled and 338 px viewport/document/body widths. Those captures did not check direction, and the
+range output guessed `USD` where the source printed only `$`. They qualify the recorded
+date/type/note and layout checks, not the complete proposal. Confirmation and delivery were not
+exercised, and the reconnect interaction itself was not observed. No APK rebuild was needed.
+
+Currency review exposed a separate acceptance overclaim: the range source prints only `$`;
+earlier expected outputs copied the model's `USD`, contrary to the code-only prompt instruction.
+Those raw captures remain unchanged, but overall grounding now rejects them while separately
+recording their correct date/type/note fields. Synthetic currency-omitted controls verify the
+strict negative rule without pretending a model emitted them. The user approved IOU's existing
+`$` to `USD` policy for image proposals. That is an app-owned interpretation of the literal symbol,
+not permission for the model to invent a printed ISO code or add currency logic to OpenChat.
+
+The current prompt changes only its currency instruction to:
+
+> "currency": copy only the visibly printed currency code or symbol exactly. Do not translate or expand symbols into codes.
+
+Its SHA-256, including the final newline, is
+`2ed2358df07dc8c42a25eb8c3b6b27f183202c384dc460335d7d476fde34bda1`.
+Four actual packaged-phone Gemma 4 E2B runs at 96 output tokens preserved the correct amount,
+printed date or complete range, kind, heading, and literal currency. The Arabic image returned
+`12900`, `EGP`, `14 Aug 2026`, and an empty ending date in 33,396 and 32,757 ms. The range image
+returned `1912.15`, `$`, `Sun, Jul 19` / `Thu, Aug 6` in 34,205 and 33,034 ms. IOU's replay maps
+the raw `$` to card/confirmation currency `USD` using the approved existing policy. No OCR,
+chat posting or confirmation was used in these four worker runs. Their unchanged receipts are
+`arabic-worker-currency-copy.json`, `arabic-worker-currency-copy-repeat.json`,
+`range-worker-currency-copy.json`, and `range-worker-currency-copy-repeat.json` under the project's
+external `output/playwright/phone-release-20260908` evidence folder.
+
+A separate direction bug remained after type selection: loading the private saved-type roster
+did not apply the matched type's saved direction. IOU's card hydration now applies that saved
+direction while preserving explicit manual edits and readonly cards. This is generic saved-type
+behavior, with no `Reservation`-specific branch or other hard-coded category keyword. The earlier
+phone captures omitted direction, so their passing date/type/note assertions could not detect it.
+
+The latest complete IOU unit run passes **1,736/1,736 tests across 105 files**, with at most two
+workers. The preceding 1,654/1,654 full run across 104 files and 922/922 focused selection across
+49 files remain historical evidence. Both application TypeScript checks pass. All 16 recorded-output
+replays through the actual selected OpenChat host
+and IOU normalization/card/confirmation-payload code pass; rejected historical outputs remain
+rejected, not retroactively qualified. These source replays are separate from fresh UI acceptance.
+The production-mode IOU frontend candidate also built successfully into
+`<project-temp>/iou-candidate-ui-20260908-be2829186e224e139f85895a94264813`.
+This is an isolated candidate bundle, not a deployment or APK update; it predates the localized
+date normalization follow-up below.
+
+The updated literal-currency definition is now published locally as app 1 revision
+`1788864441555`, replacing revision `1788862105373` and its earlier `c79e08cb…` prompt.
+Anonymous read-back verified that the full response schema equals the regenerated app source
+and that the backend manifest commitment matches exactly. The existing registrar and default
+administrator were reused; no owner change, account reset or production deployment was performed.
+The existing IOU frontend serves the direction fix: loopback checks returned HTTP 200 and verified
+the exact direction assignment and labels in the delivered modules. The PowerShell Tailscale
+HTTPS check failed TLS authentication; no certificate bypass was attempted. This is not phone
+or Tailscale UI acceptance.
+
+At `2026-09-08T10:54:29.928Z`, read-only inspection after the user's fresh physical-APK proposal
+verified one editable IOU frame and one enabled confirmation control. The range card contained
+amount `1912.15`, currency `USD`, kind `iou`, date `2026-07-19`, the full expected From-to note,
+saved type `Reservation`, and direction `debt` displayed as **You owe**. Viewport, document and
+body widths were all 338 px. The unchanged receipt is
+`output/playwright/phone-release-20260908/literal-currency-range-direction-proposal.json` in the
+project's external evidence directory. This closes the fresh rendered-card direction check.
+It did **not** capture the card's manifest revision; revision `1788864441555` and source/binding
+identity were verified separately above and must not be presented as a captured card revision.
+
+The inspector did not press confirmation or independently read backend delivery. The user then
+explicitly reported that **Add to IOU appeared correct**. Record that outcome as **user-confirmed
+delivery**, not independent end-to-end/backend acceptance, and preserve the receipt's original
+`confirmationClicked:false` / `deliveryVerified:false`. No reconnect journey was independently
+observed.
+
+The phone temporarily disconnected: the earlier read-only CDP preflight could not attach, and device
+and forwarding inventories were empty. No selection, download, cache change or inference was
+attempted. Earlier UI recognition of downloaded Qwen and uninstalled optional voice support
+does not establish current Qwen cache readiness or audio acceptance. Those device checks remain
+outstanding; the preflight failure is preserved in the same evidence directory as
+`model-cache-preflight-blocked.json`.
+Later the phone reconnected, cached base-model metadata matched, and Qwen was selected through
+the actual model manager without deleting Gemma. Full-file verification stalled before attachment.
+The subsequent user-initiated Qwen APK proposal completed in 44,716 ms with amount `12900`,
+currency `EGP`, kind `settlement`, the correct Arabic heading, and `printed_date:"14 أب 2026"`.
+The raw output also contained Markdown fences. IOU's English-only month parser discarded the
+date: the actual verified editable card had Date empty, despite correct amount/currency and one
+enabled confirmation control. Its 338 px layout did not overflow; the card was not saved.
+Original evidence remains in `qwen-arabic-first-proposal-trace.json` and
+`qwen-arabic-first-proposal-card.json` in the same external phone evidence directory.
+
+The bounded fix is entirely IOU-owned. Its anchored Gregorian date grammar accepts complete
+Arabic month and weekday names, exact decimal Arabic digit forms, and alef/vowel-mark variants
+inside name tokens. In this date position, `أب` normalizes to August; arbitrary prose, incomplete
+month names, impossible dates, weekday conflicts, controls and unjustified years remain rejected.
+Original interval spelling is retained. The source actually prints `Aug`, so this is a semantic
+normalization repair, **not** a claim that Qwen obeyed the literal-copy instruction. Neither the
+prompt, manifest nor OpenChat's generic transport changed for this fix.
+
+The exact fenced output is retained in the shared desktop/emulator replay. The actual PR2 host
+parser, IOU normalization and both card boundaries now preserve `2026-08-14` and the correct
+amount/currency/note. All 16 desktop cases pass their assertions, while this Qwen case remains
+strictly unqualified for literal raw fidelity. The 80 new localized regressions include a
+failing-first reproduction; 322 focused tests and the full 1,736-test suite now pass. Receipts include
+`iou-localized-date-before.json`, `iou-localized-date-after-host-fixture.json`,
+`iou-localized-date-desktop-replay.json` and `iou-full-after-localized-date.json` in the external
+phone evidence directory. This is recorded-output replay, not new GPU or emulator inference.
+The live server returned HTTP 200 for the updated normalization module. After USB reconnected,
+the user's fresh proposal was inspected at approximately `2026-09-08T12:21Z`. The new visible
+card, distinguished from the older undated card, showed amount `12900`, currency `EGP`, kind
+`settlement`, date `2026-08-14`, the expected Arabic note, direction `credit` / **Owed to you**,
+and no saved type. The verified frame had Add to IOU enabled and 338 px viewport/document/body
+widths without overflow. Receipt: `arabic-post-localized-date-proposal-card.json` in the same
+external evidence directory. This closes the fresh rendered-card check for this app-only fix
+on the same September 7 APK. Confirmation, delivery, card revision and new raw model output
+were not captured in this repeat; the prior Qwen selection is not a fresh model-identity assertion.
+
+The installed APK is still the reviewed September 7 artifact. Separate generic OpenChat fixes
+avoid redundant full-weight verification on a stale-worker refresh and yield during cached
+SHA hashing; their focused source tests pass 106/106 on PR1 and 111/111 on PR2. A new local-test
+APK is required for those dirty runtime changes and has not yet been built or phone-verified.
+Independently verified confirmation/delivery and reconnect, repeated phone/model cache reuse,
+optional voice if enabled, and final-head hosted checks remain separate gates.
+
+The user-approved RAM-backed socket plan has now executed the selected 54 app/model tests.
+The first run returned 26 passed / 28 failed / one ignored, with 411 filtered: shared failures
+were traced to stale test pagination/lookup assumptions, invalid test card rows and a legacy
+ingress expectation. Three integration-test files were corrected without changing production
+WASMs or weakening security assertions; a source-bound harness-only relink succeeded. A fresh
+run of the same 54 tests returned **52 passed / 2 failed / one ignored**, with 411 filtered,
+under `tmp/pr2-selected-integration-45b05627a0274980aa41b75cf5ed562c`. The remaining assertions
+concern LF/CRLF public-key text equality and an unexpected cancellation response; neither is
+waived. Final source/input bindings passed and owned process/RAM cleanup completed. This is
+not a passing integration gate or hosted Linux acceptance.
+The earlier 2.2 GiB disk preflight and 465-test socket failure remain historical, not the current
+execution state or an expanded runtime gate. The feature-only advisory request remains blocked
+pending explicit user approval; no query succeeded and no whole lockfile was uploaded.
+
+OpenChat's two unfiltered frontend workflows now contain a separate, exact nine-test-file
+**Check offline feature inventory and CI contracts** step. Its contract guard checks the actual
+single-line run, omitted tests, commented/conditional/ignored execution, repository-root working
+directory and inherited shell. Those nine helpers plus model-CI coverage pass 262/262 tests on
+PR1 and 304/304 on PR2, entirely offline, including four failing-first YAML-scalar regressions.
+This completes that bounded wiring check, not overall CI:
+the remaining old whole-lockfile commands still fail closed and must not be represented as green.
+
+The eight target/feature-specific Rust inventories and advisory request plans are now extracted
+and validated offline. PR1 uses its own four metadata profiles and 183 unchanged dependency
+inputs; PR2 uses four profiles and 190 inputs. The retained
+`<project-temp>/tmp/rust-advisory-offline-plans-e8cUoE/summary.json` plans 474 PR1 and 473 PR2
+registry queries, with seven Git identities separately unqueried in each scope. **None were sent**.
+`rootCompletenessVerified:false` records the bounded coverage limit, not a newly identified
+missing root or authority to expand into optional development tools, unchanged core fixtures,
+or a general native C audit. Historical findings remain preserved without current security clearance.
+
 ### Earlier environment recovery and APK smoke evidence
 
 The preserved PocketIC replica, OpenChat frontend/background worker, and IOU frontend were
@@ -266,12 +442,12 @@ phone's current IOU link successfully authorized card preparation and private ap
 Entry confirmation was intentionally not performed.
 
 The ARM64 v2 APK keeps all-WebGPU model support and disables production OTA replacement.
-Final artifact: `F:\Temp\openchat-v2-all-webgpu-app-boundary-arm64-20260905-161936.apk`.
+Final artifact: `<project-temp>/openchat-v2-all-webgpu-app-boundary-arm64-20260905-161936.apk`.
 Its SHA-256 is `DDE7CDC9D54575A16FA967BC79E8D635DDA388899485ECB0DF8197484BE5BD3C`.
 The installed APK's WebView reported `http://tauri.localhost/`, a secure context, and credentialless
 iframe support. Its exact version, generic processing protocol, profile-tagged OCR bridge, OCR-only
 UI, and Gemma/Qwen GPU worker assets passed the emulator smoke check. Removed host parser markers
-were absent. The report is `F:\Temp\openchat-apk-final-app-boundary-smoke-20260905-161936.json`.
+were absent. The report is `<project-temp>/openchat-apk-final-app-boundary-smoke-20260905-161936.json`.
 The emulator launches its packaged v2 UI, but its WebView returns no WebGPU adapter. No physical
 phone was attached during that emulator check.
 

@@ -1,10 +1,14 @@
 import { iouActionManifest } from "./actionManifest";
 import { extractIouLocalCandidates, postProcessIouCandidate } from "./localExtraction";
+import { normalizeRawImageEvidence } from "./rawImageEvidence";
+import { normalizeRawImageTotalRow, normalizeRawImageTotalRowText } from "./rawImageTotalRow";
 
 const PREFIX = "oc:app-process:";
 const MAX_BYTES = 64 * 1024;
 type Binding = { frameNonce: string; requestNonce: string };
-type Result = { kind: "candidates"; candidates: Record<string, unknown>[] } | { kind: "none" | "ambiguous" | "error" };
+/** App-owned profile selection, never a field supplied by OpenChat/model output. */
+export type IouProcessorOptions = { rawImageMoneyFormat?: "strict" | "total-row" };
+type Result = { kind: "candidates"; candidates: Record<string, unknown>[]; sourceIndexes?: number[] } | { kind: "none" | "ambiguous" | "error" };
 
 function record(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === "object" && !Array.isArray(value);
@@ -30,7 +34,9 @@ export function parseProcessorBootstrap(value: unknown): Binding | undefined {
   return { frameNonce: value.frameNonce, requestNonce: value.requestNonce };
 }
 
-export function processIouRequest(value: unknown, binding: Binding): Result {
+export function processIouRequest(value: unknown, binding: Binding, options: IouProcessorOptions = {}): Result {
+  if (options.rawImageMoneyFormat !== undefined && options.rawImageMoneyFormat !== "strict" &&
+    options.rawImageMoneyFormat !== "total-row") return { kind: "error" };
   if (!record(value) || value.type !== PREFIX + "request" || value.version !== 1 ||
     value.frameNonce !== binding.frameNonce || value.requestNonce !== binding.requestNonce ||
     value.actionId !== iouActionManifest.id || Object.keys(value).length !== 6 ||
@@ -43,6 +49,23 @@ export function processIouRequest(value: unknown, binding: Binding): Result {
   const text = typeof input.text === "string" ? input.text : undefined;
   const sourceTimestamp = typeof input.sourceTimestamp === "number" ? input.sourceTimestamp : undefined;
   try {
+    if (input.operation === "normalize_raw") {
+      if (input.modality !== "image" || input.ocrTranscripts !== undefined || !Array.isArray(input.candidates) ||
+        input.candidates.length === 0 || input.candidates.length > 16 || !input.candidates.every(record)) return { kind: "error" };
+      const candidates: Record<string, unknown>[] = [];
+      for (const candidate of input.candidates) {
+        const evidence = Object.hasOwn(candidate, "total_row")
+          ? normalizeRawImageTotalRow(candidate)
+          : options.rawImageMoneyFormat === "total-row" && Object.hasOwn(candidate, "total_text")
+          ? normalizeRawImageTotalRowText(candidate)
+          : normalizeRawImageEvidence(candidate, "labeled-values");
+        if (evidence === undefined) return { kind: "error" };
+        candidates.push(postProcessIouCandidate(evidence, {
+          text, sourceTimestamp, modality: "image", candidateCount: input.candidates.length,
+        }));
+      }
+      return { kind: "candidates", candidates, sourceIndexes: candidates.map((_, index) => index) };
+    }
     if (input.operation === "extract" && input.modality === "image" && input.candidates === undefined && Array.isArray(input.ocrTranscripts)) {
       const transcripts = input.ocrTranscripts;
       if (transcripts.length !== 2 || !transcripts.every((item) => record(item) &&
@@ -76,7 +99,7 @@ export function processIouRequest(value: unknown, binding: Binding): Result {
 }
 
 /** Pure local app code; this frame never loads an account, requests keys, or calls a backend. */
-export function attachIouLocalProcessor(target: Window = window): () => void {
+export function attachIouLocalProcessor(target: Window = window, options: IouProcessorOptions = {}): () => void {
   let binding: Binding | undefined;
   let parentOrigin: string | undefined;
   let completed = false;
@@ -96,7 +119,7 @@ export function attachIouLocalProcessor(target: Window = window): () => void {
     }
     if (event.origin !== parentOrigin || !record(event.data) || event.data.type !== PREFIX + "request") return;
     completed = true;
-    const result = processIouRequest(event.data, binding);
+    const result = processIouRequest(event.data, binding, options);
     target.parent.postMessage({ type: PREFIX + "result", version: 1, ...binding, ...result }, parentOrigin!);
   };
   target.addEventListener("message", receive);

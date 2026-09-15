@@ -1,0 +1,171 @@
+{
+  "version": 1,
+  "scope": "Actual smaller-Qwen desktop hardware WebGPU captures. Replay regression only; not fresh phone inference, live attestation or release qualification.",
+  "modelId": "qwen3-vl-2b-instruct-q4",
+  "promptSha256": "2d73ebab0701a7adb4256072ef4625c30964b46766172bae05602bc72e045cc8",
+  "workerSha256": "0febb1b1a7b907db1ac41f0daff33a0c12399c328cf7686e551db708ad4b405a",
+  "resultSha256": "eb1d6ec15f38f28536e21d83c1c4e049f73383bdaa63c9de1ee131d9ef396432",
+  "knownLimitations": {
+    "uniqueCardsCorrect": 7,
+    "uniqueImages": 8,
+    "repeatCardsCorrect": 2,
+    "repeatImages": 2,
+    "transportStreamCloseWarnings": 30,
+    "cleanRuntimeQualification": false
+  },
+  "cases": [
+    {
+      "raw": "```json\n{\n    \"heading\": \"تمت العملية بنجاح\",\n    \"total_text\": \"12,900 EGP\",\n    \"dates\": [\n        \"14 Aug 2026 09:47 PM\"\n    ],\n    \"kind\": \"settlement\"\n}\n```",
+      "sourceTimestamp": "2026-09-08T09:43:14.229Z",
+      "imageSha256": "b93fbf4cb198c70f5da865e98d1b17ac5c2da465c09e8ff60b4ec01d8cc0f68f",
+      "expectedAppForm": {
+        "kind": "settlement",
+        "amount": "12900",
+        "currency": "EGP",
+        "date": "2026-08-14",
+        "note": "تمت العملية بنجاح"
+      },
+      "imageId": "dev-real-arabic-transfer",
+      "repeated": false,
+      "knownMismatch": null
+    },
+    {
+      "raw": "```json\n{\n  \"heading\": \"Reservation\",\n  \"total_text\": \"Total Payout $1,912.15\",\n  \"dates\": [\n    \"Sun, Jul 19\",\n    \"Thu, Aug 6\"\n  ],\n  \"kind\": \"iou\"\n}\n```",
+      "sourceTimestamp": "2026-07-03T12:00:00Z",
+      "imageSha256": "b7acf1d1c8b54aa54d48af29ff9cb022a9a36c59f6144e623519d86e7531e6f1",
+      "expectedAppForm": {
+        "kind": "iou",
+        "amount": "1912.15",
+        "currency": "USD",
+        "date": "2026-07-19",
+        "note": "Reservation | From Sun, Jul 19 to Thu, Aug 6"
+      },
+      "imageId": "dev-real-payout-range",
+      "repeated": false,
+      "knownMismatch": null
+    },
+    {
+      "raw": "```json\n{\n    \"heading\": \"Your transaction was successful\",\n    \"total_text\": \"13,500 EGP\",\n    \"dates\": [\n        \"13 Aug 2026 11:59 AM\"\n    ],\n    \"kind\": \"settlement\"\n}\n```",
+      "sourceTimestamp": "2026-09-09T12:00:00Z",
+      "imageSha256": "df79335ced32f46553cfceaa907a5f1bf4c93c5bb0905a032af5e2c536edfed8",
+      "expectedAppForm": {
+        "kind": "settlement",
+        "amount": "13500",
+        "currency": "EGP",
+        "date": "2026-08-13",
+        "note": "Your transaction was successful"
+      },
+      "imageId": "dev-real-english-transfer",
+      "repeated": false,
+      "knownMismatch": null
+    },
+    {
+      "raw": "```json\n{\n  \"heading\": \"REPAIR ESTIMATE\",\n  \"total_text\": \"Total: 72.50\",\n  \"dates\": [],\n  \"kind\": \"iou\"\n}\n```",
+      "sourceTimestamp": "2026-09-09T12:00:00Z",
+      "imageSha256": "9455c552a8122b9f356ca0f6de30f99928073be254030bb5be7f4dd6939d9b90",
+      "expectedAppForm": {
+        "kind": "iou",
+        "amount": "72.5",
+        "currency": "",
+        "date": "",
+        "note": "REPAIR ESTIMATE"
+      },
+      "imageId": "holdout-synthetic-missing-evidence",
+      "repeated": false,
+      "knownMismatch": null
+    },
+    {
+      "raw": "```json\n{\n  \"heading\": \"RIVER MARKET SERVICE RECEIPT\",\n  \"total_text\": \"TOTAL EGP 350.00\",\n  \"dates\": [\n    \"04 JUL 2026\"\n  ],\n  \"kind\": \"iou\"\n}\n```",
+      "sourceTimestamp": "2026-09-09T12:00:00Z",
+      "imageSha256": "dd473ba928f5f4ab015b7803b65825dec5ccfd4941a544b6d66fbc0a78e3c479",
+      "expectedAppForm": {
+        "kind": "iou",
+        "amount": "350",
+        "currency": "EGP",
+        "date": "2026-07-04",
+        "note": "RIVER MARKET"
+      },
+      "imageId": "dev-synthetic-paper-owed",
+      "repeated": false,
+      "knownMismatch": {
+        "field": "note",
+        "actual": "RIVER MARKET SERVICE RECEIPT"
+      }
+    },
+    {
+      "raw": "```json\n{\n  \"heading\": \"Workshop Confirmed\",\n  \"total_text\": \"1,912.15 USD\",\n  \"dates\": [\"2026-07-19\", \"2026-08-06\"],\n  \"kind\": \"iou\"\n}\n```",
+      "sourceTimestamp": "2026-09-09T12:00:00Z",
+      "imageSha256": "088b9b7c14e5b5da35f7b6b5f1450da6f403ba23993857bdedc7353fda909878",
+      "expectedAppForm": {
+        "kind": "iou",
+        "amount": "1912.15",
+        "currency": "USD",
+        "date": "2026-07-19",
+        "note": "Workshop Confirmed | From 2026-07-19 to 2026-08-06"
+      },
+      "imageId": "dev-synthetic-workshop-range",
+      "repeated": false,
+      "knownMismatch": null
+    },
+    {
+      "raw": "```json\n{\n  \"heading\": \"PAGO RECIBIDO\",\n  \"total_text\": \"Total: €84.70\",\n  \"dates\": [\n    \"2026-09-08\"\n  ],\n  \"kind\": \"settlement\"\n}\n```",
+      "sourceTimestamp": "2026-09-09T12:00:00Z",
+      "imageSha256": "3156ed9df8f6533387948b10981e8129d6ce00f90829c93a52ccf9a8cb93baf2",
+      "expectedAppForm": {
+        "kind": "settlement",
+        "amount": "84.7",
+        "currency": "EUR",
+        "date": "2026-09-08",
+        "note": "PAGO RECIBIDO"
+      },
+      "imageId": "holdout-synthetic-spanish-paid",
+      "repeated": false,
+      "knownMismatch": null
+    },
+    {
+      "raw": "```json\n{\n  \"heading\": \"EQUIPMENT HIRE\",\n  \"total_text\": \"Total agreed: £842.65\",\n  \"dates\": [\n    \"28 Sep 2026\",\n    \"2 Oct 2026\"\n  ],\n  \"kind\": \"iou\"\n}\n```",
+      "sourceTimestamp": "2026-09-09T12:00:00Z",
+      "imageSha256": "0736054bdf8937890b28cbe5ccce2e772b536022b07e86bdfef5334176b121ea",
+      "expectedAppForm": {
+        "kind": "iou",
+        "amount": "842.65",
+        "currency": "GBP",
+        "date": "2026-09-28",
+        "note": "EQUIPMENT HIRE | From 28 Sep 2026 to 2 Oct 2026"
+      },
+      "imageId": "holdout-synthetic-unpaid-hire",
+      "repeated": false,
+      "knownMismatch": null
+    },
+    {
+      "raw": "```json\n{\n    \"heading\": \"تمت العملية بنجاح\",\n    \"total_text\": \"12,900 EGP\",\n    \"dates\": [\n        \"14 Aug 2026 09:47 PM\"\n    ],\n    \"kind\": \"settlement\"\n}\n```",
+      "sourceTimestamp": "2026-09-08T09:43:14.229Z",
+      "imageSha256": "b93fbf4cb198c70f5da865e98d1b17ac5c2da465c09e8ff60b4ec01d8cc0f68f",
+      "expectedAppForm": {
+        "kind": "settlement",
+        "amount": "12900",
+        "currency": "EGP",
+        "date": "2026-08-14",
+        "note": "تمت العملية بنجاح"
+      },
+      "imageId": "dev-real-arabic-transfer",
+      "repeated": true,
+      "knownMismatch": null
+    },
+    {
+      "raw": "```json\n{\n  \"heading\": \"Reservation\",\n  \"total_text\": \"Total Payout $1,912.15\",\n  \"dates\": [\n    \"Sun, Jul 19\",\n    \"Thu, Aug 6\"\n  ],\n  \"kind\": \"iou\"\n}\n```",
+      "sourceTimestamp": "2026-07-03T12:00:00Z",
+      "imageSha256": "b7acf1d1c8b54aa54d48af29ff9cb022a9a36c59f6144e623519d86e7531e6f1",
+      "expectedAppForm": {
+        "kind": "iou",
+        "amount": "1912.15",
+        "currency": "USD",
+        "date": "2026-07-19",
+        "note": "Reservation | From Sun, Jul 19 to Thu, Aug 6"
+      },
+      "imageId": "dev-real-payout-range",
+      "repeated": true,
+      "knownMismatch": null
+    }
+  ]
+}
