@@ -68,6 +68,7 @@ export default mergeConfig(base, {
     { find: /^@oc-test\\/(.*)$/, replacement: ${quoted(join(frontend, "app/src/utils/$1"))} },
     { find: /^@oc-test-store\\/(.*)$/, replacement: ${quoted(join(frontend, "app/src/stores/$1"))} },
     { find: "vitest", replacement: ${quoted(join(modules, "vitest/dist/index.js"))} },
+    { find: /^tauri-plugin-oc-api\\/(.*)$/, replacement: ${quoted(join(frontend, "tauri-plugin-oc/guest-js/$1"))} },
     { find: "tauri-plugin-oc-api", replacement: ${quoted(join(frontend, "tauri-plugin-oc/guest-js/index.ts"))} },
   ] },
   define: {

@@ -6,13 +6,20 @@ import { usePairTemplates } from "../templates/PairTemplatesContext";
 import { addEntryBatch, batchImportContextMatches } from "../entries/batchImport";
 import type { EntryPayload } from "../entries/types";
 import { buildLocalImportCommittedReceipt, createLocalImportReceiver, type LocalImportDraft, type PendingLocalImport } from "./localImportHandoff";
-import { localImportSenderOrigin, localImportSessionNonce } from "./localImportLaunch";
+import { localImportNativeBootstrap, localImportSenderOrigin, localImportSessionNonce } from "./localImportLaunch";
+import { createLocalImportConsent, type LocalImportConsentState } from "./localImportConsent";
 import { applyLocalImportType, prepareLocalImportReview } from "./localImportReview";
 import { createIouLocalAppPackage } from "./localAppPackage";
 import { createLocalProcessorContext } from "./localProcessorContext";
 import { currencyFromUserRecord } from "../settings/defaultCurrency";
 
-type Binding = { senderOrigin: string; senderWindow: Window; sessionNonce: string };
+type Binding = { senderOrigin: string; senderWindow: Window; sessionNonce: string; isCurrent?: () => boolean };
+type ImportTransport = {
+  binding?: Binding;
+  receiver?: ReturnType<typeof createLocalImportReceiver>;
+  consent?: ReturnType<typeof createLocalImportConsent>;
+  closed: boolean;
+};
 type SheetChoice = { pairId: string; sheetId: string; otherPrincipal: string };
 type Review = { payloads: readonly EntryPayload[]; sheet: SheetChoice; importId: string };
 
@@ -24,54 +31,125 @@ export function LocalImportPage() {
 
 function LocalImportSession() {
   const { state, signIn, signOut } = useAuth();
-  const [binding] = useState<Binding | undefined>(() => {
+  const [launch] = useState(() => {
     const senderOrigin = localImportSenderOrigin(import.meta.env.VITE_LOCAL_IMPORT_SENDER_ORIGIN);
     const sessionNonce = localImportSessionNonce();
     // The isolated model page uses a separate non-isolated relay. Frames are intentionally refused:
     // credentialless storage cannot inherit IOU auth and real browser tests severed auth popups.
-    return senderOrigin && sessionNonce && window.parent === window && window.opener
-      ? { senderOrigin, sessionNonce, senderWindow: window.opener as Window } : undefined;
+    const senderWindow = window.parent === window && window.opener ? window.opener as Window : undefined;
+    return { senderWindow, native: localImportNativeBootstrap(),
+      configured: senderOrigin && sessionNonce && senderWindow ? { senderOrigin, sessionNonce, senderWindow } : undefined };
   });
+  const [binding, setBinding] = useState<Binding | undefined>(launch.configured);
+  const [consentState, setConsentState] = useState<LocalImportConsentState>();
   const [drafts, setDrafts] = useState<readonly PendingLocalImport[]>([]);
   const [notice, setNotice] = useState("");
   const [connectionClosed, setConnectionClosed] = useState(false);
+  const transport = useRef<ImportTransport>({ closed: false });
   const previousPrincipal = useRef<string>();
   const principal = state.kind === "authenticated" ? state.principal : undefined;
+  const livePrincipal = useRef(principal);
+  livePrincipal.current = principal;
+  const accountUnchanged = () => previousPrincipal.current === undefined || previousPrincipal.current === livePrincipal.current;
+
+  function closeConnection(message: string) {
+    const active = transport.current;
+    active.closed = true; active.consent?.close(); active.receiver?.close(); active.binding = undefined;
+    setBinding(undefined); setConnectionClosed(true); setConsentState({ kind: "closed" });
+    // Reset native review state too; an accepted draft is not authority to save after cancellation.
+    if (launch.native) setDrafts([]);
+    setNotice(message);
+  }
+
+  function allowNativeConnection() {
+    const active = transport.current;
+    if (active.closed || !active.consent || !accountUnchanged()) return;
+    try {
+      if (launch.senderWindow?.closed) throw new Error("Sender closed");
+      const approved = active.consent.approve();
+      if (!approved) { closeConnection("This connection request expired. Start a fresh handoff from the client."); return; }
+      const accepted: Binding = { ...approved.binding, senderWindow: approved.binding.senderWindow as Window,
+        isCurrent: () => transport.current === active && !active.closed && active.consent?.isConnected() === true &&
+          !launch.senderWindow?.closed && accountUnchanged() };
+      // Install before replying: a prompt sender's hello cannot race receiver creation.
+      active.binding = accepted; active.receiver = createLocalImportReceiver(accepted);
+      setBinding(accepted); setConsentState(active.consent.state());
+      accepted.senderWindow.postMessage(approved.reply, accepted.senderOrigin);
+      setNotice("This exact local connection is allowed once. Receiving a draft will not save it.");
+    } catch { closeConnection("The local connection could not be accepted. Nothing was saved; start a fresh handoff."); }
+  }
+
   useEffect(() => {
     if (previousPrincipal.current && previousPrincipal.current !== principal) {
-      setConnectionClosed(true); setDrafts([]);
-      setNotice("The IOU account changed. Return to the client and explicitly reconnect before sharing another draft.");
+      closeConnection("The IOU account changed. Return to the client and explicitly reconnect before sharing another draft.");
+      setDrafts([]);
     }
     if (principal) previousPrincipal.current = principal;
   }, [principal]);
   useEffect(() => {
-    if (!binding || connectionClosed) return;
-    const receiver = createLocalImportReceiver(binding);
+    const active: ImportTransport = { closed: false, binding: launch.configured,
+      receiver: launch.configured ? createLocalImportReceiver(launch.configured) : undefined,
+      consent: launch.native && launch.senderWindow ? createLocalImportConsent({ senderWindow: launch.senderWindow }) : undefined };
+    transport.current = active;
+    setBinding(active.binding); setConsentState(active.consent?.state()); setConnectionClosed(false);
     const receive = (event: MessageEvent) => {
+      if (active.closed || transport.current !== active || !accountUnchanged()) return;
+      const receiver = active.receiver;
+      const binding = active.binding;
+      if (!receiver || !binding) {
+        const pending = active.consent?.receive(event);
+        if (pending?.kind === "closed") closeConnection("This local request changed or expired. Start a fresh handoff; nothing was saved.");
+        else if (pending) setConsentState(pending);
+        return;
+      }
+      if (binding.isCurrent && !binding.isCurrent()) { closeConnection("This local connection expired or closed. Nothing further will be accepted."); return; }
       const result = receiver.receive(event);
       if (result.kind === "ignored") return;
-      binding.senderWindow.postMessage(result.reply, binding.senderOrigin);
+      try { binding.senderWindow.postMessage(result.reply, binding.senderOrigin); }
+      catch { closeConnection("The sender is unavailable. Check the receiving app before another handoff."); return; }
       if (result.kind === "queued") setDrafts(receiver.pending());
       if (result.kind === "rejected") setNotice("The sender offered an invalid or changed draft. Nothing was saved.");
     };
     window.addEventListener("message", receive);
-    const timeout = window.setTimeout(() => { receiver.close(); setConnectionClosed(true); setNotice("This handoff expired. Return to the client to explicitly reconnect."); }, 30 * 60_000);
-    return () => { clearTimeout(timeout); receiver.close(); window.removeEventListener("message", receive); };
-  }, [binding, connectionClosed]);
+    const timeout = active.consent
+      ? window.setInterval(() => {
+        if (!active.closed && (launch.senderWindow?.closed || active.consent?.state().kind === "closed")) {
+          closeConnection("This local connection expired or closed. Return to the client to explicitly reconnect.");
+        }
+      }, 1000)
+      : window.setTimeout(() => { if (active.binding) closeConnection("This handoff expired. Return to the client to explicitly reconnect."); }, 30 * 60_000);
+    const pageClosed = () => { active.closed = true; active.consent?.close(); active.receiver?.close(); };
+    const navigationClosed = () => {
+      pageClosed();
+      if (active.consent && transport.current === active) closeConnection("This page’s local connection closed. A save already submitted may still complete; check IOU before retrying.");
+    };
+    window.addEventListener("pagehide", navigationClosed);
+    return () => { clearTimeout(timeout); clearInterval(timeout); pageClosed(); window.removeEventListener("message", receive); window.removeEventListener("pagehide", navigationClosed); };
+  }, [launch]);
 
   return <main style={{ maxWidth: 880, margin: "24px auto", padding: 16, overflowWrap: "anywhere" }}>
     <h1>IOU — private import</h1>
     <p>The client shares only the draft you reviewed. Receiving it does not save an entry. Review the IOU account, sheet and complete entry below before choosing Save in IOU.</p>
     {binding && <p>Sender: <strong>{binding.senderOrigin}</strong>{connectionClosed ? " (closed)" : ""}</p>}
-    {!binding && <p>No active handoff. You can export a private local app package below, then use the client’s Review in IOU button. Only a configured local client can send drafts.</p>}
+    {!binding && <p>No active handoff. You can export a private local app package below, then use the client’s reviewed handoff. A new native local sender needs your permission for this connection only.</p>}
+    {consentState?.kind === "waiting" && <p>Waiting for a local connection request. No draft has been accepted.</p>}
+    {consentState?.kind === "pending" && <section aria-label="Local connection consent">
+      <h2>Allow this local connection once?</h2>
+      <p>Unverified local sender: <strong>{consentState.candidate.senderOrigin}</strong></p>
+      <p>This address does not prove which app opened it. Allow only if you just started this handoff yourself and the address matches the relay you opened. Permission covers this exact window and address, not other localhost ports.</p>
+      <p>Nothing has been accepted or saved. You will still review the receiving account, sheet and every entry before Save in IOU. This request expires after two minutes.</p>
+      <button onClick={allowNativeConnection}>Allow this connection once</button>
+      <button className="secondary" onClick={() => closeConnection("Local connection rejected. No draft was accepted or saved.")}>Reject connection</button>
+    </section>}
+    {binding?.isCurrent && !connectionClosed && <button className="secondary" onClick={() => closeConnection("Local connection closed. Local drafts were discarded. A save already submitted may still complete; check IOU before retrying.")}>Close local connection</button>}
     {notice && <p role="status">{notice}</p>}
     {state.kind === "loading" && <p>Restoring your IOU sign-in…</p>}
     {state.kind === "anonymous" && <button onClick={() => void signIn().catch(() => setNotice("IOU sign-in did not finish. Nothing was saved; try again explicitly."))}>Sign in to IOU</button>}
     {state.kind === "authenticated" && <>
       <p>Signed-in IOU principal: <strong>{state.principal}</strong></p>
-      <button className="secondary" onClick={() => void signOut()}>Sign out</button>
+      <button className="secondary" onClick={() => { closeConnection("Signed out of this handoff. Reconnect explicitly before sharing another draft."); void signOut(); }}>Sign out</button>
       <SheetKeyProvider key={state.principal}>
-        <ImportAccount key={state.principal} principal={state.principal} drafts={drafts} binding={connectionClosed ? undefined : binding} />
+        <ImportAccount key={`${state.principal}:${launch.native && connectionClosed ? "closed" : "open"}`} principal={state.principal} drafts={drafts} binding={connectionClosed ? undefined : binding} />
       </SheetKeyProvider>
     </>}
   </main>;
@@ -138,6 +216,7 @@ function PrivateSheet({ principal, sheet, defaultCurrency, drafts, binding }: {
   function assertCurrent(captured: typeof current.current) {
     const live = current.current;
     if (!mounted.current || !captured.actor || !captured.identity || !captured.readyGeneration ||
+      (captured.binding?.isCurrent && !captured.binding.isCurrent()) ||
       !live.ready || live.actor !== captured.actor || live.identity !== captured.identity ||
       live.readyGeneration !== captured.readyGeneration ||
       !batchImportContextMatches(captured, live.sheetId, live.principal)) {

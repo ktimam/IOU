@@ -11,9 +11,10 @@ const fixture = vi.hoisted(() => ({
   decrypt: vi.fn(),
   decryptCrypto: vi.fn(),
   realSlots: false,
+  nativeBootstrap: false,
   unwrap: vi.fn(),
   encrypt: vi.fn(),
-  sender: { postMessage: vi.fn() },
+  sender: { postMessage: vi.fn(), closed: false },
 }));
 vi.mock("../../src/features/auth/AuthProvider", () => ({
   AuthProvider: ({ children }: { children: ReactNode }) => children,
@@ -45,7 +46,8 @@ vi.mock("../../src/features/crypto/devVetkd", () => ({
 }));
 vi.mock("../../src/features/openchat/localImportLaunch", () => ({
   localImportSenderOrigin: () => "http://localhost:5190",
-  localImportSessionNonce: () => "A".repeat(43),
+  localImportSessionNonce: () => fixture.nativeBootstrap ? undefined : "A".repeat(43),
+  localImportNativeBootstrap: () => fixture.nativeBootstrap,
 }));
 import { usePairTemplates, type PairTemplatesApi } from "../../src/features/templates/PairTemplatesContext";
 import { LocalImportPage } from "../../src/features/openchat/LocalImportPage";
@@ -112,13 +114,14 @@ beforeEach(() => {
   vi.stubGlobal("fetch", vi.fn(() => { throw new Error("No network expected in this test"); }));
   Object.defineProperty(window, "opener", { value: fixture.sender, configurable: true });
   identity("synthetic-a"); fixture.actor = null; fixture.actorError = null; fixture.realSlots = false;
+  fixture.nativeBootstrap = false; fixture.sender.closed = false;
   fixture.unwrap.mockResolvedValue(new Uint8Array(32).fill(7));
   fixture.decrypt.mockResolvedValue(slots);
   fixture.encrypt.mockResolvedValue({ entryKey: new Uint8Array([1]), ciphertext: new Uint8Array([2]), iv: new Uint8Array([3]) });
   renders.length = 0;
   container = document.createElement("div"); document.body.append(container); root = createRoot(container);
 });
-afterEach(async () => { await act(async () => root.unmount()); container.remove(); vi.unstubAllGlobals(); });
+afterEach(async () => { await act(async () => root.unmount()); container.remove(); vi.useRealTimers(); vi.unstubAllGlobals(); });
 
 describe("actual private Type readiness lifecycle", () => {
   it("is not ready without an actor or until both private slots finish loading", async () => {
@@ -268,5 +271,108 @@ describe("actual local receiver controls", () => {
     expect(request.import_id).toEqual(expectedId);
     expect(container.querySelector("pre")!.textContent).toBe(reviewed);
     expect(button("Saved in IOU").disabled).toBe(true);
+  });
+});
+
+describe("actual native receiver consent controls", () => {
+  const nativeOrigin = "http://localhost:54621";
+  const connectionId = "C".repeat(42) + "A";
+  const message = async (data: unknown, senderOrigin = nativeOrigin, senderWindow: unknown = fixture.sender) => {
+    await act(async () => { window.dispatchEvent(new MessageEvent("message", {
+      data, origin: senderOrigin, source: senderWindow as Window,
+    })); });
+  };
+  const connect = () => message({ type: "oc:app-import:connect", version: 1, connectionId });
+  const offerFor = (sessionNonce: string) => ({ type: "oc:app-import:offer", version: 1, sessionNonce, importId,
+    actionId: "iou.entry.import", payload: { entries: [{ kind: "iou", amount: 100, currency: "USD", direction: "credit",
+      date: "2026-09-26", note: "Synthetic reviewed note", typeId: template.id, typeName: template.name }] } });
+  const connectedReply = () => fixture.sender.postMessage.mock.calls.find(([value]) => value.type === "oc:app-import:connected")?.[0];
+  const loadNative = async () => { fixture.nativeBootstrap = true; fixture.actor = actor(); await mountSheet(); await connect(); };
+  const allowAndOffer = async () => {
+    await click(button("Allow this connection once"));
+    const sessionNonce = connectedReply().sessionNonce;
+    await message({ type: "oc:app-import:hello", version: 1, sessionNonce });
+    await message(offerFor(sessionNonce));
+    return sessionNonce;
+  };
+
+  it("requires explicit exact-origin consent before replying or queuing; Save remains separate", async () => {
+    await loadNative();
+    expect(container.textContent).toContain(`Unverified local sender: ${nativeOrigin}`);
+    expect(fixture.sender.postMessage).not.toHaveBeenCalled();
+    await message(offerFor("A".repeat(43)));
+    await message({ type: "oc:app-import:hello", version: 1, sessionNonce: "A".repeat(43) });
+    expect(fixture.sender.postMessage).not.toHaveBeenCalled();
+    expect(container.querySelector('[aria-label="Received draft"]')!.querySelectorAll("option")).toHaveLength(1);
+
+    const sessionNonce = await allowAndOffer();
+    expect(sessionNonce).toMatch(/^[A-Za-z0-9_-]{42}[AEIMQUYcgkosw048]$/);
+    expect(sessionNonce).not.toBe(connectionId);
+    expect(fixture.sender.postMessage.mock.calls.every(([, exactOrigin]) => exactOrigin === nativeOrigin)).toBe(true);
+    expect(fixture.sender.postMessage.mock.calls.map(([value]) => value.type)).toEqual([
+      "oc:app-import:connected", "oc:app-import:ready", "oc:app-import:received",
+    ]);
+    expect(container.querySelector('[aria-label="Received draft"]')!.querySelectorAll("option")).toHaveLength(2);
+    expect(fixture.actor.add_entry_batch).not.toHaveBeenCalled(); expect(fixture.encrypt).not.toHaveBeenCalled();
+    expect(fetch).not.toHaveBeenCalled();
+    await select(container.querySelector('[aria-label="Received draft"]')!, importId);
+    await click(button("Review exact encrypted entry contents"));
+    expect(fixture.actor.add_entry_batch).not.toHaveBeenCalled();
+    await click(button("Save in IOU"));
+    expect(fixture.actor.add_entry_batch).toHaveBeenCalledOnce(); expect(fixture.encrypt).toHaveBeenCalledOnce();
+    expect(fixture.sender.postMessage.mock.calls.at(-1)?.[0].type).toBe("oc:app-import:committed");
+    expect(fixture.actor.add_entry_batch.mock.calls[0][0]).not.toHaveProperty("payload");
+  });
+
+  it("does not learn a sender from another window or follow a changed opener after capture", async () => {
+    fixture.nativeBootstrap = true; fixture.actor = actor(); await mountSheet();
+    const changedSender = { postMessage: vi.fn() };
+    Object.defineProperty(window, "opener", { value: changedSender, configurable: true });
+    await message({ type: "oc:app-import:connect", version: 1, connectionId }, nativeOrigin, changedSender);
+    expect(button("Allow this connection once")).toBeUndefined(); expect(changedSender.postMessage).not.toHaveBeenCalled();
+    await connect(); expect(button("Allow this connection once")).toBeDefined();
+    await click(button("Reject connection"));
+    await connect(); await message(offerFor("A".repeat(43)));
+    expect(fixture.sender.postMessage).not.toHaveBeenCalled(); expect(button("Allow this connection once")).toBeUndefined();
+    expect(fixture.actor.add_entry_batch).not.toHaveBeenCalled();
+  });
+
+  it("ignores mismatched post-consent source, origin and nonce", async () => {
+    await loadNative(); await click(button("Allow this connection once"));
+    const sessionNonce = connectedReply().sessionNonce;
+    const hello = { type: "oc:app-import:hello", version: 1, sessionNonce };
+    await message(hello, "http://localhost:54622"); await message(hello, nativeOrigin, {});
+    await message({ ...hello, sessionNonce: connectionId });
+    await message(offerFor(sessionNonce));
+    expect(fixture.sender.postMessage).toHaveBeenCalledOnce();
+    expect(container.querySelector('[aria-label="Received draft"]')!.querySelectorAll("option")).toHaveLength(1);
+  });
+
+  it.each(["expiry", "closed-opener", "logout", "account-change", "navigation"])("invalidates pending consent on %s", async reason => {
+    vi.useFakeTimers(); await loadNative();
+    if (reason === "expiry") await act(async () => { await vi.advanceTimersByTimeAsync(120_000); });
+    if (reason === "closed-opener") { fixture.sender.closed = true; await act(async () => { await vi.advanceTimersByTimeAsync(1000); }); }
+    if (reason === "logout") await click(button("Sign out"));
+    if (reason === "account-change") { identity("synthetic-b"); fixture.actor = actor(); await render(<LocalImportPage />); }
+    if (reason === "navigation") await act(async () => { window.dispatchEvent(new Event("pagehide")); });
+    expect(button("Allow this connection once")).toBeUndefined();
+    await connect(); expect(fixture.sender.postMessage).not.toHaveBeenCalled();
+    expect(fixture.actor.add_entry_batch).not.toHaveBeenCalled();
+  });
+
+  it.each(["close", "expiry", "navigation"])("blocks a paused native save after %s and discards unsaved review state", async reason => {
+    vi.useFakeTimers(); await loadNative(); await allowAndOffer();
+    await select(container.querySelector('[aria-label="Received draft"]')!, importId);
+    await click(button("Review exact encrypted entry contents"));
+    const pending = deferred<{ entryKey: Uint8Array; ciphertext: Uint8Array; iv: Uint8Array }>();
+    fixture.encrypt.mockReturnValueOnce(pending.promise);
+    await click(button("Save in IOU")); expect(fixture.encrypt).toHaveBeenCalledOnce();
+    if (reason === "close") await click(button("Close local connection"));
+    else if (reason === "navigation") await act(async () => { window.dispatchEvent(new Event("pagehide")); });
+    else await act(async () => { await vi.advanceTimersByTimeAsync(600_000); });
+    await act(async () => { pending.resolve({ entryKey: new Uint8Array([1]), ciphertext: new Uint8Array([2]), iv: new Uint8Array([3]) }); });
+    expect(fixture.actor.add_entry_batch).not.toHaveBeenCalled();
+    expect(fixture.sender.postMessage.mock.calls.some(([value]) => value.type === "oc:app-import:committed")).toBe(false);
+    expect(button("Save in IOU")).toBeUndefined(); expect(container.querySelectorAll("fieldset")).toHaveLength(0);
   });
 });
