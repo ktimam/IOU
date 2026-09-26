@@ -27,4 +27,10 @@ describe("IOU local import review", () => {
     expect(() => prepareLocalImportReview({ rows: [row], selectedTypeIds: ["foreign"], templates: [type], importId: id })).toThrow(/Type/);
     expect(() => prepareLocalImportReview({ rows: [row, { ...row, amount: -1 }], selectedTypeIds: ["", ""], templates: [], importId: id })).toThrow();
   });
+  it("requires an explicit choice before discarding a mismatched proposed Type", () => {
+    const proposed = { ...row, typeId: "other-account", typeName: "Unavailable Type" };
+    expect(() => prepareLocalImportReview({ rows: [proposed], selectedTypeIds: [null], templates: [type], importId: id })).toThrow(/explicitly select None/);
+    expect(prepareLocalImportReview({ rows: [proposed], selectedTypeIds: [""], templates: [type], importId: id })[0]).not.toHaveProperty("fee");
+    expect(prepareLocalImportReview({ rows: [proposed], selectedTypeIds: [type.id], templates: [type], importId: id })[0]).toHaveProperty("fee.percent", 10);
+  });
 });

@@ -49,7 +49,7 @@ import {
   removeTemplateFromSlot,
   visibleTemplates,
 } from "./pairTemplates";
-import { decryptSlot, myMemberIndex } from "./pairTemplatesActor";
+import { decryptSlot, decryptSlotWithStatus, myMemberIndex } from "./pairTemplatesActor";
 
 export type PairTemplatesApi = {
   /** Visible merged shared templates (tombstones hidden), name-sorted. */
@@ -62,6 +62,10 @@ export type PairTemplatesApi = {
   /** Cross-member dismissed pending-card messageIds (mine ∪ partner's). */
   dismissed: Set<string>;
   loading: boolean;
+  /** True only after this exact account/sheet/auth session's private slots loaded successfully. */
+  ready: boolean;
+  /** Opaque, session-bound successful load token; changes after every reload and is absent when unready. */
+  readyGeneration: object | undefined;
   error: string | null;
   /** Create / edit / copy-on-write a type in THIS account (id absent → one
    *  is generated). A same-id upsert of a partner's type lands MY override
@@ -89,10 +93,12 @@ const EMPTY_PAYLOAD: PairSlotPayload = { templates: [], dismissed: [] };
 export function usePairTemplates(
   pairId: string | undefined,
   sheetId: string | undefined,
+  options?: { requireReadableSlots?: boolean },
 ): PairTemplatesApi {
   const { identity } = useAuth();
-  const { actor } = useActor();
+  const { actor, err: actorError } = useActor();
   const { get, unwrapFor } = useSheetKey();
+  const requireReadableSlots = options?.requireReadableSlots === true;
 
   const [mySlot, setMySlot] = useState<PairSlotPayload>(EMPTY_PAYLOAD);
   const [partnerSlot, setPartnerSlot] = useState<PairSlotPayload>(EMPTY_PAYLOAD);
@@ -102,28 +108,44 @@ export function usePairTemplates(
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [reloadTick, setReloadTick] = useState(0);
+  const [loadedContext, setLoadedContext] = useState<{
+    pairId: string; sheetId: string; actor: unknown; actorError: string | null; identity: unknown; revision: number; requireReadableSlots: boolean;
+  }>();
 
   useEffect(() => {
     let cancelled = false;
     setMySlot(EMPTY_PAYLOAD);
     setPartnerSlot(EMPTY_PAYLOAD);
     setSlotsLoaded(false);
+    setLoadedContext(undefined);
+    setLoading(false);
     setError(null);
-    if (!pairId || !sheetId || !actor || !identity) return;
+    if (!pairId || !sheetId || !identity) return;
+    if (!actor) { if (actorError) setError(actorError); return; }
     (async () => {
       setLoading(true);
       try {
         const pair = unwrap(await actor.get_pair(pairId)) as any;
-        if (!pair) return;
+        if (!pair) throw new Error("The selected IOU account is no longer available.");
         const idx = myMemberIndex(pair, identity.getPrincipal().toText());
-        if (idx == null) return;
+        if (idx == null) throw new Error("The signed-in user is not a member of this IOU account.");
         const K = get(sheetId) ?? (await unwrapFor(sheetId));
-        const a = await decryptSlot(K, pair.templates_a_enc, pair.templates_a_iv);
-        const b = await decryptSlot(K, pair.templates_b_enc, pair.templates_b_iv);
+        let a: PairSlotPayload;
+        let b: PairSlotPayload;
+        if (requireReadableSlots) {
+          const first = await decryptSlotWithStatus(K, pair.templates_a_enc, pair.templates_a_iv);
+          const second = await decryptSlotWithStatus(K, pair.templates_b_enc, pair.templates_b_iv);
+          if (!first.readable || !second.readable) throw new Error("Some private Types could not be read. The local import/export must wait until both account slots are readable.");
+          a = first.payload; b = second.payload;
+        } else {
+          a = await decryptSlot(K, pair.templates_a_enc, pair.templates_a_iv);
+          b = await decryptSlot(K, pair.templates_b_enc, pair.templates_b_iv);
+        }
         if (cancelled) return;
         setMySlot(idx === 0 ? a : b);
         setPartnerSlot(idx === 0 ? b : a);
         setSlotsLoaded(true);
+        setLoadedContext({ pairId, sheetId, actor, actorError, identity, revision: reloadTick, requireReadableSlots });
       } catch (e) {
         if (!cancelled) setError((e as Error).message);
       } finally {
@@ -134,7 +156,14 @@ export function usePairTemplates(
       cancelled = true;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [pairId, sheetId, actor, identity, reloadTick]);
+  }, [pairId, sheetId, actor, actorError, identity, reloadTick, requireReadableSlots]);
+
+  // Effects run after render: never expose the previous account's successful load as ready
+  // during the first render of a different account, sheet, actor, identity or explicit reload.
+  const ready = slotsLoaded && !!loadedContext && loadedContext.pairId === pairId &&
+    loadedContext.sheetId === sheetId && loadedContext.actor === actor && loadedContext.actorError === actorError &&
+    loadedContext.identity === identity && loadedContext.revision === reloadTick &&
+    loadedContext.requireReadableSlots === requireReadableSlots;
 
   // Memoized: consumers use these as effect/useMemo deps (e.g. SheetPage's
   // visibleInbox keys on `dismissed`), so keep the identities stable.
@@ -209,6 +238,8 @@ export function usePairTemplates(
     myIds,
     dismissed,
     loading,
+    ready,
+    readyGeneration: ready ? loadedContext : undefined,
     error,
     upsertMyTemplate,
     removeMyTemplate,

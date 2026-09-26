@@ -119,26 +119,39 @@ function PrivateSheet({ principal, sheet, defaultCurrency, drafts, binding }: {
   principal: string; sheet: SheetChoice; defaultCurrency: string; drafts: readonly PendingLocalImport[]; binding?: Binding;
 }) {
   const { actor } = useActor();
+  const { identity } = useAuth();
   const { unwrapFor } = useSheetKey();
-  const { shared, loading, error } = usePairTemplates(sheet.pairId, sheet.sheetId);
+  const { shared, loading, ready, readyGeneration, error } = usePairTemplates(sheet.pairId, sheet.sheetId, { requireReadableSlots: true });
   const [activeId, setActiveId] = useState("");
   const [rows, setRows] = useState<LocalImportDraft[]>([]);
-  const [typeIds, setTypeIds] = useState<string[]>([]);
+  const [typeIds, setTypeIds] = useState<(string | null)[]>([]);
   const [review, setReview] = useState<Review>();
   const [locked, setLocked] = useState(false);
   const [busy, setBusy] = useState(false);
   const [saved, setSaved] = useState(false);
   const [notice, setNotice] = useState("");
   const mounted = useRef(true);
-  const current = useRef({ principal, sheetId: sheet.sheetId, binding });
-  current.current = { principal, sheetId: sheet.sheetId, binding };
+  const current = useRef({ principal, sheetId: sheet.sheetId, binding, actor, identity, ready, readyGeneration });
+  current.current = { principal, sheetId: sheet.sheetId, binding, actor, identity, ready, readyGeneration };
   useEffect(() => { mounted.current = true; return () => { mounted.current = false; }; }, []);
+
+  function assertCurrent(captured: typeof current.current) {
+    const live = current.current;
+    if (!mounted.current || !captured.actor || !captured.identity || !captured.readyGeneration ||
+      !live.ready || live.actor !== captured.actor || live.identity !== captured.identity ||
+      live.readyGeneration !== captured.readyGeneration ||
+      !batchImportContextMatches(captured, live.sheetId, live.principal)) {
+      throw new Error("The IOU session or private Type context changed; this draft was not submitted.");
+    }
+  }
 
   function chooseDraft(importId: string) {
     const draft = drafts.find((item) => item.importId === importId);
-    if (!draft || locked) return;
+    if (!draft || locked || !ready) return;
     setActiveId(importId); setRows(draft.payload.entries.map((row) => ({ ...row })));
-    setTypeIds(draft.payload.entries.map((row) => shared.some((type) => type.id === row.typeId && type.name === row.typeName) ? row.typeId! : ""));
+    setTypeIds(draft.payload.entries.map((row) => row.typeId
+      ? shared.some((type) => type.id === row.typeId && type.name === row.typeName) ? row.typeId : null
+      : ""));
     setReview(undefined); setSaved(false);
     setNotice(draft.payload.entries.some((row) => row.typeId && !shared.some((type) => type.id === row.typeId && type.name === row.typeName))
       ? "A proposed Type is not available in this sheet. Select a current Type or explicitly use none; no foreign defaults are applied." : "");
@@ -147,20 +160,19 @@ function PrivateSheet({ principal, sheet, defaultCurrency, drafts, binding }: {
     setRows(rows.map((row, rowIndex) => rowIndex === index ? { ...row, ...patch } : row)); setReview(undefined);
   }
   function prepare() {
+    if (!ready) return;
     try { setReview({ payloads: prepareLocalImportReview({ rows, selectedTypeIds: typeIds, templates: shared, importId: activeId }), sheet, importId: activeId }); setNotice(""); }
     catch (cause) { setNotice((cause as Error).message); setReview(undefined); }
   }
   async function save() {
-    if (!review || busy || saved || !actor) return;
-    const captured = { principal, sheetId: review.sheet.sheetId };
-    const stillCurrent = () => {
-      if (!mounted.current || !batchImportContextMatches(captured, current.current.sheetId, current.current.principal)) throw new Error("The IOU session changed; this draft was not submitted.");
-    };
+    if (!review || busy || saved || !actor || !identity || !ready || !readyGeneration) return;
+    const captured = { ...current.current, sheetId: review.sheet.sheetId };
+    const stillCurrent = () => assertCurrent(captured);
     setLocked(true); setBusy(true); setNotice("");
     try {
       const key = await unwrapFor(review.sheet.sheetId);
       stillCurrent();
-      const acknowledgement = await addEntryBatch({ actor, sheetId: review.sheet.sheetId, payloads: [...review.payloads],
+      const acknowledgement = await addEntryBatch({ actor: captured.actor, sheetId: review.sheet.sheetId, payloads: [...review.payloads],
         // The same canonical 32-byte id is reused on every explicit outcome-unknown retry. This
         // is an import identity only, NOT a claim that OpenChat verified a message or membership.
         messageHandle: review.importId, relayId: "", sheetKey: key, beforeMutate: stillCurrent });
@@ -177,6 +189,8 @@ function PrivateSheet({ principal, sheet, defaultCurrency, drafts, binding }: {
     } finally { if (mounted.current) setBusy(false); }
   }
   async function exportPackage() {
+    if (!ready) return;
+    const captured = { ...current.current };
     try {
       const context = createLocalProcessorContext(shared, defaultCurrency);
       // Explicit setup download only; no message/source data exists in these requests. Never fetch
@@ -190,7 +204,8 @@ function PrivateSheet({ principal, sheet, defaultCurrency, drafts, binding }: {
       if (!/^[a-f0-9]{64}$/.test(metadata.sha256) || !Number.isSafeInteger(metadata.byteLength) || metadata.byteLength < 1 || metadata.byteLength > 512 * 1024) throw new Error();
       const source = await sourceResponse.arrayBuffer();
       const actual = Array.from(new Uint8Array(await crypto.subtle.digest("SHA-256", source)), (byte) => byte.toString(16).padStart(2, "0")).join("");
-      if (actual !== metadata.sha256 || source.byteLength !== metadata.byteLength || !mounted.current) throw new Error();
+      if (actual !== metadata.sha256 || source.byteLength !== metadata.byteLength) throw new Error();
+      assertCurrent(captured);
       const catalog = createIouLocalAppPackage(`${location.origin}/openchat/import`, metadata, {
         processorContext: context,
         recipientLabel: `IOU account ${sheet.pairId}; sheet ${sheet.sheetId}. Review-only label: choose the receiving IOU account and sheet again before saving.`,
@@ -205,24 +220,24 @@ function PrivateSheet({ principal, sheet, defaultCurrency, drafts, binding }: {
   return <section>
     <h2>Sheet {sheet.sheetId}</h2>
     <p>Account {sheet.pairId}; other member {sheet.otherPrincipal}. Your entries are encrypted locally for this sheet before saving.</p>
-    {loading && <p>Loading this sheet’s Types…</p>}{error && <p role="alert">Could not load this sheet’s Types. Saving is disabled.</p>}
+    {(loading || (!ready && !error)) && <p>Loading this sheet’s Types…</p>}{error && <p role="alert">Could not load this sheet’s Types. Saving is disabled.</p>}
     <details><summary>Private local-client setup</summary>
       <p>Exporting shares no chat or image. The downloaded catalog contains this account’s private Type names, trigger words, directions and default currency ({defaultCurrency || "unset"}); model prompt profiles are authored by IOU. The recipient label is a reminder, not an automatic destination binding.</p>
       <ul>{shared.map((type) => <li key={type.id}>{type.name}: {type.direction === "credit" ? "Owed to you" : "You owe"}; {type.txn_type}; keywords: {(type.keywords ?? []).join(", ") || "name only"}</li>)}</ul>
-      <button disabled={loading || !!error} onClick={() => void exportPackage()}>Download private setup catalog and processor</button>
+      <button disabled={!ready || loading || !!error} onClick={() => void exportPackage()}>Download private setup catalog and processor</button>
     </details>
     <h2>Review a received draft</h2>
     {!drafts.length && <p>No draft has been received. Nothing is saved automatically.</p>}
-    <select aria-label="Received draft" value={activeId} disabled={locked || loading || !!error} onChange={(event) => chooseDraft(event.target.value)}>
+    <select aria-label="Received draft" value={activeId} disabled={locked || !ready || loading || !!error} onChange={(event) => chooseDraft(event.target.value)}>
       <option value="">Choose a received draft…</option>{drafts.map((draft, index) => <option key={draft.importId} value={draft.importId}>Draft {index + 1} — {draft.payload.entries.length} entries — {draft.importId}</option>)}
     </select>
     {rows.map((row, index) => <fieldset key={index} disabled={locked} style={{ margin: "16px 0", display: "grid", gap: 10 }}>
       <legend>Entry {index + 1}</legend>
       {row.typeName && <p>Proposed Type: {row.typeName} ({row.typeId})</p>}
-      <label>Type <select value={typeIds[index]} onChange={(event) => {
-        const id = event.target.value; setTypeIds(typeIds.map((value, i) => i === index ? id : value));
+      <label>Type <select value={typeIds[index] === null ? "" : typeIds[index] ? `type:${typeIds[index]}` : "none"} onChange={(event) => {
+        const id = event.target.value === "none" ? "" : event.target.value.slice(5); setTypeIds(typeIds.map((value, i) => i === index ? id : value));
         updateRow(index, applyLocalImportType(row, id, shared));
-      }}><option value="">None — use reviewed fields only</option>{shared.map((type) => <option value={type.id} key={type.id}>{type.name}</option>)}</select></label>
+      }}><option value="" disabled>Choose a current Type or None…</option><option value="none">None — use reviewed fields only</option>{shared.map((type) => <option value={`type:${type.id}`} key={type.id}>{type.name}</option>)}</select></label>
       <label>Kind <select value={row.kind} onChange={(event) => updateRow(index, { kind: event.target.value as LocalImportDraft["kind"] })}><option value="iou">IOU</option><option value="settlement">Settlement</option></select></label>
       <label>Amount <input type="number" min="0.01" step="0.01" value={Number.isFinite(row.amount) ? row.amount : ""} onChange={(event) => updateRow(index, { amount: Number(event.target.value) })} /></label>
       <label>Currency <input maxLength={3} value={row.currency} onChange={(event) => updateRow(index, { currency: event.target.value.toUpperCase() })} /></label>
@@ -230,11 +245,11 @@ function PrivateSheet({ principal, sheet, defaultCurrency, drafts, binding }: {
       <label>Date <input type="date" value={row.date ?? ""} onChange={(event) => updateRow(index, { date: event.target.value })} /></label>
       <label>Note <textarea rows={3} maxLength={4096} value={row.note ?? ""} onChange={(event) => updateRow(index, { note: event.target.value })} /></label>
     </fieldset>)}
-    {!!rows.length && !locked && <button onClick={prepare} disabled={loading || !!error}>Review exact encrypted entry contents</button>}
+    {!!rows.length && !locked && <button onClick={prepare} disabled={!ready || loading || !!error}>Review exact encrypted entry contents</button>}
     {review && <section><h3>Final save review</h3><p>IOU principal {principal}; account {review.sheet.pairId}; sheet {review.sheet.sheetId}.</p>
       <p>All stored fields are below, including any selected Type fees and due schedule. No raw message or image is included. Dates marked ts/due_ts are UTC milliseconds.</p>
       <pre style={{ whiteSpace: "pre-wrap" }}>{JSON.stringify(review.payloads, null, 2)}</pre>
-      <button disabled={busy || saved || !actor || loading || !!error} onClick={() => void save()}>{saved ? "Saved in IOU" : busy ? "Saving encrypted entries…" : locked ? "Retry the same save in IOU" : "Save in IOU"}</button>
+      <button disabled={busy || saved || !actor || !ready || loading || !!error} onClick={() => void save()}>{saved ? "Saved in IOU" : busy ? "Saving encrypted entries…" : locked ? "Retry the same save in IOU" : "Save in IOU"}</button>
     </section>}
     {notice && <p role="status">{notice}</p>}
   </section>;

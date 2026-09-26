@@ -16,7 +16,7 @@ export function applyLocalImportType(row: LocalImportDraft, selectedId: string, 
 /** Build the exact final encrypted payload preview. Never guess missing dates or currencies. */
 export function prepareLocalImportReview(options: {
   rows: readonly LocalImportDraft[];
-  selectedTypeIds: readonly string[];
+  selectedTypeIds: readonly (string | null)[];
   templates: readonly TxnTemplate[];
   importId: string;
 }): readonly EntryPayload[] {
@@ -28,6 +28,7 @@ export function prepareLocalImportReview(options: {
   return Object.freeze(checked.entries.map((row, index) => {
     if (!row.date) throw new Error(`Choose the date for entry ${index + 1}; IOU will not guess it.`);
     const selectedId = options.selectedTypeIds[index];
+    if (selectedId === null) throw new Error(`Choose a current Type or explicitly select None for entry ${index + 1}.`);
     const matches = selectedId ? options.templates.filter((item) => item.id === selectedId) : [];
     if (selectedId && matches.length !== 1) throw new Error("The selected Type is not available in this IOU account.");
     const template = matches[0];

@@ -7,6 +7,7 @@ import { encryptWithSheetKey, decryptWithSheetKey } from "../crypto/devVetkd";
 import {
   type PairSlotPayload,
   decodePairSlot,
+  decodePairSlotStrict,
 } from "./pairTemplates";
 
 /** Candid opt (`[] | [T]` or plain nullable) → bytes or null. */
@@ -34,22 +35,34 @@ export function myMemberIndex(pair: any, myPrincipal: string): 0 | 1 | null {
   return null;
 }
 
-/** Decrypt one slot to its full v2 payload (templates + dismissed); ANY
- *  failure (stale key after rotation, garbage) → the empty payload. */
-export async function decryptSlot(
+export type PairTemplateSlotRead = { readable: boolean; payload: PairSlotPayload };
+
+/** Distinguish a genuinely absent slot from an unreadable private slot for strict consumers. */
+export async function decryptSlotWithStatus(
   K: Uint8Array,
   enc: unknown,
   iv: unknown,
-): Promise<PairSlotPayload> {
+): Promise<PairTemplateSlotRead> {
+  const empty: PairSlotPayload = { templates: [], dismissed: [] };
+  try {
+    const e = optBytes(enc);
+    const i = optBytes(iv);
+    if (!e && !i) return { readable: true, payload: empty };
+    if (!e || !i) return { readable: false, payload: empty };
+    const payload = decodePairSlotStrict(await decryptWithSheetKey(K, i, e));
+    return payload ? { readable: true, payload } : { readable: false, payload: empty };
+  } catch {
+    return { readable: false, payload: empty };
+  }
+}
+
+/** Legacy callers retain degraded readable-partner behavior after a slot failure. */
+export async function decryptSlot(K: Uint8Array, enc: unknown, iv: unknown): Promise<PairSlotPayload> {
   const e = optBytes(enc);
   const i = optBytes(iv);
   if (!e || !i) return { templates: [], dismissed: [] };
-  try {
-    return decodePairSlot(await decryptWithSheetKey(K, i, e));
-  } catch {
-    // degrade — self-heals when that member next republishes
-    return { templates: [], dismissed: [] };
-  }
+  try { return decodePairSlot(await decryptWithSheetKey(K, i, e)); }
+  catch { return { templates: [], dismissed: [] }; }
 }
 
 /**

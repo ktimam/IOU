@@ -23,7 +23,7 @@ function pairFixture(): PairTemplatesApi {
     { id: "partner", name: "Partner preset", direction: "debt" as const, txn_type: "iou" as const, rev: 1, updatedAt: 1 },
   ];
   return {
-    shared, merged: shared, myIds: new Set(["mine"]), dismissed: new Set(), loading: false, error: null,
+    shared, merged: shared, myIds: new Set(["mine"]), dismissed: new Set(), loading: false, ready: true, readyGeneration: {}, error: null,
     upsertMyTemplate: vi.fn(), removeMyTemplate: vi.fn(), dismissCard: vi.fn(), reload: vi.fn(),
   };
 }

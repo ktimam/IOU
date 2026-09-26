@@ -288,6 +288,33 @@ function emptyPayload(): PairSlotPayload {
   return { templates: [], dismissed: [] };
 }
 
+/** Complete private exports must not mistake malformed/truncated data for an empty Type roster. */
+export function decodePairSlotStrict(bytes: Uint8Array): PairSlotPayload | undefined {
+  if (bytes.length === 0 || bytes.length > PAIR_SLOT_MAX_BYTES) return undefined;
+  try {
+    const parsed: unknown = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(bytes));
+    let rawTemplates: unknown[];
+    let rawDismissed: unknown[] = [];
+    if (Array.isArray(parsed)) rawTemplates = parsed;
+    else if (isRecord(parsed) && parsed.v === 2 && Array.isArray(parsed.templates) && Array.isArray(parsed.dismissed) &&
+      Object.keys(parsed).every(key => ["v", "templates", "dismissed"].includes(key))) {
+      rawTemplates = parsed.templates; rawDismissed = parsed.dismissed;
+    } else return undefined;
+    if (rawTemplates.length > PAIR_TEMPLATE_CAP || rawDismissed.length > DISMISSED_CAP ||
+      rawDismissed.some(id => !isBoundedNonEmptyString(id, TEMPLATE_ID_MAX_LENGTH))) return undefined;
+    const fields = ["id", "name", "direction", "txn_type", "rev", "updatedAt", "deleted", "currency", "amount_minor", "fee_percent", "fee_fixed_minor", "fee_fixed_currency", "schedule", "note", "keywords"];
+    const templates: SharedTemplate[] = [];
+    for (const raw of rawTemplates) {
+      if (!isRecord(raw) || Object.keys(raw).some(key => !fields.includes(key))) return undefined;
+      const template = decodeTemplate(raw);
+      if (!template) return undefined;
+      templates.push(template);
+    }
+    if (new Set(templates.map(item => item.id)).size !== templates.length) return undefined;
+    return { templates, dismissed: [...new Set(rawDismissed as string[])] };
+  } catch { return undefined; }
+}
+
 /**
  * Decode a slot from bytes. Accepts BOTH formats: the legacy v1 bare array
  * (→ {templates, dismissed: []}) and the v2 {v, templates, dismissed}
