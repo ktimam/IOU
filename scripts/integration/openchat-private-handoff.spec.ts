@@ -8,17 +8,82 @@ vi.mock("@oc-test/ocrImage",()=>({prepareImageForBrowserOcr:async(bytes:Uint8Arr
 vi.mock("@oc-test/appLocalProcessor",async(original)=>({...await original(),processWithApp:runtime.remote}));
 import {extractPrivateAppAction} from "@oc-test/aiActionRunner";
 import {parseLocalAppCatalog,projectLocalAppPayload} from "@oc-test/localAppCatalog";
+import {LocalAppDraftStore, type LocalDraftDeliveryRequest} from "@oc-test/localAppDrafts";
 import {browserImageActionMode} from "@oc-test-store/browserImageActionMode";
 import {createIouLocalAppPackage} from "../../src/features/openchat/localAppPackage";
 import {createLocalProcessorContext} from "../../src/features/openchat/localProcessorContext";
 import {processLocalArtifactRequest} from "../../src/features/openchat/localProcessorArtifact";
-import {parseLocalImportPayload} from "../../src/features/openchat/localImportHandoff";
+import {createLocalImportNonce,createLocalImportReceiver,parseLocalImportPayload} from "../../src/features/openchat/localImportHandoff";
+import * as entryBatch from "../../src/features/entries/batchImport";
 
 const templates=[{id:"test-stay",name:"Reservation",direction:"debt" as const,txn_type:"iou" as const,keywords:[]}];
 const packageFor=()=>parseLocalAppCatalog(JSON.stringify(createIouLocalAppPackage("http://localhost:3000/openchat/import",{sha256:"a".repeat(64),byteLength:123},{recipientLabel:"Synthetic account review",processorContext:createLocalProcessorContext(templates,"EGP")}))).apps[0].actions[0];
 const client=()=>({clientOnlyApps:()=>true,enabledAiApps:vi.fn(),aiApps:vi.fn(),createAiAppCardProvenance:vi.fn(),sendMessageWithContent:vi.fn()});
 beforeEach(()=>{vi.clearAllMocks();browserImageActionMode.set("model_only")});
 describe("actual IOU export through actual OpenChat proposal/conformance/project/receiver",()=>{
+  it("explicitly reopens the identical received-but-unsaved request after the IOU receiver reloads",async()=>{
+    const persist=vi.spyOn(entryBatch,"addEntryBatch").mockImplementation(async()=>{throw new Error("Receiving a private draft must never persist an entry");});
+    try {
+      const action=packageFor();
+      const payload={entries:[{kind:"iou",amount:300,currency:"EGP",direction:"credit",date:"2026-09-28",note:"Synthetic received draft"}]};
+      const senderOrigin="http://localhost:5190",senderWindow=window;
+      const freshReceiver=()=>{
+        const sessionNonce=createLocalImportNonce();
+        return {sessionNonce,receiver:createLocalImportReceiver({senderOrigin,senderWindow,sessionNonce})};
+      };
+      let connection=freshReceiver();
+      const nonces:string[]=[];
+      const deliver=vi.fn(async(request:LocalDraftDeliveryRequest)=>{
+        const {sessionNonce,receiver}=connection;
+        nonces.push(sessionNonce);
+        const event=(data:unknown)=>({origin:senderOrigin,source:senderWindow,data});
+        expect(receiver.receive(event({type:"oc:app-import:hello",version:1,sessionNonce})).kind).toBe("ready");
+        const result=receiver.receive(event({type:"oc:app-import:offer",version:1,sessionNonce,
+          importId:request.idempotencyKey,actionId:request.actionId,payload:request.payload}));
+        expect(result.kind).toBe("queued");
+        if(result.kind!=="queued")throw new Error("The actual IOU receiver did not queue the reviewed draft");
+        expect(result.reply).toMatchObject({type:"oc:app-import:received",status:"pending-review"});
+        expect(result.draft.status).toBe("pending-review");
+        return {kind:"delivered" as const};
+      });
+      const store=new LocalAppDraftStore(deliver);
+      store.setAccount("synthetic-openchat-account");
+      const draft=store.create({target:{appId:"iou",actionId:action.definition.name,
+        destination:"http://localhost:3000/openchat/import",recipient:"Synthetic account review"},schema:action.draftSchema,payload});
+      const approval=store.review(draft.id),originalJson=JSON.stringify(approval.request);
+      expect(Object.isFrozen(approval.request)).toBe(true);
+      expect(Object.isFrozen(approval.request.payload)).toBe(true);
+      expect(await store.confirm(draft.id,approval.approvalId)).toEqual({kind:"delivered"});
+      expect(store.get(draft.id)?.status).toBe("delivered");
+      expect(connection.receiver.pending()).toHaveLength(1);
+      expect(connection.receiver.pending()[0]).toMatchObject({importId:approval.request.idempotencyKey,payload});
+      expect(persist).not.toHaveBeenCalled();
+
+      const priorReceiver=connection.receiver;
+      priorReceiver.close();
+      connection=freshReceiver(); // IOU reload loses its memory-only queue; the OpenChat draft remains.
+      expect(priorReceiver.pending()).toEqual([]);
+      expect(connection.receiver.pending()).toEqual([]);
+      await Promise.resolve();
+      expect(deliver).toHaveBeenCalledOnce(); // Receiver reload never triggers an automatic resend.
+      expect(await store.confirm(draft.id,approval.approvalId)).toEqual({kind:"blocked"});
+      expect(await store.retryUncertain(draft.id,approval.approvalId)).toEqual({kind:"blocked"});
+      expect(deliver).toHaveBeenCalledOnce();
+
+      // A fresh explicit choice is a distinct operation, not another ordinary confirmation.
+      expect(await store.reopenDelivered(draft.id,approval.approvalId)).toEqual({kind:"delivered"});
+      expect(deliver).toHaveBeenCalledTimes(2);
+      expect(deliver.mock.calls[0][0]).toBe(approval.request);
+      expect(deliver.mock.calls[1][0]).toBe(approval.request);
+      expect(JSON.stringify(deliver.mock.calls[1][0])).toBe(originalJson);
+      expect(nonces[1]).not.toBe(nonces[0]);
+      expect(connection.receiver.pending()).toHaveLength(1);
+      expect(connection.receiver.pending()[0]).toMatchObject({importId:approval.request.idempotencyKey,payload,status:"pending-review"});
+      expect(persist).not.toHaveBeenCalled();
+      expect(runtime.infer).not.toHaveBeenCalled();
+      expect(runtime.remote).not.toHaveBeenCalled();
+    } finally {persist.mockRestore();}
+  });
   it.each([
     ["qwen3-vl-2b-instruct-q4",{heading:"Reservation",total_text:"Total Payout $1,912.15",dates:["Sun, Jul 19","Thu, Aug 6"],kind:"iou"}],
     ["gemma-4-e2b-it-q4",{kind:"iou",currency_text:"$",amount_text:"1,912.15",date_text:"Sun, Jul 19 | Thu, Aug 6",note:"Reservation"}],
