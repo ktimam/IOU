@@ -30,4 +30,16 @@ describe("private import route wiring", () => {
     expect(page).toContain("Load this sheet’s private Types");
     expect(page).not.toMatch(/<iframe|autoFocus|dangerouslySetInnerHTML/);
   });
+  it("prepares verified setup separately from downloads and invalidates stale private context", () => {
+    expect(page).not.toContain('download("iou-private-local-app.json"');
+    expect(page).not.toContain("Downloaded the private setup catalog and public processor");
+    expect(page).toContain("setupPending.current");
+    expect(page).toContain("const { metadata, source } = await verifiedLocalSetupProcessor();\n      assertSetupCurrent(captured);");
+    expect(page).toContain("localSetupContextMatches(captured, setupContext.current)");
+    expect(page).toContain("mounted.current = false; setupOwner.current.clear()");
+    expect(page).toContain("setupOwner.current.replace(prepared);\n      setSetup(prepared)");
+    expect(page).toContain("if (setup && !setupCurrent) clearSetup()");
+    expect(page).toContain("assertCurrent={() => assertSetupCurrent(setup.context)}");
+    expect(page).toContain("Check your browser’s Downloads list to confirm it was saved.");
+  });
 });

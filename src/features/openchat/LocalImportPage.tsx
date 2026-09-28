@@ -11,6 +11,7 @@ import { createLocalImportConsent, type LocalImportConsentState } from "./localI
 import { applyLocalImportType, prepareLocalImportReview } from "./localImportReview";
 import { createIouLocalAppPackage } from "./localAppPackage";
 import { createLocalProcessorContext } from "./localProcessorContext";
+import { createLocalSetupDownloadFiles, createLocalSetupDownloadOwner, localSetupContextMatches, LocalSetupDownloads, verifiedLocalSetupProcessor } from "./LocalSetupDownloads";
 import { currencyFromUserRecord } from "../settings/defaultCurrency";
 
 type Binding = { senderOrigin: string; senderWindow: Window; sessionNonce: string; isCurrent?: () => boolean };
@@ -211,7 +212,17 @@ function PrivateSheet({ principal, sheet, defaultCurrency, drafts, binding }: {
   const mounted = useRef(true);
   const current = useRef({ principal, sheetId: sheet.sheetId, binding, actor, identity, ready, readyGeneration });
   current.current = { principal, sheetId: sheet.sheetId, binding, actor, identity, ready, readyGeneration };
-  useEffect(() => { mounted.current = true; return () => { mounted.current = false; }; }, []);
+  const setupContext = useRef({ ...current.current, pairId: sheet.pairId, shared, defaultCurrency });
+  setupContext.current = { ...current.current, pairId: sheet.pairId, shared, defaultCurrency };
+  const [setup, setSetup] = useState<ReturnType<typeof createLocalSetupDownloadFiles> & { context: typeof setupContext.current }>();
+  const [preparingSetup, setPreparingSetup] = useState(false);
+  const setupPending = useRef(false);
+  const setupOwner = useRef(createLocalSetupDownloadOwner());
+  const setupCurrent = !!setup && localSetupContextMatches(setup.context, setupContext.current);
+  useEffect(() => { mounted.current = true; return () => { mounted.current = false; setupOwner.current.clear(); }; }, []);
+  useEffect(() => { if (setup && !setupCurrent) clearSetup(); }, [setup, setupCurrent]);
+
+  function clearSetup() { setupOwner.current.clear(); setSetup(undefined); }
 
   function assertCurrent(captured: typeof current.current) {
     const live = current.current;
@@ -222,6 +233,11 @@ function PrivateSheet({ principal, sheet, defaultCurrency, drafts, binding }: {
       !batchImportContextMatches(captured, live.sheetId, live.principal)) {
       throw new Error("The IOU session or private Type context changed; this draft was not submitted.");
     }
+  }
+
+  function assertSetupCurrent(captured: typeof setupContext.current) {
+    assertCurrent(captured);
+    if (!localSetupContextMatches(captured, setupContext.current)) throw new Error("The private setup context changed");
   }
 
   function chooseDraft(importId: string) {
@@ -267,33 +283,27 @@ function PrivateSheet({ principal, sheet, defaultCurrency, drafts, binding }: {
       if (mounted.current) setNotice("The save did not return a confirmed result. The exact reviewed data, account, sheet and import ID are locked. Check IOU, or explicitly retry this same save; do not create a new proposal to retry it.");
     } finally { if (mounted.current) setBusy(false); }
   }
-  async function exportPackage() {
-    if (!ready) return;
-    const captured = { ...current.current };
+  async function prepareSetupFiles() {
+    if (!ready || setupPending.current) return;
+    const captured = { ...setupContext.current };
+    setupPending.current = true;
+    setPreparingSetup(true); clearSetup(); setNotice("");
     try {
       const context = createLocalProcessorContext(shared, defaultCurrency);
       // Explicit setup download only; no message/source data exists in these requests. Never fetch
       // an app processor during inference or include this private vocabulary in public build files.
-      const [metadataResponse, sourceResponse] = await Promise.all([
-        fetch("/openchat/local-processor-v1.sha256.json", { credentials: "omit", cache: "no-store" }),
-        fetch("/openchat/local-processor-v1.js", { credentials: "omit", cache: "no-store" }),
-      ]);
-      if (!metadataResponse.ok || !sourceResponse.ok) throw new Error();
-      const metadata = await metadataResponse.json() as { sha256: string; byteLength: number };
-      if (!/^[a-f0-9]{64}$/.test(metadata.sha256) || !Number.isSafeInteger(metadata.byteLength) || metadata.byteLength < 1 || metadata.byteLength > 512 * 1024) throw new Error();
-      const source = await sourceResponse.arrayBuffer();
-      const actual = Array.from(new Uint8Array(await crypto.subtle.digest("SHA-256", source)), (byte) => byte.toString(16).padStart(2, "0")).join("");
-      if (actual !== metadata.sha256 || source.byteLength !== metadata.byteLength) throw new Error();
-      assertCurrent(captured);
+      const { metadata, source } = await verifiedLocalSetupProcessor();
+      assertSetupCurrent(captured);
       const catalog = createIouLocalAppPackage(`${location.origin}/openchat/import`, metadata, {
         processorContext: context,
         recipientLabel: `IOU account ${sheet.pairId}; sheet ${sheet.sheetId}. Review-only label: choose the receiving IOU account and sheet again before saving.`,
       });
-      const download = (name: string, value: Blob) => { const url = URL.createObjectURL(value); const a = document.createElement("a"); a.href = url; a.download = name; a.click(); setTimeout(() => URL.revokeObjectURL(url), 1000); };
-      download("iou-private-local-app.json", new Blob([JSON.stringify(catalog, null, 2)], { type: "application/json" }));
-      download("iou-local-processor.js", new Blob([source], { type: "text/javascript" }));
-      setNotice("Downloaded the private setup catalog and public processor. Import both locally in the client. The catalog includes this account’s Type names/keywords and currency; keep it private.");
-    } catch { setNotice("The app package could not be verified/exported. No entry or source message was sent."); }
+      const prepared = { ...createLocalSetupDownloadFiles(catalog, source), context: captured };
+      setupOwner.current.replace(prepared);
+      setSetup(prepared);
+      setNotice("Setup files verified and ready. Nothing has been downloaded yet. Use each download button below.");
+    } catch { if (mounted.current) setNotice("The app package could not be verified/prepared. No entry or source message was sent."); }
+    finally { setupPending.current = false; if (mounted.current) setPreparingSetup(false); }
   }
 
   return <section>
@@ -303,7 +313,14 @@ function PrivateSheet({ principal, sheet, defaultCurrency, drafts, binding }: {
     <details><summary>Private local-client setup</summary>
       <p>Exporting shares no chat or image. The downloaded catalog contains this account’s private Type names, trigger words, directions and default currency ({defaultCurrency || "unset"}); model prompt profiles are authored by IOU. The recipient label is a reminder, not an automatic destination binding.</p>
       <ul>{shared.map((type) => <li key={type.id}>{type.name}: {type.direction === "credit" ? "Owed to you" : "You owe"}; {type.txn_type}; keywords: {(type.keywords ?? []).join(", ") || "name only"}</li>)}</ul>
-      <button disabled={!ready || loading || !!error} onClick={() => void exportPackage()}>Download private setup catalog and processor</button>
+      <button disabled={!ready || loading || !!error || preparingSetup} onClick={() => void prepareSetupFiles()}>{preparingSetup ? "Verifying setup files…" : "Prepare setup files"}</button>
+      {setup && <LocalSetupDownloads files={setup.files} disabled={!setupCurrent || loading || !!error}
+        assertCurrent={() => assertSetupCurrent(setup.context)}
+        onRequest={(file) => setNotice(`Download requested: ${file.name}. Check your browser’s Downloads list to confirm it was saved.`)}
+        onError={() => {
+          clearSetup();
+          setNotice("The setup file could not be requested, or the IOU session changed. Prepare fresh setup files before downloading.");
+        }} />}
     </details>
     <h2>Review a received draft</h2>
     {!drafts.length && <p>No draft has been received. Nothing is saved automatically.</p>}
