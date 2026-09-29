@@ -12,6 +12,17 @@ Five extraction cases cover both model raw-output contracts (Qwen and Gemma), ex
 
 The additional React lifecycle suite mounts the actual IOU receiver and private-Type hook in the installed jsdom environment. Authenticated actors, key unwrap/decryption and encryption boundaries are mocked; no real account or ledger is accessed. It verifies deferred actor/Type readiness, unavailable account or membership, account-switch cleanup, explicit resolution of mismatched proposed Types, and an outcome-unknown retry using the same reviewed payload and import ID. Deferred key/encryption cases also change actor, identity or successful Type-load generation without changing the principal/sheet, proving the old operation cannot write. A strict-slot case exercises the real slot decoder with only the crypto primitive mocked, distinguishing unreadable from genuinely absent Types. These are deterministic component tests, not real-browser authentication or live-backend proof.
 
+Two-entry composition cases additionally connect the actual receiver and batch adapter to
+OpenChat's actual origin/window/nonce-bound handoff and saved-receipt consumer. A stateful
+synthetic actor commits both encrypted rows before losing its first response. Only an
+explicit retry reuses the sheet/import identity; its deferred `replayed: true` receipt
+returns the original two IDs without adding mock ledger rows. The sender remains
+`received` until the receiver emits the complete committed receipt. Fresh synthetic
+encrypted envelopes are allowed while both reviewed plaintext rows remain unchanged.
+A second-row encryption failure causes no partial batch call or saved receipt. These
+tests start from an already-reviewed synthetic request; they do not qualify model
+inference, real cryptography, backend atomicity, browser windows, or live replay/save.
+
 Native receiver cases additionally exercise the plain-URL `connect` / user Allow / `connected` bootstrap.
 The opener is captured once; the exact canonical localhost origin and public connection ID are frozen
 for the user’s decision. No receiver nonce, `ready` acknowledgement or accepted draft exists before

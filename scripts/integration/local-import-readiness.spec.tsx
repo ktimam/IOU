@@ -55,6 +55,8 @@ vi.mock("../../src/features/openchat/localImportLaunch", async (original) => {
 import { usePairTemplates, type PairTemplatesApi } from "../../src/features/templates/PairTemplatesContext";
 import { LocalImportPage } from "../../src/features/openchat/LocalImportPage";
 import type { LocalImportDraft } from "../../src/features/openchat/localImportHandoff";
+import type { EntryBatchActor } from "../../src/features/entries/batchImport";
+import { createLocalAppHandoffSession } from "@oc-test/localAppHandoff";
 
 const sheetId = "0123456789abcdef";
 const importId = "B".repeat(42) + "A";
@@ -117,6 +119,8 @@ async function mountSheet(selectedSheetId = sheetId) {
 }
 beforeEach(() => {
   vi.clearAllMocks();
+  fixture.sender.postMessage.mockReset();
+  fixture.encrypt.mockReset();
   vi.stubEnv("VITE_LOCAL_IMPORT_SENDER_ORIGIN", "http://localhost:5190");
   vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
   vi.stubGlobal("fetch", vi.fn(() => { throw new Error("No network expected in this test"); }));
@@ -417,6 +421,139 @@ describe("actual local receiver controls", () => {
     expect(request.import_id).toEqual(expectedId);
     expect(container.querySelector("pre")!.textContent).toBe(reviewed);
     expect(button("Saved in IOU").disabled).toBe(true);
+  });
+});
+
+describe("actual two-entry receiver, batch adapter and OpenChat receipt composition", () => {
+  const entries: readonly LocalImportDraft[] = [
+    { kind: "iou", amount: 100, currency: "USD", direction: "debt", date: "2026-09-26", note: "Synthetic first reviewed row" },
+    { kind: "settlement", amount: 25, currency: "EGP", direction: "credit", date: "2026-09-27", note: "Synthetic second reviewed row" },
+  ];
+  type BatchRequest = Parameters<EntryBatchActor["add_entry_batch"]>[0];
+
+  async function receiveReviewedBatch() {
+    await mountSheet();
+    const outcomes = vi.fn();
+    const senderOrigin = "http://localhost:5190";
+    const receiverOrigin = "http://localhost:3000";
+    const send = vi.fn((data: unknown, exactOrigin: string) => {
+      expect(exactOrigin).toBe(receiverOrigin);
+      window.dispatchEvent(new MessageEvent("message", {
+        data, source: fixture.sender as unknown as Window, origin: senderOrigin,
+      }));
+    });
+    const session = createLocalAppHandoffSession({
+      request: {
+        appId: "iou", actionId: "iou.entry.import", destination: `${receiverOrigin}/openchat/import`,
+        recipient: "Synthetic reviewed account", idempotencyKey: importId, payload: { entries },
+      },
+      sessionNonce: "A".repeat(43), receiver: window, send, onOutcome: outcomes,
+    });
+    fixture.sender.postMessage.mockImplementation((data: unknown, exactOrigin: string) => {
+      expect(exactOrigin).toBe(senderOrigin);
+      session.receive({ origin: receiverOrigin, source: window, data });
+    });
+    await act(async () => session.start());
+    expect(outcomes.mock.calls).toEqual([["received"]]);
+    expect(send.mock.calls.map(([data]) => (data as { type: string }).type))
+      .toEqual(["oc:app-import:hello", "oc:app-import:offer"]);
+    expect(fixture.encrypt).not.toHaveBeenCalled();
+    expect(fixture.actor.add_entry_batch).not.toHaveBeenCalled();
+    await select(container.querySelector('[aria-label="Received draft"]')!, importId);
+    await click(button("Review exact encrypted entry contents"));
+    const reviewed = JSON.parse(container.querySelector("pre")!.textContent!);
+    expect(reviewed).toHaveLength(2);
+    expect(reviewed.map((row: { kind: string }) => row.kind)).toEqual(["expense", "payment"]);
+    return { session, outcomes, send, reviewed };
+  }
+
+  it("keeps two committed rows after response loss and reports saved only after explicit same-ID replay", async () => {
+    // Synthetic actor models only sheet/import receipt semantics; it is not a live backend.
+    const ledger: BatchRequest["entries"] = [];
+    const receipts = new Map<string, bigint[]>();
+    const replayReply = deferred<{ entry_ids: bigint[]; replayed: boolean }>();
+    fixture.actor = actor();
+    fixture.actor.add_entry_batch.mockImplementation(async (request: BatchRequest) => {
+      expect(request.sheet_id).toBe(sheetId);
+      expect(request.entries).toHaveLength(2);
+      const key = `${request.sheet_id}:${request.import_id.join(",")}`;
+      if (receipts.has(key)) return replayReply.promise;
+      ledger.push(...structuredClone(request.entries));
+      receipts.set(key, [501n, 502n]);
+      throw new Error("Synthetic response loss after both rows committed");
+    });
+    let encryptionNonce = 0;
+    fixture.encrypt.mockImplementation(async () => {
+      const nonce = ++encryptionNonce;
+      return { entryKey: new Uint8Array([nonce]), ciphertext: new Uint8Array([nonce + 10]), iv: new Uint8Array([nonce + 20]) };
+    });
+    const sender = await receiveReviewedBatch();
+    try {
+      await click(button("Save in IOU"));
+      expect(fixture.actor.add_entry_batch).toHaveBeenCalledOnce();
+      expect(ledger).toHaveLength(2);
+      expect(receipts.size).toBe(1);
+      expect(sender.outcomes.mock.calls).toEqual([["received"]]);
+      expect(fixture.sender.postMessage.mock.calls.some(([message]) => message.type === "oc:app-import:committed")).toBe(false);
+      expect([...container.querySelectorAll("fieldset")].every((row) => row.disabled)).toBe(true);
+      expect(container.textContent).toContain("The save did not return a confirmed result");
+      await flush();
+      expect(fixture.actor.add_entry_batch).toHaveBeenCalledOnce(); // Never retry on rerender/flush.
+
+      await click(button("Retry the same save in IOU"));
+      expect(fixture.actor.add_entry_batch).toHaveBeenCalledTimes(2);
+      expect(sender.outcomes.mock.calls).toEqual([["received"]]); // A pending replay is not saved.
+      expect(ledger).toHaveLength(2);
+      const [first, second] = fixture.actor.add_entry_batch.mock.calls.map(([request]: [BatchRequest]) => request);
+      expect(second.sheet_id).toBe(first.sheet_id);
+      expect(second.import_id).toEqual(first.import_id);
+      expect(second.entries).not.toEqual(first.entries); // Fresh encrypted envelopes retain one import identity.
+      expect(fixture.encrypt.mock.calls.map(([bytes]) => JSON.parse(new TextDecoder().decode(bytes))))
+        .toEqual([...sender.reviewed, ...sender.reviewed]);
+      for (const request of [first, second]) {
+        expect(Object.keys(request).sort()).toEqual(["entries", "import_id", "sheet_id"]);
+        for (const row of request.entries) expect(Object.keys(row).sort()).toEqual(["ciphertext", "entry_key", "iv"]);
+      }
+
+      await act(async () => replayReply.resolve({ entry_ids: receipts.values().next().value!, replayed: true }));
+      expect(ledger).toHaveLength(2);
+      expect(fixture.actor.add_entry_batch).toHaveBeenCalledTimes(2);
+      expect(container.textContent).toContain("Saved 2 entries in the reviewed IOU sheet (the earlier save was already accepted)");
+      expect(button("Saved in IOU").disabled).toBe(true);
+      const committed = fixture.sender.postMessage.mock.calls.filter(([message]) => message.type === "oc:app-import:committed");
+      expect(committed).toEqual([[{
+        type: "oc:app-import:committed", version: 1, sessionNonce: "A".repeat(43),
+        importId, status: "saved", acceptedCount: 2, replayed: true,
+      }, "http://localhost:5190"]]);
+      expect(sender.outcomes.mock.calls).toEqual([["received"], ["saved"]]);
+      expect(sender.send).toHaveBeenCalledTimes(2); // No repeated hello, offer, processor or inference.
+      await click(button("Saved in IOU"));
+      expect(fixture.actor.add_entry_batch).toHaveBeenCalledTimes(2);
+      expect(fetch).not.toHaveBeenCalled();
+    } finally {
+      sender.session.close(); fixture.sender.postMessage.mockReset();
+    }
+  });
+
+  it("never submits a partial batch or a saved receipt when the second row cannot be encrypted", async () => {
+    fixture.actor = actor();
+    fixture.encrypt.mockResolvedValueOnce({ entryKey: new Uint8Array([1]), ciphertext: new Uint8Array([2]), iv: new Uint8Array([3]) })
+      .mockRejectedValueOnce(new Error("Synthetic second-row encryption failure"));
+    const sender = await receiveReviewedBatch();
+    try {
+      await click(button("Save in IOU"));
+      expect(fixture.encrypt).toHaveBeenCalledTimes(2);
+      expect(fixture.actor.add_entry_batch).not.toHaveBeenCalled();
+      expect(sender.outcomes.mock.calls).toEqual([["received"]]);
+      expect(fixture.sender.postMessage.mock.calls.some(([message]) => message.type === "oc:app-import:committed")).toBe(false);
+      expect(button("Retry the same save in IOU").disabled).toBe(false);
+      expect([...container.querySelectorAll("fieldset")].every((row) => row.disabled)).toBe(true);
+      await flush();
+      expect(fixture.actor.add_entry_batch).not.toHaveBeenCalled();
+      expect(fetch).not.toHaveBeenCalled();
+    } finally {
+      sender.session.close(); fixture.sender.postMessage.mockReset();
+    }
   });
 });
 
