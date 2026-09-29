@@ -26,6 +26,7 @@ import { OpenChatCardPage } from "../features/openchat/OpenChatCardPage";
 import { OpenChatLocalProcessorPage } from "../features/openchat/OpenChatLocalProcessorPage";
 import { OpenChatPrivateMatchPage } from "../features/openchat/OpenChatPrivateMatchPage";
 import { LocalImportPage } from "../features/openchat/LocalImportPage";
+import { LocalConnectPage } from "../features/openchat/LocalConnectPage";
 import { AcceptInvitePage } from "../features/invite/AcceptInvitePage";
 import { useDeepLinks } from "../features/deeplinks/deepLink";
 
@@ -48,6 +49,7 @@ export function App() {
       <Route path="/openchat/card" element={new URLSearchParams(window.location.search).get("oc-app-process") === "1" ? <OpenChatLocalProcessorPage /> : <OpenChatCardPage />} />
       <Route path="/openchat/private-match" element={<OpenChatPrivateMatchPage />} />
       <Route path="/openchat/import" element={<LocalImportPage />} />
+      <Route path="/openchat/connect" element={<LocalConnectPage />} />
       <Route path="/*" element={<AuthedApp />} />
     </Routes>
   );

@@ -31,4 +31,13 @@ invalidate approved connections after ten minutes, logout or close. A deferred e
 that a closed native connection cannot make a late backend write. These mocks do not qualify the
 actual Android browser transport or the passkey/account session.
 
+The no-file setup suite mounts the actual `/openchat/connect` page, consent protocol,
+private catalog builder and public processor integrity check. Synthetic authentication,
+actor reads and the decrypted-Type hook avoid accessing real accounts. It checks explicit
+consent before any setup response, exact requester origin/window/nonce binding, selected
+account/sheet visibility, and blocked late delivery after authentication, actor, Type-load
+generation, destination, expiry or window changes. Public bytes use a real SHA-256 digest.
+No processor executes, file downloads, entry writes or credential transfers occur. This
+does not qualify browser popup support, real account login or the Android bridge.
+
 The runner writes only a generated configuration and test cache beneath `--work-dir`, leaves them for diagnosis, and propagates failures as a nonzero exit status. Source paths are derived from the supplied checkout and this script's own location. It uses OpenChat's installed Vitest and current base configuration, so changes to that pipeline are tested rather than reproduced in an IOU mock. The regular IOU unit suite does not need the OpenChat checkout and does not run this DOM/cross-package suite; this explicit integration command is an additional required validation gate whenever either side's private-app contract changes or a local-client release is prepared.

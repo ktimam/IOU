@@ -1,0 +1,22 @@
+{
+  "version": 1,
+  "apps": [
+    {
+      "id": "iou",
+      "name": "IOU",
+      "description": "Review private transaction drafts, then save encrypted entries in IOU.",
+      "revision": "local-import-v1",
+      "catalog": {
+        "url": "/openchat/local-app-v1.json",
+        "sha256": "50c053074e3371565eee96b2e82c925b3eff840fefeaa3dccd336dae50a0413f",
+        "byteLength": 29537
+      },
+      "processor": {
+        "url": "/openchat/local-processor-v1.js",
+        "sha256": "bbf1aa6b1d50431f7280d0ee64b343443869abd7baf20e4a0fb0d95a2df0acaa",
+        "byteLength": 90985
+      },
+      "setupUrl": "/openchat/connect"
+    }
+  ]
+}

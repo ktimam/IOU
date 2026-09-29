@@ -24,9 +24,17 @@ const context = vm.createContext({ module: { exports: {} }, URL, TextEncoder });
 vm.runInContext(generator.outputFiles[0].text, context, { timeout: 1000 });
 const metadata = { version: 1, sha256, byteLength: source.byteLength, protocol: "oc:local-process:request" };
 const catalog = context.module.exports.createIouLocalAppPackage(argument[1], { sha256, byteLength: source.byteLength });
+const catalogBytes = Buffer.from(JSON.stringify(catalog, null, 2) + "\n");
+const app = catalog.apps[0];
+const directory = { version: 1, apps: [{ id: app.id, name: app.name, description: app.description, revision: app.revision,
+  catalog: { url: "/openchat/local-app-v1.json", sha256: createHash("sha256").update(catalogBytes).digest("hex"), byteLength: catalogBytes.byteLength },
+  processor: { url: "/openchat/local-processor-v1.js", sha256, byteLength: source.byteLength },
+  setupUrl: "/openchat/connect",
+}] };
 const output = path.join(root, "public/openchat");
 mkdirSync(output, { recursive: true });
 writeFileSync(path.join(output, "local-processor-v1.js"), source);
 writeFileSync(path.join(output, "local-processor-v1.sha256.json"), JSON.stringify(metadata, null, 2) + "\n");
-writeFileSync(path.join(output, "local-app-v1.json"), JSON.stringify(catalog, null, 2) + "\n");
+writeFileSync(path.join(output, "local-app-v1.json"), catalogBytes);
+writeFileSync(path.join(output, "apps-v1.json"), JSON.stringify(directory, null, 2) + "\n");
 console.log(`IOU local package generated: ${source.byteLength} bytes; SHA-256 ${sha256}`);
