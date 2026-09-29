@@ -24,7 +24,9 @@ export function processLocalArtifactRequest(value: unknown) {
     if (!state.currency && context?.defaultCurrency) state.currency = context.defaultCurrency;
     const matched = context && matchTemplateForDraft(context.types.map((item) => ({ ...item, keywords: [...item.keywords] })),
       candidate, { evidence: result.candidates.length > 1 ? "row-local" : "full", allowImageHeading: input.modality === "image" });
-    if (matched) { state.kind = matched.txn_type; state.direction = matched.direction; }
+    // Match the original card: a saved Type supplies direction, not a replacement for the
+    // extracted IOU/Settlement kind. The two user-visible choices are independent.
+    if (matched) state.direction = matched.direction;
     // Source ranges become visible note text here, in IOU. Only reviewed DTO fields leave this
     // worker; source echo, image headings, date intermediates and private types are not forwarded.
     delete state.message;

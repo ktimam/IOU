@@ -8,12 +8,31 @@ const row: LocalImportDraft = { kind: "iou", amount: 100, currency: "USD", direc
 const type: TxnTemplate = { id: "private-one", name: "User-defined Type", direction: "debt", txn_type: "iou", fee_percent: 10, schedule: [{ offset_days: 2, percent: 100 }] };
 
 describe("IOU local import review", () => {
-  it("changes visible type/direction only on explicit account-local Type selection", () => {
+  it("changes direction only on explicit account-local saved Type selection", () => {
     const state = initializeLocalImportReviewRow(row, [type]);
     expect(applyLocalImportType(state, type.id, [type]).row).toMatchObject({ kind: "iou", direction: "debt" });
     expect(row.direction).toBe("credit");
     expect(() => applyLocalImportType(state, "foreign", [type])).toThrow();
     expect(() => applyLocalImportType(state, type.id, [type, type])).toThrow();
+  });
+  it.each(["iou", "settlement"] as const)("preserves visible %s kind through selection, reselection, clearing and final review", (kind) => {
+    const different = { ...type, txn_type: kind === "iou" ? "settlement" as const : "iou" as const };
+    let state = initializeLocalImportReviewRow({ ...row, kind }, [different]);
+    state = applyLocalImportType(state, different.id, [different]);
+    expect(state.row).toMatchObject({ kind, direction: "debt" });
+    state = applyLocalImportType(state, "", [different]);
+    expect(state.row).toMatchObject({ kind, direction: "credit" });
+    state = applyLocalImportType(state, different.id, [different]);
+    const reviewed = prepareLocalImportReview({ rows: [state.row], selectedTypeIds: [state.selectedTypeId],
+      templates: [different], importId: id });
+    expect(reviewed[0].txn_type).toBe(kind);
+  });
+  it("preserves an explicitly edited kind when the saved Type changes", () => {
+    let state = applyLocalImportType(initializeLocalImportReviewRow(row, [type]), type.id, [type]);
+    state = { ...state, row: { ...state.row, kind: "settlement" } };
+    state = applyLocalImportType(state, type.id, [type]);
+    expect(state.row.kind).toBe("settlement");
+    expect(applyLocalImportType(state, "", [type]).row.kind).toBe("settlement");
   });
   it("includes net, fees and complete schedule in immutable final storage preview", () => {
     const selected = applyLocalImportType(initializeLocalImportReviewRow(row, [type]), type.id, [type]);

@@ -8,8 +8,8 @@
       "description": "Review private transaction drafts, then save encrypted entries in IOU.",
       "destination": "http://localhost:3000/openchat/import",
       "processor": {
-        "sha256": "c95b7fcd3f16661283e5f911c0a0f53c6342e632b0c6f2b05daca5c54982dd22",
-        "byteLength": 90798
+        "sha256": "86220bca8061ba2ffa886b2eaee3551c78f956c3cdf40d36843f2c50aab17a42",
+        "byteLength": 90780
       },
       "actions": [
         {

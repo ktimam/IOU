@@ -36,7 +36,8 @@ export function applyLocalImportType(state: LocalImportReviewRow, selectedId: st
   const selected = matches[0];
   return {
     ...rest, selectedTypeId: selectedId,
-    row: { ...row, kind: selected.txn_type, ...(!state.directionEdited ? { direction: selected.direction } : {}) },
+    // Saved-Type defaults must not overwrite the extracted or manually edited kind.
+    row: { ...row, ...(!state.directionEdited ? { direction: selected.direction } : {}) },
     ...(!state.directionEdited ? { directionBeforeType: row.direction } : {}),
   };
 }

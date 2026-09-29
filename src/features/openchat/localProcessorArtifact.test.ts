@@ -1,9 +1,54 @@
 import { describe, expect, it } from "vitest";
+import { readFileSync } from "node:fs";
+import { createHash } from "node:crypto";
+import { createContext, runInContext } from "node:vm";
 import { processLocalArtifactRequest } from "./localProcessorArtifact";
 import { createIouLocalAppPackage } from "./localAppPackage";
 import { createLocalProcessorContext, parseLocalProcessorContext } from "./localProcessorContext";
 
 describe("standalone IOU local processor export", () => {
+  it("ships the verified compiled processor with the same kind-preserving behavior", () => {
+    const source = readFileSync(new URL("../../../public/openchat/local-processor-v1.js", import.meta.url));
+    const metadata = JSON.parse(readFileSync(new URL("../../../public/openchat/local-processor-v1.sha256.json", import.meta.url), "utf8"));
+    const catalog = JSON.parse(readFileSync(new URL("../../../public/openchat/local-app-v1.json", import.meta.url), "utf8"));
+    expect(createHash("sha256").update(source).digest("hex")).toBe(metadata.sha256);
+    expect(source.byteLength).toBe(metadata.byteLength);
+    expect(catalog.apps[0].processor).toEqual({ sha256: metadata.sha256, byteLength: metadata.byteLength });
+    for (const kind of ["iou", "settlement"] as const) {
+      const context = createLocalProcessorContext([{ id: "synthetic-kind", name: "Synthetic booking",
+        keywords: ["booking"], direction: "debt", txn_type: kind === "iou" ? "settlement" : "iou" }], "USD");
+      const request = { type: "oc:local-process:request", version: 1, actionId: "iou.entry.import", context,
+        input: { operation: "normalize", modality: "text", text: "booking 20 USD",
+          candidates: [{ kind, amount: 20, currency: "USD", direction: "credit", note: "booking" }] } };
+      let listener: ((event: { data: unknown }) => void) | undefined;
+      const replies: unknown[] = [];
+      // Execute the actual shipped worker, without any network capability or app account.
+      const worker = createContext({ TextEncoder, TextDecoder, requestJson: JSON.stringify(request),
+        dispatch: (event: { data: unknown }) => listener!(event), self: {
+        addEventListener: (_name: string, handler: typeof listener) => { listener = handler; },
+        postMessage: (value: unknown) => replies.push(JSON.parse(JSON.stringify(value))),
+      } });
+      runInContext(source.toString("utf8"), worker, { timeout: 1000 });
+      expect(listener).toBeTypeOf("function");
+      // Real postMessage clones into the worker realm; do not pass foreign VM prototypes.
+      runInContext("dispatch({ data: JSON.parse(requestJson) }); dispatch({ data: JSON.parse(requestJson) });", worker, { timeout: 1000 });
+      expect(replies).toEqual([processLocalArtifactRequest(request)]);
+      expect(replies[0]).toMatchObject({ kind: "candidates", candidates: [{ kind, direction: "debt" }] });
+    }
+  });
+  it.each(["iou", "settlement"] as const)("preserves extracted %s kind when a different saved Type matches", (kind) => {
+    const context = createLocalProcessorContext([{ id: "synthetic-kind", name: "Synthetic booking",
+      keywords: ["booking"], direction: "debt", txn_type: kind === "iou" ? "settlement" : "iou" }], "USD");
+    const result = processLocalArtifactRequest({ type: "oc:local-process:request", version: 1,
+      actionId: "iou.entry.import", context, input: {
+        operation: "normalize", modality: "text", text: "booking 20 USD", candidates: [{
+          kind, amount: 20, currency: "USD", direction: "credit", note: "booking",
+        }],
+      } });
+    expect(result).toMatchObject({ kind: "candidates", candidates: [{
+      kind, direction: "debt", typeId: "synthetic-kind", typeName: "Synthetic booking",
+    }] });
+  });
   it("rejects conflicting acceptance-label dates but accepts the same text with one transaction date", () => {
     const context = createLocalProcessorContext([{ id: "synthetic-acceptance", name: "Synthetic acceptance",
       direction: "debt", txn_type: "iou", keywords: ["TEST ONLY"] }], "USD");
