@@ -26,7 +26,9 @@ export function processLocalArtifactRequest(value: unknown) {
       candidate, { evidence: result.candidates.length > 1 ? "row-local" : "full", allowImageHeading: input.modality === "image" });
     // Match the original card: a saved Type supplies direction, not a replacement for the
     // extracted IOU/Settlement kind. The two user-visible choices are independent.
-    if (matched) state.direction = matched.direction;
+    // Paired named-choice exports let the host capture this pre-Type direction before it
+    // applies IOU's declared default. Old contexts retain their existing behavior.
+    if (matched && context?.draftEditorDefaults !== "host-v1") state.direction = matched.direction;
     // Source ranges become visible note text here, in IOU. Only reviewed DTO fields leave this
     // worker; source echo, image headings, date intermediates and private types are not forwarded.
     delete state.message;

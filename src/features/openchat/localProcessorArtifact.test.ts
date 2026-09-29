@@ -14,9 +14,13 @@ describe("standalone IOU local processor export", () => {
     expect(createHash("sha256").update(source).digest("hex")).toBe(metadata.sha256);
     expect(source.byteLength).toBe(metadata.byteLength);
     expect(catalog.apps[0].processor).toEqual({ sha256: metadata.sha256, byteLength: metadata.byteLength });
-    for (const kind of ["iou", "settlement"] as const) {
-      const context = createLocalProcessorContext([{ id: "synthetic-kind", name: "Synthetic booking",
+    for (const draftEditorDefaults of [undefined, "host-v1"] as const) for (const kind of ["iou", "settlement"] as const) {
+      const baseContext = createLocalProcessorContext([{ id: "synthetic-kind", name: "Synthetic booking",
         keywords: ["booking"], direction: "debt", txn_type: kind === "iou" ? "settlement" : "iou" }], "USD");
+      const privateCatalog = createIouLocalAppPackage("http://localhost:3000/openchat/import", metadata,
+        { processorContext: baseContext, recipientLabel: "Synthetic sheet" });
+      const context = draftEditorDefaults ? privateCatalog.apps[0].actions[0].processorContext : baseContext;
+      expect(privateCatalog.apps[0].processor).toEqual(catalog.apps[0].processor);
       const request = { type: "oc:local-process:request", version: 1, actionId: "iou.entry.import", context,
         input: { operation: "normalize", modality: "text", text: "booking 20 USD",
           candidates: [{ kind, amount: 20, currency: "USD", direction: "credit", note: "booking" }] } };
@@ -33,7 +37,8 @@ describe("standalone IOU local processor export", () => {
       // Real postMessage clones into the worker realm; do not pass foreign VM prototypes.
       runInContext("dispatch({ data: JSON.parse(requestJson) }); dispatch({ data: JSON.parse(requestJson) });", worker, { timeout: 1000 });
       expect(replies).toEqual([processLocalArtifactRequest(request)]);
-      expect(replies[0]).toMatchObject({ kind: "candidates", candidates: [{ kind, direction: "debt" }] });
+      expect(replies[0]).toMatchObject({ kind: "candidates", candidates: [{ kind,
+        direction: draftEditorDefaults ? "credit" : "debt", typeId: "synthetic-kind", typeName: "Synthetic booking" }] });
     }
   });
   it.each(["iou", "settlement"] as const)("preserves extracted %s kind when a different saved Type matches", (kind) => {
@@ -48,6 +53,54 @@ describe("standalone IOU local processor export", () => {
     expect(result).toMatchObject({ kind: "candidates", candidates: [{
       kind, direction: "debt", typeId: "synthetic-kind", typeName: "Synthetic booking",
     }] });
+  });
+  it.each(["iou", "settlement"] as const)("retains the raw direction and %s kind for an opted-in host choice", (kind) => {
+    const baseContext = createLocalProcessorContext([{ id: "private-id", name: "Private booking",
+      keywords: ["booking"], direction: "debt", txn_type: kind === "iou" ? "settlement" : "iou" }], "EGP");
+    const context = { ...baseContext, draftEditorDefaults: "host-v1" };
+    const result = processLocalArtifactRequest({ type: "oc:local-process:request", version: 1,
+      actionId: "iou.entry.import", context, input: {
+        operation: "normalize", modality: "text", text: "booking 20", candidates: [{
+          kind, amount: 20, direction: "credit", note: "booking",
+        }],
+      } });
+    expect(result).toMatchObject({ kind: "candidates", candidates: [{ kind, amount: 20, currency: "EGP",
+      direction: "credit", typeId: "private-id", typeName: "Private booking" }] });
+    expect(JSON.stringify(result)).not.toContain("draftEditorDefaults");
+  });
+  it("leaves no-Type processing unchanged in both context modes", () => {
+    const context = createLocalProcessorContext([], "EGP");
+    const request = { type: "oc:local-process:request", version: 1, actionId: "iou.entry.import", context,
+      input: { operation: "normalize", modality: "text", text: "20", candidates: [{ kind: "settlement", amount: 20 }] } };
+    const legacy = processLocalArtifactRequest(request);
+    expect(processLocalArtifactRequest({ ...request, context: { ...context, draftEditorDefaults: "host-v1" } })).toEqual(legacy);
+    expect(legacy).toMatchObject({ kind: "candidates", candidates: [{ kind: "settlement", direction: "debt", currency: "EGP" }] });
+    expect(processLocalArtifactRequest({ ...request, context: { ...context, draftEditorDefaults: "unknown" } })).toEqual({ kind: "error" });
+  });
+  it("keeps image matching and visible date/note intact while exposing the pre-Type direction to the host", () => {
+    const context = createLocalProcessorContext([{ id: "image-type", name: "Reservation", keywords: [],
+      direction: "debt", txn_type: "settlement" }], "EGP");
+    const request = { type: "oc:local-process:request", version: 1, actionId: "iou.entry.import", context,
+      input: { operation: "normalize_raw", modality: "image", sourceTimestamp: Date.UTC(2026, 6, 3), candidates: [{
+        heading: "Reservation", total_text: "Total Payout $1,912.15", dates: ["Sun, Jul 19", "Thu, Aug 6"], kind: "iou",
+      }] } };
+    const legacy = processLocalArtifactRequest(request);
+    const host = processLocalArtifactRequest({ ...request, context: { ...context, draftEditorDefaults: "host-v1" } });
+    expect(legacy).toMatchObject({ kind: "candidates", candidates: [{ direction: "debt", kind: "iou", typeId: "image-type" }] });
+    expect(host).toEqual({ kind: "candidates", sourceIndexes: [0], candidates: [{ amount: 1912.15, currency: "USD",
+      direction: "credit", kind: "iou", date: "2026-07-19", note: "Reservation | From Sun, Jul 19 to Thu, Aug 6",
+      typeId: "image-type", typeName: "Reservation" }] });
+  });
+  it("does not apply an unmatched Type or expose the context to the outgoing candidate", () => {
+    const context = createLocalProcessorContext([{ id: "unmatched", name: "Unmatched", keywords: ["other"],
+      direction: "debt", txn_type: "settlement" }], "EGP");
+    const request = { type: "oc:local-process:request", version: 1, actionId: "iou.entry.import", context,
+      input: { operation: "normalize", modality: "text", text: "Lunch 20", candidates: [{ kind: "iou", amount: 20,
+        direction: "credit", note: "Lunch" }] } };
+    expect(processLocalArtifactRequest(request)).toEqual(processLocalArtifactRequest({ ...request,
+      context: { ...context, draftEditorDefaults: "host-v1" } }));
+    expect(processLocalArtifactRequest(request)).toEqual({ kind: "candidates", candidates: [{
+      amount: 20, currency: "EGP", direction: "credit", kind: "iou", note: "Lunch" }] });
   });
   it("rejects conflicting acceptance-label dates but accepts the same text with one transaction date", () => {
     const context = createLocalProcessorContext([{ id: "synthetic-acceptance", name: "Synthetic acceptance",
@@ -113,7 +166,7 @@ describe("standalone IOU local processor export", () => {
     expect((result as { candidates: unknown[] }).candidates[0]).not.toHaveProperty("date");
     const catalog = createIouLocalAppPackage("http://localhost:3000/openchat/import", { sha256: "a".repeat(64), byteLength: 1234 }, { processorContext: context, recipientLabel: "Sheet to review" });
     expect(catalog.apps[0].recipientLabel).toBe("Sheet to review");
-    expect(catalog.apps[0].actions[0].processorContext).toEqual(context);
+    expect(catalog.apps[0].actions[0].processorContext).toEqual({ ...context, draftEditorDefaults: "host-v1" });
     const publicCatalog = createIouLocalAppPackage("http://localhost:3000/openchat/import", { sha256: "a".repeat(64), byteLength: 1234 });
     expect(publicCatalog.apps[0].actions[0]).not.toHaveProperty("processorContext");
   });

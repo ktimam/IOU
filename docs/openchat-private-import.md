@@ -57,8 +57,35 @@ is public code, but the client must still verify it against the catalog’s dige
 Prepare a fresh pair after changing the IOU account, sheet, Types or currency.
 Prepared download controls are invalidated when their loaded context changes.
 
-The local-test client keeps imported setup and drafts in page memory. Reloading or
-changing the OpenChat account discards them; this is not cross-device configuration.
+The updated local-test client remembers imported setup, selected app/action and
+enabled chats on this device, isolated by the signed-in OpenChat account and backend.
+That local setup contains private Type names and is not chat-encrypted or synced.
+Use **Forget this account's app setup on this device** to remove it. Drafts,
+recipients, approvals and delivery details remain memory-only; reloading or changing
+account discards those, not the separately stored setup.
+
+### Saved Types in the sender's private draft
+
+New private exports declare IOU's Type labels, IDs and direction defaults through
+OpenChat's generic named-choice editor. Selecting a Type updates its ID/name and
+direction, never the independent IOU/Settlement kind. Direction edited explicitly
+by the user is preserved, including an edit to the same value. Clearing the Type
+restores the pre-Type direction unless it was manually edited. Different rows have
+independent history; neither selection nor clearing repeats model processing.
+
+The private processor context opts into this host behavior only when the paired
+selector is exported. Older contexts retain their previous behavior; public or
+empty-Type exports do not include the selector. A client must support the new
+declaration before importing it. Explicitly prepare/import a fresh matching pair
+after updating: existing imports are not replaced automatically.
+
+The baseline is held only in the sender's draft session. Advanced JSON preserves
+explicit values and disables automatic defaults, including after row reordering.
+The receiver gets only the final reviewed fields and cannot recover pre-Type values
+from sender history. IOU's receiving page remains responsible for current-sheet
+validation, fees and schedules. Type labels must be distinct, visible and different
+from the selector's None label; invalid labels fail export rather than creating an
+unusable catalog.
 
 ## Review and deliver
 
