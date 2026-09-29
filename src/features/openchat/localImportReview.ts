@@ -4,13 +4,41 @@ import { templateToInitial } from "../templates/templateBase";
 import type { TxnTemplate } from "../templates/TemplatesContext";
 import { isLocalImportId, parseLocalImportPayload, type LocalImportDraft } from "./localImportHandoff";
 
-/** Explicit user selection may change these visible controls; never infer a private Type by id. */
-export function applyLocalImportType(row: LocalImportDraft, selectedId: string, templates: readonly TxnTemplate[]): LocalImportDraft {
-  if (!selectedId) return row;
+/** Receiver-only interaction state. Never include these flags in the imported or encrypted DTO. */
+export interface LocalImportReviewRow {
+  row: LocalImportDraft;
+  selectedTypeId: string | null;
+  directionEdited?: true;
+  directionBeforeType?: LocalImportDraft["direction"];
+}
+
+export function initializeLocalImportReviewRow(row: LocalImportDraft, templates: readonly TxnTemplate[]): LocalImportReviewRow {
+  const matches = row.typeId ? templates.filter((item) => item.id === row.typeId && item.name === row.typeName) : [];
+  // The incoming DTO contains the final reviewed direction, not its value before a processor
+  // matched a Type. Do not invent that missing history or reapply a possibly changed default.
+  return { row: { ...row }, selectedTypeId: row.typeId ? matches.length === 1 ? row.typeId : null : "" };
+}
+
+/** A manual direction is authoritative across later Type choices, as in IOU's original card. */
+export function editLocalImportDirection(state: LocalImportReviewRow, direction: LocalImportDraft["direction"]): LocalImportReviewRow {
+  const { directionBeforeType: _previous, ...rest } = state;
+  return { ...rest, row: { ...state.row, direction }, directionEdited: true };
+}
+
+/** Apply only a current account-local Type; restore only a receiver-observed prior direction. */
+export function applyLocalImportType(state: LocalImportReviewRow, selectedId: string, templates: readonly TxnTemplate[]): LocalImportReviewRow {
   const matches = templates.filter((item) => item.id === selectedId);
-  if (matches.length !== 1) throw new Error("The selected Type is not available in this IOU account.");
+  if (selectedId && matches.length !== 1) throw new Error("The selected Type is not available in this IOU account.");
+  const { directionBeforeType, ...rest } = state;
+  const row = directionBeforeType !== undefined && !state.directionEdited
+    ? { ...state.row, direction: directionBeforeType } : state.row;
+  if (!selectedId) return { ...rest, row, selectedTypeId: "" };
   const selected = matches[0];
-  return { ...row, kind: selected.txn_type, direction: selected.direction };
+  return {
+    ...rest, selectedTypeId: selectedId,
+    row: { ...row, kind: selected.txn_type, ...(!state.directionEdited ? { direction: selected.direction } : {}) },
+    ...(!state.directionEdited ? { directionBeforeType: row.direction } : {}),
+  };
 }
 
 /** Build the exact final encrypted payload preview. Never guess missing dates or currencies. */

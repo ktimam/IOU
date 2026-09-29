@@ -54,6 +54,7 @@ vi.mock("../../src/features/openchat/localImportLaunch", async (original) => {
 });
 import { usePairTemplates, type PairTemplatesApi } from "../../src/features/templates/PairTemplatesContext";
 import { LocalImportPage } from "../../src/features/openchat/LocalImportPage";
+import type { LocalImportDraft } from "../../src/features/openchat/localImportHandoff";
 
 const sheetId = "0123456789abcdef";
 const importId = "B".repeat(42) + "A";
@@ -96,19 +97,22 @@ function actor(getPair: () => Promise<unknown> = async () => [pair()]) {
   };
 }
 async function offer(typeId = "foreign", typeName = "Foreign Type") {
+  await offerRows([{
+    kind: "iou", amount: 100, currency: "USD", direction: "credit", date: "2026-09-26", note: "Synthetic reviewed note", typeId, typeName,
+  }]);
+}
+async function offerRows(entries: readonly LocalImportDraft[], offeredId = importId) {
   await act(async () => {
     for (const data of [
       { type: "oc:app-import:hello", version: 1, sessionNonce: "A".repeat(43) },
-      { type: "oc:app-import:offer", version: 1, sessionNonce: "A".repeat(43), importId, actionId: "iou.entry.import", payload: { entries: [{
-        kind: "iou", amount: 100, currency: "USD", direction: "credit", date: "2026-09-26", note: "Synthetic reviewed note", typeId, typeName,
-      }] } },
+      { type: "oc:app-import:offer", version: 1, sessionNonce: "A".repeat(43), importId: offeredId, actionId: "iou.entry.import", payload: { entries } },
     ]) window.dispatchEvent(new MessageEvent("message", { data, source: fixture.sender as unknown as Window, origin: "http://localhost:5190" }));
   });
 }
-async function mountSheet() {
+async function mountSheet(selectedSheetId = sheetId) {
   await render(<LocalImportPage />);
   const sheetSelect = container.querySelector("select")!;
-  await select(sheetSelect, sheetId);
+  await select(sheetSelect, selectedSheetId);
   await click(button("Load this sheet’s private Types"));
 }
 beforeEach(() => {
@@ -124,6 +128,119 @@ beforeEach(() => {
   fixture.encrypt.mockResolvedValue({ entryKey: new Uint8Array([1]), ciphertext: new Uint8Array([2]), iv: new Uint8Array([3]) });
   renders.length = 0;
   container = document.createElement("div"); document.body.append(container); root = createRoot(container);
+});
+
+describe("actual local receiver Type and manual-direction editing", () => {
+  const entry: LocalImportDraft = { kind: "iou", amount: 100, currency: "USD", direction: "credit", date: "2026-09-26", note: "Synthetic reviewed note" };
+  const creditType = { ...template, id: "credit-type", name: "Credit Type", direction: "credit" as const };
+  const rowSelect = (label: string, index = 0) => {
+    const fieldset = container.querySelectorAll("fieldset")[index];
+    return [...fieldset.querySelectorAll("label")].find(node => node.textContent?.startsWith(`${label} `))!
+      .querySelector("select")!;
+  };
+  const chooseReceived = async (id = importId) => select(container.querySelector('[aria-label="Received draft"]')!, id);
+  const reviewed = () => JSON.parse(container.querySelector("pre")!.textContent!);
+
+  it("clears an incoming matched Type without inventing missing pre-Type direction history", async () => {
+    fixture.actor = actor(); await mountSheet();
+    await offerRows([{ ...entry, direction: "debt", typeId: template.id, typeName: template.name }]);
+    await chooseReceived();
+    expect(rowSelect("Type").value).toBe(`type:${template.id}`);
+    await select(rowSelect("Type"), "none");
+    expect(rowSelect("Direction").value).toBe("debt");
+    await click(button("Review exact encrypted entry contents"));
+    expect(reviewed()[0]).toMatchObject({ direction: "debt", amount_minor: 10000 });
+    expect(reviewed()[0]).not.toHaveProperty("fee");
+  });
+
+  it("restores a known receiver direction after Type A, Type B and None", async () => {
+    fixture.decrypt.mockResolvedValue({ templates: [template, creditType], dismissed: [] });
+    fixture.actor = actor(); await mountSheet(); await offerRows([entry]); await chooseReceived();
+    await select(rowSelect("Type"), `type:${template.id}`);
+    expect(rowSelect("Direction").value).toBe("debt");
+    await select(rowSelect("Type"), `type:${creditType.id}`);
+    expect(rowSelect("Direction").value).toBe("credit");
+    await select(rowSelect("Type"), "none");
+    expect(rowSelect("Direction").value).toBe("credit");
+    await click(button("Review exact encrypted entry contents"));
+    expect(reviewed()[0]).toMatchObject({ direction: "credit", amount_minor: 10000 });
+    expect(reviewed()[0]).not.toHaveProperty("fee");
+  });
+
+  it("keeps an explicit direction through later Type and None choices and encrypts only the final DTO", async () => {
+    fixture.decrypt.mockResolvedValue({ templates: [template, creditType], dismissed: [] });
+    fixture.actor = actor(); await mountSheet(); await offerRows([entry]); await chooseReceived();
+    await select(rowSelect("Direction"), "debt");
+    await select(rowSelect("Type"), `type:${creditType.id}`);
+    expect(rowSelect("Direction").value).toBe("debt");
+    await select(rowSelect("Type"), "none");
+    expect(rowSelect("Direction").value).toBe("debt");
+    await select(rowSelect("Type"), `type:${creditType.id}`);
+    await click(button("Review exact encrypted entry contents"));
+    const expected = reviewed()[0];
+    expect(expected).toMatchObject({ direction: "debt", amount_minor: 9000, fee: { percent: 10 } });
+    expect(expected).not.toHaveProperty("directionEdited");
+    expect(expected).not.toHaveProperty("directionBeforeType");
+    expect(expected).not.toHaveProperty("selectedTypeId");
+    await click(button("Save in IOU"));
+    expect(fixture.encrypt).toHaveBeenCalledOnce();
+    expect(JSON.parse(new TextDecoder().decode(fixture.encrypt.mock.calls[0][0]))).toEqual(expected);
+    expect(fixture.actor.add_entry_batch).toHaveBeenCalledOnce();
+  });
+
+  it("isolates manual direction history per entry and resets it when choosing another draft", async () => {
+    fixture.actor = actor(); await mountSheet();
+    await offerRows([entry, { ...entry, note: "Second entry" }]); await chooseReceived();
+    await select(rowSelect("Direction", 0), "credit");
+    await select(rowSelect("Type", 0), `type:${template.id}`);
+    await select(rowSelect("Type", 1), `type:${template.id}`);
+    expect(rowSelect("Direction", 0).value).toBe("credit");
+    expect(rowSelect("Direction", 1).value).toBe("debt");
+    await select(rowSelect("Type", 1), "none");
+    expect(rowSelect("Direction", 1).value).toBe("credit");
+    await click(button("Review exact encrypted entry contents"));
+    expect(reviewed().map((value: { direction: string }) => value.direction)).toEqual(["credit", "credit"]);
+    expect(reviewed()[0]).toHaveProperty("fee.percent", 10);
+    expect(reviewed()[1]).not.toHaveProperty("fee");
+    const anotherId = "C".repeat(42) + "A";
+    await offerRows([entry], anotherId); await chooseReceived(anotherId);
+    expect(button("Save in IOU")).toBeUndefined();
+    await select(rowSelect("Type"), `type:${template.id}`);
+    expect(rowSelect("Direction").value).toBe("debt");
+    await select(rowSelect("Type"), "none");
+    expect(rowSelect("Direction").value).toBe("credit");
+  });
+
+  it.each(["account", "sheet"])("never applies a foreign proposed Type and resets row metadata for a new %s", async (replacement) => {
+    fixture.actor = actor(); await mountSheet(); await offerRows([entry]); await chooseReceived();
+    await select(rowSelect("Direction"), "credit");
+    await select(rowSelect("Type"), `type:${template.id}`);
+    expect(rowSelect("Direction").value).toBe("credit");
+    const selectedSheetId = replacement === "sheet" ? "fedcba9876543210" : sheetId;
+    if (replacement === "account") {
+      identity("synthetic-b"); fixture.actor = actor(); await render(<LocalImportPage />);
+      expect(container.querySelectorAll("fieldset")).toHaveLength(0);
+    } else {
+      fixture.actor = actor();
+      fixture.actor.get_my_pairs.mockResolvedValue([{ id: "another-pair", active_sheet_id: [selectedSheetId], archived_at: [], other_principal: { toText: () => "synthetic-partner" } }]);
+    }
+    // Changing account closes the exact old connection; choosing a different destination also
+    // requires a fresh receiving page instead of moving an in-progress review to another sheet.
+    await render(null); await mountSheet(selectedSheetId);
+    await offerRows([{ ...entry, typeId: template.id, typeName: "Stale or foreign name" }]);
+    await chooseReceived();
+    expect(rowSelect("Type").value).toBe("");
+    expect(rowSelect("Direction").value).toBe("credit");
+    await click(button("Review exact encrypted entry contents"));
+    expect(button("Save in IOU")).toBeUndefined();
+    await select(rowSelect("Type"), `type:${template.id}`);
+    expect(rowSelect("Direction").value).toBe("debt");
+    await select(rowSelect("Type"), "none");
+    expect(rowSelect("Direction").value).toBe("credit");
+    await click(button("Review exact encrypted entry contents"));
+    expect(reviewed()[0]).not.toHaveProperty("fee");
+    expect(fixture.actor.add_entry_batch).not.toHaveBeenCalled();
+  });
 });
 afterEach(async () => { await act(async () => root.unmount()); container.remove(); vi.useRealTimers(); vi.unstubAllGlobals(); vi.unstubAllEnvs(); });
 

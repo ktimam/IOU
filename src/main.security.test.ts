@@ -10,6 +10,12 @@ vi.mock("./features/openchat/chatLinkLaunch", () => ({
   },
 }));
 
+vi.mock("./features/openchat/localImportLaunch", () => ({
+  captureLocalImportLaunch: () => {
+    bootstrapEvents.push("local-import-capture");
+  },
+}));
+
 vi.mock("./bootstrapApp", () => {
   bootstrapEvents.push("app-import");
   return {};
@@ -21,21 +27,23 @@ describe("security bootstrap ordering", () => {
     vi.resetModules();
   });
 
-  it("scrubs an OpenChat routing token before importing the React/auth tree", () => {
+  it("captures both launch paths before importing the React/auth tree", () => {
     const source = readFileSync(new URL("./main.tsx", import.meta.url), "utf8");
     const capture = source.indexOf("captureOpenChatRoutingLaunch();");
+    const localCapture = source.indexOf("captureLocalImportLaunch();");
     const appImport = source.indexOf('import("./bootstrapApp")');
 
     expect(capture).toBeGreaterThanOrEqual(0);
-    expect(appImport).toBeGreaterThan(capture);
+    expect(localCapture).toBeGreaterThan(capture);
+    expect(appImport).toBeGreaterThan(localCapture);
     expect(source).not.toMatch(/from ["']\.\/app\/App["']/);
     expect(source).not.toContain("ReactDOM.createRoot");
   });
 
-  it("executes the scrub before evaluating the application bootstrap", async () => {
+  it("executes the scrub and local import capture before evaluating the application bootstrap", async () => {
     const main = await import("./main");
     await main.appBootstrap;
 
-    expect(bootstrapEvents).toEqual(["scrub", "app-import"]);
+    expect(bootstrapEvents).toEqual(["scrub", "local-import-capture", "app-import"]);
   });
 });

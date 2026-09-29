@@ -8,7 +8,7 @@ import type { EntryPayload } from "../entries/types";
 import { buildLocalImportCommittedReceipt, createLocalImportReceiver, type LocalImportDraft, type PendingLocalImport } from "./localImportHandoff";
 import { localImportNativeBootstrap, localImportSenderOrigin, localImportSessionNonce } from "./localImportLaunch";
 import { createLocalImportConsent, type LocalImportConsentState } from "./localImportConsent";
-import { applyLocalImportType, prepareLocalImportReview } from "./localImportReview";
+import { applyLocalImportType, editLocalImportDirection, initializeLocalImportReviewRow, prepareLocalImportReview, type LocalImportReviewRow } from "./localImportReview";
 import { createIouLocalAppPackage } from "./localAppPackage";
 import { createLocalProcessorContext } from "./localProcessorContext";
 import { createLocalSetupDownloadFiles, createLocalSetupDownloadOwner, localSetupContextMatches, LocalSetupDownloads, verifiedLocalSetupProcessor } from "./LocalSetupDownloads";
@@ -202,8 +202,9 @@ function PrivateSheet({ principal, sheet, defaultCurrency, drafts, binding }: {
   const { unwrapFor } = useSheetKey();
   const { shared, loading, ready, readyGeneration, error } = usePairTemplates(sheet.pairId, sheet.sheetId, { requireReadableSlots: true });
   const [activeId, setActiveId] = useState("");
-  const [rows, setRows] = useState<LocalImportDraft[]>([]);
-  const [typeIds, setTypeIds] = useState<(string | null)[]>([]);
+  const [editRows, setEditRows] = useState<LocalImportReviewRow[]>([]);
+  const rows = editRows.map((state) => state.row);
+  const typeIds = editRows.map((state) => state.selectedTypeId);
   const [review, setReview] = useState<Review>();
   const [locked, setLocked] = useState(false);
   const [busy, setBusy] = useState(false);
@@ -243,16 +244,27 @@ function PrivateSheet({ principal, sheet, defaultCurrency, drafts, binding }: {
   function chooseDraft(importId: string) {
     const draft = drafts.find((item) => item.importId === importId);
     if (!draft || locked || !ready) return;
-    setActiveId(importId); setRows(draft.payload.entries.map((row) => ({ ...row })));
-    setTypeIds(draft.payload.entries.map((row) => row.typeId
-      ? shared.some((type) => type.id === row.typeId && type.name === row.typeName) ? row.typeId : null
-      : ""));
+    setActiveId(importId); setEditRows(draft.payload.entries.map((row) => initializeLocalImportReviewRow(row, shared)));
     setReview(undefined); setSaved(false);
     setNotice(draft.payload.entries.some((row) => row.typeId && !shared.some((type) => type.id === row.typeId && type.name === row.typeName))
       ? "A proposed Type is not available in this sheet. Select a current Type or explicitly use none; no foreign defaults are applied." : "");
   }
   function updateRow(index: number, patch: Partial<LocalImportDraft>) {
-    setRows(rows.map((row, rowIndex) => rowIndex === index ? { ...row, ...patch } : row)); setReview(undefined);
+    if (locked) return;
+    setEditRows((currentRows) => currentRows.map((state, rowIndex) => rowIndex === index
+      ? { ...state, row: { ...state.row, ...patch } } : state)); setReview(undefined);
+  }
+  function selectType(index: number, selectedId: string) {
+    if (locked || !ready) return;
+    try {
+      const next = editRows.map((state, rowIndex) => rowIndex === index ? applyLocalImportType(state, selectedId, shared) : state);
+      setEditRows(next); setReview(undefined);
+    } catch { setNotice("The selected Type is not available in this IOU account."); setReview(undefined); }
+  }
+  function editDirection(index: number, direction: LocalImportDraft["direction"]) {
+    if (locked) return;
+    setEditRows((currentRows) => currentRows.map((state, rowIndex) => rowIndex === index
+      ? editLocalImportDirection(state, direction) : state)); setReview(undefined);
   }
   function prepare() {
     if (!ready) return;
@@ -331,13 +343,13 @@ function PrivateSheet({ principal, sheet, defaultCurrency, drafts, binding }: {
       <legend>Entry {index + 1}</legend>
       {row.typeName && <p>Proposed Type: {row.typeName} ({row.typeId})</p>}
       <label>Type <select value={typeIds[index] === null ? "" : typeIds[index] ? `type:${typeIds[index]}` : "none"} onChange={(event) => {
-        const id = event.target.value === "none" ? "" : event.target.value.slice(5); setTypeIds(typeIds.map((value, i) => i === index ? id : value));
-        updateRow(index, applyLocalImportType(row, id, shared));
+        const id = event.target.value === "none" ? "" : event.target.value.slice(5);
+        selectType(index, id);
       }}><option value="" disabled>Choose a current Type or None…</option><option value="none">None — use reviewed fields only</option>{shared.map((type) => <option value={`type:${type.id}`} key={type.id}>{type.name}</option>)}</select></label>
       <label>Kind <select value={row.kind} onChange={(event) => updateRow(index, { kind: event.target.value as LocalImportDraft["kind"] })}><option value="iou">IOU</option><option value="settlement">Settlement</option></select></label>
       <label>Amount <input type="number" min="0.01" step="0.01" value={Number.isFinite(row.amount) ? row.amount : ""} onChange={(event) => updateRow(index, { amount: Number(event.target.value) })} /></label>
       <label>Currency <input maxLength={3} value={row.currency} onChange={(event) => updateRow(index, { currency: event.target.value.toUpperCase() })} /></label>
-      <label>Direction <select value={row.direction} onChange={(event) => updateRow(index, { direction: event.target.value as LocalImportDraft["direction"] })}><option value="credit">Owed to you</option><option value="debt">You owe</option></select></label>
+      <label>Direction <select value={row.direction} onChange={(event) => editDirection(index, event.target.value as LocalImportDraft["direction"])}><option value="credit">Owed to you</option><option value="debt">You owe</option></select></label>
       <label>Date <input type="date" value={row.date ?? ""} onChange={(event) => updateRow(index, { date: event.target.value })} /></label>
       <label>Note <textarea rows={3} maxLength={4096} value={row.note ?? ""} onChange={(event) => updateRow(index, { note: event.target.value })} /></label>
     </fieldset>)}
