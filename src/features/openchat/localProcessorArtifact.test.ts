@@ -4,6 +4,30 @@ import { createIouLocalAppPackage } from "./localAppPackage";
 import { createLocalProcessorContext, parseLocalProcessorContext } from "./localProcessorContext";
 
 describe("standalone IOU local processor export", () => {
+  it("rejects conflicting acceptance-label dates but accepts the same text with one transaction date", () => {
+    const context = createLocalProcessorContext([{ id: "synthetic-acceptance", name: "Synthetic acceptance",
+      direction: "debt", txn_type: "iou", keywords: ["TEST ONLY"] }], "USD");
+    const text = "TEST ONLY — OpenChat IOU acceptance 2026-09-29\nAmount: 123.45 USD\nDate: 27 September 2026\nDirection: You owe\nNote: Synthetic acceptance; not a real balance.";
+    const request = (sourceText: string, privateContext = context) => ({
+      type: "oc:local-process:request", version: 1, actionId: "iou.entry.import", context: privateContext,
+      input: { operation: "extract", modality: "text", text: sourceText, sourceTimestamp: Date.UTC(2026, 8, 29) },
+    });
+    expect(processLocalArtifactRequest(request(text))).toEqual({ kind: "ambiguous" });
+    // Remove only the run-label date. Do not weaken date ambiguity checks or alter the transaction.
+    const singleDate = text.replace(" acceptance 2026-09-29\n", " acceptance\n");
+    expect(processLocalArtifactRequest(request(singleDate))).toEqual({ kind: "candidates", candidates: [{
+      amount: 123.45, direction: "debt", note: "", currency: "USD", kind: "iou", date: "2026-09-27",
+      typeId: "synthetic-acceptance", typeName: "Synthetic acceptance",
+    }] });
+    // Text cues are sender-relative; the exported matching Type separately supplies its direction.
+    const noTypes = createLocalProcessorContext([], "USD");
+    expect(processLocalArtifactRequest(request(singleDate, noTypes))).toMatchObject({
+      kind: "candidates", candidates: [{ direction: "credit", date: "2026-09-27" }],
+    });
+    expect(processLocalArtifactRequest(request(singleDate.replace("Direction: You owe", "Direction: I owe"), noTypes))).toMatchObject({
+      kind: "candidates", candidates: [{ direction: "debt", date: "2026-09-27" }],
+    });
+  });
   it("normalizes a raw image and composes the full source range into the visible note", () => {
     expect(processLocalArtifactRequest({ type: "oc:local-process:request", version: 1, actionId: "iou.entry.import", input: {
       operation: "normalize_raw", modality: "image", sourceTimestamp: Date.UTC(2026, 6, 3), candidates: [{

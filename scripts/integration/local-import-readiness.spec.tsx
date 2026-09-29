@@ -44,11 +44,14 @@ vi.mock("../../src/features/templates/pairTemplatesActor", async (original) => {
 vi.mock("../../src/features/crypto/devVetkd", () => ({
   encryptEntryPayload: fixture.encrypt, encryptWithSheetKey: vi.fn(), decryptWithSheetKey: fixture.decryptCrypto,
 }));
-vi.mock("../../src/features/openchat/localImportLaunch", () => ({
-  localImportSenderOrigin: () => "http://localhost:5190",
-  localImportSessionNonce: () => fixture.nativeBootstrap ? undefined : "A".repeat(43),
-  localImportNativeBootstrap: () => fixture.nativeBootstrap,
-}));
+vi.mock("../../src/features/openchat/localImportLaunch", async (original) => {
+  const real = await original<typeof import("../../src/features/openchat/localImportLaunch")>();
+  return {
+    ...real,
+    localImportSessionNonce: () => fixture.nativeBootstrap ? undefined : "A".repeat(43),
+    localImportNativeBootstrap: () => fixture.nativeBootstrap,
+  };
+});
 import { usePairTemplates, type PairTemplatesApi } from "../../src/features/templates/PairTemplatesContext";
 import { LocalImportPage } from "../../src/features/openchat/LocalImportPage";
 
@@ -110,6 +113,7 @@ async function mountSheet() {
 }
 beforeEach(() => {
   vi.clearAllMocks();
+  vi.stubEnv("VITE_LOCAL_IMPORT_SENDER_ORIGIN", "http://localhost:5190");
   vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
   vi.stubGlobal("fetch", vi.fn(() => { throw new Error("No network expected in this test"); }));
   Object.defineProperty(window, "opener", { value: fixture.sender, configurable: true });
@@ -121,7 +125,7 @@ beforeEach(() => {
   renders.length = 0;
   container = document.createElement("div"); document.body.append(container); root = createRoot(container);
 });
-afterEach(async () => { await act(async () => root.unmount()); container.remove(); vi.useRealTimers(); vi.unstubAllGlobals(); });
+afterEach(async () => { await act(async () => root.unmount()); container.remove(); vi.useRealTimers(); vi.unstubAllGlobals(); vi.unstubAllEnvs(); });
 
 describe("actual private Type readiness lifecycle", () => {
   it("is not ready without an actor or until both private slots finish loading", async () => {
@@ -156,14 +160,14 @@ describe("actual private Type readiness lifecycle", () => {
     expect(latest.ready).toBe(true); expect(latest.shared).toEqual([]);
     await mountSheet();
     expect(fixture.decryptCrypto).toHaveBeenCalled();
-    expect(button("Download private setup catalog and processor").disabled).toBe(true);
+    expect(button("Prepare setup files").disabled).toBe(true);
     expect((container.querySelector('[aria-label="Received draft"]') as HTMLSelectElement).disabled).toBe(true);
     expect(container.textContent).toContain("Could not load this sheet’s Types");
     expect(fixture.actor.add_entry_batch).not.toHaveBeenCalled(); expect(fetch).not.toHaveBeenCalled();
   });
   it("allows genuinely absent private slots, without treating absent ciphertext as a decryption error", async () => {
     fixture.realSlots = true; fixture.actor = actor(); await mountSheet();
-    expect(button("Download private setup catalog and processor").disabled).toBe(false);
+    expect(button("Prepare setup files").disabled).toBe(false);
     expect(fixture.decryptCrypto).not.toHaveBeenCalled();
   });
   it.each([
@@ -174,7 +178,7 @@ describe("actual private Type readiness lifecycle", () => {
     fixture.realSlots = true; fixture.decryptCrypto.mockResolvedValue(new TextEncoder().encode(data));
     fixture.actor = actor(async () => [{ ...pair(), templates_a_enc: [[1, 2]], templates_a_iv: [Array(12).fill(0)] }]);
     await mountSheet();
-    expect(button("Download private setup catalog and processor").disabled).toBe(true);
+    expect(button("Prepare setup files").disabled).toBe(true);
     expect(container.textContent).toContain("Could not load this sheet’s Types");
     expect(fixture.actor.add_entry_batch).not.toHaveBeenCalled();
   });
@@ -188,10 +192,35 @@ describe("actual private Type readiness lifecycle", () => {
 });
 
 describe("actual local receiver controls", () => {
+  it.each([
+    ["missing", undefined],
+    ["empty", ""],
+    ["noncanonical", "http://localhost:5190/"],
+    ["non-loopback", "http://example.invalid:5190"],
+  ] as const)("does not acknowledge, queue or save a browser handoff with %s sender configuration", async (_reason, senderOrigin) => {
+    vi.stubEnv("VITE_LOCAL_IMPORT_SENDER_ORIGIN", senderOrigin);
+    fixture.actor = actor();
+    await mountSheet();
+    // The browser launch still has its valid nonce and exact opener. Neither is authority
+    // to learn a trusted sender from an incoming hello/offer when configuration is absent/invalid.
+    expect(fixture.nativeBootstrap).toBe(false);
+    expect(window.opener).toBe(fixture.sender);
+    await offer(template.id, template.name);
+    expect(container.textContent).toContain("No active handoff");
+    expect(fixture.sender.postMessage).not.toHaveBeenCalled();
+    expect(container.querySelector('[aria-label="Received draft"]')!.querySelectorAll("option")).toHaveLength(1);
+    expect(container.querySelectorAll("fieldset")).toHaveLength(0);
+    expect(button("Review exact encrypted entry contents")).toBeUndefined();
+    expect(button("Save in IOU")).toBeUndefined();
+    expect(fixture.encrypt).not.toHaveBeenCalled();
+    expect(fixture.actor.add_entry_batch).not.toHaveBeenCalled();
+    expect(fetch).not.toHaveBeenCalled();
+  });
+
   it("blocks setup/draft selection before private Types load, then requires an explicit mismatched-Type choice", async () => {
     const fetched = deferred<unknown>(); fixture.actor = actor(() => fetched.promise);
     await mountSheet(); await offer();
-    const download = button("Download private setup catalog and processor");
+    const download = button("Prepare setup files");
     expect(download.disabled).toBe(true);
     expect((container.querySelector('[aria-label="Received draft"]') as HTMLSelectElement).disabled).toBe(true);
     await click(download); expect(fetch).not.toHaveBeenCalled();
@@ -211,7 +240,7 @@ describe("actual local receiver controls", () => {
     expect(container.querySelectorAll("fieldset")).toHaveLength(1);
     identity("synthetic-b"); fixture.actor = null; await render(<LocalImportPage />);
     expect(container.querySelectorAll("fieldset")).toHaveLength(0);
-    expect(button("Download private setup catalog and processor")).toBeUndefined();
+    expect(button("Prepare setup files")).toBeUndefined();
     expect(container.textContent).toContain("IOU account changed");
   });
   it("locks an outcome-unknown save and retries the same reviewed payload/id without a second approval transition", async () => {
@@ -252,7 +281,7 @@ describe("actual local receiver controls", () => {
     else if (change === "identity") identity(fixture.principal);
     else fixture.actorError = "Synthetic hook reload generation";
     await render(<LocalImportPage />);
-    expect(button("Download private setup catalog and processor").disabled).toBe(false);
+    expect(button("Prepare setup files").disabled).toBe(false);
     await act(async () => {
       pendingKey.resolve(new Uint8Array(32).fill(7));
       pendingEncryption.resolve({ entryKey: new Uint8Array([1]), ciphertext: new Uint8Array([2]), iv: new Uint8Array([3]) });
@@ -275,6 +304,7 @@ describe("actual local receiver controls", () => {
 });
 
 describe("actual native receiver consent controls", () => {
+  beforeEach(() => { vi.stubEnv("VITE_LOCAL_IMPORT_SENDER_ORIGIN", undefined); });
   const nativeOrigin = "http://localhost:54621";
   const connectionId = "C".repeat(42) + "A";
   const message = async (data: unknown, senderOrigin = nativeOrigin, senderWindow: unknown = fixture.sender) => {
