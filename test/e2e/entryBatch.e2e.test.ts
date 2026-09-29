@@ -10,7 +10,7 @@
 import { AnonymousIdentity } from "@dfinity/agent";
 import { expect, it } from "vitest";
 import { deriveUserKeypair, newSheetKey, wrapSheetKey } from "../../src/features/crypto/devVetkd";
-import { describeE2E, freshIdentity, iouActor } from "./env";
+import { describeE2E, freshIdentity, iouActor } from "./localBatchEnv";
 
 type Actor = {
   // The E2E actor is generated dynamically from the hand-maintained Candid IDL.
@@ -166,6 +166,7 @@ describeE2E("IOU backend — atomic entry batch ingress, rollback, retry, and ac
       const beforeIds = sortedIds(beforeBadBatch);
       const committedIds = sortedIds(afterCommit).filter((id) => !beforeIds.includes(id));
       expect(committedIds).toHaveLength(2);
+      expect(committedIds[0]).toBe(beforeIds[beforeIds.length - 1] + 1n);
       expect(committedIds[1]).toBe(committedIds[0] + 1n);
       for (const [index, id] of committedIds.entries()) {
         const stored = afterCommit.find((entry) => entry.id === id);
