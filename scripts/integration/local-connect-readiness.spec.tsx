@@ -2,7 +2,7 @@
 // Actual setup page, consent state machine, app catalog builder and processor integrity check.
 // Authentication, authenticated actor reads and the decrypted-Type hook are synthetic boundaries.
 import { createHash, webcrypto } from "node:crypto";
-import { act, type ReactNode } from "react";
+import { act, StrictMode, type ReactNode } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -44,7 +44,9 @@ const type = { id: "type-1", name: "Private Choice", direction: "debt", txn_type
 let root: Root;
 let container: HTMLDivElement;
 let digests: Promise<ArrayBuffer>[];
-const render = async (child: ReactNode = <LocalConnectPage />) => { await act(async () => { root.render(child); }); };
+// Match bootstrapApp.tsx: development replays effects under StrictMode. A plain mount can hide
+// a cleanup that permanently closes a session subsequently reused by the replayed setup.
+const render = async (child: ReactNode = <LocalConnectPage />) => { await act(async () => { root.render(<StrictMode>{child}</StrictMode>); }); };
 const click = async (element: HTMLElement) => { await act(async () => { element.click(); }); };
 const button = (label: string) => [...container.querySelectorAll("button")].find(item => item.textContent === label);
 const select = async (value: string) => { await act(async () => {
@@ -104,6 +106,19 @@ afterEach(async () => {
 });
 
 describe("no-file IOU setup consent", () => {
+  it("keeps one live consent after Strict Mode effect replay", async () => {
+    vi.useFakeTimers();
+    await render();
+    await act(async () => { await vi.advanceTimersByTimeAsync(1000); });
+    expect(container.textContent).toContain("Waiting for a setup request");
+    expect(container.textContent).not.toContain("Connection closed or expired");
+    expect(vi.getTimerCount()).toBe(1);
+    await request();
+    expect(container.textContent).toContain(clientOrigin);
+    expect(container.querySelector("select")).not.toBeNull();
+    expect(fixture.opener.postMessage).not.toHaveBeenCalled();
+    expect(fetch).not.toHaveBeenCalled();
+  });
   it("waits for its original requester and shares one exact setup only after visible consent", async () => {
     await render();
     expect(fixture.actor.get_my_pairs).not.toHaveBeenCalled();
@@ -174,7 +189,7 @@ describe("no-file IOU setup consent", () => {
     expect(fetch).not.toHaveBeenCalled();
   });
 
-  it.each(["account", "identity", "actor", "types", "generation", "unreadable", "logout", "pagehide", "closed", "expiry"])("blocks late async setup delivery after %s changes", async (reason) => {
+  it.each(["account", "identity", "actor", "types", "generation", "unreadable", "logout", "pagehide", "unmount", "closed", "expiry"])("blocks late async setup delivery after %s changes", async (reason) => {
     const clock = vi.spyOn(Date, "now").mockReturnValue(1000);
     try {
       await ready();
@@ -189,6 +204,7 @@ describe("no-file IOU setup consent", () => {
       if (reason === "unreadable") { fixture.templates = { ...fixture.templates, ready: false, loading: true }; await render(); }
       if (reason === "logout") await click(button("Sign out")!);
       if (reason === "pagehide") await act(async () => { window.dispatchEvent(new Event("pagehide")); });
+      if (reason === "unmount") await act(async () => { root.render(null); });
       if (reason === "closed") fixture.opener.closed = true;
       if (reason === "expiry") clock.mockReturnValue(1000 + LOCAL_APP_SETUP_MS);
       await act(async () => { gate.resolve(); });

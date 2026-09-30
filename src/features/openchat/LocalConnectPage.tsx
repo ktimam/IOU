@@ -23,14 +23,15 @@ export function LocalConnectPage() {
 
 function ConnectSession({ opener }: { opener: Window }) {
   const { state: auth, identity, signIn, signOut } = useAuth();
-  const [consent] = useState(() => createLocalAppSetupConsent({ opener, appId: "iou" }));
-  const [state, setState] = useState<LocalAppSetupState>(consent.state());
+  const consentRef = useRef<Consent>();
+  const [state, setState] = useState<LocalAppSetupState>({ kind: "waiting" });
   const [notice, setNotice] = useState("");
   const principal = auth.kind === "authenticated" ? auth.principal : undefined;
   const previousAuth = useRef<{ principal: string; identity: unknown }>();
   const close = useCallback((message: string) => {
-    consent.close(); setState(consent.state()); setNotice(message);
-  }, [consent]);
+    const consent = consentRef.current;
+    consent?.close(); setState(consent?.state() ?? { kind: "closed" }); setNotice(message);
+  }, []);
   useEffect(() => {
     if (previousAuth.current && (previousAuth.current.principal !== principal || previousAuth.current.identity !== identity)) {
       close("The IOU sign-in changed. Nothing further will be shared. Start a fresh Connect request.");
@@ -38,6 +39,11 @@ function ConnectSession({ opener }: { opener: Window }) {
     if (principal) previousAuth.current = { principal, identity };
   }, [principal, identity, close]);
   useEffect(() => {
+    // Each effect installation owns its consent. StrictMode replays setup/cleanup in development;
+    // reusing a state-owned instance would reuse the permanently closed first installation.
+    const consent = createLocalAppSetupConsent({ opener, appId: "iou" });
+    consentRef.current = consent;
+    setState(consent.state());
     const receive = (event: MessageEvent) => setState(consent.receive(event));
     const pagehide = () => close("This setup connection closed. Start a fresh Connect request.");
     window.addEventListener("message", receive);
@@ -46,8 +52,13 @@ function ConnectSession({ opener }: { opener: Window }) {
       if (opener.closed) close("The requesting window closed. Nothing further will be shared.");
       else setState(consent.state());
     }, 1000);
-    return () => { clearInterval(timer); consent.close(); window.removeEventListener("message", receive); window.removeEventListener("pagehide", pagehide); };
-  }, [consent, opener, close]);
+    return () => {
+      clearInterval(timer); consent.close();
+      if (consentRef.current === consent) consentRef.current = undefined;
+      window.removeEventListener("message", receive); window.removeEventListener("pagehide", pagehide);
+    };
+  }, [opener, close]);
+  const consent = consentRef.current;
 
   return <main style={{ maxWidth: 880, margin: "24px auto", padding: 16, overflowWrap: "anywhere" }}>
     <h1>Connect IOU setup</h1>
@@ -65,7 +76,7 @@ function ConnectSession({ opener }: { opener: Window }) {
     {auth.kind === "authenticated" && <>
       <p>Signed-in IOU principal: <strong>{auth.principal}</strong></p>
       <button className="secondary" onClick={() => { close("Signed out. Start a fresh Connect request before sharing setup."); void signOut(); }}>Sign out</button>
-      {state.kind === "pending" && <SheetKeyProvider key={auth.principal}>
+      {state.kind === "pending" && consent && <SheetKeyProvider key={auth.principal}>
         <ConnectAccount key={auth.principal} principal={auth.principal} opener={opener} consent={consent} state={state}
           close={close} onShared={() => setState(consent.state())} />
       </SheetKeyProvider>}
