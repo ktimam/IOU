@@ -487,6 +487,37 @@
           "handoff": {
             "kind": "wrapped-list",
             "field": "entries"
+          },
+          "draftPresentation": {
+            "version": 1,
+            "enumLabels": [
+              {
+                "field": "kind",
+                "options": [
+                  {
+                    "value": "iou",
+                    "label": "IOU"
+                  },
+                  {
+                    "value": "settlement",
+                    "label": "Settlement"
+                  }
+                ]
+              },
+              {
+                "field": "direction",
+                "options": [
+                  {
+                    "value": "credit",
+                    "label": "Owed to you"
+                  },
+                  {
+                    "value": "debt",
+                    "label": "You owe"
+                  }
+                ]
+              }
+            ]
           }
         }
       ]

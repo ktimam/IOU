@@ -33,6 +33,27 @@ const hostPayload=(action:LocalAppAction,candidates:readonly Record<string,unkno
 const client=()=>({clientOnlyApps:()=>true,enabledAiApps:vi.fn(),aiApps:vi.fn(),createAiAppCardProvenance:vi.fn(),sendMessageWithContent:vi.fn()});
 beforeEach(()=>{vi.clearAllMocks();browserImageActionMode.set("model_only")});
 describe("actual IOU export through actual OpenChat proposal/conformance/project/receiver",()=>{
+  it.each([
+    {kind:"iou",direction:"credit"}, {kind:"iou",direction:"debt"},
+    {kind:"settlement",direction:"credit"}, {kind:"settlement",direction:"debt"},
+  ])(
+    "keeps $kind/$direction values unchanged through presentation, projection and the receiver",({kind,direction})=>{
+      const action=packageFor();
+      expect(action.draftPresentation).toEqual({version:1,enumLabels:[
+        {field:"kind",options:[{value:"iou",label:"IOU"},{value:"settlement",label:"Settlement"}]},
+        {field:"direction",options:[{value:"credit",label:"Owed to you"},{value:"debt",label:"You owe"}]},
+      ]});
+      const candidate={kind,direction,amount:20,currency:"USD",note:"Synthetic presentation parity"};
+      const payload=hostPayload(action,[candidate]);
+      expect(payload).toEqual({entries:[candidate]});
+      expect(parseLocalImportPayload(payload)).toEqual(payload);
+      const legacyPackage=createIouLocalAppPackage("http://localhost:3000/openchat/import",{sha256:"a".repeat(64),byteLength:123},
+        {recipientLabel:"Synthetic account review",processorContext:createLocalProcessorContext(templates,"EGP")});
+      const {draftPresentation:_presentation,...legacyAction}=legacyPackage.apps[0].actions[0];
+      const legacy=parseLocalAppCatalog(JSON.stringify({...legacyPackage,apps:[{...legacyPackage.apps[0],actions:[legacyAction]}]})).apps[0].actions[0];
+      expect(hostPayload(legacy,[candidate])).toEqual(payload);
+    },
+  );
   it.each(["iou","settlement"] as const)("reviews and delivers the compiled worker's %s draft with reversible named Type defaults",async(kind)=>{
     const artifactRoot=resolve(dirname(fileURLToPath(import.meta.url)),"../../public/openchat");
     const workerBytes=readFileSync(resolve(artifactRoot,"local-processor-v1.js"));
@@ -48,7 +69,7 @@ describe("actual IOU export through actual OpenChat proposal/conformance/project
     const action=catalog.apps[0].actions[0];
     expect(catalog.apps[0].processor).toEqual({sha256:metadata.sha256,byteLength:metadata.byteLength});
     expect(action.processorContext).toMatchObject({draftEditorDefaults:"host-v1"});
-    expect(action.draftEditor?.choices[0]).toMatchObject({field:"typeId",label:"Type",options:[
+    expect(action.draftEditor?.choices[0]).toMatchObject({field:"typeId",label:"Saved type",options:[
       {value:"synthetic-debt",label:"Synthetic booking",assign:[{field:"typeName",value:"Synthetic booking"}],defaults:[{field:"direction",value:"debt"}]},
       {value:"synthetic-credit",label:"Synthetic alternative",assign:[{field:"typeName",value:"Synthetic alternative"}],defaults:[{field:"direction",value:"credit"}]},
     ]});

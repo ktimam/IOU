@@ -1,6 +1,9 @@
 import { describe, expect, it } from "vitest";
+import { createHash } from "node:crypto";
 import { createIouLocalAppPackage } from "./localAppPackage";
 import { createLocalProcessorContext, parseLocalProcessorContext } from "./localProcessorContext";
+import { iouActionManifest } from "./actionManifest";
+import { DIRECTION_LABELS } from "../entries/directionLabels";
 
 const destination = "http://localhost:3000/openchat/import";
 const processor = { sha256: "a".repeat(64), byteLength: 1234 };
@@ -8,13 +11,60 @@ const types = [
   { id: "private-credit", name: "Private credit", keywords: ["alpha"], direction: "credit" as const, txn_type: "iou" as const, fee_percent: 50 },
   { id: "private-debt", name: "Private debt", keywords: ["beta"], direction: "debt" as const, txn_type: "settlement" as const },
 ];
+const presentation = { version: 1, enumLabels: [
+  { field: "kind", options: [{ value: "iou", label: "IOU" }, { value: "settlement", label: "Settlement" }] },
+  { field: "direction", options: [{ value: "credit", label: "Owed to you" }, { value: "debt", label: "You owe" }] },
+] };
+
+describe("IOU-owned draft presentation", () => {
+  it.each(["public", "private-empty", "private-types"] as const)("exports display-only labels for %s setup without changing scalar values or defaults", (setup) => {
+    const privateSetup = setup === "public" ? undefined : {
+      recipientLabel: "Synthetic sheet", processorContext: createLocalProcessorContext(setup === "private-types" ? types : [], "EGP"),
+    };
+    const action = createIouLocalAppPackage(destination, processor, privateSetup).apps[0].actions[0];
+    expect(action.draftPresentation).toEqual(presentation);
+    expect(action.draftPresentation.enumLabels[1].options).toEqual([
+      { value: "credit", label: DIRECTION_LABELS.credit }, { value: "debt", label: DIRECTION_LABELS.debt },
+    ]);
+    expect(action.draftSchema.properties.entries.items.properties.kind).toEqual({ type: "string", enum: ["iou", "settlement"] });
+    expect(action.draftSchema.properties.entries.items.properties.direction).toEqual({ type: "string", enum: ["credit", "debt"] });
+    expect(action.definition.responseSchema.properties.kind).toMatchObject({ enum: ["settlement", "iou"], default: "iou",
+      "x-openchat-require-explicit-for-image-only": true });
+    expect(action.definition.responseSchema.properties.direction).toEqual({ type: "string", enum: ["credit", "debt"],
+      default: "debt", "x-openchat-default-for-image-only": "credit" });
+    expect(action.definition).not.toHaveProperty("draftPresentation");
+    expect(action.draftSchema).not.toHaveProperty("draftPresentation");
+    expect(action.processorContext ?? {}).not.toHaveProperty("draftPresentation");
+    expect(action.definition.promptTemplate).toBe(iouActionManifest.prompt);
+    for (const entry of action.draftPresentation.enumLabels) {
+      expect(Object.keys(entry).sort()).toEqual(["field", "options"]);
+      for (const option of entry.options) expect(Object.keys(option).sort()).toEqual(["label", "value"]);
+    }
+  });
+  it("retains the exact original model prompt bytes in the exported extraction contract", () => {
+    const action = createIouLocalAppPackage(destination, processor).apps[0].actions[0];
+    const profiles = action.definition.responseSchema["x-openchat-image-prompt-by-model"] as {
+      version: number; templates: Record<string, { template: string; includeRuleGuidance: boolean; output: string }>;
+    };
+    expect(profiles.version).toBe(2);
+    const expected = {
+      "qwen3-vl-2b-instruct-q4": "2d73ebab0701a7adb4256072ef4625c30964b46766172bae05602bc72e045cc8",
+      "gemma-4-e2b-it-q4": "a84d35c89fb8f3c91979a1954051769417109bb4f6785fea4fea3a3ad72048d8",
+    };
+    expect(Object.keys(profiles.templates).sort()).toEqual(Object.keys(expected).sort());
+    for (const [id, sha256] of Object.entries(expected)) {
+      expect(createHash("sha256").update(profiles.templates[id].template).digest("hex")).toBe(sha256);
+      expect(profiles.templates[id]).toMatchObject({ includeRuleGuidance: false, output: "app" });
+    }
+  });
+});
 
 describe("IOU-owned named draft choices", () => {
   it("exports the exact private labels and IDs with only a direction default", () => {
     const context = createLocalProcessorContext(types, "EGP");
     const before = JSON.stringify(context);
     const action = createIouLocalAppPackage(destination, processor, { processorContext: context, recipientLabel: "Synthetic sheet" }).apps[0].actions[0];
-    expect(action.draftEditor).toEqual({ version: 1, choices: [{ field: "typeId", label: "Type",
+    expect(action.draftEditor).toEqual({ version: 1, choices: [{ field: "typeId", label: "Saved type",
       noneLabel: "None — use reviewed fields only", options: types.map(type => ({ value: type.id, label: type.name,
         assign: [{ field: "typeName", value: type.name }], defaults: [{ field: "direction", value: type.direction }],
       })),

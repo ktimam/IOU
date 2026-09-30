@@ -1,5 +1,6 @@
 import { iouActionManifest } from "./actionManifest";
 import { parseLocalProcessorContext, type LocalProcessorContext } from "./localProcessorContext";
+import { DIRECTION_LABELS } from "../entries/directionLabels";
 
 /** Strict final review DTO, separate from the model/evidence schema and owned entirely by IOU. */
 export const iouLocalDraftSchema = {
@@ -55,7 +56,7 @@ export function createIouLocalAppPackage(destination: string, processor: { sha25
   // The roster belongs to IOU. The host receives only this declarative selector, companion
   // assignment and direction default; kind, fees and schedules remain independent.
   const draftEditor = parsedContext?.types.length ? { version: 1, choices: [{
-    field: "typeId", label: "Type", noneLabel: "None — use reviewed fields only",
+    field: "typeId", label: "Saved type", noneLabel: "None — use reviewed fields only",
     options: parsedContext.types.map(type => ({ value: type.id, label: type.name,
       assign: [{ field: "typeName", value: type.name }],
       defaults: [{ field: "direction", value: type.direction }],
@@ -88,6 +89,11 @@ export function createIouLocalAppPackage(destination: string, processor: { sha25
           confirmLabel: "Review in IOU", cancelLabel: "Cancel" },
       },
       draftSchema: iouLocalDraftSchema, handoff: { kind: "wrapped-list", field: "entries" },
+      // Display copy only; extraction, stored enum values and saved-Type defaults stay unchanged.
+      draftPresentation: { version: 1, enumLabels: [
+        { field: "kind", options: [{ value: "iou", label: "IOU" }, { value: "settlement", label: "Settlement" }] },
+        { field: "direction", options: [{ value: "credit", label: DIRECTION_LABELS.credit }, { value: "debt", label: DIRECTION_LABELS.debt }] },
+      ] },
       ...(processorContext ? { processorContext } : {}),
       ...(draftEditor ? { draftEditor } : {}),
     }],
