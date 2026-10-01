@@ -136,6 +136,39 @@ describe("standalone IOU local processor export", () => {
       note: "Reservation | From Sun, Jul 19 to Thu, Aug 6",
     }] });
   });
+  it.each([
+    { model: "small Qwen", raw: { heading: "SYNTHETIC TEST INVOICE", total_text: "123.45 USD",
+      dates: ["27 September 2026"], kind: "iou" } },
+    { model: "Gemma", raw: { note: "SYNTHETIC TEST INVOICE", currency_text: "USD", amount_text: "123.45",
+      date_text: "27 September 2026", kind: "iou" } },
+  ])("characterizes $model's omitted image evidence without claiming source fidelity", ({ raw }) => {
+    // Hand-authored representations of the shipped contracts, NOT captured model responses.
+    // The independent source oracle also prints these facts, but neither selected profile
+    // requests them. Successful parsing cannot recover facts missing from the raw evidence.
+    const printed = { direction: "debt", description: "Test stationery", footer: "TEST ONLY" };
+    const context = createLocalProcessorContext([{ id: "synthetic-acceptance", name: "Synthetic acceptance",
+      direction: "debt", txn_type: "iou", keywords: [printed.footer] }], "USD");
+    const request = { type: "oc:local-process:request", version: 1, actionId: "iou.entry.import", context,
+      input: { operation: "normalize_raw", modality: "image", sourceTimestamp: Date.UTC(2026, 8, 27), candidates: [raw] } };
+    const result = processLocalArtifactRequest(request);
+    expect(result).toEqual({ kind: "candidates", sourceIndexes: [0], candidates: [{
+      amount: 123.45, currency: "USD", kind: "iou", direction: "credit", date: "2026-09-27",
+      note: "SYNTHETIC TEST INVOICE",
+    }] });
+    if (result.kind !== "candidates" || !("candidates" in result)) throw new Error("Expected a parseable contract");
+    const candidate = result.candidates[0];
+    expect({
+      printedDirectionPreserved: candidate.direction === printed.direction,
+      printedDescriptionPreserved: candidate.note === printed.description,
+      footerTypeMatched: candidate.typeId === context.types[0].id,
+    }).toEqual({ printedDirectionPreserved: false, printedDescriptionPreserved: false, footerTypeMatched: false });
+    expect(JSON.stringify(raw)).not.toContain(printed.description);
+    expect(JSON.stringify(raw)).not.toContain(printed.footer);
+    expect(raw).not.toHaveProperty("direction");
+    // A prompt-only extra field is not a fix: exact raw schemas reject the entire row.
+    expect(processLocalArtifactRequest({ ...request, input: { ...request.input,
+      candidates: [{ ...raw, direction: printed.direction }] } })).toEqual({ kind: "error" });
+  });
   it("does not transmit raw source or arbitrary fields and rejects wrong actions", () => {
     const request = { type: "oc:local-process:request", version: 1, actionId: "iou.entry.import", input: {
       operation: "normalize", modality: "text", text: "owe 20 USD", candidates: [{

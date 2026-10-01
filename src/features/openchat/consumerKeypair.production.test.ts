@@ -437,6 +437,81 @@ describe('production consumer key storage', () => {
     expect(state.remotes.has(identity.getPrincipal().toText())).toBe(false);
   });
 
+  it('waits for receive-only native persistence before clearing the recipient key', async () => {
+    state.native = true;
+    const mod = await freshModule();
+    const principal = identity.getPrincipal().toText();
+    mod.configureConsumerKeypairBackend(identity);
+    const original = await mod.loadOrCreateConsumerKeypair();
+    mod.configureConsumerKeypairBackend(identity);
+
+    let releasePersist!: () => void;
+    const persistGate = new Promise<void>((resolve) => {
+      releasePersist = resolve;
+    });
+    state.secureSet.mockImplementationOnce(async (key: string, value: string) => {
+      await persistGate;
+      state.secure.set(key, value);
+    });
+    const recovery = mod.loadExistingConsumerKeypair(
+      mod.captureConsumerKeypairSession(principal),
+    );
+    const recoveryResult = Promise.allSettled([recovery]);
+    await vi.waitFor(() => expect(state.secureSet).toHaveBeenCalledTimes(2));
+
+    const clearing = mod.clearConsumerKeypair(
+      mod.captureConsumerKeypairSession(principal),
+    );
+    let clearedBeforePersist: boolean;
+    try {
+      clearedBeforePersist = await Promise.race([
+        clearing.then(() => true),
+        new Promise<false>((resolve) => setTimeout(() => resolve(false), 50)),
+      ]);
+    } finally {
+      releasePersist();
+    }
+    const [recovered] = await recoveryResult;
+    await clearing;
+
+    expect(recovered.status).toBe('rejected');
+    expect(state.secure.size).toBe(0);
+    expect(state.remotes.has(principal)).toBe(false);
+    expect(clearedBeforePersist).toBe(false);
+    const replacement = await mod.loadOrCreateConsumerKeypair();
+    expect(replacement.publicKeySpkiPem).not.toBe(original.publicKeySpkiPem);
+  });
+
+  it('blocks receive-only recovery while the recipient key is being cleared', async () => {
+    const mod = await freshModule();
+    const principal = identity.getPrincipal().toText();
+    mod.configureConsumerKeypairBackend(identity);
+    await mod.loadOrCreateConsumerKeypair();
+    let releaseDelete!: () => void;
+    state.deleteGate = new Promise<void>((resolve) => {
+      releaseDelete = resolve;
+    });
+    const clearing = mod.clearConsumerKeypair(
+      mod.captureConsumerKeypairSession(principal),
+    );
+    await vi.waitFor(() => expect(state.deleteStarted).toHaveBeenCalledTimes(1));
+    let recoveryResult: PromiseSettledResult<unknown>[];
+    try {
+      recoveryResult = await Promise.allSettled([
+        mod.loadExistingConsumerKeypair(mod.captureConsumerKeypairSession(principal)),
+      ]);
+    } finally {
+      releaseDelete();
+      await clearing;
+    }
+    expect(recoveryResult[0].status).toBe('rejected');
+    if (recoveryResult[0].status === 'rejected') {
+      expect(recoveryResult[0].reason).toHaveProperty('message', 'consumer keypair is being cleared');
+    }
+    expect(state.remotes.has(principal)).toBe(false);
+    expect(state.setCalls).toHaveLength(1);
+  });
+
   it('rejects a pre-delete upload delayed in another browser process', async () => {
     const principal = identity.getPrincipal().toText();
     const oldBrowser = await freshModule();

@@ -1,7 +1,8 @@
-// Real React hook/component behavior; only authenticated IO and cryptographic boundaries are mocked.
+// @vitest-environment-options {"url":"http://localhost:3000/openchat/import"}
+// Real React hooks, receiver and delivery crypto. Authentication and ledger encryption are synthetic boundaries.
 import { act, type ReactNode } from "react";
 import { createRoot, type Root } from "react-dom/client";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, beforeAll, describe, expect, it, vi } from "vitest";
 
 const fixture = vi.hoisted(() => ({
   actor: null as any,
@@ -15,7 +16,21 @@ const fixture = vi.hoisted(() => ({
   unwrap: vi.fn(),
   encrypt: vi.fn(),
   sender: { postMessage: vi.fn(), closed: false },
+  deliveryKey: undefined as CryptoKeyPair | undefined,
+  decryptions: [] as Promise<unknown>[],
+  deliverySheet: "0123456789abcdef",
 }));
+vi.mock("../../src/features/auth/config", () => ({ host:"http://127.0.0.1:4943", canisterId:"rrkah-fqaaa-aaaaa-aaaaq-cai" }));
+vi.mock("../../src/features/openchat/LocalDeliveryKeyProvider", () => ({
+  LocalDeliveryKeyProvider: ({children}:{children:ReactNode})=>children,
+  useLocalDeliveryKey:()=>({ready:!!fixture.identity && !!fixture.actor,load:async()=>fixture.deliveryKey}),
+}));
+vi.mock("../../src/features/openchat/localImportHandoff", async original=>{
+  const real=await original<typeof import("../../src/features/openchat/localImportHandoff")>();
+  return {...real,decryptPendingLocalImport:(...args:Parameters<typeof real.decryptPendingLocalImport>)=>{
+    const pending=real.decryptPendingLocalImport(...args);fixture.decryptions.push(pending);return pending;
+  }};
+});
 vi.mock("../../src/features/auth/AuthProvider", () => ({
   AuthProvider: ({ children }: { children: ReactNode }) => children,
   useAuth: () => ({
@@ -57,8 +72,22 @@ import { LocalImportPage } from "../../src/features/openchat/LocalImportPage";
 import type { LocalImportDraft } from "../../src/features/openchat/localImportHandoff";
 import type { EntryBatchActor } from "../../src/features/entries/batchImport";
 import { createLocalAppHandoffSession } from "@oc-test/localAppHandoff";
+import { sealLocalAppDelivery } from "@oc-test/localAppEncryption";
+import { createLocalDeliveryEncryption } from "../../src/features/openchat/localImportEncryption";
 
 const sheetId = "0123456789abcdef";
+const pairId = "0000000000000001";
+const destination = "http://localhost:3000/openchat/import";
+beforeAll(async()=>{ fixture.deliveryKey=await crypto.subtle.generateKey({name:"ECDH",namedCurve:"P-256"},false,["deriveBits"]); });
+const encryptedRequest=async(entries:readonly LocalImportDraft[],idempotencyKey=importId)=>sealLocalAppDelivery({
+  appId:"iou",appRevision:"local-import-v2",actionId:"iou.entry.import",destination,recipient:"Synthetic recipient",idempotencyKey,payload:{entries},
+  deliveryEncryption:await createLocalDeliveryEncryption(fixture.deliveryKey!.publicKey,{principal:fixture.principal,
+    backendHost:"http://127.0.0.1:4943",backendCanisterId:"rrkah-fqaaa-aaaaa-aaaaq-cai",pairId,sheetId:fixture.deliverySheet}),
+});
+const encryptedOffer=async(entries:readonly LocalImportDraft[],sessionNonce:string,idempotencyKey=importId)=>{
+  const {idempotencyKey:importId,...sealed}=await encryptedRequest(entries,idempotencyKey);
+  return {type:"oc:app-import:offer",version:2,sessionNonce,importId,...sealed};
+};
 const importId = "B".repeat(42) + "A";
 const template = { id: "own-type", name: "Own Type", direction: "debt" as const, txn_type: "iou" as const, keywords: [], fee_percent: 10, rev: 1, updatedAt: 1 };
 const slots = { templates: [template], dismissed: [] };
@@ -74,7 +103,7 @@ let container: HTMLDivElement;
 let latest: PairTemplatesApi;
 const renders: boolean[] = [];
 function Probe() {
-  latest = usePairTemplates("synthetic-pair", sheetId);
+  latest = usePairTemplates(pairId, sheetId);
   renders.push(latest.ready);
   return null;
 }
@@ -83,7 +112,14 @@ const flush = async () => { await act(async () => { await Promise.resolve(); });
 const button = (text: string) => Array.from(container.querySelectorAll("button")).find(item => item.textContent === text)!;
 const click = async (element: HTMLElement) => { await act(async () => element.click()); };
 const select = async (element: HTMLSelectElement, value: string) => {
+  if(element.getAttribute("aria-label")==="Received draft")fixture.decryptions=[];
   await act(async () => { element.value = value; element.dispatchEvent(new Event("change", { bubbles: true })); });
+  if(element.getAttribute("aria-label")==="Received draft" && value){
+    await act(async()=>{
+      await vi.waitFor(()=>expect(fixture.decryptions.length).toBeGreaterThan(0));
+      await Promise.allSettled(fixture.decryptions);
+    });
+  }
 };
 function identity(principal: string) {
   fixture.principal = principal;
@@ -92,7 +128,7 @@ function identity(principal: string) {
 function actor(getPair: () => Promise<unknown> = async () => [pair()]) {
   return {
     get_pair: vi.fn(getPair),
-    get_my_pairs: vi.fn(async () => [{ id: "synthetic-pair", active_sheet_id: [sheetId], archived_at: [], other_principal: { toText: () => "synthetic-partner" } }]),
+    get_my_pairs: vi.fn(async () => [{ id: pairId, active_sheet_id: [sheetId], archived_at: [], other_principal: { toText: () => "synthetic-partner" } }]),
     get_my_user: vi.fn(async () => []),
     add_entry_batch: vi.fn(async () => ({ entry_ids: [1n], replayed: false })),
     set_pair_templates: vi.fn(),
@@ -104,14 +140,15 @@ async function offer(typeId = "foreign", typeName = "Foreign Type") {
   }]);
 }
 async function offerRows(entries: readonly LocalImportDraft[], offeredId = importId) {
+  const offer=await encryptedOffer(entries,"A".repeat(43),offeredId);
   await act(async () => {
     for (const data of [
-      { type: "oc:app-import:hello", version: 1, sessionNonce: "A".repeat(43) },
-      { type: "oc:app-import:offer", version: 1, sessionNonce: "A".repeat(43), importId: offeredId, actionId: "iou.entry.import", payload: { entries } },
+      { type: "oc:app-import:hello", version: 2, sessionNonce: "A".repeat(43) }, offer,
     ]) window.dispatchEvent(new MessageEvent("message", { data, source: fixture.sender as unknown as Window, origin: "http://localhost:5190" }));
   });
 }
 async function mountSheet(selectedSheetId = sheetId) {
+  fixture.deliverySheet=selectedSheetId;
   await render(<LocalImportPage />);
   const sheetSelect = container.querySelector("select")!;
   await select(sheetSelect, selectedSheetId);
@@ -127,6 +164,7 @@ beforeEach(() => {
   Object.defineProperty(window, "opener", { value: fixture.sender, configurable: true });
   identity("synthetic-a"); fixture.actor = null; fixture.actorError = null; fixture.realSlots = false;
   fixture.nativeBootstrap = false; fixture.sender.closed = false;
+  fixture.decryptions=[];
   fixture.unwrap.mockResolvedValue(new Uint8Array(32).fill(7));
   fixture.decrypt.mockResolvedValue(slots);
   fixture.encrypt.mockResolvedValue({ entryKey: new Uint8Array([1]), ciphertext: new Uint8Array([2]), iv: new Uint8Array([3]) });
@@ -144,6 +182,34 @@ describe("actual local receiver Type and manual-direction editing", () => {
   };
   const chooseReceived = async (id = importId) => select(container.querySelector('[aria-label="Received draft"]')!, id);
   const reviewed = () => JSON.parse(container.querySelector("pre")!.textContent!);
+
+  it.each([false,true])("invalidates a review when a new ciphertext retries the same ID (changed payload %s)",async(changed)=>{
+    fixture.actor=actor();await mountSheet();await offerRows([entry]);await chooseReceived();
+    await click(button("Review exact encrypted entry contents"));expect(button("Save in IOU")).toBeDefined();
+    await offerRows([{...entry,amount:changed?999:entry.amount}]);
+    expect(button("Save in IOU")).toBeUndefined();expect(container.querySelectorAll("fieldset")).toHaveLength(0);
+    expect(fixture.actor.add_entry_batch).not.toHaveBeenCalled();
+    await chooseReceived();
+    if(changed){
+      expect(container.textContent).toContain("retries conflict");expect(container.querySelectorAll("fieldset")).toHaveLength(0);
+      expect(button("Review exact encrypted entry contents")).toBeUndefined();
+    }else{
+      expect(container.querySelectorAll("fieldset")).toHaveLength(1);
+      await click(button("Review exact encrypted entry contents"));expect(reviewed()[0].amount_minor).toBe(10000);
+    }
+    expect(fixture.actor.add_entry_batch).not.toHaveBeenCalled();
+  });
+
+  it("blocks a paused save if a different ciphertext arrives before the backend mutation",async()=>{
+    fixture.actor=actor();await mountSheet();await offerRows([entry]);await chooseReceived();
+    await click(button("Review exact encrypted entry contents"));
+    const pending=deferred<{entryKey:Uint8Array;ciphertext:Uint8Array;iv:Uint8Array}>();
+    fixture.encrypt.mockReturnValueOnce(pending.promise);await click(button("Save in IOU"));
+    expect(fixture.encrypt).toHaveBeenCalledOnce();await offerRows([{...entry,amount:999}]);
+    await act(async()=>pending.resolve({entryKey:new Uint8Array([1]),ciphertext:new Uint8Array([2]),iv:new Uint8Array([3])}));
+    expect(fixture.actor.add_entry_batch).not.toHaveBeenCalled();expect(button("Save in IOU")).toBeUndefined();
+    expect(fixture.sender.postMessage.mock.calls.some(([value])=>value.type==="oc:app-import:committed")).toBe(false);
+  });
 
   it("clears an incoming matched Type without inventing missing pre-Type direction history", async () => {
     fixture.actor = actor(); await mountSheet();
@@ -226,7 +292,7 @@ describe("actual local receiver Type and manual-direction editing", () => {
       expect(container.querySelectorAll("fieldset")).toHaveLength(0);
     } else {
       fixture.actor = actor();
-      fixture.actor.get_my_pairs.mockResolvedValue([{ id: "another-pair", active_sheet_id: [selectedSheetId], archived_at: [], other_principal: { toText: () => "synthetic-partner" } }]);
+      fixture.actor.get_my_pairs.mockResolvedValue([{ id: pairId, active_sheet_id: [selectedSheetId], archived_at: [], other_principal: { toText: () => "synthetic-partner" } }]);
     }
     // Changing account closes the exact old connection; choosing a different destination also
     // requires a fresh receiving page instead of moving an in-progress review to another sheet.
@@ -443,10 +509,7 @@ describe("actual two-entry receiver, batch adapter and OpenChat receipt composit
       }));
     });
     const session = createLocalAppHandoffSession({
-      request: {
-        appId: "iou", actionId: "iou.entry.import", destination: `${receiverOrigin}/openchat/import`,
-        recipient: "Synthetic reviewed account", idempotencyKey: importId, payload: { entries },
-      },
+      request: await encryptedRequest(entries),
       sessionNonce: "A".repeat(43), receiver: window, send, onOutcome: outcomes,
     });
     fixture.sender.postMessage.mockImplementation((data: unknown, exactOrigin: string) => {
@@ -522,7 +585,7 @@ describe("actual two-entry receiver, batch adapter and OpenChat receipt composit
       expect(button("Saved in IOU").disabled).toBe(true);
       const committed = fixture.sender.postMessage.mock.calls.filter(([message]) => message.type === "oc:app-import:committed");
       expect(committed).toEqual([[{
-        type: "oc:app-import:committed", version: 1, sessionNonce: "A".repeat(43),
+        type: "oc:app-import:committed", version: 2, sessionNonce: "A".repeat(43),
         importId, status: "saved", acceptedCount: 2, replayed: true,
       }, "http://localhost:5190"]]);
       expect(sender.outcomes.mock.calls).toEqual([["received"], ["saved"]]);
@@ -567,16 +630,15 @@ describe("actual native receiver consent controls", () => {
     })); });
   };
   const connect = () => message({ type: "oc:app-import:connect", version: 1, connectionId });
-  const offerFor = (sessionNonce: string) => ({ type: "oc:app-import:offer", version: 1, sessionNonce, importId,
-    actionId: "iou.entry.import", payload: { entries: [{ kind: "iou", amount: 100, currency: "USD", direction: "credit",
-      date: "2026-09-26", note: "Synthetic reviewed note", typeId: template.id, typeName: template.name }] } });
+  const offerFor = (sessionNonce: string) => encryptedOffer([{ kind: "iou", amount: 100, currency: "USD", direction: "credit",
+      date: "2026-09-26", note: "Synthetic reviewed note", typeId: template.id, typeName: template.name }],sessionNonce);
   const connectedReply = () => fixture.sender.postMessage.mock.calls.find(([value]) => value.type === "oc:app-import:connected")?.[0];
   const loadNative = async () => { fixture.nativeBootstrap = true; fixture.actor = actor(); await mountSheet(); await connect(); };
   const allowAndOffer = async () => {
     await click(button("Allow this connection once"));
     const sessionNonce = connectedReply().sessionNonce;
-    await message({ type: "oc:app-import:hello", version: 1, sessionNonce });
-    await message(offerFor(sessionNonce));
+    await message({ type: "oc:app-import:hello", version: 2, sessionNonce });
+    await message(await offerFor(sessionNonce));
     return sessionNonce;
   };
 
@@ -584,8 +646,8 @@ describe("actual native receiver consent controls", () => {
     await loadNative();
     expect(container.textContent).toContain(`Unverified local sender: ${nativeOrigin}`);
     expect(fixture.sender.postMessage).not.toHaveBeenCalled();
-    await message(offerFor("A".repeat(43)));
-    await message({ type: "oc:app-import:hello", version: 1, sessionNonce: "A".repeat(43) });
+    await message(await offerFor("A".repeat(43)));
+    await message({ type: "oc:app-import:hello", version: 2, sessionNonce: "A".repeat(43) });
     expect(fixture.sender.postMessage).not.toHaveBeenCalled();
     expect(container.querySelector('[aria-label="Received draft"]')!.querySelectorAll("option")).toHaveLength(1);
 
@@ -616,7 +678,7 @@ describe("actual native receiver consent controls", () => {
     expect(button("Allow this connection once")).toBeUndefined(); expect(changedSender.postMessage).not.toHaveBeenCalled();
     await connect(); expect(button("Allow this connection once")).toBeDefined();
     await click(button("Reject connection"));
-    await connect(); await message(offerFor("A".repeat(43)));
+    await connect(); await message(await offerFor("A".repeat(43)));
     expect(fixture.sender.postMessage).not.toHaveBeenCalled(); expect(button("Allow this connection once")).toBeUndefined();
     expect(fixture.actor.add_entry_batch).not.toHaveBeenCalled();
   });
@@ -624,10 +686,10 @@ describe("actual native receiver consent controls", () => {
   it("ignores mismatched post-consent source, origin and nonce", async () => {
     await loadNative(); await click(button("Allow this connection once"));
     const sessionNonce = connectedReply().sessionNonce;
-    const hello = { type: "oc:app-import:hello", version: 1, sessionNonce };
+    const hello = { type: "oc:app-import:hello", version: 2, sessionNonce };
     await message(hello, "http://localhost:54622"); await message(hello, nativeOrigin, {});
     await message({ ...hello, sessionNonce: connectionId });
-    await message(offerFor(sessionNonce));
+    await message(await offerFor(sessionNonce));
     expect(fixture.sender.postMessage).toHaveBeenCalledOnce();
     expect(container.querySelector('[aria-label="Received draft"]')!.querySelectorAll("option")).toHaveLength(1);
   });

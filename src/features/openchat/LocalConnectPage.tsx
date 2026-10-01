@@ -8,6 +8,9 @@ import { createIouLocalAppPackage } from "./localAppPackage";
 import { createLocalProcessorContext } from "./localProcessorContext";
 import { localSetupContextMatches, verifiedLocalSetupProcessor, type LocalSetupContext } from "./LocalSetupDownloads";
 import { createLocalAppSetupConsent, type LocalAppSetupState } from "./localAppSetupConsent";
+import { LocalDeliveryKeyProvider, useLocalDeliveryKey } from "./LocalDeliveryKeyProvider";
+import { createLocalDeliveryEncryption } from "./localImportEncryption";
+import { host as backendHost, canisterId as backendCanisterId } from "../auth/config";
 
 type Consent = ReturnType<typeof createLocalAppSetupConsent>;
 type SheetChoice = { pairId: string; sheetId: string; otherPrincipal: string };
@@ -18,7 +21,7 @@ export function LocalConnectPage() {
   if (window.parent !== window || !opener || opener.closed || location.pathname !== "/openchat/connect" || location.search || location.hash) {
     return <main><h1>Connect IOU from your client</h1><p>Start a fresh Connect request in the client. This setup page requires its original window and a plain URL.</p></main>;
   }
-  return <AuthProvider><ConnectSession opener={opener} /></AuthProvider>;
+  return <AuthProvider><LocalDeliveryKeyProvider><ConnectSession opener={opener} /></LocalDeliveryKeyProvider></AuthProvider>;
 }
 
 function ConnectSession({ opener }: { opener: Window }) {
@@ -62,7 +65,7 @@ function ConnectSession({ opener }: { opener: Window }) {
 
   return <main style={{ maxWidth: 880, margin: "24px auto", padding: 16, overflowWrap: "anywhere" }}>
     <h1>Connect IOU setup</h1>
-    <p>This shares your selected account and sheet reminder, Type names, keywords, directions and currency preferences with the requesting client. It sends no chat, image, draft, sign-in credential or encryption key, and saves no entry.</p>
+    <p>This shares your selected account/sheet routing metadata, Type names, keywords, directions, currency preferences and a public delivery-encryption key with the requesting client. It sends no chat, image, draft, sign-in credential, private key or sheet secret, and saves no entry.</p>
     {state.kind === "waiting" && <p>Waiting for a setup request. Nothing has been shared.</p>}
     {state.kind === "pending" && <section aria-label="Setup requester">
       <p>Requesting client: <strong>{state.binding.senderOrigin}</strong></p>
@@ -130,6 +133,7 @@ function ConnectSheet({ principal, sheet, defaultCurrency, opener, consent, stat
 }) {
   const { actor } = useActor();
   const { identity } = useAuth();
+  const deliveryKeys = useLocalDeliveryKey();
   const { shared, ready, readyGeneration, loading, error } = usePairTemplates(sheet.pairId, sheet.sheetId, { requireReadableSlots: true });
   const [busy, setBusy] = useState(false);
   const [notice, setNotice] = useState("");
@@ -146,18 +150,23 @@ function ConnectSheet({ principal, sheet, defaultCurrency, opener, consent, stat
   }, [principal, sheet.pairId, sheet.sheetId, defaultCurrency, actor, identity, shared, ready, readyGeneration, state.binding, close]);
 
   async function share() {
-    if (pending.current || !ready || !consent.isCurrent(state.binding) || opener.closed) return;
+    if (pending.current || !ready || !deliveryKeys.ready || !consent.isCurrent(state.binding) || opener.closed) return;
     const captured = { ...current.current };
     pending.current = true; setBusy(true); setNotice("");
     try {
       const context = createLocalProcessorContext(shared, defaultCurrency);
       const { metadata } = await verifiedLocalSetupProcessor();
+      const key = await deliveryKeys.load(true);
+      const deliveryEncryption = await createLocalDeliveryEncryption(key.publicKey, {
+        principal, backendHost, backendCanisterId, pairId: sheet.pairId, sheetId: sheet.sheetId,
+      });
       if (!mounted.current || opener.closed || !consent.isCurrent(state.binding) || !localSetupContextMatches(captured, current.current)) {
         throw new Error("Setup session changed");
       }
       const catalog = createIouLocalAppPackage(`${location.origin}/openchat/import`, metadata, {
         processorContext: context,
-        recipientLabel: `IOU account ${sheet.pairId}; sheet ${sheet.sheetId}. Review-only label: choose the receiving IOU account and sheet again before saving.`,
+        deliveryEncryption,
+        recipientLabel: `IOU account ${sheet.pairId}; sheet ${sheet.sheetId}. Encrypted to this IOU user and sheet; review again in IOU before saving.`,
       });
       const response = consent.approve(state.binding, JSON.stringify(catalog));
       opener.postMessage(response, state.binding.senderOrigin);
@@ -176,7 +185,7 @@ function ConnectSheet({ principal, sheet, defaultCurrency, opener, consent, stat
     {error && <p role="alert">This sheet’s private Types could not be read. Sharing is disabled.</p>}
     {ready && <ul>{shared.map(type => <li key={type.id}>{type.name}: {type.direction === "credit" ? "Owed to you" : "You owe"}; keywords: {(type.keywords ?? []).join(", ") || "name only"}</li>)}</ul>}
     <p>Only this setup is sent. Fees, schedules, entries, sheet keys and IOU sign-in credentials stay in IOU. The client may remember the shared setup on this device.</p>
-    <button disabled={!ready || loading || !!error || busy} onClick={() => void share()}>{busy ? "Verifying and sharing setup…" : "Connect / share setup"}</button>
+    <button disabled={!ready || !deliveryKeys.ready || loading || !!error || busy} onClick={() => void share()}>{busy ? "Verifying and sharing setup…" : "Connect / share setup"}</button>
     {notice && <p role="status">{notice}</p>}
   </section>;
 }

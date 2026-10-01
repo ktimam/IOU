@@ -1,5 +1,6 @@
-// Hand-authored synthetic model-output fixtures only. No user image files or network inference.
-import {describe,it,expect,vi,beforeEach} from "vitest";
+// Hand-authored synthetic contracts and explicitly labelled, existing sanitized model captures.
+// No user image files, fresh model inference, network calls or real ledger writes.
+import {describe,it,expect,vi,beforeEach,beforeAll} from "vitest";
 import {readFileSync} from "node:fs";
 import {dirname,resolve} from "node:path";
 import {fileURLToPath} from "node:url";
@@ -16,14 +17,37 @@ import {extractPrivateAppAction} from "@oc-test/aiActionRunner";
 import {parseLocalAppCatalog,projectLocalAppPayload,type LocalAppAction} from "@oc-test/localAppCatalog";
 import {initializeLocalAppDraftChoices,selectLocalAppDraftChoice,editLocalAppDraftScalar,assertLocalAppDraftChoiceConsistency} from "@oc-test/localAppDraftChoices";
 import {LocalAppDraftStore, type LocalDraftDeliveryRequest} from "@oc-test/localAppDrafts";
+import {sealLocalAppDelivery} from "@oc-test/localAppEncryption";
 import {browserImageActionMode} from "@oc-test-store/browserImageActionMode";
 import {createIouLocalAppPackage} from "../../src/features/openchat/localAppPackage";
 import {createLocalProcessorContext} from "../../src/features/openchat/localProcessorContext";
 import {processLocalArtifactRequest} from "../../src/features/openchat/localProcessorArtifact";
-import {createLocalImportNonce,createLocalImportReceiver,parseLocalImportPayload} from "../../src/features/openchat/localImportHandoff";
+import {createLocalImportNonce,createLocalImportReceiver,parseLocalImportPayload,decryptPendingLocalImport} from "../../src/features/openchat/localImportHandoff";
+import {createLocalDeliveryEncryption, type LocalDeliveryEncryption} from "../../src/features/openchat/localImportEncryption";
+import {prepareLocalImportReview} from "../../src/features/openchat/localImportReview";
+import {decryptEntryPayload} from "../../src/features/crypto/devVetkd";
 import * as entryBatch from "../../src/features/entries/batchImport";
+import {iouImagePromptByModel} from "../../src/features/openchat/modelImageProfiles";
+import smallerQwenCapture from "../../test/fixtures/openchat/model-acceptance/qwen-q4-v20-app-replay.json";
+import gemmaCapture from "../../test/fixtures/openchat/model-acceptance/gemma-v15-app-replay.json";
 
 const templates=[{id:"test-stay",name:"Reservation",direction:"debt" as const,txn_type:"iou" as const,keywords:[]}];
+const destination="http://localhost:3000/openchat/import";
+const recipientContext={principal:"rrkah-fqaaa-aaaaa-aaaaq-cai",backendHost:"http://127.0.0.1:4943",backendCanisterId:"ryjl3-tyaaa-aaaaa-aaaba-cai",pairId:"0000000000000001",sheetId:"0000000000000002"};
+let deliveryKey:CryptoKeyPair,deliveryEncryption:LocalDeliveryEncryption;
+beforeAll(async()=>{
+  deliveryKey=await crypto.subtle.generateKey({name:"ECDH",namedCurve:"P-256"},false,["deriveBits"]);
+  deliveryEncryption=await createLocalDeliveryEncryption(deliveryKey.publicKey,recipientContext);
+});
+const sealedOffer=async(request:LocalDraftDeliveryRequest,sessionNonce:string)=>{
+  const sealed=await sealLocalAppDelivery(request);
+  const {idempotencyKey,...header}=sealed;
+  const offer={type:"oc:app-import:offer",version:2,sessionNonce,importId:idempotencyKey,...header};
+  expect(offer).not.toHaveProperty("payload");expect(offer).not.toHaveProperty("recipient");
+  expect(offer).not.toHaveProperty("deliveryEncryption");
+  return offer;
+};
+const decryptQueued=(receiver:ReturnType<typeof createLocalImportReceiver>)=>decryptPendingLocalImport(receiver.pending()[0],deliveryKey.privateKey,deliveryEncryption,destination,()=>{});
 const packageFor=()=>parseLocalAppCatalog(JSON.stringify(createIouLocalAppPackage("http://localhost:3000/openchat/import",{sha256:"a".repeat(64),byteLength:123},{recipientLabel:"Synthetic account review",processorContext:createLocalProcessorContext(templates,"EGP")}))).apps[0].actions[0];
 const hostPayload=(action:LocalAppAction,candidates:readonly Record<string,unknown>[])=>{
   const initialized=initializeLocalAppDraftChoices(action,JSON.stringify(projectLocalAppPayload(action,candidates)));
@@ -32,7 +56,113 @@ const hostPayload=(action:LocalAppAction,candidates:readonly Record<string,unkno
 };
 const client=()=>({clientOnlyApps:()=>true,enabledAiApps:vi.fn(),aiApps:vi.fn(),createAiAppCardProvenance:vi.fn(),sendMessageWithContent:vi.fn()});
 beforeEach(()=>{vi.clearAllMocks();browserImageActionMode.set("model_only")});
+const retainedImageCaptures=[smallerQwenCapture,gemmaCapture].flatMap((capture)=>capture.cases
+  .filter((row)=>["dev-real-arabic-transfer","dev-real-payout-range"].includes(row.imageId)&&
+    (!("repeated" in row)||!row.repeated))
+  .map((row)=>({modelId:capture.modelId,promptSha256:capture.promptSha256,imageId:row.imageId,row})));
+
 describe("actual IOU export through actual OpenChat proposal/conformance/project/receiver",()=>{
+  it("retains exactly the existing Arabic/range captures for both currently selected models",()=>{
+    expect(retainedImageCaptures.map(({modelId,imageId})=>`${modelId}/${imageId}`).sort()).toEqual([
+      "gemma-4-e2b-it-q4/dev-real-arabic-transfer","gemma-4-e2b-it-q4/dev-real-payout-range",
+      "qwen3-vl-2b-instruct-q4/dev-real-arabic-transfer","qwen3-vl-2b-instruct-q4/dev-real-payout-range",
+    ]);
+    // Do not relabel historical formatting failures as strict-prompt passes.
+    expect(gemmaCapture.cases.find((row)=>row.imageId==="dev-real-payout-range")?.strictPromptContractPassed).toBe(false);
+  });
+  it.each(retainedImageCaptures)("replays retained $modelId / $imageId through choices and encrypted delivery",async({modelId,promptSha256,imageId,row})=>{
+    const profile=iouImagePromptByModel?.templates[modelId];
+    expect(profile).toBeDefined();
+    expect(createHash("sha256").update(profile!.template).digest("hex")).toBe(promptSha256);
+    const originalRaw=row.raw;
+    // Feed the retained reply verbatim, including fences/array/printed separator, to the host parser.
+    // Fake image bytes are never decoded: this is captured-output replay, not new accuracy.
+    runtime.model=modelId;runtime.infer.mockResolvedValue({kind:"ok",text:originalRaw});
+    const action=packageFor(),oc=client();
+    const result=await extractPrivateAppAction(action.definition,{kind:"image_content",blobData:new Uint8Array([4,2])} as never,oc as never,{
+      stillCurrent:()=>true,sourceTimestamp:Date.parse(row.sourceTimestamp),
+      processor:async(actionId,input)=>processLocalArtifactRequest({type:"oc:local-process:request",version:1,actionId,input,context:action.processorContext}) as never,
+    });
+    if(result.kind!=="extracted")throw new Error(JSON.stringify(result));
+    const range=imageId==="dev-real-payout-range";
+    const expectedEntry={...row.expectedAppForm,amount:Number(row.expectedAppForm.amount),direction:range?"debt":"credit",
+      ...(range?{typeId:"test-stay",typeName:"Reservation"}:{})};
+    // IOU exports the pre-Type default; the actual generic host initializer supplies Type direction.
+    expect(result.candidates).toHaveLength(1);
+    expect(result.candidates[0].direction).toBe("credit");
+    const payload=hostPayload(action,result.candidates);
+    expect(payload).toEqual({entries:[expectedEntry]});
+    if(!range)expect(payload.entries[0]).not.toHaveProperty("typeId");
+    const senderOrigin="http://localhost:5190",sessionNonce=createLocalImportNonce();
+    const receiver=createLocalImportReceiver({senderOrigin,senderWindow:window,sessionNonce,destination});
+    const received=(data:unknown)=>({origin:senderOrigin,source:window,data});
+    const persist=vi.spyOn(entryBatch,"addEntryBatch").mockImplementation(async()=>{throw new Error("Delivery is not save consent");});
+    try{
+      const deliver=vi.fn(async(request:LocalDraftDeliveryRequest)=>{
+        expect(receiver.receive(received({type:"oc:app-import:hello",version:2,sessionNonce})).kind).toBe("ready");
+        const offer=await sealedOffer(request,sessionNonce);
+        expect(JSON.stringify(offer)).not.toContain(expectedEntry.note);
+        expect(JSON.stringify(offer)).not.toContain(expectedEntry.date);
+        expect(receiver.receive(received(offer)).kind).toBe("queued");
+        return {kind:"delivered" as const};
+      });
+      const store=new LocalAppDraftStore(deliver);
+      store.setAccount("synthetic-openchat-account");
+      const draft=store.create({target:{appId:"iou",appRevision:"local-import-v2",actionId:action.definition.name,destination,
+        recipient:"Synthetic account review",deliveryEncryption},schema:action.draftSchema,payload});
+      const review=store.review(draft.id);
+      expect(deliver).not.toHaveBeenCalled();expect(receiver.pending()).toEqual([]);
+      expect(await store.confirm(draft.id,review.approvalId)).toEqual({kind:"delivered"});
+      expect(deliver).toHaveBeenCalledOnce();
+      expect(receiver.pending()).toHaveLength(1);
+      expect(receiver.pending()[0]).not.toHaveProperty("payload");
+      expect(receiver.pending()[0]).toMatchObject({importId:review.request.idempotencyKey,status:"pending-review"});
+      expect(await decryptQueued(receiver)).toEqual({entries:[expectedEntry]});
+      expect(persist).not.toHaveBeenCalled();
+      expect(runtime.infer).toHaveBeenCalledOnce();expect(runtime.ocr).not.toHaveBeenCalled();expect(runtime.remote).not.toHaveBeenCalled();
+      for(const method of [oc.enabledAiApps,oc.aiApps,oc.createAiAppCardProvenance,oc.sendMessageWithContent])expect(method).not.toHaveBeenCalled();
+      expect(row.raw).toBe(originalRaw);
+    }finally{persist.mockRestore();receiver.close();}
+  });
+  it("encrypts in OpenChat, decrypts only for the connected IOU context, then encrypts the second-reviewed ledger write",async()=>{
+    const action=packageFor(), senderOrigin="http://localhost:5190",sessionNonce=createLocalImportNonce();
+    const receiver=createLocalImportReceiver({senderOrigin,senderWindow:window,sessionNonce,destination});
+    const event=(data:unknown)=>({origin:senderOrigin,source:window,data});
+    const backend={add_entry_batch:vi.fn(async()=>({entry_ids:[1n],replayed:false}))};
+    const payload={entries:[{kind:"iou",direction:"debt",amount:12900,currency:"EGP",date:"2026-08-14",note:"Synthetic private bank receipt"}]};
+    const store=new LocalAppDraftStore(async(request)=>{
+      expect(receiver.receive(event({type:"oc:app-import:hello",version:2,sessionNonce})).kind).toBe("ready");
+      const offer=await sealedOffer(request,sessionNonce);
+      for(const secret of ["12900","2026-08-14","Synthetic private bank receipt"])expect(JSON.stringify(offer)).not.toContain(secret);
+      expect(receiver.receive(event(offer)).kind).toBe("queued");
+      return {kind:"delivered" as const};
+    });
+    store.setAccount("synthetic-openchat-account");
+    const draft=store.create({target:{appId:"iou",appRevision:"local-import-v2",actionId:action.definition.name,destination,
+      recipient:"Synthetic recipient",deliveryEncryption},schema:action.draftSchema,payload});
+    const approved=store.review(draft.id);
+    expect(receiver.pending()).toEqual([]);expect(backend.add_entry_batch).not.toHaveBeenCalled();
+    expect(await store.confirm(draft.id,approved.approvalId)).toEqual({kind:"delivered"});
+    expect(backend.add_entry_batch).not.toHaveBeenCalled();
+    const wrongSheet=await createLocalDeliveryEncryption(deliveryKey.publicKey,{...recipientContext,sheetId:"0000000000000003"});
+    await expect(decryptPendingLocalImport(receiver.pending()[0],deliveryKey.privateKey,wrongSheet,destination,()=>{})).rejects.toThrow();
+    const decoded=await decryptQueued(receiver);
+    expect(decoded).toEqual(payload);expect(backend.add_entry_batch).not.toHaveBeenCalled();
+    const reviewed=prepareLocalImportReview({rows:decoded.entries,selectedTypeIds:[""],templates:[],importId:approved.request.idempotencyKey});
+    expect(backend.add_entry_batch).not.toHaveBeenCalled(); // Second review is NOT save consent.
+    const sheetKey=crypto.getRandomValues(new Uint8Array(32));
+    await entryBatch.addEntryBatch({actor:backend,sheetId:recipientContext.sheetId,payloads:[...reviewed],messageHandle:approved.request.idempotencyKey,
+      relayId:approved.request.idempotencyKey,sheetKey,beforeMutate:()=>expect(backend.add_entry_batch).not.toHaveBeenCalled()});
+    expect(backend.add_entry_batch).toHaveBeenCalledOnce();
+    const wire=backend.add_entry_batch.mock.calls[0][0];
+    expect(Object.keys(wire).sort()).toEqual(["entries","import_id","sheet_id"]);
+    expect(Object.keys(wire.entries[0]).sort()).toEqual(["ciphertext","entry_key","iv"]);
+    const stored=wire.entries[0];
+    const plaintext=await decryptEntryPayload(new Uint8Array(stored.entry_key),new Uint8Array(stored.iv),new Uint8Array(stored.ciphertext),sheetKey);
+    expect(JSON.parse(new TextDecoder().decode(plaintext))).toEqual(reviewed[0]);
+    expect(reviewed[0]).toMatchObject({amount_minor:1290000,currency:"EGP",direction:"debt",note:"Synthetic private bank receipt"});
+    receiver.close();
+  });
   it.each([
     {kind:"iou",direction:"credit"}, {kind:"iou",direction:"debt"},
     {kind:"settlement",direction:"credit"}, {kind:"settlement",direction:"debt"},
@@ -92,21 +222,20 @@ describe("actual IOU export through actual OpenChat proposal/conformance/project
     const initial={entries:[{kind,amount:20,currency:"USD",direction:"debt",note:"booking",typeId:"synthetic-debt",typeName:"Synthetic booking"}]};
     expect(JSON.parse(choices.editorJson)).toEqual(initial);
     const senderOrigin="http://localhost:5190",sessionNonce=createLocalImportNonce();
-    const receiver=createLocalImportReceiver({senderOrigin,senderWindow:window,sessionNonce});
+    const receiver=createLocalImportReceiver({senderOrigin,senderWindow:window,sessionNonce,destination});
     const received=(data:unknown)=>({origin:senderOrigin,source:window,data});
     const persist=vi.spyOn(entryBatch,"addEntryBatch").mockImplementation(async()=>{throw new Error("Private proposal delivery must not save an entry");});
     try {
       const deliver=vi.fn(async(delivery:LocalDraftDeliveryRequest)=>{
-        expect(receiver.receive(received({type:"oc:app-import:hello",version:1,sessionNonce})).kind).toBe("ready");
-        const result=receiver.receive(received({type:"oc:app-import:offer",version:1,sessionNonce,importId:delivery.idempotencyKey,
-          actionId:delivery.actionId,payload:delivery.payload}));
+        expect(receiver.receive(received({type:"oc:app-import:hello",version:2,sessionNonce})).kind).toBe("ready");
+        const result=receiver.receive(received(await sealedOffer(delivery,sessionNonce)));
         expect(result.kind).toBe("queued");
         return {kind:"delivered" as const};
       });
       const store=new LocalAppDraftStore(deliver);
       store.setAccount("synthetic-openchat-account");
-      const draft=store.create({target:{appId:catalog.apps[0].id,actionId:action.definition.name,destination:catalog.apps[0].destination,
-        recipient:"Synthetic account review"},schema:action.draftSchema,payload:initial});
+      const draft=store.create({target:{appId:catalog.apps[0].id,appRevision:catalog.apps[0].revision,actionId:action.definition.name,destination:catalog.apps[0].destination,
+        recipient:"Synthetic account review",deliveryEncryption},schema:action.draftSchema,payload:initial});
       const review=()=>{assertLocalAppDraftChoiceConsistency(action,choices.editorJson);return store.review(draft.id);};
       const commitChoice=()=>store.edit(draft.id,{payload:JSON.parse(choices.editorJson)});
       const originalApproval=review();
@@ -134,7 +263,9 @@ describe("actual IOU export through actual OpenChat proposal/conformance/project
       expect(deliver).toHaveBeenCalledOnce();
       expect(deliver.mock.calls[0][0]).toBe(approval.request);
       expect(receiver.pending()).toHaveLength(1);
-      expect(receiver.pending()[0]).toMatchObject({payload:finalPayload,status:"pending-review",importId:approval.request.idempotencyKey});
+      expect(receiver.pending()[0]).toMatchObject({status:"pending-review",importId:approval.request.idempotencyKey});
+      expect(receiver.pending()[0]).not.toHaveProperty("payload");
+      expect(await decryptQueued(receiver)).toEqual(finalPayload);
       expect(dispatch).toHaveBeenCalledOnce();
       expect(runtime.infer).not.toHaveBeenCalled();expect(runtime.ocr).not.toHaveBeenCalled();expect(runtime.remote).not.toHaveBeenCalled();
       expect(persist).not.toHaveBeenCalled();
@@ -148,7 +279,7 @@ describe("actual IOU export through actual OpenChat proposal/conformance/project
       const senderOrigin="http://localhost:5190",senderWindow=window;
       const freshReceiver=()=>{
         const sessionNonce=createLocalImportNonce();
-        return {sessionNonce,receiver:createLocalImportReceiver({senderOrigin,senderWindow,sessionNonce})};
+        return {sessionNonce,receiver:createLocalImportReceiver({senderOrigin,senderWindow,sessionNonce,destination})};
       };
       let connection=freshReceiver();
       const nonces:string[]=[];
@@ -156,9 +287,8 @@ describe("actual IOU export through actual OpenChat proposal/conformance/project
         const {sessionNonce,receiver}=connection;
         nonces.push(sessionNonce);
         const event=(data:unknown)=>({origin:senderOrigin,source:senderWindow,data});
-        expect(receiver.receive(event({type:"oc:app-import:hello",version:1,sessionNonce})).kind).toBe("ready");
-        const result=receiver.receive(event({type:"oc:app-import:offer",version:1,sessionNonce,
-          importId:request.idempotencyKey,actionId:request.actionId,payload:request.payload}));
+        expect(receiver.receive(event({type:"oc:app-import:hello",version:2,sessionNonce})).kind).toBe("ready");
+        const result=receiver.receive(event(await sealedOffer(request,sessionNonce)));
         expect(result.kind).toBe("queued");
         if(result.kind!=="queued")throw new Error("The actual IOU receiver did not queue the reviewed draft");
         expect(result.reply).toMatchObject({type:"oc:app-import:received",status:"pending-review"});
@@ -167,15 +297,16 @@ describe("actual IOU export through actual OpenChat proposal/conformance/project
       });
       const store=new LocalAppDraftStore(deliver);
       store.setAccount("synthetic-openchat-account");
-      const draft=store.create({target:{appId:"iou",actionId:action.definition.name,
-        destination:"http://localhost:3000/openchat/import",recipient:"Synthetic account review"},schema:action.draftSchema,payload});
+      const draft=store.create({target:{appId:"iou",appRevision:"local-import-v2",actionId:action.definition.name,
+        destination,recipient:"Synthetic account review",deliveryEncryption},schema:action.draftSchema,payload});
       const approval=store.review(draft.id),originalJson=JSON.stringify(approval.request);
       expect(Object.isFrozen(approval.request)).toBe(true);
       expect(Object.isFrozen(approval.request.payload)).toBe(true);
       expect(await store.confirm(draft.id,approval.approvalId)).toEqual({kind:"delivered"});
       expect(store.get(draft.id)?.status).toBe("delivered");
       expect(connection.receiver.pending()).toHaveLength(1);
-      expect(connection.receiver.pending()[0]).toMatchObject({importId:approval.request.idempotencyKey,payload});
+      expect(connection.receiver.pending()[0]).toMatchObject({importId:approval.request.idempotencyKey});
+      expect(await decryptQueued(connection.receiver)).toEqual(payload);
       expect(persist).not.toHaveBeenCalled();
 
       const priorReceiver=connection.receiver;
@@ -197,7 +328,8 @@ describe("actual IOU export through actual OpenChat proposal/conformance/project
       expect(JSON.stringify(deliver.mock.calls[1][0])).toBe(originalJson);
       expect(nonces[1]).not.toBe(nonces[0]);
       expect(connection.receiver.pending()).toHaveLength(1);
-      expect(connection.receiver.pending()[0]).toMatchObject({importId:approval.request.idempotencyKey,payload,status:"pending-review"});
+      expect(connection.receiver.pending()[0]).toMatchObject({importId:approval.request.idempotencyKey,status:"pending-review"});
+      expect(await decryptQueued(connection.receiver)).toEqual(payload);
       expect(persist).not.toHaveBeenCalled();
       expect(runtime.infer).not.toHaveBeenCalled();
       expect(runtime.remote).not.toHaveBeenCalled();

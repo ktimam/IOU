@@ -5,7 +5,7 @@ import { useActor, unwrap } from "../flows/useActor";
 import { usePairTemplates } from "../templates/PairTemplatesContext";
 import { addEntryBatch, batchImportContextMatches } from "../entries/batchImport";
 import type { EntryPayload } from "../entries/types";
-import { buildLocalImportCommittedReceipt, createLocalImportReceiver, type LocalImportDraft, type PendingLocalImport } from "./localImportHandoff";
+import { buildLocalImportCommittedReceipt, createLocalImportReceiver, decryptPendingLocalImport, type LocalImportDraft, type PendingLocalImport } from "./localImportHandoff";
 import { localImportNativeBootstrap, localImportSenderOrigin, localImportSessionNonce } from "./localImportLaunch";
 import { createLocalImportConsent, type LocalImportConsentState } from "./localImportConsent";
 import { applyLocalImportType, editLocalImportDirection, initializeLocalImportReviewRow, prepareLocalImportReview, type LocalImportReviewRow } from "./localImportReview";
@@ -13,6 +13,9 @@ import { createIouLocalAppPackage } from "./localAppPackage";
 import { createLocalProcessorContext } from "./localProcessorContext";
 import { createLocalSetupDownloadFiles, createLocalSetupDownloadOwner, localSetupContextMatches, LocalSetupDownloads, verifiedLocalSetupProcessor } from "./LocalSetupDownloads";
 import { currencyFromUserRecord } from "../settings/defaultCurrency";
+import { LocalDeliveryKeyProvider, useLocalDeliveryKey } from "./LocalDeliveryKeyProvider";
+import { createLocalDeliveryEncryption } from "./localImportEncryption";
+import { host as backendHost, canisterId as backendCanisterId } from "../auth/config";
 
 type Binding = { senderOrigin: string; senderWindow: Window; sessionNonce: string; isCurrent?: () => boolean };
 type ImportTransport = {
@@ -22,12 +25,12 @@ type ImportTransport = {
   closed: boolean;
 };
 type SheetChoice = { pairId: string; sheetId: string; otherPrincipal: string };
-type Review = { payloads: readonly EntryPayload[]; sheet: SheetChoice; importId: string };
+type Review = { payloads: readonly EntryPayload[]; sheet: SheetChoice; importId: string; draft: PendingLocalImport };
 
 /** Deliberately outside IOU's legacy manifest/key/inbox providers. No OC canister is called here. */
 export function LocalImportPage() {
   if (window.parent !== window) return <main><h1>Open IOU in its own window</h1><p>Private imports do not run inside an embedded frame. Use the client’s reviewed handoff to open IOU.</p></main>;
-  return <AuthProvider><LocalImportSession /></AuthProvider>;
+  return <AuthProvider><LocalDeliveryKeyProvider><LocalImportSession /></LocalDeliveryKeyProvider></AuthProvider>;
 }
 
 function LocalImportSession() {
@@ -73,7 +76,7 @@ function LocalImportSession() {
         isCurrent: () => transport.current === active && !active.closed && active.consent?.isConnected() === true &&
           !launch.senderWindow?.closed && accountUnchanged() };
       // Install before replying: a prompt sender's hello cannot race receiver creation.
-      active.binding = accepted; active.receiver = createLocalImportReceiver(accepted);
+      active.binding = accepted; active.receiver = createLocalImportReceiver({ ...accepted, destination: `${location.origin}/openchat/import` });
       setBinding(accepted); setConsentState(active.consent.state());
       accepted.senderWindow.postMessage(approved.reply, accepted.senderOrigin);
       setNotice("This exact local connection is allowed once. Receiving a draft will not save it.");
@@ -89,7 +92,7 @@ function LocalImportSession() {
   }, [principal]);
   useEffect(() => {
     const active: ImportTransport = { closed: false, binding: launch.configured,
-      receiver: launch.configured ? createLocalImportReceiver(launch.configured) : undefined,
+      receiver: launch.configured ? createLocalImportReceiver({ ...launch.configured, destination: `${location.origin}/openchat/import` }) : undefined,
       consent: launch.native && launch.senderWindow ? createLocalImportConsent({ senderWindow: launch.senderWindow }) : undefined };
     transport.current = active;
     setBinding(active.binding); setConsentState(active.consent?.state()); setConnectionClosed(false);
@@ -130,7 +133,7 @@ function LocalImportSession() {
 
   return <main style={{ maxWidth: 880, margin: "24px auto", padding: 16, overflowWrap: "anywhere" }}>
     <h1>IOU — private import</h1>
-    <p>The client shares only the draft you reviewed. Receiving it does not save an entry. Review the IOU account, sheet and complete entry below before choosing Save in IOU.</p>
+    <p>The client encrypts the reviewed draft before handing it to IOU. Only the connected IOU user can decrypt it for the linked sheet. Receiving ciphertext does not save an entry. Review the complete entry again before choosing Save in IOU.</p>
     {binding && <p>Sender: <strong>{binding.senderOrigin}</strong>{connectionClosed ? " (closed)" : ""}</p>}
     {!binding && <p>No active handoff. You can export a private local app package below, then use the client’s reviewed handoff. A new native local sender needs your permission for this connection only.</p>}
     {consentState?.kind === "waiting" && <p>Waiting for a local connection request. No draft has been accepted.</p>}
@@ -182,7 +185,7 @@ function ImportAccount({ principal, drafts, binding }: { principal: string; draf
   }, [actor]);
   return <section>
     <h2>Choose the IOU destination</h2>
-    <p>This is a fresh, explicit destination choice. The client’s exported recipient label does not bind or switch your IOU account.</p>
+    <p>Choose the sheet connected in OpenChat. A draft encrypted for another IOU user, backend or sheet cannot be opened here.</p>
     {(error || err) && <p role="alert">{error || err}</p>}
     <label>Existing active sheet <select value={selected} disabled={!!loaded} onChange={(event) => setSelected(event.target.value)}>
       <option value="">Choose a sheet…</option>
@@ -199,6 +202,7 @@ function PrivateSheet({ principal, sheet, defaultCurrency, drafts, binding }: {
 }) {
   const { actor } = useActor();
   const { identity } = useAuth();
+  const deliveryKeys = useLocalDeliveryKey();
   const { unwrapFor } = useSheetKey();
   const { shared, loading, ready, readyGeneration, error } = usePairTemplates(sheet.pairId, sheet.sheetId, { requireReadableSlots: true });
   const [activeId, setActiveId] = useState("");
@@ -210,6 +214,11 @@ function PrivateSheet({ principal, sheet, defaultCurrency, drafts, binding }: {
   const [busy, setBusy] = useState(false);
   const [saved, setSaved] = useState(false);
   const [notice, setNotice] = useState("");
+  const [decrypting, setDecrypting] = useState(false);
+  const decryptedDraft = useRef<PendingLocalImport>();
+  const decryptSequence = useRef(0);
+  const liveDrafts = useRef(drafts);
+  liveDrafts.current = drafts;
   const mounted = useRef(true);
   const current = useRef({ principal, sheetId: sheet.sheetId, binding, actor, identity, ready, readyGeneration });
   current.current = { principal, sheetId: sheet.sheetId, binding, actor, identity, ready, readyGeneration };
@@ -220,8 +229,14 @@ function PrivateSheet({ principal, sheet, defaultCurrency, drafts, binding }: {
   const setupPending = useRef(false);
   const setupOwner = useRef(createLocalSetupDownloadOwner());
   const setupCurrent = !!setup && localSetupContextMatches(setup.context, setupContext.current);
-  useEffect(() => { mounted.current = true; return () => { mounted.current = false; setupOwner.current.clear(); }; }, []);
+  useEffect(() => { mounted.current = true; return () => { mounted.current = false; decryptSequence.current++; setupOwner.current.clear(); }; }, []);
   useEffect(() => { if (setup && !setupCurrent) clearSetup(); }, [setup, setupCurrent]);
+  useEffect(() => {
+    if (decryptedDraft.current && !drafts.includes(decryptedDraft.current)) {
+      decryptSequence.current++; decryptedDraft.current = undefined; setReview(undefined); setEditRows([]); setActiveId("");
+      setNotice("An encrypted retry arrived. Select it again to verify that every retry contains the same reviewed draft.");
+    }
+  }, [drafts]);
 
   function clearSetup() { setupOwner.current.clear(); setSetup(undefined); }
 
@@ -241,13 +256,27 @@ function PrivateSheet({ principal, sheet, defaultCurrency, drafts, binding }: {
     if (!localSetupContextMatches(captured, setupContext.current)) throw new Error("The private setup context changed");
   }
 
-  function chooseDraft(importId: string) {
+  async function chooseDraft(importId: string) {
     const draft = drafts.find((item) => item.importId === importId);
-    if (!draft || locked || !ready) return;
-    setActiveId(importId); setEditRows(draft.payload.entries.map((row) => initializeLocalImportReviewRow(row, shared)));
-    setReview(undefined); setSaved(false);
-    setNotice(draft.payload.entries.some((row) => row.typeId && !shared.some((type) => type.id === row.typeId && type.name === row.typeName))
-      ? "A proposed Type is not available in this sheet. Select a current Type or explicitly use none; no foreign defaults are applied." : "");
+    if (!draft || locked || !ready || !deliveryKeys.ready) return;
+    const captured = { ...current.current }, sequence = ++decryptSequence.current;
+    const stillCurrent = () => {
+      assertCurrent(captured);
+      if (sequence !== decryptSequence.current || !liveDrafts.current.includes(draft)) throw new Error("Encrypted draft changed during decryption");
+    };
+    setActiveId(""); setEditRows([]); setReview(undefined); setSaved(false); setDecrypting(true); decryptedDraft.current = undefined;
+    try {
+      const key = await deliveryKeys.load(false);
+      stillCurrent();
+      const recipient = await createLocalDeliveryEncryption(key.publicKey, { principal, backendHost, backendCanisterId,
+        pairId: sheet.pairId, sheetId: sheet.sheetId });
+      const payload = await decryptPendingLocalImport(draft, key.privateKey, recipient, `${location.origin}/openchat/import`, stillCurrent);
+      stillCurrent(); decryptedDraft.current = draft; setActiveId(importId);
+      setEditRows(payload.entries.map(row => initializeLocalImportReviewRow(row, shared)));
+      setNotice(payload.entries.some(row => row.typeId && !shared.some(type => type.id === row.typeId && type.name === row.typeName))
+        ? "A proposed Type is not available in this sheet. Select a current Type or explicitly use none; no foreign defaults are applied." : "Decrypted locally. Review every field before saving.");
+    } catch { if (mounted.current && sequence === decryptSequence.current) setNotice("This encrypted draft could not be opened for this IOU user and sheet, its key changed, or retries conflict. Reconnect the app; nothing was saved."); }
+    finally { if (mounted.current && sequence === decryptSequence.current) setDecrypting(false); }
   }
   function updateRow(index: number, patch: Partial<LocalImportDraft>) {
     if (locked) return;
@@ -267,14 +296,14 @@ function PrivateSheet({ principal, sheet, defaultCurrency, drafts, binding }: {
       ? editLocalImportDirection(state, direction) : state)); setReview(undefined);
   }
   function prepare() {
-    if (!ready) return;
-    try { setReview({ payloads: prepareLocalImportReview({ rows, selectedTypeIds: typeIds, templates: shared, importId: activeId }), sheet, importId: activeId }); setNotice(""); }
+    if (!ready || !decryptedDraft.current || !drafts.includes(decryptedDraft.current)) return;
+    try { setReview({ payloads: prepareLocalImportReview({ rows, selectedTypeIds: typeIds, templates: shared, importId: activeId }), sheet, importId: activeId, draft: decryptedDraft.current }); setNotice(""); }
     catch (cause) { setNotice((cause as Error).message); setReview(undefined); }
   }
   async function save() {
     if (!review || busy || saved || !actor || !identity || !ready || !readyGeneration) return;
     const captured = { ...current.current, sheetId: review.sheet.sheetId };
-    const stillCurrent = () => assertCurrent(captured);
+    const stillCurrent = () => { assertCurrent(captured); if (!liveDrafts.current.includes(review.draft)) throw new Error("Encrypted draft changed before save"); };
     setLocked(true); setBusy(true); setNotice("");
     try {
       const key = await unwrapFor(review.sheet.sheetId);
@@ -306,9 +335,14 @@ function PrivateSheet({ principal, sheet, defaultCurrency, drafts, binding }: {
       // an app processor during inference or include this private vocabulary in public build files.
       const { metadata, source } = await verifiedLocalSetupProcessor();
       assertSetupCurrent(captured);
+      const key = await deliveryKeys.load(true);
+      const deliveryEncryption = await createLocalDeliveryEncryption(key.publicKey, { principal, backendHost, backendCanisterId,
+        pairId: sheet.pairId, sheetId: sheet.sheetId });
+      assertSetupCurrent(captured);
       const catalog = createIouLocalAppPackage(`${location.origin}/openchat/import`, metadata, {
         processorContext: context,
-        recipientLabel: `IOU account ${sheet.pairId}; sheet ${sheet.sheetId}. Review-only label: choose the receiving IOU account and sheet again before saving.`,
+        deliveryEncryption,
+        recipientLabel: `IOU account ${sheet.pairId}; sheet ${sheet.sheetId}. Encrypted to this IOU user and sheet; review again before saving.`,
       });
       const prepared = { ...createLocalSetupDownloadFiles(catalog, source), context: captured };
       setupOwner.current.replace(prepared);
@@ -323,9 +357,9 @@ function PrivateSheet({ principal, sheet, defaultCurrency, drafts, binding }: {
     <p>Account {sheet.pairId}; other member {sheet.otherPrincipal}. Your entries are encrypted locally for this sheet before saving.</p>
     {(loading || (!ready && !error)) && <p>Loading this sheet’s Types…</p>}{error && <p role="alert">Could not load this sheet’s Types. Saving is disabled.</p>}
     <details><summary>Private local-client setup</summary>
-      <p>Exporting shares no chat or image. The downloaded catalog contains this account’s private Type names, trigger words, directions and default currency ({defaultCurrency || "unset"}); model prompt profiles are authored by IOU. The recipient label is a reminder, not an automatic destination binding.</p>
+      <p>Exporting shares no chat or image. The catalog contains Type names, trigger words, directions, default currency ({defaultCurrency || "unset"}), public delivery key and visible recipient routing metadata. No private key or sheet secret leaves IOU.</p>
       <ul>{shared.map((type) => <li key={type.id}>{type.name}: {type.direction === "credit" ? "Owed to you" : "You owe"}; {type.txn_type}; keywords: {(type.keywords ?? []).join(", ") || "name only"}</li>)}</ul>
-      <button disabled={!ready || loading || !!error || preparingSetup} onClick={() => void prepareSetupFiles()}>{preparingSetup ? "Verifying setup files…" : "Prepare setup files"}</button>
+      <button disabled={!ready || !deliveryKeys.ready || loading || !!error || preparingSetup} onClick={() => void prepareSetupFiles()}>{preparingSetup ? "Verifying setup files…" : "Prepare setup files"}</button>
       {setup && <LocalSetupDownloads files={setup.files} disabled={!setupCurrent || loading || !!error}
         assertCurrent={() => assertSetupCurrent(setup.context)}
         onRequest={(file) => setNotice(`Download requested: ${file.name}. Check your browser’s Downloads list to confirm it was saved.`)}
@@ -336,8 +370,9 @@ function PrivateSheet({ principal, sheet, defaultCurrency, drafts, binding }: {
     </details>
     <h2>Review a received draft</h2>
     {!drafts.length && <p>No draft has been received. Nothing is saved automatically.</p>}
-    <select aria-label="Received draft" value={activeId} disabled={locked || !ready || loading || !!error} onChange={(event) => chooseDraft(event.target.value)}>
-      <option value="">Choose a received draft…</option>{drafts.map((draft, index) => <option key={draft.importId} value={draft.importId}>Draft {index + 1} — {draft.payload.entries.length} entries — {draft.importId}</option>)}
+    {decrypting && <p>Decrypting for this IOU user and sheet…</p>}
+    <select aria-label="Received draft" value={activeId} disabled={locked || decrypting || !deliveryKeys.ready || !ready || loading || !!error} onChange={(event) => void chooseDraft(event.target.value)}>
+      <option value="">Choose an encrypted draft…</option>{drafts.map((draft, index) => <option key={draft.importId} value={draft.importId}>Encrypted draft {index + 1} — {draft.importId}</option>)}
     </select>
     {rows.map((row, index) => <fieldset key={index} disabled={locked} style={{ margin: "16px 0", display: "grid", gap: 10 }}>
       <legend>Entry {index + 1}</legend>

@@ -83,6 +83,7 @@ const store = new Map<string, string>();
 
 import {
   loadOrCreateConsumerKeypair,
+  loadExistingConsumerKeypair,
   consumerPublicKeyPem,
   configureConsumerKeypairBackend,
   clearConsumerKeypair,
@@ -111,6 +112,31 @@ beforeEach(() => {
   s.getGate = null;
   s.bindingKeyMismatch = false;
   configureConsumerKeypairBackend(null);
+});
+
+describe("consumerKeypair receive-only recovery", () => {
+  it("requires authentication even in development", async () => {
+    await expect(loadExistingConsumerKeypair(captureConsumerKeypairSession())).rejects.toThrow("authenticated");
+    expect(s.setCalls).toEqual([]);
+  });
+  it("never provisions an absent remote key", async () => {
+    configureConsumerKeypairBackend(identity);
+    await expect(loadExistingConsumerKeypair(captureConsumerKeypairSession())).rejects.toThrow("unavailable");
+    expect(s.setCalls).toEqual([]);expect(s.remote).toBeNull();
+  });
+  it("recovers the existing wrapped recipient key without rotating or uploading", async () => {
+    configureConsumerKeypairBackend(identity);const original=await loadOrCreateConsumerKeypair();
+    store.delete(IDENTITY_KEY);configureConsumerKeypairBackend(identity);s.setCalls=[];
+    const recovered=await loadExistingConsumerKeypair(captureConsumerKeypairSession());
+    expect(recovered.publicKeySpkiPem).toBe(original.publicKeySpkiPem);expect(s.setCalls).toEqual([]);
+  });
+  it("does not rotate a damaged remote key even without a device cache", async () => {
+    configureConsumerKeypairBackend(identity);await loadOrCreateConsumerKeypair();
+    s.remote!.wrapped_private_key=[1,2,3];const pinned=s.remote!.public_key_pem;
+    store.delete(IDENTITY_KEY);configureConsumerKeypairBackend(identity);s.setCalls=[];
+    await expect(loadExistingConsumerKeypair(captureConsumerKeypairSession())).rejects.toThrow("not replaced");
+    expect(s.remote!.public_key_pem).toBe(pinned);expect(s.setCalls).toEqual([]);
+  });
 });
 
 describe("consumerKeypair account isolation", () => {

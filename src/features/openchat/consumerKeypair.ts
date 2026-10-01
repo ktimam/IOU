@@ -518,7 +518,7 @@ async function setRemoteConsumerKeypair(
   return appliedEpoch;
 }
 
-async function syncWithBackend(identity: Identity, generation: number): Promise<ConsumerKeypair> {
+async function syncWithBackend(identity: Identity, generation: number, allowProvision = true): Promise<ConsumerKeypair> {
   const principal = identity.getPrincipal().toText();
   const storageKey = storageKeyForPrincipal(principal);
   const production = isProdVetkd();
@@ -556,6 +556,13 @@ async function syncWithBackend(identity: Identity, generation: number): Promise<
       return await importStoredForSession(stored, principal, generation);
     } catch (cause) {
       assertCurrentSession(principal, generation);
+      if (!allowProvision) {
+        const recovery = cached ?? legacy;
+        if (recovery && pemOf(recovery) === remote.public_key_pem) {
+          return importStoredForSession(recovery, principal, generation);
+        }
+        throw new NonRecoverableConsumerKeyError("The existing delivery key could not be recovered; it was not replaced");
+      }
       if (production) {
         // A legacy/secure copy may repair a damaged wrapped blob only when its
         // public key matches the already-registered remote public key. Never
@@ -599,6 +606,7 @@ async function syncWithBackend(identity: Identity, generation: number): Promise<
   // Nothing on the canister yet: adopt the device-cached keypair when one
   // exists (preserves any registration made with it) else generate, then
   // wrap + upload so every other device can recover it.
+  if (!allowProvision) throw new NonRecoverableConsumerKeyError("The existing delivery key is unavailable; reconnect IOU before sending");
   const stored = cached ?? legacy ?? (await generate());
   assertCurrentSession(principal, generation);
   await validateStored(stored);
@@ -614,6 +622,22 @@ async function syncWithBackend(identity: Identity, generation: number): Promise<
     purgeLegacy(storageKey);
   }
   return importStoredForSession(stored, principal, generation);
+}
+
+/** Authenticated receive-only recovery: never generates or replaces a recipient key. */
+export async function loadExistingConsumerKeypair(expectedSession: ConsumerKeypairSession): Promise<ConsumerKeypair> {
+  assertCapturedSession(expectedSession);
+  const identity = backendIdentity;
+  if (!identity || identity.getPrincipal().isAnonymous()) throw new Error("An authenticated IOU delivery-key session is required");
+  const storageKey = storageKeyForPrincipal(identity.getPrincipal().toText());
+  if (clearingStorageKeys.has(storageKey)) {
+    throw new Error("consumer keypair is being cleared");
+  }
+  // Recovery never provisions remotely, but it still persists the recovered
+  // private key locally. Disconnect must wait for that write before deleting it.
+  const promise = syncWithBackend(identity, expectedSession.generation, false);
+  trackActiveSync(storageKey, promise);
+  return promise;
 }
 
 /**

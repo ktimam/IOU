@@ -1,6 +1,7 @@
 import { iouActionManifest } from "./actionManifest";
 import { parseLocalProcessorContext, type LocalProcessorContext } from "./localProcessorContext";
 import { DIRECTION_LABELS } from "../entries/directionLabels";
+import { IOU_LOCAL_APP_REVISION, parseLocalDeliveryEncryption, type LocalDeliveryEncryption } from "./localImportEncryption";
 
 /** Strict final review DTO, separate from the model/evidence schema and owned entirely by IOU. */
 export const iouLocalDraftSchema = {
@@ -24,6 +25,7 @@ export const iouLocalDraftSchema = {
 export function createIouLocalAppPackage(destination: string, processor: { sha256: string; byteLength: number }, privateSetup?: {
   recipientLabel: string;
   processorContext: LocalProcessorContext;
+  deliveryEncryption?: LocalDeliveryEncryption;
 }) {
   const url = new URL(destination);
   if (url.username || url.password || url.search || url.hash || url.pathname !== "/openchat/import" ||
@@ -34,6 +36,8 @@ export function createIouLocalAppPackage(destination: string, processor: { sha25
   const parsedContext = privateSetup && parseLocalProcessorContext(privateSetup.processorContext);
   if (privateSetup && (!parsedContext ||
     !privateSetup.recipientLabel.trim() || privateSetup.recipientLabel.length > 512)) throw new Error("Invalid private IOU export.");
+  const deliveryEncryption = privateSetup?.deliveryEncryption && parseLocalDeliveryEncryption(privateSetup.deliveryEncryption);
+  if (privateSetup?.deliveryEncryption && !deliveryEncryption) throw new Error("Invalid IOU delivery encryption setup");
   // The isolated IOU processor already verifies text currency evidence and composes the note.
   // Preserve its reviewed private defaults and optional Type through the host's final conformance
   // pass. Raw source echo is not a field in this private handoff contract.
@@ -77,8 +81,9 @@ export function createIouLocalAppPackage(destination: string, processor: { sha25
     if (!processorContext) throw new Error("Private Type context exceeds the local processor limits after adding editor defaults.");
   }
   return { version: 1, apps: [{
-    id: "iou", revision: "local-import-v1", name: "IOU", description: "Review private transaction drafts, then save encrypted entries in IOU.",
+    id: "iou", revision: IOU_LOCAL_APP_REVISION, name: "IOU", description: "Receive encrypted private transaction drafts, then review and save encrypted entries in IOU.",
     destination: url.href, processor: { sha256: processor.sha256, byteLength: processor.byteLength },
+    ...(deliveryEncryption ? { deliveryEncryption } : {}),
     ...(privateSetup ? { recipientLabel: privateSetup.recipientLabel } : {}), actions: [{
       definition: {
         name: iouActionManifest.id, description: "Prepare an IOU transaction draft for private review.",

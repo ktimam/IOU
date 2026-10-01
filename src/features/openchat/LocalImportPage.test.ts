@@ -5,11 +5,15 @@ const page = readFileSync(new URL("./LocalImportPage.tsx", import.meta.url), "ut
 const routes = readFileSync(new URL("../../app/App.tsx", import.meta.url), "utf8");
 
 describe("private import route wiring", () => {
-  it("is a separate route without legacy OpenChat registration/inbox/capability providers", () => {
+  it("is a separate encrypted route without legacy OpenChat registration/inbox/capability providers", () => {
     expect(routes).toContain('<Route path="/openchat/import" element={<LocalImportPage />} />');
     expect(page).not.toMatch(/ConsumerKeypairSync|ManifestTypesSync|DefaultCurrencySync|openchat_card|cardPrivateContext|chatSheetLinks/);
     expect(page).toContain("window.parent === window && window.opener");
     expect(page).toContain("localImportSenderOrigin(import.meta.env.VITE_LOCAL_IMPORT_SENDER_ORIGIN)");
+    expect(page).toContain("<LocalDeliveryKeyProvider><LocalImportSession /></LocalDeliveryKeyProvider>");
+    expect(page).toContain("await deliveryKeys.load(false)");
+    expect(page).toContain("await decryptPendingLocalImport(");
+    expect(page).not.toContain("draft.payload.entries");
   });
   it("offers only queue local state and replies with the exact origin; the sole write is an explicit Save click", () => {
     const receive = page.slice(page.indexOf("const receive = (event:"), page.indexOf('window.addEventListener("message", receive)'));
@@ -36,7 +40,7 @@ describe("private import route wiring", () => {
     expect(page).toContain("setupPending.current");
     expect(page).toContain("const { metadata, source } = await verifiedLocalSetupProcessor();\n      assertSetupCurrent(captured);");
     expect(page).toContain("localSetupContextMatches(captured, setupContext.current)");
-    expect(page).toContain("mounted.current = false; setupOwner.current.clear()");
+    expect(page).toContain("mounted.current = false; decryptSequence.current++; setupOwner.current.clear()");
     expect(page).toContain("setupOwner.current.replace(prepared);\n      setSetup(prepared)");
     expect(page).toContain("if (setup && !setupCurrent) clearSetup()");
     expect(page).toContain("assertCurrent={() => assertSetupCurrent(setup.context)}");

@@ -3,25 +3,30 @@ import {
   buildLocalImportCommittedReceipt, createLocalImportNonce, createLocalImportReceiver, isLocalImportId, LOCAL_IMPORT_ACTION,
   LOCAL_IMPORT_LIMITS, parseLocalImportPayload, type LocalImportEvent,
 } from "./localImportHandoff";
+import { localDeliveryBase64Url, LOCAL_DELIVERY_SCHEME } from "./localImportEncryption";
 
 const ORIGIN = "https://unofficial.example";
 const SOURCE = {} as Window;
 const NONCE = "A".repeat(43);
 const ID = "B".repeat(42) + "A";
 const ROW = { kind: "iou", amount: 12.35, currency: "USD", direction: "debt", date: "2026-09-26", note: "Reviewed note" };
-const payload = () => ({ entries: [{ ...ROW }] });
-const hello = () => ({ type: "oc:app-import:hello", version: 1, sessionNonce: NONCE });
-const offer = () => ({ type: "oc:app-import:offer", version: 1, sessionNonce: NONCE, importId: ID, actionId: LOCAL_IMPORT_ACTION, payload: payload() });
+const DESTINATION = "http://localhost:3000/openchat/import";
+const envelope = () => ({ version: 1, scheme: LOCAL_DELIVERY_SCHEME, keyId: "a".repeat(64), recipientContext: "AQ",
+  ephemeralPublicKey: localDeliveryBase64Url(Uint8Array.from([4, ...new Array(64).fill(0)])), salt: localDeliveryBase64Url(new Uint8Array(32)),
+  iv: localDeliveryBase64Url(new Uint8Array(12)), ciphertext: localDeliveryBase64Url(new Uint8Array(17)) });
+const hello = () => ({ type: "oc:app-import:hello", version: 2, sessionNonce: NONCE });
+const offer = () => ({ type: "oc:app-import:offer", version: 2, sessionNonce: NONCE, importId: ID,
+  appId: "iou", appRevision: "local-import-v2", actionId: LOCAL_IMPORT_ACTION, destination: DESTINATION, envelope: envelope() });
 const event = (data: unknown): LocalImportEvent => ({ origin: ORIGIN, source: SOURCE, data });
-const receiver = () => createLocalImportReceiver({ senderOrigin: ORIGIN, senderWindow: SOURCE, sessionNonce: NONCE });
+const receiver = () => createLocalImportReceiver({ senderOrigin: ORIGIN, senderWindow: SOURCE, sessionNonce: NONCE, destination: DESTINATION });
 const readyReceiver = () => { const r = receiver(); r.receive(event(hello())); return r; };
 
 describe("local import binding and generic handshake", () => {
   it.each(["null", "*", "http://unofficial.example", "https://unofficial.example/", "https://unofficial.example/path", "https://user:password@unofficial.example", "https://unofficial.example?x=1"]) ("rejects unsafe or non-canonical origin %s", (senderOrigin) => {
-    expect(() => createLocalImportReceiver({ senderOrigin, senderWindow: SOURCE, sessionNonce: NONCE })).toThrow();
+    expect(() => createLocalImportReceiver({ senderOrigin, senderWindow: SOURCE, sessionNonce: NONCE, destination: DESTINATION })).toThrow();
   });
   it.each(["http://localhost:5187", "http://127.0.0.1:5187", "http://[::1]:5187", ORIGIN])("accepts explicit secure/loopback origin %s", (senderOrigin) => {
-    expect(() => createLocalImportReceiver({ senderOrigin, senderWindow: SOURCE, sessionNonce: NONCE })).not.toThrow();
+    expect(() => createLocalImportReceiver({ senderOrigin, senderWindow: SOURCE, sessionNonce: NONCE, destination: DESTINATION })).not.toThrow();
   });
   it("generates distinct canonical 32-byte nonces", () => {
     const a = createLocalImportNonce(); const b = createLocalImportNonce();
@@ -43,7 +48,7 @@ describe("local import binding and generic handshake", () => {
       { ...event(offer()), source: {} as Window },
       { ...event(offer()), source: null },
       event({ ...offer(), sessionNonce: "C".repeat(42) + "A" }),
-      event({ ...offer(), version: 2 }),
+      event({ ...offer(), version: 1 }),
     ];
     for (const item of bad) expect(r.receive(item)).toEqual({ kind: "ignored" });
     expect(r.pending()).toEqual([]);
@@ -57,7 +62,7 @@ describe("local import binding and generic handshake", () => {
   });
   it("does not trust accessor properties or invoke getters", () => {
     const read = vi.fn(() => "oc:app-import:hello");
-    const message = Object.defineProperty({ version: 1, sessionNonce: NONCE }, "type", { enumerable: true, get: read });
+    const message = Object.defineProperty({ version: 2, sessionNonce: NONCE }, "type", { enumerable: true, get: read });
     expect(receiver().receive(event(message))).toEqual({ kind: "ignored" }); expect(read).not.toHaveBeenCalled();
   });
 });
@@ -120,7 +125,7 @@ describe("strict IOU reviewed payload", () => {
 describe("immutable pending-review lifecycle without side effects", () => {
   it("builds a separate saved receipt only from a complete batch acknowledgement", () => {
     const receipt = buildLocalImportCommittedReceipt(NONCE, ID, { entry_ids: [1n, 2n], accepted_count: 2, replayed: false });
-    expect(receipt).toEqual({ type: "oc:app-import:committed", version: 1, sessionNonce: NONCE,
+    expect(receipt).toEqual({ type: "oc:app-import:committed", version: 2, sessionNonce: NONCE,
       importId: ID, status: "saved", acceptedCount: 2, replayed: false });
     expect(Object.isFrozen(receipt)).toBe(true);
     for (const ack of [
@@ -138,23 +143,33 @@ describe("immutable pending-review lifecycle without side effects", () => {
     try {
       const r = readyReceiver(); const input = offer(); const result = r.receive(event(input));
       expect(result).toMatchObject({ kind: "queued", reply: { status: "pending-review", importId: ID } });
-      input.payload.entries[0].amount = 99;
-      expect(r.pending()[0].payload.entries[0].amount).toBe(12.35);
+      input.envelope.keyId = "b".repeat(64);
+      expect(r.pending()[0].envelope.keyId).toBe("a".repeat(64));
       expect(Object.isFrozen(r.pending())).toBe(true);
       expect(Object.isFrozen(r.pending()[0])).toBe(true);
-      expect(Object.isFrozen(r.pending()[0].payload)).toBe(true);
-      expect(Object.isFrozen(r.pending()[0].payload.entries)).toBe(true);
-      expect(Object.isFrozen(r.pending()[0].payload.entries[0])).toBe(true);
+      expect(Object.isFrozen(r.pending()[0].envelope)).toBe(true);
+      expect(Object.isFrozen(r.pending()[0].envelopes)).toBe(true);
+      expect(r.pending()[0]).not.toHaveProperty("payload");
       expect(fetch).not.toHaveBeenCalled();
     } finally { fetch.mockRestore(); }
   });
-  it("deduplicates semantically identical property ordering; changed same-ID data cannot replace review", () => {
+  it("deduplicates exact envelopes but retains fresh ciphertext for authenticated comparison", () => {
     const r = readyReceiver(); r.receive(event(offer()));
-    const duplicate = { ...offer(), payload: { entries: [{ note: ROW.note, date: ROW.date, direction: ROW.direction, currency: ROW.currency, amount: ROW.amount, kind: ROW.kind }] } };
+    const duplicate = offer();
     expect(r.receive(event(duplicate)).kind).toBe("duplicate");
-    const changed = offer(); changed.payload.entries[0].amount = 20;
-    expect(r.receive(event(changed))).toMatchObject({ kind: "rejected", reply: { reason: "id-conflict" } });
-    expect(r.pending()).toHaveLength(1); expect(r.pending()[0].payload.entries[0].amount).toBe(12.35);
+    const changed = offer(); changed.envelope.ciphertext = localDeliveryBase64Url(new Uint8Array(17).fill(1));
+    expect(r.receive(event(changed)).kind).toBe("queued");
+    expect(r.pending()).toHaveLength(1); expect(r.pending()[0].envelopes).toHaveLength(2);
+    expect(r.receive(event({ ...offer(), envelope: { ...envelope(), keyId: "b".repeat(64) } }))).toMatchObject({ kind: "rejected", reply: { reason: "id-conflict" } });
+  });
+  it("refuses plaintext, mixed plaintext/ciphertext, wrong destinations and expired app revisions", () => {
+    const r = readyReceiver();
+    const { envelope: _envelope, ...base } = offer();
+    for (const value of [{ ...base, payload: { entries: [ROW] } }, { ...offer(), payload: { entries: [ROW] } },
+      { ...offer(), destination: "https://other.example/openchat/import" }, { ...offer(), appRevision: "local-import-v1" }]) {
+      expect(r.receive(event(value)).kind).toBe("rejected");
+    }
+    expect(r.pending()).toEqual([]);
   });
   it("bounds pending queue and still permits an exact replay while full", () => {
     const r = readyReceiver();

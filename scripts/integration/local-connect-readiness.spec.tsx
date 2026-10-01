@@ -14,6 +14,8 @@ const fixture = vi.hoisted(() => ({
   templateHook: vi.fn(),
   opener: { closed: false, postMessage: vi.fn() },
   signIn: vi.fn(), signOut: vi.fn(),
+  deliveryKey: undefined as any,
+  loadDeliveryKey: vi.fn(),
 }));
 vi.mock("../../src/features/auth/AuthProvider", () => ({
   AuthProvider: ({ children }: { children: ReactNode }) => children,
@@ -21,12 +23,17 @@ vi.mock("../../src/features/auth/AuthProvider", () => ({
     state: fixture.identity ? { kind: "authenticated", principal: fixture.principal } : { kind: "anonymous" },
     signIn: fixture.signIn, signOut: fixture.signOut }),
 }));
+vi.mock("../../src/features/auth/config", () => ({ host: "http://127.0.0.1:4943", canisterId: "aaaaa-aa" }));
 vi.mock("../../src/features/flows/useActor", () => ({
   useActor: () => ({ actor: fixture.actor, err: undefined }),
   unwrap: (value: unknown) => Array.isArray(value) ? value[0] ?? null : value ?? null,
 }));
 vi.mock("../../src/features/flows/SheetKeyContext", () => ({
   SheetKeyProvider: ({ children }: { children: ReactNode }) => children,
+}));
+vi.mock("../../src/features/openchat/LocalDeliveryKeyProvider", () => ({
+  LocalDeliveryKeyProvider: ({ children }: { children: ReactNode }) => children,
+  useLocalDeliveryKey: () => ({ ready: !!fixture.identity, load: fixture.loadDeliveryKey }),
 }));
 vi.mock("../../src/features/templates/PairTemplatesContext", () => ({
   usePairTemplates: (...args: unknown[]) => { fixture.templateHook(...args); return fixture.templates; },
@@ -74,17 +81,21 @@ function publicFetch(overrides: { sha256?: string; wait?: Promise<void> } = {}) 
 }
 async function settledDigest() {
   await act(async () => {
-    await vi.waitFor(() => expect(digests).toHaveLength(1));
+    await vi.waitFor(() => expect(digests.length).toBeGreaterThanOrEqual(1));
     await Promise.all(digests);
+    // Public-key export/fingerprint is another real crypto turn after processor validation.
+    await new Promise(resolve => setTimeout(resolve, 20));
   });
 }
-beforeEach(() => {
+beforeEach(async () => {
   vi.clearAllMocks();
   vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
   digests = [];
+  fixture.deliveryKey = await webcrypto.subtle.generateKey({ name: "ECDH", namedCurve: "P-256" }, true, ["deriveBits"]);
+  fixture.loadDeliveryKey.mockResolvedValue(fixture.deliveryKey);
   vi.stubGlobal("crypto", { subtle: { digest: (algorithm: string, bytes: BufferSource) => {
     const pending = webcrypto.subtle.digest(algorithm, bytes); digests.push(pending); return pending;
-  } } });
+  }, exportKey: webcrypto.subtle.exportKey.bind(webcrypto.subtle) } });
   vi.stubGlobal("fetch", vi.fn(() => { throw new Error("No network before explicit consent"); }));
   Object.defineProperty(window, "opener", { configurable: true, value: fixture.opener });
   window.history.replaceState(null, "", "/openchat/connect");
@@ -93,7 +104,7 @@ beforeEach(() => {
   fixture.signIn.mockResolvedValue(undefined); fixture.signOut.mockResolvedValue(undefined);
   fixture.templates = { shared: [type], ready: true, readyGeneration: {}, loading: false, error: undefined };
   fixture.actor = {
-    get_my_pairs: vi.fn(async () => [sheetId, otherSheetId].map((id, index) => ({ id: `synthetic-pair-${index}`,
+    get_my_pairs: vi.fn(async () => [sheetId, otherSheetId].map((id, index) => ({ id: index ? "2222222222222222" : "1111111111111111",
       active_sheet_id: [id], archived_at: [], other_principal: { toText: () => "synthetic-partner" } }))),
     get_my_user: vi.fn(async () => [{ default_currency: ["EGP"] }]),
     add_entry_batch: vi.fn(), set_pair_templates: vi.fn(),
@@ -129,7 +140,7 @@ describe("no-file IOU setup consent", () => {
     expect(container.textContent).toContain(clientOrigin);
     expect(container.textContent).toContain(`sheet ${sheetId}`);
     expect(container.textContent).toContain("Private Choice: You owe; keywords: private-keyword");
-    expect(fixture.templateHook).toHaveBeenCalledWith("synthetic-pair-0", sheetId, { requireReadableSlots: true });
+    expect(fixture.templateHook).toHaveBeenCalledWith("1111111111111111", sheetId, { requireReadableSlots: true });
     expect(fetch).not.toHaveBeenCalled();
     expect(fixture.opener.postMessage).not.toHaveBeenCalled();
     const fetcher = publicFetch();
@@ -145,6 +156,9 @@ describe("no-file IOU setup consent", () => {
     expect(app.destination).toBe("http://localhost:3000/openchat/import");
     expect(app.processor).toEqual(metadata);
     expect(app.recipientLabel).toContain(sheetId);
+    expect(app.deliveryEncryption).toMatchObject({ version: 1, scheme: "p256-hkdf-sha256-aes-256-gcm-v1", keyId: expect.stringMatching(/^[a-f0-9]{64}$/) });
+    expect(app.deliveryEncryption.publicKeySpki).toBeTruthy();
+    expect(fixture.loadDeliveryKey).toHaveBeenCalledWith(true);
     expect(app.actions[0].processorContext).toMatchObject({ defaultCurrency: "EGP", draftEditorDefaults: "host-v1",
       types: [{ id: type.id, name: type.name, direction: "debt", keywords: type.keywords, txn_type: "iou" }] });
     expect(app.actions[0].draftEditor.choices[0].options[0]).toMatchObject({ value: type.id, label: type.name,

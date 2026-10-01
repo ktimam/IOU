@@ -32,6 +32,8 @@ describe("IOU-owned public client distribution", () => {
     const app = catalog.apps[0];
     expect(catalog).toEqual(createIouLocalAppPackage(app.destination, app.processor));
     expect(app).not.toHaveProperty("recipientLabel");
+    expect(app).not.toHaveProperty("deliveryEncryption"); // Public discovery cannot provision a recipient key.
+    expect(app.revision).toBe("local-import-v2");
     for (const action of app.actions) {
       expect(action).not.toHaveProperty("processorContext");
       expect(action).not.toHaveProperty("draftEditor");

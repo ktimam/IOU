@@ -1,22 +1,23 @@
 /**
  * A first-party, consent-bound import inbox for the unofficial client.
  *
- * The sender must obtain permission before opening IOU and offering the reviewed payload.
- * A received offer is UNTRUSTED and only queues an immutable local draft for IOU's own review.
+ * The sender must obtain permission before opening IOU and offering its encrypted reviewed payload.
+ * A received offer is UNTRUSTED and only queues immutable ciphertext for IOU's own review.
  * This module never loads a URL, stores a draft, invokes an actor, or submits an entry. It does
  * not assert OpenChat provenance, chat membership, or user consent from a wire flag.
  *
- * The host protocol is generic: actionId and payload are opaque to OpenChat. Only this IOU
- * adapter knows the ledger fields. A future UI supplies a pre-approved exact origin, its
- * opened window reference, and a fresh receiver-owned nonce; never learn these from an offer
- * or place payloads/credentials in URLs. Native bridges require separate qualification.
+ * The host protocol is generic; only this IOU adapter interprets ledger fields after authenticated
+ * decryption for the connected account and sheet. The UI supplies a pre-approved exact origin,
+ * opened window and fresh receiver-owned nonce; never learn those from an offer or put fields or
+ * credentials in URLs. Receiving, decrypting and reviewing are never permission to save an entry.
  */
 import { parseDraft, type EntryDraft } from "../entries/draft";
 import type { EntryBatchAcknowledgement } from "../entries/batchImport";
+import { decryptLocalImportEnvelope, IOU_LOCAL_APP_REVISION, parseLocalEncryptedEnvelope, type LocalDeliveryEncryption, type LocalEncryptedEnvelope, type LocalEncryptedRequest } from "./localImportEncryption";
 
 export const LOCAL_IMPORT_ACTION = "iou.entry.import";
-export const LOCAL_IMPORT_VERSION = 1;
-export const LOCAL_IMPORT_LIMITS = Object.freeze({ entries: 32, noteBytes: 4096, payloadBytes: 65536, queued: 8 });
+export const LOCAL_IMPORT_VERSION = 2;
+export const LOCAL_IMPORT_LIMITS = Object.freeze({ entries: 32, noteBytes: 4096, payloadBytes: 65536, queued: 8, encryptedVariants: 4 });
 
 export type LocalImportDraft = Readonly<
   Required<Pick<EntryDraft, "kind" | "currency" | "direction">> & {
@@ -28,15 +29,13 @@ export type LocalImportDraft = Readonly<
   }
 >;
 export type LocalImportPayload = Readonly<{ entries: readonly LocalImportDraft[] }>;
-export type PendingLocalImport = Readonly<{
-  importId: string;
-  actionId: typeof LOCAL_IMPORT_ACTION;
+export type PendingLocalImport = LocalEncryptedRequest & Readonly<{
   senderOrigin: string;
-  payload: LocalImportPayload;
+  envelopes: readonly LocalEncryptedEnvelope[];
   status: "pending-review";
 }>;
 
-type Envelope = { version: 1; sessionNonce: string };
+type Envelope = { version: 2; sessionNonce: string };
 type Rejection = "invalid-offer" | "id-conflict" | "queue-full";
 export type LocalImportReply =
   | (Envelope & { type: "oc:app-import:ready" })
@@ -183,18 +182,41 @@ export function parseLocalImportPayload(value: unknown): LocalImportPayload | un
   } catch { return undefined; }
 }
 
+/** Authenticated comparison of retries; no plaintext exists in the transport queue. */
+export async function decryptPendingLocalImport(draft: PendingLocalImport, privateKey: CryptoKey,
+  recipient: LocalDeliveryEncryption, destination: string, assertCurrent: () => void): Promise<LocalImportPayload> {
+  if (!draft.envelopes.length || draft.envelopes.length > LOCAL_IMPORT_LIMITS.encryptedVariants) throw new Error("Invalid encrypted draft variants");
+  let payload: LocalImportPayload | undefined;
+  let canonical: string | undefined;
+  for (const envelope of draft.envelopes) {
+    const candidate = parseLocalImportPayload(await decryptLocalImportEnvelope({ ...draft, envelope }, privateKey, recipient, destination, assertCurrent));
+    if (!candidate) throw new Error("The decrypted draft is not a supported IOU entry");
+    const encoded = JSON.stringify(candidate);
+    if (canonical !== undefined && encoded !== canonical) throw new Error("Conflicting encrypted drafts reused the same import ID");
+    canonical = encoded; payload = candidate;
+  }
+  assertCurrent();
+  return payload!;
+}
+
 export function createLocalImportReceiver(binding: {
   senderOrigin: string;
   senderWindow: MessageEventSource;
   sessionNonce: string;
+  destination: string;
 }) {
-  const { senderOrigin, senderWindow, sessionNonce } = binding;
+  const { senderOrigin, senderWindow, sessionNonce, destination } = binding;
+  let destinationUrl: URL;
+  try { destinationUrl = new URL(destination); } catch { throw new Error("Invalid IOU destination"); }
   if (!validOrigin(senderOrigin) || !senderWindow || !isLocalImportId(sessionNonce)) {
     throw new Error("Invalid local import binding");
   }
+  if (!validOrigin(destinationUrl.origin) || destinationUrl.href !== `${destinationUrl.origin}/openchat/import`) {
+    throw new Error("Invalid IOU destination");
+  }
   let ready = false;
   let closed = false;
-  const queue = new Map<string, { draft: PendingLocalImport; canonical: string }>();
+  const queue = new Map<string, PendingLocalImport>();
   const common: Envelope = { version: LOCAL_IMPORT_VERSION, sessionNonce };
   const rejected = (reason: Rejection): LocalImportResult => ({
     kind: "rejected", reply: { ...common, type: "oc:app-import:rejected", reason },
@@ -212,25 +234,31 @@ export function createLocalImportReceiver(binding: {
         return { kind: "ready", reply: { ...common, type: "oc:app-import:ready" } };
       }
       if (!ready || message.type !== "oc:app-import:offer") return { kind: "ignored" };
-      if (!exactKeys(message, ["type", "version", "sessionNonce", "importId", "actionId", "payload"]) ||
-        !isLocalImportId(message.importId) || message.actionId !== LOCAL_IMPORT_ACTION) return rejected("invalid-offer");
-      const payload = parseLocalImportPayload(message.payload);
-      if (!payload) return rejected("invalid-offer");
-      const canonical = JSON.stringify(payload);
+      if (!exactKeys(message, ["type", "version", "sessionNonce", "importId", "appId", "appRevision", "actionId", "destination", "envelope"]) ||
+        !isLocalImportId(message.importId) || message.appId !== "iou" || message.appRevision !== IOU_LOCAL_APP_REVISION ||
+        message.actionId !== LOCAL_IMPORT_ACTION || message.destination !== destination) return rejected("invalid-offer");
+      const envelope = parseLocalEncryptedEnvelope(message.envelope);
+      if (!envelope) return rejected("invalid-offer");
       const prior = queue.get(message.importId);
-      if (prior && prior.canonical !== canonical) return rejected("id-conflict");
+      if (prior && (prior.envelope.keyId !== envelope.keyId || prior.envelope.recipientContext !== envelope.recipientContext)) return rejected("id-conflict");
       if (!prior && queue.size >= LOCAL_IMPORT_LIMITS.queued) return rejected("queue-full");
-      const draft: PendingLocalImport = prior?.draft ?? Object.freeze({
-        importId: message.importId, actionId: LOCAL_IMPORT_ACTION, senderOrigin, payload,
+      const duplicate = prior?.envelopes.some(item => JSON.stringify(item) === JSON.stringify(envelope));
+      if (prior && !duplicate && prior.envelopes.length >= LOCAL_IMPORT_LIMITS.encryptedVariants) return rejected("queue-full");
+      // Re-encrypting the same reviewed payload produces different bytes. Preserve bounded variants
+      // for authenticated comparison; ciphertext equality is never a plaintext/idempotency proof.
+      const draft: PendingLocalImport = duplicate ? prior! : Object.freeze({
+        importId: message.importId, appId: "iou", appRevision: IOU_LOCAL_APP_REVISION, actionId: LOCAL_IMPORT_ACTION,
+        destination, senderOrigin, envelope,
+        envelopes: Object.freeze([...(prior?.envelopes ?? []), envelope]),
         status: "pending-review" as const,
       });
-      if (!prior) queue.set(message.importId, { draft, canonical });
+      if (!duplicate) queue.set(message.importId, draft);
       return {
-        kind: prior ? "duplicate" : "queued", draft,
+        kind: duplicate ? "duplicate" : "queued", draft,
         reply: { ...common, type: "oc:app-import:received", importId: message.importId, status: "pending-review" },
       };
     },
-    pending(): readonly PendingLocalImport[] { return Object.freeze([...queue.values()].map((item) => item.draft)); },
+    pending(): readonly PendingLocalImport[] { return Object.freeze([...queue.values()]); },
     /** Invoke on navigation, logout, expiry or account change; old callbacks then cannot requeue. */
     close(): void { closed = true; ready = false; queue.clear(); },
   });

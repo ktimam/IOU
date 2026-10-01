@@ -74,11 +74,11 @@ describe("one-time native import consent", () => {
       expect(consent.receive(event(connect())).kind).toBe("closed"); expect(consent.approve()).toBeUndefined(); expect(consent.isConnected()).toBe(false);
     }
   });
-  it("only the accepted binding can enter the unchanged hello/offer receiver protocol", () => {
+  it("only the accepted binding can enter the encrypted hello/offer receiver protocol", () => {
     const consent = createLocalImportConsent({ senderWindow: source, now: () => 0, nonce: () => sessionNonce });
     consent.receive(event(connect())); const accepted = consent.approve()!;
-    const receiver = createLocalImportReceiver(accepted.binding);
-    const hello = { type: "oc:app-import:hello", version: 1, sessionNonce };
+    const receiver = createLocalImportReceiver({ ...accepted.binding, destination: "http://localhost:3000/openchat/import" });
+    const hello = { type: "oc:app-import:hello", version: 2, sessionNonce };
     expect(receiver.receive(event({ ...hello, sessionNonce: connectionId })).kind).toBe("ignored");
     expect(receiver.receive(event(hello, "http://localhost:5200")).kind).toBe("ignored");
     expect(receiver.receive(event(hello, origin, {} as Window)).kind).toBe("ignored");
