@@ -4,6 +4,7 @@ import { createIouLocalAppPackage } from "./localAppPackage";
 import { createLocalProcessorContext, parseLocalProcessorContext } from "./localProcessorContext";
 import { iouActionManifest } from "./actionManifest";
 import { DIRECTION_LABELS } from "../entries/directionLabels";
+import { orderedCurrencies } from "../settings/currencies";
 
 const destination = "http://localhost:3000/openchat/import";
 const processor = { sha256: "a".repeat(64), byteLength: 1234 };
@@ -22,7 +23,15 @@ describe("IOU-owned draft presentation", () => {
       recipientLabel: "Synthetic sheet", processorContext: createLocalProcessorContext(setup === "private-types" ? types : [], "EGP"),
     };
     const action = createIouLocalAppPackage(destination, processor, privateSetup).apps[0].actions[0];
-    expect(action.draftPresentation).toEqual(presentation);
+    expect(action.draftPresentation).toEqual({ ...presentation, controls: [
+      { field: "currency", kind: "text", suggestions: orderedCurrencies(setup === "public" ? undefined : "EGP") },
+      { field: "date", kind: "date" },
+      { field: "note", kind: "multiline", fullWidth: true },
+    ] });
+    expect(action.definition.card.rows.map(row => row.valueKey)).toEqual(["amount", "currency", "direction", "kind", "typeId", "date", "note", "typeName"]);
+    expect(action.definition.card.rows.find(row => row.valueKey === "typeId")?.label).toBe("Saved type");
+    expect(action.definition.card.rows.find(row => row.valueKey === "typeName")?.label).toBe("Type name");
+    for (const row of action.definition.card.rows) expect(action.definition.responseSchema.properties).toHaveProperty(row.valueKey);
     expect(action.draftPresentation.enumLabels[1].options).toEqual([
       { value: "credit", label: DIRECTION_LABELS.credit }, { value: "debt", label: DIRECTION_LABELS.debt },
     ]);
@@ -40,6 +49,19 @@ describe("IOU-owned draft presentation", () => {
       expect(Object.keys(entry).sort()).toEqual(["field", "options"]);
       for (const option of entry.options) expect(Object.keys(option).sort()).toEqual(["label", "value"]);
     }
+  });
+  it("offers IOU's currency suggestions without converting the draft schema into an enum", () => {
+    const action = createIouLocalAppPackage(destination, processor, {
+      recipientLabel: "Synthetic sheet", processorContext: createLocalProcessorContext([], "ZZZ"),
+    }).apps[0].actions[0];
+    const suggestions = action.draftPresentation.controls[0].suggestions!;
+    expect(suggestions[0]).toBe("ZZZ");
+    expect(suggestions).toEqual(orderedCurrencies("ZZZ"));
+    expect(new Set(suggestions).size).toBe(suggestions.length);
+    expect(suggestions.length).toBeLessThanOrEqual(256);
+    expect(action.draftSchema.properties.entries.items.properties.currency).toEqual({ type: "string", minLength: 3, maxLength: 3 });
+    expect(action.draftSchema.properties.entries.items.properties.date).toEqual({ type: "string", minLength: 10, maxLength: 10 });
+    expect(action.draftSchema.properties.entries.items.properties.note).toEqual({ type: "string", maxLength: 4096 });
   });
   it("retains the exact original model prompt bytes in the exported extraction contract", () => {
     const action = createIouLocalAppPackage(destination, processor).apps[0].actions[0];

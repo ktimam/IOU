@@ -1,6 +1,7 @@
 import { iouActionManifest } from "./actionManifest";
 import { parseLocalProcessorContext, type LocalProcessorContext } from "./localProcessorContext";
 import { DIRECTION_LABELS } from "../entries/directionLabels";
+import { orderedCurrencies } from "../settings/currencies";
 import { IOU_LOCAL_APP_REVISION, parseLocalDeliveryEncryption, type LocalDeliveryEncryption } from "./localImportEncryption";
 
 /** Strict final review DTO, separate from the model/evidence schema and owned entirely by IOU. */
@@ -90,14 +91,22 @@ export function createIouLocalAppPackage(destination: string, processor: { sha25
         promptTemplate: iouActionManifest.prompt, responseSchema,
         rules, acceptsImage: true,
         card: { title: iouActionManifest.title,
-          rows: iouActionManifest.card.fields.map(({ key, label }) => ({ label, valueKey: key })),
+          rows: ["amount", "currency", "direction", "kind", "typeId", "date", "note", "typeName"].map(key => ({
+            label: key === "typeId" ? "Saved type" : key === "typeName" ? "Type name" :
+              iouActionManifest.card.fields.find(field => field.key === key)!.label,
+            valueKey: key,
+          })),
           confirmLabel: "Review in IOU", cancelLabel: "Cancel" },
       },
       draftSchema: iouLocalDraftSchema, handoff: { kind: "wrapped-list", field: "entries" },
-      // Display copy only; extraction, stored enum values and saved-Type defaults stay unchanged.
+      // Presentation only; suggestions do not restrict currencies or change extracted values.
       draftPresentation: { version: 1, enumLabels: [
         { field: "kind", options: [{ value: "iou", label: "IOU" }, { value: "settlement", label: "Settlement" }] },
         { field: "direction", options: [{ value: "credit", label: DIRECTION_LABELS.credit }, { value: "debt", label: DIRECTION_LABELS.debt }] },
+      ], controls: [
+        { field: "currency", kind: "text", suggestions: orderedCurrencies(parsedContext?.defaultCurrency) },
+        { field: "date", kind: "date" },
+        { field: "note", kind: "multiline", fullWidth: true },
       ] },
       ...(processorContext ? { processorContext } : {}),
       ...(draftEditor ? { draftEditor } : {}),
