@@ -5,6 +5,7 @@ import { createLocalProcessorContext, parseLocalProcessorContext } from "./local
 import { iouActionManifest } from "./actionManifest";
 import { DIRECTION_LABELS } from "../entries/directionLabels";
 import { orderedCurrencies } from "../settings/currencies";
+import { parseLocalImportPayload } from "./localImportHandoff";
 
 const destination = "http://localhost:3000/openchat/import";
 const processor = { sha256: "a".repeat(64), byteLength: 1234 };
@@ -24,7 +25,7 @@ describe("IOU-owned draft presentation", () => {
     };
     const action = createIouLocalAppPackage(destination, processor, privateSetup).apps[0].actions[0];
     expect(action.draftPresentation).toEqual({ ...presentation, controls: [
-      { field: "currency", kind: "text", suggestions: orderedCurrencies(setup === "public" ? undefined : "EGP") },
+      { field: "currency", kind: "select", suggestions: orderedCurrencies(setup === "public" ? undefined : "EGP") },
       { field: "date", kind: "date" },
       { field: "note", kind: "multiline", fullWidth: true },
     ] });
@@ -59,9 +60,34 @@ describe("IOU-owned draft presentation", () => {
     expect(suggestions).toEqual(orderedCurrencies("ZZZ"));
     expect(new Set(suggestions).size).toBe(suggestions.length);
     expect(suggestions.length).toBeLessThanOrEqual(256);
-    expect(action.draftSchema.properties.entries.items.properties.currency).toEqual({ type: "string", minLength: 3, maxLength: 3 });
+    expect(action.draftSchema.properties.entries.items.properties.currency).toEqual({ type: "string", minLength: 3, maxLength: 3, pattern: "^[A-Z]{3}$" });
     expect(action.draftSchema.properties.entries.items.properties.date).toEqual({ type: "string", minLength: 10, maxLength: 10 });
     expect(action.draftSchema.properties.entries.items.properties.note).toEqual({ type: "string", maxLength: 4096 });
+  });
+  it("declares the recipient's uppercase currency boundary only for final review and retains unsuggested codes", () => {
+    const action = createIouLocalAppPackage(destination, processor).apps[0].actions[0];
+    const currencySchema = action.draftSchema.properties.entries.items.properties.currency;
+    expect(currencySchema).toEqual({ type: "string", minLength: 3, maxLength: 3, pattern: "^[A-Z]{3}$" });
+    expect(currencySchema).not.toHaveProperty("enum");
+    expect(action.draftPresentation.controls[0]).toEqual({ field: "currency", kind: "select", suggestions: orderedCurrencies() });
+    expect(action.draftPresentation.controls[0].suggestions).not.toContain("XXQ");
+    const extractionProperties = iouActionManifest.outputSchema.properties as Record<string, Record<string, unknown>>;
+    const { "x-openchat-require-text-evidence": _evidence, ...originalExtractionCurrency } = extractionProperties.currency;
+    expect(action.definition.responseSchema.properties.currency).toEqual(originalExtractionCurrency);
+    expect(action.definition.responseSchema.properties.currency).not.toHaveProperty("pattern");
+    for (const [currency, accepted] of [
+      ["USD", true], ["EGP", true], ["ZZZ", true], ["XXQ", true],
+      ["usd", false], ["UsD", false], ["12A", false], ["A$B", false],
+      ["ÅBC", false], ["ＵＳＤ", false], ["US", false], ["USDD", false],
+      [" USD", false], ["USD ", false], ["USD\n", false], ["", false],
+    ] as const) {
+      const payload = { entries: [{ kind: "iou", amount: 1.23, currency, direction: "debt" }] };
+      const before = JSON.stringify(payload);
+      const parsed = parseLocalImportPayload(payload);
+      expect(parsed !== undefined, JSON.stringify(currency)).toBe(accepted);
+      if (accepted) expect(parsed?.entries[0].currency).toBe(currency);
+      expect(JSON.stringify(payload)).toBe(before);
+    }
   });
   it("retains the exact original model prompt bytes in the exported extraction contract", () => {
     const action = createIouLocalAppPackage(destination, processor).apps[0].actions[0];

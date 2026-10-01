@@ -12,7 +12,7 @@ export const iouLocalDraftSchema = {
       properties: {
         kind: { type: "string", enum: ["iou", "settlement"] },
         amount: { type: "number", minimum: 0.01, maximum: Math.floor(Number.MAX_SAFE_INTEGER / 100) },
-        currency: { type: "string", minLength: 3, maxLength: 3 },
+        currency: { type: "string", minLength: 3, maxLength: 3, pattern: "^[A-Z]{3}$" },
         direction: { type: "string", enum: ["credit", "debt"] },
         date: { type: "string", minLength: 10, maxLength: 10 },
         note: { type: "string", maxLength: 4096 },
@@ -99,12 +99,12 @@ export function createIouLocalAppPackage(destination: string, processor: { sha25
           confirmLabel: "Review in IOU", cancelLabel: "Cancel" },
       },
       draftSchema: iouLocalDraftSchema, handoff: { kind: "wrapped-list", field: "entries" },
-      // Presentation only; suggestions do not restrict currencies or change extracted values.
+      // Presentation only; suggestions do not narrow valid currency codes or change extracted values.
       draftPresentation: { version: 1, enumLabels: [
         { field: "kind", options: [{ value: "iou", label: "IOU" }, { value: "settlement", label: "Settlement" }] },
         { field: "direction", options: [{ value: "credit", label: DIRECTION_LABELS.credit }, { value: "debt", label: DIRECTION_LABELS.debt }] },
       ], controls: [
-        { field: "currency", kind: "text", suggestions: orderedCurrencies(parsedContext?.defaultCurrency) },
+        { field: "currency", kind: "select", suggestions: orderedCurrencies(parsedContext?.defaultCurrency) },
         { field: "date", kind: "date" },
         { field: "note", kind: "multiline", fullWidth: true },
       ] },
