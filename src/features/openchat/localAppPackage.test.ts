@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { createHash } from "node:crypto";
+import { readFileSync } from "node:fs";
 import { createIouLocalAppPackage } from "./localAppPackage";
 import { createLocalProcessorContext, parseLocalProcessorContext } from "./localProcessorContext";
 import { iouActionManifest } from "./actionManifest";
@@ -17,6 +18,39 @@ const presentation = { version: 1, enumLabels: [
   { field: "kind", options: [{ value: "iou", label: "IOU" }, { value: "settlement", label: "Settlement" }] },
   { field: "direction", options: [{ value: "credit", label: "Owed to you" }, { value: "debt", label: "You owe" }] },
 ] };
+
+describe("checked-in public IOU package freshness", () => {
+  const artifact = (name: string) => readFileSync(new URL(`../../../public/openchat/${name}`, import.meta.url));
+  const digest = (bytes: Uint8Array) => createHash("sha256").update(bytes).digest("hex");
+
+  it("exports the current producer contract, not just an internally consistent older catalog", () => {
+    const catalog = JSON.parse(artifact("local-app-v1.json").toString("utf8"));
+    const metadata = JSON.parse(artifact("local-processor-v1.sha256.json").toString("utf8"));
+    expect(catalog.apps).toHaveLength(1);
+    const expected = createIouLocalAppPackage(catalog.apps[0].destination, metadata);
+    // Compare the whole source-produced recipe: stale card rows/schema must fail even when
+    // their old public-file digests still agree. Private setup is never included here.
+    expect(catalog).toEqual(expected);
+  });
+
+  it("binds the public directory and setup metadata to the exact exported bytes", () => {
+    const catalogBytes = artifact("local-app-v1.json");
+    const processorBytes = artifact("local-processor-v1.js");
+    const catalog = JSON.parse(catalogBytes.toString("utf8"));
+    const directory = JSON.parse(artifact("apps-v1.json").toString("utf8"));
+    const metadata = JSON.parse(artifact("local-processor-v1.sha256.json").toString("utf8"));
+    const app = catalog.apps[0];
+    const processorIdentity = { sha256: digest(processorBytes), byteLength: processorBytes.byteLength };
+    expect(metadata).toEqual({ version: 1, ...processorIdentity, protocol: "oc:local-process:request" });
+    expect(app.processor).toEqual(processorIdentity);
+    expect(directory).toEqual({ version: 1, apps: [{
+      id: app.id, name: app.name, description: app.description, revision: app.revision,
+      catalog: { url: "/openchat/local-app-v1.json", sha256: digest(catalogBytes), byteLength: catalogBytes.byteLength },
+      processor: { url: "/openchat/local-processor-v1.js", ...processorIdentity },
+      setupUrl: "/openchat/connect",
+    }] });
+  });
+});
 
 describe("IOU-owned draft presentation", () => {
   it.each(["public", "private-empty", "private-types"] as const)("exports display-only labels for %s setup without changing scalar values or defaults", (setup) => {

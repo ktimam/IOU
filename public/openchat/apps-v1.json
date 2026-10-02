@@ -8,8 +8,8 @@
       "revision": "local-import-v2",
       "catalog": {
         "url": "/openchat/local-app-v1.json",
-        "sha256": "24bde3cdbac708e4a00d6c885fcb5cc09f12218e101da00e2a3b8f0f08eb2080",
-        "byteLength": 30379
+        "sha256": "b52db934975938e52f6a8833ef0adfeac5f178c33b2bed758453d0663d22060a",
+        "byteLength": 35014
       },
       "processor": {
         "url": "/openchat/local-processor-v1.js",

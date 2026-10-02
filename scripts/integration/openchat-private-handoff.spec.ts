@@ -15,12 +15,14 @@ vi.mock("@oc-test/ocrImage",()=>({prepareImageForBrowserOcr:async(bytes:Uint8Arr
 vi.mock("@oc-test/appLocalProcessor",async(original)=>({...await original(),processWithApp:runtime.remote}));
 import {extractPrivateAppAction} from "@oc-test/aiActionRunner";
 import {parseLocalAppCatalog,projectLocalAppPayload,type LocalAppAction} from "@oc-test/localAppCatalog";
+import {bindConnectedLocalApp,parseLocalAppDirectory,publicLocalAppCatalog,validateLocalAppInstallation} from "@oc-test/localAppDirectory";
 import {initializeLocalAppDraftChoices,selectLocalAppDraftChoice,editLocalAppDraftScalar,assertLocalAppDraftChoiceConsistency} from "@oc-test/localAppDraftChoices";
 import {LocalAppDraftStore, type LocalDraftDeliveryRequest} from "@oc-test/localAppDrafts";
 import {sealLocalAppDelivery} from "@oc-test/localAppEncryption";
 import {browserImageActionMode} from "@oc-test-store/browserImageActionMode";
 import {createIouLocalAppPackage} from "../../src/features/openchat/localAppPackage";
 import {createLocalProcessorContext} from "../../src/features/openchat/localProcessorContext";
+import {orderedCurrencies} from "../../src/features/settings/currencies";
 import {processLocalArtifactRequest} from "../../src/features/openchat/localProcessorArtifact";
 import {createLocalImportNonce,createLocalImportReceiver,parseLocalImportPayload,decryptPendingLocalImport} from "../../src/features/openchat/localImportHandoff";
 import {createLocalDeliveryEncryption, type LocalDeliveryEncryption} from "../../src/features/openchat/localImportEncryption";
@@ -62,6 +64,51 @@ const retainedImageCaptures=[smallerQwenCapture,gemmaCapture].flatMap((capture)=
   .map((row)=>({modelId:capture.modelId,promptSha256:capture.promptSha256,imageId:row.imageId,row})));
 
 describe("actual IOU export through actual OpenChat proposal/conformance/project/receiver",()=>{
+  it("binds the shipped public catalog to the actual encrypted private setup and persisted provenance",async()=>{
+    const artifactRoot=resolve(dirname(fileURLToPath(import.meta.url)),"../../public/openchat");
+    const sourceUrl="http://localhost:3000/openchat/apps-v1.json";
+    const directoryJson=readFileSync(resolve(artifactRoot,"apps-v1.json"),"utf8");
+    const publicCatalogJson=readFileSync(resolve(artifactRoot,"local-app-v1.json"),"utf8");
+    const processorBytes=readFileSync(resolve(artifactRoot,"local-processor-v1.js"));
+    const metadata=JSON.parse(readFileSync(resolve(artifactRoot,"local-processor-v1.sha256.json"),"utf8"));
+    const descriptor=parseLocalAppDirectory(directoryJson,sourceUrl).apps[0];
+    expect(descriptor.catalog).toMatchObject({sha256:createHash("sha256").update(publicCatalogJson).digest("hex"),byteLength:Buffer.byteLength(publicCatalogJson)});
+    expect(descriptor.processor).toMatchObject({sha256:createHash("sha256").update(processorBytes).digest("hex"),byteLength:processorBytes.byteLength});
+    expect(metadata).toMatchObject({sha256:descriptor.processor.sha256,byteLength:descriptor.processor.byteLength});
+    const advertised=publicLocalAppCatalog(publicCatalogJson,descriptor);
+    const setup=createIouLocalAppPackage(destination,metadata,{recipientLabel:"Synthetic account and sheet",deliveryEncryption,
+      processorContext:createLocalProcessorContext([{id:"synthetic-acceptance",name:"Synthetic acceptance",direction:"debt",txn_type:"iou",keywords:["TESTONLY"]}],"USD")});
+    const json=JSON.stringify(setup);
+    // Parse separately: a valid private encryption/context DTO is not proof of public-recipe binding.
+    const parsed=parseLocalAppCatalog(json).apps[0];
+    expect(parsed.deliveryEncryption).toEqual(deliveryEncryption);
+    expect(parsed.actions[0].draftEditor?.choices[0].options[0]).toMatchObject({value:"synthetic-acceptance",label:"Synthetic acceptance"});
+    const connected=bindConnectedLocalApp(json,advertised);
+    expect(connected).toEqual(parsed);
+    const installation={appId:connected.id,sourceUrl,descriptor,publicCatalogJson};
+    expect(await validateLocalAppInstallation(JSON.parse(JSON.stringify(installation)),connected)).toEqual(installation);
+    expect(runtime.infer).not.toHaveBeenCalled();expect(runtime.ocr).not.toHaveBeenCalled();expect(runtime.remote).not.toHaveBeenCalled();
+  });
+  it("accepts current encrypted setup but still rejects changes to the pinned definition, final schema and handoff",()=>{
+    const processor={sha256:"a".repeat(64),byteLength:123};
+    const advertised=parseLocalAppCatalog(JSON.stringify(createIouLocalAppPackage(destination,processor)));
+    const setup=createIouLocalAppPackage(destination,processor,{recipientLabel:"Synthetic recipient",deliveryEncryption,
+      processorContext:createLocalProcessorContext([{id:"synthetic-acceptance",name:"Synthetic acceptance",direction:"debt",txn_type:"iou",keywords:["TESTONLY"]}],"USD")});
+    expect(bindConnectedLocalApp(JSON.stringify(setup),advertised).deliveryEncryption).toEqual(deliveryEncryption);
+    const mutations=[
+      (app:typeof setup.apps[0])=>{app.actions[0].definition.card.title="Changed public title";},
+      (app:typeof setup.apps[0])=>{app.actions[0].definition.card.rows.reverse();},
+      (app:typeof setup.apps[0])=>{app.actions[0].definition.promptTemplate+=" Changed pinned prompt.";},
+      (app:typeof setup.apps[0])=>{delete (app.actions[0].draftSchema.properties.entries.items.properties.currency as {pattern?:string}).pattern;},
+      (app:typeof setup.apps[0])=>{app.actions[0].handoff={kind:"single"} as typeof app.actions[0].handoff;},
+      (app:typeof setup.apps[0])=>{app.destination="http://localhost:3000/other-import";},
+    ];
+    for(const mutate of mutations){
+      const changed=JSON.parse(JSON.stringify(setup)) as typeof setup;
+      mutate(changed.apps[0]);
+      expect(()=>bindConnectedLocalApp(JSON.stringify(changed),advertised)).toThrow();
+    }
+  });
   it("retains exactly the existing Arabic/range captures for both currently selected models",()=>{
     expect(retainedImageCaptures.map(({modelId,imageId})=>`${modelId}/${imageId}`).sort()).toEqual([
       "gemma-4-e2b-it-q4/dev-real-arabic-transfer","gemma-4-e2b-it-q4/dev-real-payout-range",
@@ -172,6 +219,10 @@ describe("actual IOU export through actual OpenChat proposal/conformance/project
       expect(action.draftPresentation).toEqual({version:1,enumLabels:[
         {field:"kind",options:[{value:"iou",label:"IOU"},{value:"settlement",label:"Settlement"}]},
         {field:"direction",options:[{value:"credit",label:"Owed to you"},{value:"debt",label:"You owe"}]},
+      ],controls:[
+        {field:"currency",kind:"select",suggestions:orderedCurrencies("EGP")},
+        {field:"date",kind:"date"},
+        {field:"note",kind:"multiline",fullWidth:true},
       ]});
       const candidate={kind,direction,amount:20,currency:"USD",note:"Synthetic presentation parity"};
       const payload=hostPayload(action,[candidate]);
