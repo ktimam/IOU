@@ -70,8 +70,8 @@ login bridge; this procedure is not a claim of native runtime acceptance.
 Opening **Private apps** refreshes the public directory. Compatible updates from
 the same approved publisher are verified and installed without file uploads or
 another APK update, provided the client already supports the directory and protocol.
-Updates wait while processing or a draft is active; a failed update retains the
-last working setup. Changes requiring a new private recipe, trust or destination
+Updates wait while processing or any private cards are retained; a failed update
+retains the last working setup. Changes requiring a new private recipe, trust or destination
 ask for **Reconnect**. After changing the IOU account, sheet, Types or currency,
 reconnect and review the new setup rather than assuming the remembered copy changed.
 Changing publisher origin or requiring a new client protocol is not a compatible update.
@@ -79,13 +79,15 @@ Changing publisher origin or requiring a new client protocol is not a compatible
 The local-test client remembers connected or imported setup, selected app/action and
 enabled chats on this device, isolated by the signed-in OpenChat account and backend.
 That local setup contains private Type names and is not chat-encrypted or synced.
-Use **Forget this account's app setup on this device** to remove it. The active private
-card is saved separately with device-local encryption, scoped to OpenChat account/backend.
+Use **Forget this account's app setup and ALL saved private cards on this device**
+to remove setup and all saved cards. Up to eight private cards are saved separately
+in a device-local encrypted collection, scoped to OpenChat account/backend.
 Approval tokens and transport details remain ephemeral. Restoring a card requires fresh
 review; an attempted delivery retains the same request ID and is never retried automatically.
-Signing out clears the live card view but retains its encrypted local copy. **Discard**
-removes the card/key; **Forget** removes setup and card/key. These local operations do
-not recall a delivered request or undo an entry already saved in IOU.
+Signing out clears the live card view but retains the encrypted local collection.
+**Discard** removes only the selected card, retaining the collection and encryption key
+even when no cards remain. **Forget** removes setup, all saved cards and the encryption key.
+These local operations do not recall a delivered request or undo an entry already saved in IOU.
 
 ## Advanced recovery with setup files
 
