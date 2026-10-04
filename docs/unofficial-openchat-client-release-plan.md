@@ -196,6 +196,38 @@ Do not merge every old checkpoint branch or copy the live runtime over the lates
 - Retain the previously deferred scoped advisory record. No broad OpenChat core audit is
   part of this plan; review feature/release exposure and any newly introduced dependencies.
 
+## October 4 local-test IOU advisory deferral
+
+On 2026-10-04 the user explicitly chose to defer the following newer findings
+recorded by [IOU run 37188618011](https://github.com/ktimam/IOU/actions/runs/37188618011)
+for the unofficial **local-test** release. This records that decision; it does
+not rerun the audit or assert that the findings are harmless.
+
+| Recorded package/version | Recorded advisory IDs |
+| --- | --- |
+| Hono 4.12.34 | [GHSA-gqvv-2mrq-wpjv](https://github.com/advisories/GHSA-gqvv-2mrq-wpjv); [GHSA-g6gw-c38x-mqfc](https://github.com/advisories/GHSA-g6gw-c38x-mqfc); [GHSA-crvj-82cr-hjcx](https://github.com/advisories/GHSA-crvj-82cr-hjcx); [GHSA-hxh3-vqpv-xpqv](https://github.com/advisories/GHSA-hxh3-vqpv-xpqv) |
+| ip-address 10.4.0 | [GHSA-rpw4-54j3-4h4q](https://github.com/advisories/GHSA-rpw4-54j3-4h4q); [GHSA-2vr4-cq9g-pvrc](https://github.com/advisories/GHSA-2vr4-cq9g-pvrc); [GHSA-j6r3-76f7-8jcv](https://github.com/advisories/GHSA-j6r3-76f7-8jcv); [GHSA-h3mg-xc3c-68pw](https://github.com/advisories/GHSA-h3mg-xc3c-68pw) |
+| fast-uri 3.1.7 | [GHSA-hrr3-gc8f-f4qj](https://github.com/advisories/GHSA-hrr3-gc8f-f4qj) |
+| brace-expansion 2.1.4 / 5.0.9 | [GHSA-q2hr-2g5m-vwhr](https://github.com/advisories/GHSA-q2hr-2g5m-vwhr); [GHSA-qhr7-859c-m2p7](https://github.com/advisories/GHSA-qhr7-859c-m2p7); [GHSA-6j4f-fj2g-mc7p](https://github.com/advisories/GHSA-6j4f-fj2g-mc7p) |
+
+The brace-expansion row groups the versions and IDs recorded in that report;
+it does not assert every possible version/ID combination. The decision is limited
+to the recorded finding set, not future findings, versions or advisories.
+`brace-expansion` is a different package from OpenChat's separately deferred
+`braces`; previous OpenChat Rust/braces and earlier IOU decisions remain unchanged.
+
+Reachability and exploitability in the deployed IOU paths are not established by
+this decision. Dependency presence does not prove exposure or non-exposure.
+The findings stay open and disclosed, but no longer require a local-test approval
+decision. The original hosted audit job remains failed; downstream typecheck,
+coverage, card UI, build and Rust jobs skipped behind it remain skipped. Separate
+local functional passes do not convert those hosted outcomes into passes.
+
+No package was upgraded, no new audit or query was run, and no CI gate, exception,
+suppression or security policy was changed. This does not approve a public or
+production release. Model/browser acceptance and the existing phone, optional
+voice and public-release deferrals remain separate.
+
 ## Acceptance gates
 
 1. **Backend compatibility:** requests use only supported official APIs; no `ai_apps`,
