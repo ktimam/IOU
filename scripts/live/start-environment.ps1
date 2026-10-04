@@ -1,9 +1,15 @@
 <#
 .SYNOPSIS
-Starts or verifies the complete preserved OpenChat + IOU phone-development environment.
+Starts or verifies the legacy registered-app OpenChat + IOU phone-development environment.
 
 .DESCRIPTION
-This is the one normal entry point after a reboot. It is deliberately fail-closed:
+This entry point targets the legacy local-canister integration, not the unofficial fork client
+using official OpenChat services. Do not repoint openChatRepo to convert this launcher: it still
+sets local OpenChat backend flags and checks the legacy published-app registration. For the
+unofficial client, follow docs/openchat-private-import.md: use the strict existing recovered-state
+manager, an IOU-only frontend, and the selected frozen fork preview separately.
+
+The legacy environment checks remain deliberately fail-closed:
 
 * the authoritative recovered PocketIC manager must validate the exact three-subnet topology and
   deployed canisters;

@@ -8,6 +8,40 @@ draft received by IOU is not saved until its final review is confirmed.
 encryption at Save. The September 26 plaintext transport is obsolete. Source changes
 and passing tests do not update previously installed APKs or served bundles automatically.
 
+## Restart the existing local-test environment
+
+The general `scripts/live/start-environment.ps1` launcher belongs to the legacy
+registered-app/local-OpenChat-canister integration. It is not the unofficial fork's
+reboot entry point: changing its `openChatRepo` setting would still launch local
+OpenChat backend flags and require the old app registration. Do not use it to
+replace the unofficial client, or retarget its saved state to a new replica.
+
+Reuse healthy processes first. When a service is stopped, restore only these
+existing components, in order, without rebuilding or reinstalling anything:
+
+1. From this IOU checkout, check the strict recovered manager with
+   `pwsh -File scripts/live/pocketic-recovered.ps1 status -EnvironmentConfigPath scripts/live/start-environment.local.json`.
+   Use the same command with `start` only when it is stopped. Preserve the existing
+   config, state directory, canisters and account data, even where historical names
+   mention OpenChat. Do not substitute `dfx start`, reset, deploy or automatic repair.
+   An incomplete checkpoint requires separate backup-first recovery approval.
+2. Start only the IOU frontend from this checkout with the installed Vite command
+   `node node_modules/vite/bin/vite.js --host 127.0.0.1 --port 3000 --strictPort`.
+   The launcher must pass an explicitly present empty `VITE_IC_URL` in the child
+   environment, plus `VITE_LOCAL_IMPORT_SENDER_ORIGIN=http://localhost:5190` for
+   this browser origin. Keep the existing local network, port and canister settings;
+   do not let a stale LAN override replace the preserved local gateway. Use the
+   existing IOU-only launcher that supplies these values, not the general launcher.
+3. From the fork checkout, reuse the selected, already verified frozen web artifact:
+   `node scripts/preview-unofficial-local-web.mjs --directory <existing-frozen-web-build>`.
+   Supply its absolute directory; do not rebuild, change its origin or clear model
+   caches merely to restart it. Open the artifact's `http://localhost:5190` address,
+   not its IP alias. A `/communities` health request must accept `text/html`.
+
+The recovered replica serves IOU and its local identity service; it does not change
+the unofficial client's official OpenChat backend. HTTP readiness is not proof of
+signed-in app connection, model inference or successful encrypted delivery.
+
 ## Browser handoff prerequisite
 
 Before delivering drafts through the browser workflow, configure the IOU frontend
