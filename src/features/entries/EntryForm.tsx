@@ -10,10 +10,11 @@
 //   - convert toggle: pick target currency, fetch FX rate, show
 //     converted amount
 
-import { useEffect, useState } from "react";
+import { useState } from "react";
 import type { EntryPayload, Direction, TxnType } from "./types";
 import { DIRECTION_LABELS } from "./directionLabels";
-import { fetchRate, type FxRate } from "./fx";
+import { resolveConversion } from "./conversion";
+import { useCurrencyConversion } from "./useCurrencyConversion";
 import { netAfterFee, formatMinor } from "./balance";
 import { buildEntryPayload } from "./entryMath";
 import { usePreferences } from "../settings/usePreferences";
@@ -48,18 +49,17 @@ export function EntryForm({
   // A sheet has no currency of its own, so the only default is the user's single
   // default currency (Settings -> Default currency). An entry being EDITED keeps its own.
   const [currency, setCurrency] = useState(
-    initial?.currency ?? prefs.defaultCurrency ?? "USD",
+    initial?.convert?.from_currency ?? initial?.currency ?? prefs.defaultCurrency ?? "USD",
   );
   // Default first, then USD/EUR/GBP, then every other ISO code alphabetically. The
   // entry's own code is folded in so an edited entry's currency never drops out of
   // the list (e.g. a legacy or non-ISO code).
-  const currencyOptions = orderedCurrencies(prefs.defaultCurrency, [currency]);
+  const currencyOptions = orderedCurrencies(prefs.defaultCurrency, [currency, initial?.convert?.to_currency ?? ""]);
   // The amount field holds the GROSS (face value). For an entry with a fee
   // the stored amount_minor is the net, so seed from the fee's gross.
   // Templates may carry no amount at all → leave it blank.
-  const initialGrossMinor = initial?.fee
-    ? initial.fee.gross_amount_minor
-    : initial?.amount_minor;
+  const initialGrossMinor = initial?.convert?.from_amount_minor ??
+    initial?.fee?.gross_amount_minor ?? initial?.amount_minor;
   const [amount, setAmount] = useState(
     initialGrossMinor && initialGrossMinor > 0
       ? (initialGrossMinor / 100).toFixed(2)
@@ -108,41 +108,20 @@ export function EntryForm({
       [prefs.defaultCurrency, "USD", "EUR"].find((c) => c && c !== currency) ??
       "USD",
   );
-  const [rate, setRate] = useState<FxRate | null>(null);
-  const [rateErr, setRateErr] = useState<string | null>(null);
-  const [rateLoading, setRateLoading] = useState(false);
-
-  async function fetchRateAndStore() {
-    setRate(null);
-    setRateErr(null);
-    setRateLoading(true);
-    try {
-      const r = await fetchRate(currency, convertTo);
-      setRate(r);
-    } catch (e) {
-      setRateErr((e as Error).message);
-    } finally {
-      setRateLoading(false);
-    }
-  }
-
-  useEffect(() => {
-    if (convertEnabled && currency !== convertTo) {
-      fetchRateAndStore();
-    } else if (convertEnabled && currency === convertTo) {
-      setRate({ base: currency, quote: convertTo, rate: 1, fetchedAt: Date.now(), source: "frankfurter.app" });
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [convertEnabled, currency, convertTo]);
+  const conversion = useCurrencyConversion(convertEnabled, currency, convertTo, initial?.convert);
 
   const amountMinor = Math.round((parseFloat(amount) || 0) * 100);
   const feeFixedMinor = Math.round((parseFloat(feeFixed) || 0) * 100);
   const feeCcy = feeFixedCurrency || currency;
   // A fixed fee in a different currency doesn't reduce the entry amount; it's its own balance line.
   const feeForeign = feeFixedMinor > 0 && feeCcy !== currency;
-  const convertedMinor = rate
-    ? Math.round(amountMinor * rate.rate)
-    : null;
+  const resolved = resolveConversion(conversion.draft, amountMinor);
+  const rate = resolved?.rate;
+  const convertedMinor = resolved?.convertedMinor;
+  const rateValue = conversion.draft?.kind === "rate"
+    ? conversion.draft.value : rate ? String(rate.rate) : "";
+  const convertedValue = conversion.draft?.kind === "amount"
+    ? conversion.draft.value : convertedMinor != null ? (convertedMinor / 100).toFixed(2) : "";
 
   async function submit(e: React.FormEvent) {
     e.preventDefault();
@@ -158,11 +137,13 @@ export function EntryForm({
       txnType,
       feePercent,
       feeFixedStr: feeFixed,
-      feeFixedCurrency,
+      feeFixedCurrency: feeCcy,
       schedule,
+      convertEnabled,
       convert:
         convertEnabled && rate && convertedMinor != null
-          ? { to: convertTo, rate: rate.rate, rateSource: rate.source, rateFetchedAt: rate.fetchedAt }
+          ? { to: convertTo, rate: rate.rate, rateSource: rate.source, rateFetchedAt: rate.fetchedAt,
+              toAmountMinor: convertedMinor }
           : null,
       draftId: initial?.draft_id,
       // Cross-member already-imported key: carried on BOTH the import path (SheetPage sets it on
@@ -203,7 +184,13 @@ export function EntryForm({
           <span>Currency</span>
           <select
             value={currency}
-            onChange={(e) => setCurrency(e.target.value)}
+            onChange={(e) => {
+              const next = e.target.value;
+              setCurrency(next);
+              if (next === convertTo) {
+                setConvertTo([prefs.defaultCurrency, "USD", "EUR"].find((c) => c && c !== next) ?? "USD");
+              }
+            }}
             required
           >
             {currencyOptions.map((c) => (
@@ -393,13 +380,13 @@ export function EntryForm({
       </div>
 
       <div className="row">
-        <label>
+        <label className="conversion-toggle">
           <input
             type="checkbox"
             checked={convertEnabled}
             onChange={(e) => setConvertEnabled(e.target.checked)}
           />
-          {` Convert to another currency`}
+          <span>Convert to another currency</span>
         </label>
       </div>
 
@@ -421,24 +408,42 @@ export function EntryForm({
             </label>
             <button
               type="button"
-              onClick={fetchRateAndStore}
-              disabled={rateLoading || currency === convertTo}
+              onClick={() => void conversion.refresh()}
+              disabled={conversion.loading || currency === convertTo}
             >
-              {rateLoading ? "fetching..." : "Refresh rate"}
+              {conversion.loading ? "Fetching rate…" : "Refresh rate"}
             </button>
           </div>
-          {rateErr && <div className="err">{rateErr}</div>}
+          <p className="muted small" id="conversion-help">
+            Enter an exchange rate or the converted amount manually at any time, including offline.
+            The converted amount is before any fees.
+          </p>
+          <div className="row">
+            <label>
+              <span>Exchange rate (1 {currency} in {convertTo})</span>
+              <input type="number" inputMode="decimal" step="any" min="0"
+                value={rateValue} aria-describedby="conversion-help"
+                onChange={(e) => conversion.edit("rate", e.target.value)} />
+            </label>
+            <label>
+              <span>Converted amount ({convertTo})</span>
+              <input type="number" inputMode="decimal" step="0.01" min="0"
+                value={convertedValue} aria-describedby="conversion-help"
+                onChange={(e) => conversion.edit("amount", e.target.value)} />
+            </label>
+          </div>
+          {conversion.error && <div className="err" role="status">{conversion.error}</div>}
           {rate && convertedMinor != null && (
             <div className="rate-preview">
               {amount || "0.00"} {currency} → {convertedMinor / 100}{" "}
-              {convertTo} @ {rate.rate.toFixed(4)} (
-              {new Date(rate.fetchedAt).toISOString().slice(0, 10)})
+              {convertTo} @ {rate.rate} · {rate.source === "manual" ? "Manual conversion" : `Fetched rate (${rate.source})`}
+              {" · "}{new Date(rate.fetchedAt).toLocaleString()}
             </div>
           )}
         </div>
       )}
 
-      {err && <div className="err">{err}</div>}
+      {err && <div className="err" role="alert">{err}</div>}
 
       <div className="actions">
         <button type="button" onClick={onCancel} disabled={submitting}>

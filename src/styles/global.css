@@ -307,10 +307,35 @@ h3 { font-size: 1rem; font-weight: 600; }
   padding: 12px;
   background: var(--surface-2);
 }
+.entry-form .conversion-toggle {
+  flex-direction: row;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  cursor: pointer;
+}
+.entry-form .conversion-toggle input {
+  width: 18px;
+  height: 18px;
+  margin: 0;
+  flex: 0 0 18px;
+}
+.entry-form .conversion-toggle > span {
+  color: var(--text);
+  font-size: 1rem;
+}
+.entry-form .convert-block input,
+.entry-form .convert-block select {
+  min-width: 0;
+}
+.entry-form .convert-block .row {
+  align-items: flex-end;
+}
 .entry-form .rate-preview {
   margin-top: 8px;
   font-size: 0.9375rem;
   color: var(--text);
+  overflow-wrap: anywhere;
 }
 .entry-form .actions {
   display: flex;

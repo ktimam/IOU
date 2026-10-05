@@ -339,15 +339,19 @@ unaffected devices.
 ### 4.9 FX
 - F9.1 The canister does **not** call out to FX APIs. The user's browser
   does, on demand, when the convert toggle is enabled.
-- F9.2 Default provider: **Frankfurter.app** (free, ECB-backed, no key,
-  historical rates back to 1999).
-- F9.3 The fetched rate is shown in the form as "from frankfurter.app,
-  fetched at <time>". The user can override.
+- F9.2 Default provider: **Frankfurter v2** (`api.frankfurter.dev`, no key,
+  daily reference rates from multiple official providers). Only currency codes
+  are sent, never entry amounts or notes. The deployed CSP allows this exact host.
+- F9.3 The form shows the rate source and retrieval time. Both the exchange rate
+  and converted amount are always editable, including while loading or offline.
+  Manual conversions are marked `manual`; failed requests offer retry/manual entry.
 - F9.4 The rate is stored on the entry as part of `convertTo`. It is encrypted
   with the entry.
-- F9.5 **No client-side caching.** Every "convert toggle on" event triggers
-  a fresh `GET` to Frankfurter.app. The convert path is rare enough (per
-  the user's note) that the cost of a few KB of network is irrelevant.
+- F9.5 **No client-side rate cache.** Enabling automatic conversion requests a fresh
+  quote. Saved conversions and manual agreements are preserved until explicitly
+  refreshed or edited. A request times out after 10 seconds, and late replies cannot
+  replace manual input or a quote for another currency pair. If conversion is enabled
+  without a valid rate/amount, saving is blocked instead of silently skipping conversion.
 
 ### 4.10 Rate limits
 - F10.1 Per-principal sliding-window rate limits on write endpoints:

@@ -361,7 +361,7 @@ src/
   lib/
     candid.ts         # generated declarations
     actor.ts          # authenticated actor factory
-    fx.ts             # frankfurter.app fetcher
+    fx.ts             # Frankfurter v2 fetcher
     format.ts         # currency / date formatting
   styles/
   workers/
@@ -387,12 +387,15 @@ src/
 These are in `src/features/crypto/`. They are unit-tested in `tests/`.
 
 ### 4.5 FX integration
-- `lib/fx.ts` exposes `fetchRate(from, to, date)`. Calls
-  `https://api.frankfurter.app/{date}?from={from}&to={to}`.
-- Caches per (date, from, to) in `IndexedDB` for 24h.
-- Returns `{ rate, fetchedAt, source: "frankfurter" }`.
-- On network failure, throws a typed error that the form converts to
-  "Provider unavailable, please enter the rate manually".
+- `src/features/entries/fx.ts` exposes `fetchRate(from, to, signal?)`. Calls
+  `https://api.frankfurter.dev/v2/rate/{from}/{to}` without credentials or entry data.
+- No client-side rate cache. Requests have a 10-second timeout and cancellation;
+  responses must contain the requested pair and a finite positive rate.
+- Returns `{ base, quote, rate, fetchedAt, source: "frankfurter.dev" }`.
+- `useCurrencyConversion` rejects stale replies and preserves manual/saved conversions.
+  `conversion.ts` resolves either a typed rate or an exact converted amount. Both inputs
+  stay usable during a request and after failure. `entryMath.ts` rejects an unresolved
+  enabled conversion; manual provenance is stored as `manual` on the encrypted entry.
 
 ### 4.6 State
 - v1: small per-page state with `useState` / `useReducer`. No Redux, no

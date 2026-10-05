@@ -153,6 +153,47 @@ describe("buildEntryPayload — fees", () => {
 });
 
 describe("buildEntryPayload — currency conversion", () => {
+  it("does not silently skip a selected conversion when a fetch or manual input is missing", () => {
+    expect(buildEntryPayload(base({ convertEnabled: true }))).toEqual({
+      ok: false, error: "Enter an exchange rate or converted amount, or turn off currency conversion.",
+    });
+    expect(buildEntryPayload(base({ convertEnabled: false })).ok).toBe(true);
+  });
+  it.each([0, -1, NaN, Infinity, -Infinity])("rejects invalid rate %s", (rate) => {
+    expect(buildEntryPayload(base({
+      convert: { to: "EGP", rate, rateSource: "manual", rateFetchedAt: 1700000000000 },
+    })).ok).toBe(false);
+  });
+  it.each([1e300, 1e-300])("rejects overflow or zero rounded converted amount for rate %s", (rate) => {
+    expect(buildEntryPayload(base({
+      convert: { to: "EGP", rate, rateSource: "manual", rateFetchedAt: 1700000000000 },
+    })).ok).toBe(false);
+  });
+  it("saves the manually entered amount through its derived rate", () => {
+    const p = okPayload({
+      amountStr: "300", convertEnabled: true,
+      convert: { to: "EGP", rate: 1290025 / 30000, rateSource: "manual", rateFetchedAt: 1700000000000 },
+    });
+    expect(p.amount_minor).toBe(1290025);
+    expect(p.currency).toBe("EGP");
+    expect(p.convert?.rate_source).toBe("manual");
+    expect(p.convert?.from_amount_minor).toBe(30000);
+  });
+  it("preserves the exact manually entered minor units without a floating-point rate round-trip", () => {
+    const toAmountMinor = 4503599627370495;
+    const p = okPayload({
+      amountStr: "1", convertEnabled: true,
+      convert: { to: "EGP", rate: toAmountMinor / 100, toAmountMinor,
+        rateSource: "manual", rateFetchedAt: 1700000000000 },
+    });
+    expect(p.amount_minor).toBe(toAmountMinor);
+    expect(p.convert?.to_amount_minor).toBe(toAmountMinor);
+  });
+  it.each([0, -1, NaN, Infinity, 1.5, Number.MAX_SAFE_INTEGER + 1])("rejects invalid explicit converted minor units %s", (toAmountMinor) => {
+    expect(buildEntryPayload(base({
+      convert: { to: "EGP", rate: 50, toAmountMinor, rateSource: "manual", rateFetchedAt: 1700000000000 },
+    })).ok).toBe(false);
+  });
   it("restates the entry in the target currency and applies the fee to the converted base", () => {
     const p = okPayload({
       txnType: "iou",

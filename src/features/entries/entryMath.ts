@@ -9,12 +9,13 @@ import { netAfterFee } from "./balance";
 /** A due-date row as the form holds it (date string + percent). */
 export type ScheduleRowInput = { date: string; percent: number };
 
-/** The convert selection when the toggle is on and a rate has loaded. */
+/** A validated automatic or manual conversion selection. */
 export type ConvertInput = {
   to: string;
   rate: number;
   rateSource: string;
   rateFetchedAt: number;
+  toAmountMinor?: number; // exact user-entered converted amount, avoiding a rate round-trip
 };
 
 export type EntryFormInput = {
@@ -28,7 +29,8 @@ export type EntryFormInput = {
   feeFixedStr: string; // major units (e.g. "5.00")
   feeFixedCurrency: string; // "" ⇒ same as the entry currency
   schedule: ScheduleRowInput[];
-  convert?: ConvertInput | null; // present iff the convert toggle is on with a loaded rate
+  convert?: ConvertInput | null; // present when conversion has a valid automatic/manual value
+  convertEnabled?: boolean; // when selected, a missing rate must never silently skip conversion
   draftId?: string;
   importMessageId?: string; // OpenChat messageId of the imported card → payload.import_message_id
 };
@@ -58,8 +60,14 @@ export function ymdToTs(ymd: string): number {
  */
 export function buildEntryPayload(input: EntryFormInput): BuildEntryResult {
   const amountMinor = toMinorMajor(input.amountStr);
-  if (!amountMinor || amountMinor <= 0) {
+  if (!Number.isSafeInteger(amountMinor) || amountMinor <= 0) {
     return { ok: false, error: "amount must be > 0" };
+  }
+  if (input.convertEnabled && !input.convert) {
+    return { ok: false, error: "Enter an exchange rate or converted amount, or turn off currency conversion." };
+  }
+  if (input.convert && (!Number.isFinite(input.convert.rate) || input.convert.rate <= 0)) {
+    return { ok: false, error: "Exchange rate must be a positive number." };
   }
 
   const percentTotal = input.schedule.reduce((t, r) => t + (Number(r.percent) || 0), 0);
@@ -77,7 +85,12 @@ export function buildEntryPayload(input: EntryFormInput): BuildEntryResult {
 
   const ts = ymdToTs(input.dateYmd);
   const feeFixedMinor = toMinorMajor(input.feeFixedStr);
-  const convertedMinor = input.convert ? Math.round(amountMinor * input.convert.rate) : null;
+  const convertedMinor = input.convert
+    ? input.convert.toAmountMinor ?? Math.round(amountMinor * input.convert.rate)
+    : null;
+  if (convertedMinor != null && (!Number.isSafeInteger(convertedMinor) || convertedMinor <= 0)) {
+    return { ok: false, error: "Converted amount must be positive and within the supported range." };
+  }
 
   let convert: ConvertPayload | undefined;
   if (input.convert && convertedMinor != null) {

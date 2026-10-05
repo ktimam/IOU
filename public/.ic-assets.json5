@@ -18,7 +18,7 @@
   {
     "match": "**/*",
     "headers": {
-      "Content-Security-Policy": "default-src 'self'; connect-src 'self' http://127.0.0.1:40436 https://icp-api.io https://*.icp0.io https://*.ic0.app; script-src 'self' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self'; object-src 'none'; base-uri 'self'; form-action 'self'; frame-ancestors 'none';",
+      "Content-Security-Policy": "default-src 'self'; connect-src 'self' http://127.0.0.1:40436 https://icp-api.io https://*.icp0.io https://*.ic0.app https://api.frankfurter.dev; script-src 'self' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self'; object-src 'none'; base-uri 'self'; form-action 'self'; frame-ancestors 'none';",
       "X-Content-Type-Options": "nosniff",
       // Required by the opaque-origin (`sandbox=allow-scripts`) OpenChat card frame. Static assets
       // are public and the frame is credentialless; this does not grant access to canister APIs.
@@ -46,7 +46,7 @@
     //      treated as absent, leaving CSP frame-ancestors as the sole (allowlist-capable) authority.
     "match": "index.html",
     "headers": {
-      "Content-Security-Policy": "default-src 'self'; connect-src 'self' http://127.0.0.1:40436 https://icp-api.io https://*.icp0.io https://*.ic0.app; script-src 'self' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self'; object-src 'none'; base-uri 'self'; form-action 'self'; frame-ancestors https://oc.app;",
+      "Content-Security-Policy": "default-src 'self'; connect-src 'self' http://127.0.0.1:40436 https://icp-api.io https://*.icp0.io https://*.ic0.app https://api.frankfurter.dev; script-src 'self' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self'; object-src 'none'; base-uri 'self'; form-action 'self'; frame-ancestors https://oc.app;",
       "X-Content-Type-Options": "nosniff",
       // Re-declared because this later index.html rule replaces the generic header set.
       "Access-Control-Allow-Origin": "*",
