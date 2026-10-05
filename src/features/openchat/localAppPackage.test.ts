@@ -152,7 +152,7 @@ describe("IOU-owned named draft choices", () => {
     const before = JSON.stringify(context);
     const action = createIouLocalAppPackage(destination, processor, { processorContext: context, recipientLabel: "Synthetic sheet" }).apps[0].actions[0];
     expect(action.draftEditor).toEqual({ version: 1, choices: [{ field: "typeId", label: "Saved type",
-      noneLabel: "None — use reviewed fields only", options: types.map(type => ({ value: type.id, label: type.name,
+      noneLabel: "None", options: types.map(type => ({ value: type.id, label: type.name,
         assign: [{ field: "typeName", value: type.name }], defaults: [{ field: "direction", value: type.direction }],
       })),
     }] });
@@ -174,7 +174,7 @@ describe("IOU-owned named draft choices", () => {
     const context = { ...createLocalProcessorContext([], "EGP"), draftEditorDefaults: "host-v1" as const };
     const privateAction = createIouLocalAppPackage(destination, processor, { processorContext: context, recipientLabel: "Empty sheet" }).apps[0].actions[0];
     expect(privateAction.draftEditor).toEqual({ version: 1, choices: [{
-      field: "typeId", label: "Saved type", noneLabel: "None — use reviewed fields only",
+      field: "typeId", label: "Saved type", noneLabel: "None",
       options: [], companionFields: ["typeName"],
     }] });
     expect(privateAction.processorContext).toEqual({ version: 1, types: [], defaultCurrency: "EGP" });
@@ -189,7 +189,7 @@ describe("IOU-owned named draft choices", () => {
     expect(parseLocalImportPayload(payload)?.entries[0]).not.toHaveProperty("typeName");
   });
   it("rejects duplicate or hidden Type labels rather than emitting a host-invalid selector", () => {
-    for (const name of [types[0].name, "None — use reviewed fields only", "Hidden\u200bname", "Hidden\u0085name"]) {
+    for (const name of [types[0].name, "None", "Hidden\u200bname", "Hidden\u0085name"]) {
       const context = createLocalProcessorContext([types[0], { ...types[1], name }], "USD");
       expect(() => createIouLocalAppPackage(destination, processor, { processorContext: context, recipientLabel: "Synthetic sheet" })).toThrow(/unique, visible/);
     }

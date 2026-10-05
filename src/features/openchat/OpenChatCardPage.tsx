@@ -49,6 +49,7 @@ import {
 } from "./cardPrivateContext";
 import { encryptTemplateRef, type TemplateRefContext } from "./templateRef";
 import { IOU_MAX_MAJOR_AMOUNT, IOU_MIN_MAJOR_AMOUNT } from "./actionManifest";
+import { IOU_CARD_STYLE, IOU_CARD_THEME_VARS } from "./cardPresentation";
 
 // Same vocabulary as the real entry form's "Type" fieldset (IOU = owed, has a due date; Settlement =
 // paid now), short enough for a card row. The classic OC-rendered card printed the raw wire value
@@ -301,36 +302,7 @@ async function encryptedTypeRef(
 // light set keeps the same mint identity but darkens the accent for contrast on
 // a white surface. Set as CSS custom properties on the page root so the shared
 // input/select/button rules cascade correctly in both themes.
-const THEME_VARS: Record<CardTheme, Record<string, string>> = {
-  dark: {
-    "--bg": "#0f1216",
-    "--surface": "#181c22",
-    "--surface-2": "#12161b",
-    "--text": "#eaf0f0",
-    "--text-dim": "#8a95a1",
-    "--accent": "#5fe3b3",
-    "--accent-hover": "#7fecc4",
-    "--accent-soft": "rgba(95, 227, 179, 0.12)",
-    "--on-accent": "#04241b",
-    "--border": "#262c34",
-    "--credit": "#5fe3b3",
-    "--debt": "#ff8a75",
-  },
-  light: {
-    "--bg": "#eef3f1",
-    "--surface": "#ffffff",
-    "--surface-2": "#f3f7f5",
-    "--text": "#0f1a17",
-    "--text-dim": "#5a6b64",
-    "--accent": "#0f9c7c",
-    "--accent-hover": "#0c8168",
-    "--accent-soft": "rgba(15, 156, 124, 0.12)",
-    "--on-accent": "#ffffff",
-    "--border": "#d3ded9",
-    "--credit": "#0b7a5f",
-    "--debt": "#c2410c",
-  },
-};
+const THEME_VARS: Record<CardTheme, Record<string, string>> = IOU_CARD_THEME_VARS;
 
 export function OpenChatCardPage() {
   const rootRef = useRef<HTMLDivElement>(null);
@@ -929,7 +901,7 @@ export function OpenChatCardPage() {
     ...themeVars,
     background: "var(--bg)",
     color: "var(--text)",
-    padding: 16,
+    padding: IOU_CARD_STYLE.outerPadding,
     fontFamily: "var(--font, 'Manrope', system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif)",
     boxSizing: "border-box",
   };
@@ -962,11 +934,11 @@ export function OpenChatCardPage() {
         style={{
           background: "var(--surface)",
           border: "1px solid var(--border)",
-          borderRadius: 14,
-          padding: 16,
-          maxWidth: 460,
+          borderRadius: IOU_CARD_STYLE.cardRadius,
+          padding: IOU_CARD_STYLE.cardPadding,
+          maxWidth: IOU_CARD_STYLE.cardMaxWidth,
           margin: "0 auto",
-          boxShadow: "0 1px 3px rgba(0,0,0,0.35)",
+          boxShadow: IOU_CARD_STYLE.cardShadow,
         }}
       >
         <CardTypesStatus state={typesState} />
@@ -1006,11 +978,11 @@ export function OpenChatCardPage() {
         ) : readonly ? (
           <ReadonlyView form={form} templates={templates} />
         ) : (
-          <div style={{ display: "flex", flexDirection: "column", gap: 8, marginTop: 10 }}>
+          <div style={{ display: "flex", flexDirection: "column", gap: IOU_CARD_STYLE.rowGap, marginTop: 10 }}>
             {/* Three to a wrapping row instead of two-then-one: at card width they sit on one line,
                 and each still has a flex basis wide enough to wrap rather than squash on a narrow
                 bubble. Two rows of controls where there used to be three. */}
-            <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+            <div style={{ display: "flex", gap: IOU_CARD_STYLE.rowGap, flexWrap: "wrap" }}>
               <Field label="Amount" style={{ flex: "1 1 96px" }}>
                 <input
                   type="number"
@@ -1058,7 +1030,7 @@ export function OpenChatCardPage() {
               </Field>
             </div>
 
-            <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+            <div style={{ display: "flex", gap: IOU_CARD_STYLE.rowGap, flexWrap: "wrap" }}>
               <TypeFields form={form} onChange={set} templates={templates} disabled={submitting} />
               <DateField form={form} onChange={set} disabled={submitting} />
             </div>
@@ -1095,16 +1067,16 @@ export function OpenChatCardPage() {
 //
 // 44 is not a round number: it is the WCAG 2.5.5 / Apple HIG target size. The type shrank; the thing
 // a finger has to hit did not.
-const TOUCH_TARGET = 44;
+const TOUCH_TARGET = IOU_CARD_STYLE.touchTarget;
 
 const inputStyle: CSSProperties = {
   fontFamily: "inherit",
-  fontSize: "0.9375rem",
+  fontSize: IOU_CARD_STYLE.controlFontSize,
   border: "1px solid var(--border)",
-  borderRadius: 10,
+  borderRadius: IOU_CARD_STYLE.controlRadius,
   // Vertical padding is a floor, not the height: minHeight does the real work, so a smaller font
   // tightens the look and the control stays tappable.
-  padding: "7px 10px",
+  padding: IOU_CARD_STYLE.controlPadding,
   minHeight: TOUCH_TARGET,
   width: "100%",
   background: "var(--surface-2)",
@@ -1122,8 +1094,8 @@ function Field({
   style?: CSSProperties;
 }) {
   return (
-    <label style={{ display: "flex", flexDirection: "column", gap: 2, minWidth: 0, ...style }}>
-      <span style={{ fontSize: "0.6875rem", color: "var(--text-dim)" }}>{label}</span>
+    <label style={{ display: "flex", flexDirection: "column", gap: IOU_CARD_STYLE.labelControlGap, minWidth: 0, ...style }}>
+      <span style={{ fontSize: IOU_CARD_STYLE.labelFontSize, color: "var(--text-dim)" }}>{label}</span>
       {children}
     </label>
   );
@@ -1291,7 +1263,7 @@ function EntryRow({
   return (
     <div style={entryBlockStyle}>
       <EntryHeading index={index} total={total} />
-      <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+      <div style={{ display: "flex", gap: IOU_CARD_STYLE.rowGap, flexWrap: "wrap" }}>
         <Field label="Amount" style={{ flex: "1 1 84px" }}>
           <input
             type="number"
@@ -1338,7 +1310,7 @@ function EntryRow({
           </select>
         </Field>
       </div>
-      <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+      <div style={{ display: "flex", gap: IOU_CARD_STYLE.rowGap, flexWrap: "wrap" }}>
         <TypeFields form={entry} onChange={onChange} templates={templates} disabled={disabled} />
         <DateField form={entry} onChange={onChange} disabled={disabled} />
       </div>

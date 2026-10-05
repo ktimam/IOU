@@ -62,7 +62,7 @@ export function createIouLocalAppPackage(destination: string, processor: { sha25
   // The roster belongs to IOU. The host receives only this declarative selector, companion
   // assignment and direction default; kind, fees and schedules remain independent.
   const draftEditor = parsedContext ? { version: 1, choices: [{
-    field: "typeId", label: "Saved type", noneLabel: "None — use reviewed fields only",
+    field: "typeId", label: "Saved type", noneLabel: "None",
     options: parsedContext.types.map(type => ({ value: type.id, label: type.name,
       assign: [{ field: "typeName", value: type.name }],
       defaults: [{ field: "direction", value: type.direction }],
@@ -101,7 +101,7 @@ export function createIouLocalAppPackage(destination: string, processor: { sha25
               iouActionManifest.card.fields.find(field => field.key === key)!.label,
             valueKey: key,
           })),
-          confirmLabel: "Review in IOU", cancelLabel: "Cancel" },
+          confirmLabel: "Add to IOU", cancelLabel: "Cancel" },
       },
       draftSchema: iouLocalDraftSchema, handoff: { kind: "wrapped-list", field: "entries" },
       // Static app-owned layout travels in the verified public catalog and the

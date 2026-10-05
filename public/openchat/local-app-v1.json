@@ -419,7 +419,7 @@
                   "valueKey": "typeName"
                 }
               ],
-              "confirmLabel": "Review in IOU",
+              "confirmLabel": "Add to IOU",
               "cancelLabel": "Cancel"
             }
           },
@@ -522,58 +522,65 @@
             "nodes": [
               {
                 "kind": "group",
-                "gap": "small",
-                "padding": "small",
-                "surface": "card",
-                "radius": "medium",
+                "gap": "none",
+                "padding": "medium",
                 "children": [
                   {
-                    "kind": "row",
+                    "kind": "group",
                     "gap": "small",
+                    "padding": "medium",
+                    "surface": "card",
+                    "radius": "medium",
                     "children": [
                       {
-                        "kind": "field",
-                        "field": "amount",
-                        "minWidth": 96
+                        "kind": "row",
+                        "gap": "small",
+                        "children": [
+                          {
+                            "kind": "field",
+                            "field": "amount",
+                            "minWidth": 96
+                          },
+                          {
+                            "kind": "field",
+                            "field": "currency",
+                            "minWidth": 96
+                          },
+                          {
+                            "kind": "field",
+                            "field": "direction",
+                            "minWidth": 124
+                          }
+                        ]
+                      },
+                      {
+                        "kind": "row",
+                        "gap": "small",
+                        "children": [
+                          {
+                            "kind": "field",
+                            "field": "kind",
+                            "minWidth": 108
+                          },
+                          {
+                            "kind": "field",
+                            "field": "typeId",
+                            "minWidth": 128
+                          },
+                          {
+                            "kind": "field",
+                            "field": "date",
+                            "minWidth": 112
+                          }
+                        ]
                       },
                       {
                         "kind": "field",
-                        "field": "currency",
-                        "minWidth": 96
-                      },
-                      {
-                        "kind": "field",
-                        "field": "direction",
-                        "minWidth": 124
+                        "field": "note",
+                        "fullWidth": true,
+                        "control": "single-line"
                       }
                     ]
-                  },
-                  {
-                    "kind": "row",
-                    "gap": "small",
-                    "children": [
-                      {
-                        "kind": "field",
-                        "field": "kind",
-                        "minWidth": 108
-                      },
-                      {
-                        "kind": "field",
-                        "field": "typeId",
-                        "minWidth": 128
-                      },
-                      {
-                        "kind": "field",
-                        "field": "date",
-                        "minWidth": 112
-                      }
-                    ]
-                  },
-                  {
-                    "kind": "field",
-                    "field": "note",
-                    "fullWidth": true,
-                    "control": "single-line"
                   }
                 ]
               }

@@ -1,3 +1,5 @@
+import { IOU_CARD_STYLE, IOU_CARD_THEME_VARS } from "./cardPresentation";
+
 /**
  * Static app-owned presentation, included in the verified local app catalog.
  * This is inert data matching the host's LocalAppViewV1 contract, not HTML/CSS
@@ -7,7 +9,7 @@
  *
  * The layout/palette mirror OpenChatCardPage without importing its React,
  * window messaging, private-context, crypto or network dependencies. Keep the
- * legacy page unchanged; this module has no authority to activate a host UI.
+ * legacy page behavior unchanged; this module has no authority to activate a host UI.
  */
 export type IouLocalCardViewPalette = Readonly<Partial<Record<
   "background" | "surface" | "field" | "text" | "muted" | "border" | "accent", string
@@ -44,7 +46,16 @@ export type IouLocalCardViewV1 = Readonly<{
  * arbitrary CSS/height is intentionally not part of the app view protocol.
  * This constant is an acceptance expectation, not a view-tree instruction.
  */
-export const IOU_ORIGINAL_CARD_TOUCH_TARGET_PX = 44;
+export const IOU_ORIGINAL_CARD_TOUCH_TARGET_PX = IOU_CARD_STYLE.touchTarget;
+
+const SPACING = { 0: "none", 8: "small", 16: "medium" } as const;
+function palette(theme: "dark" | "light"): IouLocalCardViewPalette {
+  const source = IOU_CARD_THEME_VARS[theme];
+  return {
+    background: source["--bg"], surface: source["--surface"], field: source["--surface-2"],
+    text: source["--text"], muted: source["--text-dim"], border: source["--border"], accent: source["--accent"],
+  };
+}
 
 /**
  * No payload, private roster, account or read-only argument is accepted. Readonly
@@ -55,30 +66,27 @@ export function createIouLocalCardView(): IouLocalCardViewV1 {
   return {
     version: 1,
     theme: {
-      dark: {
-        background: "#0f1216", surface: "#181c22", field: "#12161b",
-        text: "#eaf0f0", muted: "#8a95a1", border: "#262c34", accent: "#5fe3b3",
-      },
-      light: {
-        background: "#eef3f1", surface: "#ffffff", field: "#f3f7f5",
-        text: "#0f1a17", muted: "#5a6b64", border: "#d3ded9", accent: "#0f9c7c",
-      },
+      dark: palette("dark"),
+      light: palette("light"),
     },
     nodes: [{
-      kind: "group", gap: "small", padding: "small", surface: "card", radius: "medium",
-      children: [
-        { kind: "row", gap: "small", children: [
-          { kind: "field", field: "amount", minWidth: 96 },
-          { kind: "field", field: "currency", minWidth: 96 },
-          { kind: "field", field: "direction", minWidth: 124 },
-        ] },
-        { kind: "row", gap: "small", children: [
-          { kind: "field", field: "kind", minWidth: 108 },
-          { kind: "field", field: "typeId", minWidth: 128 },
-          { kind: "field", field: "date", minWidth: 112 },
-        ] },
-        { kind: "field", field: "note", fullWidth: true, control: "single-line" },
-      ],
+      kind: "group", gap: "none", padding: SPACING[IOU_CARD_STYLE.outerPadding],
+      children: [{
+        kind: "group", gap: SPACING[IOU_CARD_STYLE.rowGap], padding: SPACING[IOU_CARD_STYLE.cardPadding], surface: "card", radius: "medium",
+        children: [
+          { kind: "row", gap: SPACING[IOU_CARD_STYLE.rowGap], children: [
+            { kind: "field", field: "amount", minWidth: 96 },
+            { kind: "field", field: "currency", minWidth: 96 },
+            { kind: "field", field: "direction", minWidth: 124 },
+          ] },
+          { kind: "row", gap: SPACING[IOU_CARD_STYLE.rowGap], children: [
+            { kind: "field", field: "kind", minWidth: 108 },
+            { kind: "field", field: "typeId", minWidth: 128 },
+            { kind: "field", field: "date", minWidth: 112 },
+          ] },
+          { kind: "field", field: "note", fullWidth: true, control: "single-line" },
+        ],
+      }],
     }],
   };
 }
