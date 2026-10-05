@@ -1,0 +1,7 @@
+main { max-width: 760px; margin: 0 auto; padding: 20px; }
+main.mobile { width: 390px; max-width: 100%; }
+h1 { font-size: 1.3rem; }
+nav { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 24px; }
+nav button { font-size: .8rem; padding: 8px; }
+nav select { max-width: 100%; min-width: 0; }
+pre { white-space: pre-wrap; overflow-wrap: anywhere; font-size: .75rem; }
