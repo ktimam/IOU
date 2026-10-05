@@ -1,9 +1,12 @@
 import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
 import { describe, expect, it } from "vitest";
 import { createIouLocalAppPackage } from "./localAppPackage";
 
-const bytes = (name: string) => readFileSync(new URL(`../../../public/openchat/${name}`, import.meta.url));
+const directory = process.env.IOU_LOCAL_APP_TEST_ARTIFACT_DIRECTORY;
+const bytes = (name: string) => readFileSync(directory ? resolve(directory, name)
+  : new URL(`../../../public/openchat/${name}`, import.meta.url));
 const digest = (value: Uint8Array) => createHash("sha256").update(value).digest("hex");
 
 describe("IOU-owned public client distribution", () => {

@@ -500,3 +500,98 @@ keeps cross-canister call costs off the hot path.
 - Q3: Telegram bot is "bring your own bot" — do we want a one-click deploy
   to a free-tier host in v1.1? (Default: ship a Dockerfile and a clear
   README; no one-click deploy.)
+
+## 9. Unofficial OpenChat static card distribution
+
+IOU owns the original card layout in the pure `localCardView.ts` producer:
+Amount/Currency/Direction, Type/Saved type/Date, and a single-line Note with
+the original mint/charcoal palette. `createIouLocalAppPackage` includes its
+inert version1 tree as action-level `draftView`, alongside the existing
+canonical labels, `draftEditor` and `draftPresentation`. It contains field
+bindings, bounded layout choices and color tokens, never values, private Type
+names, URLs, event handlers, arbitrary DOM/CSS or delivery capabilities.
+
+The compatible OpenChat client validates and freezes the tree against the
+canonical schema/handoff, supplies values and labels itself, repeats the tree
+for canonical rows, and independently enforces read-only state. It retains a
+complete host review of all outgoing fields; the companion `typeName` field is
+not silently removed just because it is absent from IOU's compact layout. The
+generic renderer owns the44px touch-target requirement. This changes no
+OpenChat canister or IOU encryption/delivery contract.
+
+An explicitly connected account with no saved Types still receives IOU's
+`Saved type` selector, containing only `None — use reviewed fields only`.
+Its generic editor declaration uses `options: []` and explicit
+`companionFields: ["typeName"]`; it never creates a placeholder Type ID or
+default direction. The compatible host keeps the companion read-only and
+preserves any stale ID/name visibly, blocking review until the user explicitly
+clears the selection. An orphan companion can also be cleared through the
+selector's field options. Existing nonempty selectors retain their original
+assignment/default contract, including protection of manual direction edits.
+This empty-roster declaration is private setup metadata only: public package
+bytes, model prompts, processor bytes and empty-roster processor context do not
+change. Older hosts reject the new empty-choice declaration; deploy it only with
+the compatible client, never by weakening validation or emitting a fake option.
+
+### 9.1 Ordinary discovery and Connect
+
+1. The publisher directory `/openchat/apps-v1.json` pins the entire public
+   catalog and processor by exact SHA-256 and byte length.
+2. `/openchat/local-app-v1.json` includes the static view, so the existing
+   catalog digest covers every view node. No extra view download/URL is needed.
+3. The ordinary `/openchat/connect` page uses that same package producer after
+   the existing explicit account/sheet setup consent and processor verification.
+   Its static view must exactly match the advertised public view; private
+   account setup cannot add, remove or substitute another tree.
+4. A compatible client can receive later bounded visual updates through its
+   ordinary verified app update path. Users do not import files for this.
+   Existing destination/private-setup change rules and approval requirements
+   remain in force; a view update does not authorize new chat access or delivery.
+
+The host must first support `draftView`; older clients correctly reject unknown
+catalog fields. For this rollout, keep the old public catalog in place until
+the compatible web/APK build is ready. Subsequent compatible view-only updates
+need no new APK or model download; changes to the host view protocol still do.
+
+### 9.2 Stage and verify a visual-only publication
+
+Do not rebuild the model processor merely to change static layout. The exporter
+supports a fail-closed catalog-only mode:
+
+```powershell
+node scripts/export-local-app-package.mjs --destination http://localhost:3000/openchat/import --catalog-only --output-directory F:/Temp/OpenChat-IOU/card-publication-review
+```
+
+Use the intended configured destination, not an account-specific hostname.
+Catalog-only verifies the existing processor bytes, exact descriptor metadata,
+public catalog descriptor and directory/catalog digest chain before reuse. It
+does not execute or rebuild that processor. A staging directory receives exact
+copies of the old processor and metadata plus the new catalog/directory. The
+currently served files remain untouched.
+
+Run the full scoped suite against those explicit staged artifacts:
+
+```powershell
+$env:IOU_LOCAL_APP_TEST_ARTIFACT_DIRECTORY = 'F:/Temp/OpenChat-IOU/card-publication-review'
+try {
+  node node_modules/vitest/vitest.mjs run src/features/openchat
+} finally {
+  Remove-Item Env:IOU_LOCAL_APP_TEST_ARTIFACT_DIRECTORY
+}
+```
+
+This test-only override changes artifact location, not freshness/hash assertions.
+Normal tests without it still check `public/openchat` and will correctly report
+staleness while the staged source change awaits publication. Review the complete
+catalog delta, verify model prompts/schema/editor/handoff are unchanged, and run
+the compatible client's actual parser/public-private binding checks as well.
+
+After the compatible host and staged delta are approved, rerun the exporter
+with the same destination and `--catalog-only`, omitting `--output-directory`,
+to update only the canonical catalog/directory. Then rerun normal tests and the
+ordinary browser/APK Connect/update flow. This is a publication step, not an
+automatic consequence of building source. The default exporter without
+`--catalog-only` still rebuilds the processor and needs its separate code review.
+
+Source/unit/parser and in-memory artifact-loader checks do not establish live
+UI, model inference, persisted-card or encrypted-delivery acceptance.

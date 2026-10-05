@@ -497,6 +497,88 @@
             "kind": "wrapped-list",
             "field": "entries"
           },
+          "draftView": {
+            "version": 1,
+            "theme": {
+              "dark": {
+                "background": "#0f1216",
+                "surface": "#181c22",
+                "field": "#12161b",
+                "text": "#eaf0f0",
+                "muted": "#8a95a1",
+                "border": "#262c34",
+                "accent": "#5fe3b3"
+              },
+              "light": {
+                "background": "#eef3f1",
+                "surface": "#ffffff",
+                "field": "#f3f7f5",
+                "text": "#0f1a17",
+                "muted": "#5a6b64",
+                "border": "#d3ded9",
+                "accent": "#0f9c7c"
+              }
+            },
+            "nodes": [
+              {
+                "kind": "group",
+                "gap": "small",
+                "padding": "small",
+                "surface": "card",
+                "radius": "medium",
+                "children": [
+                  {
+                    "kind": "row",
+                    "gap": "small",
+                    "children": [
+                      {
+                        "kind": "field",
+                        "field": "amount",
+                        "minWidth": 96
+                      },
+                      {
+                        "kind": "field",
+                        "field": "currency",
+                        "minWidth": 96
+                      },
+                      {
+                        "kind": "field",
+                        "field": "direction",
+                        "minWidth": 124
+                      }
+                    ]
+                  },
+                  {
+                    "kind": "row",
+                    "gap": "small",
+                    "children": [
+                      {
+                        "kind": "field",
+                        "field": "kind",
+                        "minWidth": 108
+                      },
+                      {
+                        "kind": "field",
+                        "field": "typeId",
+                        "minWidth": 128
+                      },
+                      {
+                        "kind": "field",
+                        "field": "date",
+                        "minWidth": 112
+                      }
+                    ]
+                  },
+                  {
+                    "kind": "field",
+                    "field": "note",
+                    "fullWidth": true,
+                    "control": "single-line"
+                  }
+                ]
+              }
+            ]
+          },
           "draftPresentation": {
             "version": 1,
             "enumLabels": [

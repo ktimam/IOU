@@ -3,6 +3,7 @@ import { parseLocalProcessorContext, type LocalProcessorContext } from "./localP
 import { DIRECTION_LABELS } from "../entries/directionLabels";
 import { orderedCurrencies } from "../settings/currencies";
 import { IOU_LOCAL_APP_REVISION, parseLocalDeliveryEncryption, type LocalDeliveryEncryption } from "./localImportEncryption";
+import { createIouLocalCardView } from "./localCardView";
 
 /** Strict final review DTO, separate from the model/evidence schema and owned entirely by IOU. */
 export const iouLocalDraftSchema = {
@@ -60,12 +61,15 @@ export function createIouLocalAppPackage(destination: string, processor: { sha25
   }
   // The roster belongs to IOU. The host receives only this declarative selector, companion
   // assignment and direction default; kind, fees and schedules remain independent.
-  const draftEditor = parsedContext?.types.length ? { version: 1, choices: [{
+  const draftEditor = parsedContext ? { version: 1, choices: [{
     field: "typeId", label: "Saved type", noneLabel: "None — use reviewed fields only",
     options: parsedContext.types.map(type => ({ value: type.id, label: type.name,
       assign: [{ field: "typeName", value: type.name }],
       defaults: [{ field: "direction", value: type.direction }],
     })),
+    // None is absence, not a fabricated account Type. Explicit empty ownership
+    // keeps the companion read-only and lets the host clear stale values safely.
+    ...(parsedContext.types.length === 0 ? { companionFields: ["typeName"] } : {}),
   }] } : undefined;
   if (draftEditor && (new Set(draftEditor.choices[0].options.map(option => option.label)).size !== draftEditor.choices[0].options.length ||
     draftEditor.choices[0].options.some(option => option.label === draftEditor.choices[0].noneLabel ||
@@ -73,12 +77,13 @@ export function createIouLocalAppPackage(destination: string, processor: { sha25
     new TextEncoder().encode(JSON.stringify(draftEditor)).byteLength > 65536)) {
     throw new Error("Private Type names must be unique, visible labels within the local editor limits.");
   }
-  // Never emit the opt-in without its paired selector, including an empty private roster.
+  // Only a nonempty roster needs host default application. None-only ownership
+  // changes no processor behavior and retains the existing empty-roster context.
   let processorContext: LocalProcessorContext | undefined;
   if (parsedContext) {
     const { draftEditorDefaults: _priorDefaults, ...baseContext } = parsedContext;
     processorContext = parseLocalProcessorContext({ ...baseContext,
-      ...(draftEditor ? { draftEditorDefaults: "host-v1" as const } : {}) });
+      ...(parsedContext.types.length ? { draftEditorDefaults: "host-v1" as const } : {}) });
     if (!processorContext) throw new Error("Private Type context exceeds the local processor limits after adding editor defaults.");
   }
   return { version: 1, apps: [{
@@ -99,6 +104,9 @@ export function createIouLocalAppPackage(destination: string, processor: { sha25
           confirmLabel: "Review in IOU", cancelLabel: "Cancel" },
       },
       draftSchema: iouLocalDraftSchema, handoff: { kind: "wrapped-list", field: "entries" },
+      // Static app-owned layout travels in the verified public catalog and the
+      // same consented private setup. No values, private labels or capabilities.
+      draftView: createIouLocalCardView(),
       // Presentation only; suggestions do not narrow valid currency codes or change extracted values.
       draftPresentation: { version: 1, enumLabels: [
         { field: "kind", options: [{ value: "iou", label: "IOU" }, { value: "settlement", label: "Settlement" }] },

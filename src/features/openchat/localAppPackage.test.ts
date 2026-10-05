@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
 import { createIouLocalAppPackage } from "./localAppPackage";
 import { createLocalProcessorContext, parseLocalProcessorContext } from "./localProcessorContext";
 import { iouActionManifest } from "./actionManifest";
@@ -20,7 +21,11 @@ const presentation = { version: 1, enumLabels: [
 ] };
 
 describe("checked-in public IOU package freshness", () => {
-  const artifact = (name: string) => readFileSync(new URL(`../../../public/openchat/${name}`, import.meta.url));
+  // Explicit staging verification only; normal/CI runs still check canonical
+  // public bytes. Never skip the complete source freshness/hash assertions.
+  const directory = process.env.IOU_LOCAL_APP_TEST_ARTIFACT_DIRECTORY;
+  const artifact = (name: string) => readFileSync(directory ? resolve(directory, name)
+    : new URL(`../../../public/openchat/${name}`, import.meta.url));
   const digest = (bytes: Uint8Array) => createHash("sha256").update(bytes).digest("hex");
 
   it("exports the current producer contract, not just an internally consistent older catalog", () => {
@@ -162,14 +167,26 @@ describe("IOU-owned named draft choices", () => {
       { value: "private-debt", keywords: ["Private debt", "beta"] },
     ] });
   });
-  it("omits editor and context from public exports, and retains empty-roster currency without opt-in", () => {
+  it("keeps public exports unchanged and gives empty private rosters an explicit None-only selector", () => {
     const publicAction = createIouLocalAppPackage(destination, processor).apps[0].actions[0];
     expect(publicAction).not.toHaveProperty("draftEditor");
     expect(publicAction).not.toHaveProperty("processorContext");
     const context = { ...createLocalProcessorContext([], "EGP"), draftEditorDefaults: "host-v1" as const };
     const privateAction = createIouLocalAppPackage(destination, processor, { processorContext: context, recipientLabel: "Empty sheet" }).apps[0].actions[0];
-    expect(privateAction).not.toHaveProperty("draftEditor");
+    expect(privateAction.draftEditor).toEqual({ version: 1, choices: [{
+      field: "typeId", label: "Saved type", noneLabel: "None — use reviewed fields only",
+      options: [], companionFields: ["typeName"],
+    }] });
     expect(privateAction.processorContext).toEqual({ version: 1, types: [], defaultCurrency: "EGP" });
+    expect(privateAction.draftSchema).toEqual(publicAction.draftSchema);
+    expect(privateAction.draftView).toEqual(publicAction.draftView);
+    expect(privateAction.definition).toEqual(publicAction.definition);
+    expect(privateAction.draftEditor?.choices[0]).not.toHaveProperty("defaults");
+    expect(privateAction.draftEditor?.choices[0]).not.toHaveProperty("assign");
+    expect(privateAction.draftEditor?.choices[0].options).toHaveLength(0);
+    const payload = { entries: [{ amount: 1.23, currency: "EGP", kind: "iou", direction: "debt" }] };
+    expect(parseLocalImportPayload(payload)?.entries[0]).not.toHaveProperty("typeId");
+    expect(parseLocalImportPayload(payload)?.entries[0]).not.toHaveProperty("typeName");
   });
   it("rejects duplicate or hidden Type labels rather than emitting a host-invalid selector", () => {
     for (const name of [types[0].name, "None — use reviewed fields only", "Hidden\u200bname", "Hidden\u0085name"]) {
