@@ -5,6 +5,10 @@ const UNSAFE = /[\p{Cc}\p{Cf}\p{Cs}\u2028\u2029]/u;
 
 function label(value: string): boolean {
   if (!/^[\p{L}\p{M}][\p{L}\p{M} '’\-]{0,63}:?$/u.test(value)) return false;
+  // A trailing hyphen may be the amount's minus sign, even before its currency.
+  // Reject that ambiguity instead of consuming the sign as label punctuation;
+  // internal hyphenated words remain valid labels.
+  if (/- *:?$/u.test(value)) return false;
   // A second currency cannot disappear into a label. No document/label vocabulary.
   return !(value.match(/[\p{L}\p{M}]+/gu) ?? []).some((word) =>
     normalizeImageCurrencyToken(word) !== undefined);
