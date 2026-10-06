@@ -53,6 +53,8 @@ import {
   type DraftBaseResolverContext,
 } from "./draft";
 import { BatchConfirmModal } from "./BatchConfirmModal";
+import type { LocalSheetImport } from "../openchat/localImportSheet";
+import { useLocalImportNavigation } from "../openchat/LocalImportNavigation";
 import {
   addEntryBatch,
   batchImportContextMatches,
@@ -233,8 +235,12 @@ const SORT_OPTIONS: { value: SortKey; label: string }[] = [
   { value: "amount-asc", label: "Smallest amount" },
 ];
 
-export function SheetPage() {
-  const { sheetId = "" } = useParams();
+export function SheetPage({ localImport }: { localImport?: LocalSheetImport } = {}) {
+  const externalNavigation = useLocalImportNavigation();
+  const navigationProps = externalNavigation ? { target: "_blank", rel: "noopener noreferrer" } : {};
+  const { sheetId: routeSheetId = "" } = useParams();
+  const sheetId = localImport?.sheetId ?? routeSheetId;
+  const isLocalImport = !!localImport;
   const { state } = useAuth();
   const principal = state.kind === "authenticated" ? state.principal : null;
   const inboxDedupe = useMemo(
@@ -259,6 +265,7 @@ export function SheetPage() {
     // For an EDIT: did the current viewer author this entry? The form shows/edits direction in the
     // viewer's frame; on save we orient back to the author's frame so storage stays author-relative.
     createdByMe?: boolean;
+    localImportId?: string;
   }>(null);
   const [sortKey, setSortKey] = useState<SortKey>("newest");
   // Types are ACCOUNT-SCOPED: everything templates feed on this page
@@ -393,6 +400,7 @@ export function SheetPage() {
     relayId: string;
     chatKey: string | null;
     context: BatchImportContext;
+    localImportId?: string;
   }>(null);
   const [batchBusy, setBatchBusy] = useState(false);
   const reloadPending = async () => {
@@ -457,6 +465,23 @@ export function SheetPage() {
     setPendingChatKey(null);
     setPendingMessageId(null);
   };
+  const reviewLocalImport = () => {
+    if (!localImport?.ready || localImport.saved || !principal || !localImport.drafts.length) return;
+    try {
+      localImport.assertCurrent();
+      if (localImport.drafts.length > 1) {
+        setBatch({ drafts: [...localImport.drafts], messageId: localImport.importId,
+          relayId: "", chatKey: null, context: { sheetId, principal }, localImportId: localImport.importId });
+      } else {
+        closeEntryModal();
+        setModal({ initial: localImport.drafts[0].initial, entryId: null, localImportId: localImport.importId });
+      }
+    } catch (cause) { toasts.show({ kind: "error", text: (cause as Error).message }); }
+  };
+  useEffect(() => {
+    if (modal?.localImportId && (!localImport?.ready || localImport.importId !== modal.localImportId)) closeEntryModal();
+    if (batch?.localImportId && (!localImport?.ready || localImport.importId !== batch.localImportId)) setBatch(null);
+  }, [localImport?.ready, localImport?.importId]);
   const importFromRelay = async (p: PendingDraft) => {
     if (!principal) {
       toasts.show({ kind: "error", text: "Sign in before importing this chat card" });
@@ -591,6 +616,7 @@ export function SheetPage() {
     });
   };
   useEffect(() => {
+    if (isLocalImport) return;
     const cfg = getRelayConfig(principal);
     if (!cfg) return;
     let cancelled = false;
@@ -608,12 +634,12 @@ export function SheetPage() {
       cancelled = true;
       clearInterval(iv);
     };
-  }, [principal]);
+  }, [principal, isLocalImport]);
 
   // Refresh the chat → sheet links from the canister (cache-first: state is
   // seeded from localStorage above, the canister copy wins when it arrives).
   useEffect(() => {
-    if (!actor) return;
+    if (!actor || isLocalImport) return;
     let cancelled = false;
     if (!principal) {
       setChatLinks({});
@@ -629,11 +655,12 @@ export function SheetPage() {
     return () => {
       cancelled = true;
     };
-  }, [actor, principal]);
+  }, [actor, principal, isLocalImport]);
 
   // "Pending from OpenChat": confirmed actions OpenChat deposited on-chain. We pull them from the action_inbox
   // canister, verify OpenChat's provenance signature + decrypt locally, then feed each through the same seam.
   useEffect(() => {
+    if (isLocalImport) return;
     let cancelled = false;
     let iv: ReturnType<typeof setInterval> | undefined;
     const ackQueue = new InboxAcknowledgementQueue();
@@ -694,7 +721,7 @@ export function SheetPage() {
         inboxAckQueueRef.current = new InboxAcknowledgementQueue();
       }
     };
-  }, [actor, principal, handledInboxIds]);
+  }, [actor, principal, handledInboxIds, isLocalImport]);
 
   const myPrincipal = state.kind === "authenticated"
     ? state.identity.getPrincipal().toText()
@@ -780,8 +807,9 @@ export function SheetPage() {
       }
       setEntries(decoded.entries);
     } catch (e) {
-      setErr((e as Error).message);
-      toasts.show({ kind: "error", text: (e as Error).message });
+      const message = isLocalImport ? "IOU could not load the connected sheet. Try again when it is available." : (e as Error).message;
+      setErr(message);
+      toasts.show({ kind: "error", text: message });
     } finally {
       setLoading(false);
     }
@@ -904,7 +932,14 @@ export function SheetPage() {
     // authored by me → my frame IS the author frame → no change.
     const toStore: EntryPayload =
       modal?.createdByMe === false ? { ...p, direction: flipDirection(p.direction) } : p;
-    if (modal?.entryId != null) {
+    if (modal?.localImportId) {
+      if (!localImport?.ready || localImport.importId !== modal.localImportId || localImport.sheetId !== sheetId) {
+        throw new Error("The connected IOU draft changed. Nothing was saved.");
+      }
+      localImport.assertCurrent();
+      await localImport.save([toStore]);
+      toasts.show({ kind: "success", text: "Entry added" });
+    } else if (modal?.entryId != null) {
       const K_sheet = get(sheetId) ?? (await unwrapFor(sheetId));
       const enc = await encryptEntryPayload(
         new TextEncoder().encode(JSON.stringify(toStore)),
@@ -1003,6 +1038,17 @@ export function SheetPage() {
           ...(batch.messageId ? { import_message_id: batch.messageId } : {}),
         }),
       );
+      if (batch.localImportId) {
+        if (!localImport?.ready || localImport.importId !== batch.localImportId || localImport.sheetId !== sheetId) {
+          throw new Error("The connected IOU draft changed. Nothing was saved.");
+        }
+        localImport.assertCurrent();
+        await localImport.save(payloads);
+        toasts.show({ kind: "success", text: `Added ${payloads.length} entries` });
+        setBatch(null);
+        await reload();
+        return;
+      }
       const K_sheet = get(batch.context.sheetId) ?? (await unwrapFor(batch.context.sheetId));
       const acknowledgement = await addEntryBatch({
         actor: actor as any,
@@ -1127,6 +1173,9 @@ export function SheetPage() {
   if (loading && !sheet) return <p>Loading…</p>;
   if (err) return <p className="err">{err}</p>;
   if (!sheet) return <p>Not found.</p>;
+  if (localImport && (sheet.pair_id !== localImport.pairId || !isActive(sheet.state))) {
+    return <p role="alert">The connected sheet changed. Reconnect IOU in OpenChat before sending this draft.</p>;
+  }
 
   // Balances ignore deleted entries. Direction is stored in the AUTHOR's frame ("credit" = the OTHER
   // member owes the author), so orient each entry to the CURRENT viewer — otherwise both members see
@@ -1162,8 +1211,8 @@ export function SheetPage() {
     <div className="sheet-page">
       <header>
         <div className="row" style={{ justifyContent: "space-between" }}>
-          <Link to="/pairs">← Accounts</Link>
-          <Link to={`/pair/${pairId}`} className="muted small">
+          <Link to="/pairs" {...navigationProps}>← Accounts</Link>
+          <Link to={`/pair/${pairId}`} className="muted small" {...navigationProps}>
             Details →
           </Link>
         </div>
@@ -1300,14 +1349,22 @@ export function SheetPage() {
         )}
       </section>
 
-      {!modal && isActive(sheet.state) && pending.length + visibleInbox.length > 0 && (
+      {localImport?.notice && <p role="status">{localImport.notice}</p>}
+      {!modal && isActive(sheet.state) && pending.length + visibleInbox.length + (localImport?.ready && !localImport.saved ? 1 : 0) > 0 && (
         <section className="card" style={{ marginBottom: 12 }}>
-          <h2 style={{ marginTop: 0 }}>✨ Pending from chat ({pending.length + visibleInbox.length})</h2>
+          <h2 style={{ marginTop: 0 }}>✨ Pending from chat ({pending.length + visibleInbox.length + (localImport?.ready && !localImport.saved ? 1 : 0)})</h2>
           <p className="muted small" style={{ marginTop: 0 }}>
             Drafts your AI assistant sent. Review each before it's saved — nothing is
             written until you confirm.
           </p>
           <ul style={{ listStyle: "none", padding: 0, margin: 0 }}>
+            {localImport?.ready && !localImport.saved && <li className="row" style={{ justifyContent: "space-between", alignItems: "center", gap: 8, padding: "6px 0" }}>
+              <span className="small">{batchSummary({ drafts: [...localImport.drafts], errors: [] })}</span>
+              <span className="row" style={{ gap: 6 }}>
+                <button className="secondary small" onClick={reviewLocalImport}>Review &amp; add</button>
+                <button className="secondary small" onClick={() => localImport.dismiss()} title="Dismiss without adding">✕</button>
+              </span>
+            </li>}
             {[...pending, ...visibleInbox].map((p) => {
               // Single OR multi-entry card: batchSummary renders the count ("N entries: …") for a
               // multi card and the plain summary for a single one (byte-identical to before).

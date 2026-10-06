@@ -1,20 +1,24 @@
 import { useEffect, useRef, useState } from "react";
 import { AuthProvider, useAuth } from "../auth/AuthProvider";
+import { SignInButtons } from "../auth/SignInButtons";
 import { SheetKeyProvider, useSheetKey } from "../flows/SheetKeyContext";
 import { useActor, unwrap } from "../flows/useActor";
 import { usePairTemplates } from "../templates/PairTemplatesContext";
-import { addEntryBatch, batchImportContextMatches } from "../entries/batchImport";
+import { TemplatesProvider } from "../templates/TemplatesContext";
+import { PreferencesProvider } from "../settings/usePreferences";
+import { ToastProvider } from "../ui/Toasts";
+import { Layout } from "../../app/Layout";
+import { SheetPage } from "../entries/SheetPage";
+import { addEntryBatch } from "../entries/batchImport";
 import type { EntryPayload } from "../entries/types";
-import { buildLocalImportCommittedReceipt, createLocalImportReceiver, decryptPendingLocalImport, type LocalImportDraft, type PendingLocalImport } from "./localImportHandoff";
+import { buildLocalImportCommittedReceipt, createLocalImportReceiver, decryptPendingLocalImport, type PendingLocalImport } from "./localImportHandoff";
 import { localImportNativeBootstrap, localImportSenderOrigin, localImportSessionNonce } from "./localImportLaunch";
 import { createLocalImportConsent, type LocalImportConsentState } from "./localImportConsent";
-import { applyLocalImportType, editLocalImportDirection, initializeLocalImportReviewRow, prepareLocalImportReview, type LocalImportReviewRow } from "./localImportReview";
-import { createIouLocalAppPackage } from "./localAppPackage";
-import { createLocalProcessorContext } from "./localProcessorContext";
-import { createLocalSetupDownloadFiles, createLocalSetupDownloadOwner, localSetupContextMatches, LocalSetupDownloads, verifiedLocalSetupProcessor } from "./LocalSetupDownloads";
-import { currencyFromUserRecord } from "../settings/defaultCurrency";
 import { LocalDeliveryKeyProvider, useLocalDeliveryKey } from "./LocalDeliveryKeyProvider";
-import { createLocalDeliveryEncryption } from "./localImportEncryption";
+import { createLocalDeliveryEncryption, type IouDeliveryContext } from "./localImportEncryption";
+import { createLocalImportSaveLock, LocalImportReviewError, localImportRecipient, localImportSheetDrafts, type LocalSheetImport } from "./localImportSheet";
+import { localAppSenderWindow } from "./localAppSender";
+import { LocalImportNavigationProvider } from "./LocalImportNavigation";
 import { host as backendHost, canisterId as backendCanisterId } from "../auth/config";
 
 type Binding = { senderOrigin: string; senderWindow: Window; sessionNonce: string; isCurrent?: () => boolean };
@@ -24,31 +28,25 @@ type ImportTransport = {
   consent?: ReturnType<typeof createLocalImportConsent>;
   closed: boolean;
 };
-type SheetChoice = { pairId: string; sheetId: string; otherPrincipal: string };
-type Review = { payloads: readonly EntryPayload[]; sheet: SheetChoice; importId: string; draft: PendingLocalImport };
 
-/** Deliberately outside IOU's legacy manifest/key/inbox providers. No OC canister is called here. */
+/** Reuse normal sheet/review UI without mounting legacy registration/inbox providers. */
 export function LocalImportPage() {
-  if (window.parent !== window) return <main><h1>Open IOU in its own window</h1><p>Private imports do not run inside an embedded frame. Use the client’s reviewed handoff to open IOU.</p></main>;
-  return <AuthProvider><LocalDeliveryKeyProvider><LocalImportSession /></LocalDeliveryKeyProvider></AuthProvider>;
+  return <AuthProvider><LocalImportSession /></AuthProvider>;
 }
 
 function LocalImportSession() {
-  const { state, signIn, signOut } = useAuth();
+  const { state } = useAuth();
   const [launch] = useState(() => {
     const senderOrigin = localImportSenderOrigin(import.meta.env.VITE_LOCAL_IMPORT_SENDER_ORIGIN);
     const sessionNonce = localImportSessionNonce();
-    // The isolated model page uses a separate non-isolated relay. Frames are intentionally refused:
-    // credentialless storage cannot inherit IOU auth and real browser tests severed auth popups.
-    const senderWindow = window.parent === window && window.opener ? window.opener as Window : undefined;
-    return { senderWindow, native: localImportNativeBootstrap(),
+    const senderWindow = localAppSenderWindow(window);
+    return { senderWindow, framed: window.parent !== window, native: localImportNativeBootstrap(),
       configured: senderOrigin && sessionNonce && senderWindow ? { senderOrigin, sessionNonce, senderWindow } : undefined };
   });
   const [binding, setBinding] = useState<Binding | undefined>(launch.configured);
   const [consentState, setConsentState] = useState<LocalImportConsentState>();
   const [drafts, setDrafts] = useState<readonly PendingLocalImport[]>([]);
   const [notice, setNotice] = useState("");
-  const [connectionClosed, setConnectionClosed] = useState(false);
   const transport = useRef<ImportTransport>({ closed: false });
   const previousPrincipal = useRef<string>();
   const principal = state.kind === "authenticated" ? state.principal : undefined;
@@ -59,34 +57,27 @@ function LocalImportSession() {
   function closeConnection(message: string) {
     const active = transport.current;
     active.closed = true; active.consent?.close(); active.receiver?.close(); active.binding = undefined;
-    setBinding(undefined); setConnectionClosed(true); setConsentState({ kind: "closed" });
-    // Reset native review state too; an accepted draft is not authority to save after cancellation.
-    if (launch.native) setDrafts([]);
-    setNotice(message);
+    setBinding(undefined); setConsentState({ kind: "closed" }); setDrafts([]); setNotice(message);
   }
-
   function allowNativeConnection() {
     const active = transport.current;
     if (active.closed || !active.consent || !accountUnchanged()) return;
     try {
       if (launch.senderWindow?.closed) throw new Error("Sender closed");
       const approved = active.consent.approve();
-      if (!approved) { closeConnection("This connection request expired. Start a fresh handoff from the client."); return; }
+      if (!approved) { closeConnection("This request expired. Return to OpenChat to reopen the same card."); return; }
       const accepted: Binding = { ...approved.binding, senderWindow: approved.binding.senderWindow as Window,
         isCurrent: () => transport.current === active && !active.closed && active.consent?.isConnected() === true &&
           !launch.senderWindow?.closed && accountUnchanged() };
-      // Install before replying: a prompt sender's hello cannot race receiver creation.
       active.binding = accepted; active.receiver = createLocalImportReceiver({ ...accepted, destination: `${location.origin}/openchat/import` });
       setBinding(accepted); setConsentState(active.consent.state());
       accepted.senderWindow.postMessage(approved.reply, accepted.senderOrigin);
-      setNotice("This exact local connection is allowed once. Receiving a draft will not save it.");
-    } catch { closeConnection("The local connection could not be accepted. Nothing was saved; start a fresh handoff."); }
+      setNotice("");
+    } catch { closeConnection("The connection could not be accepted. Nothing was saved. Return to OpenChat to reopen the same card."); }
   }
-
   useEffect(() => {
     if (previousPrincipal.current && previousPrincipal.current !== principal) {
-      closeConnection("The IOU account changed. Return to the client and explicitly reconnect before sharing another draft.");
-      setDrafts([]);
+      closeConnection("The IOU account changed. Return to OpenChat to reconnect before sending another draft.");
     }
     if (principal) previousPrincipal.current = principal;
   }, [principal]);
@@ -94,306 +85,158 @@ function LocalImportSession() {
     const active: ImportTransport = { closed: false, binding: launch.configured,
       receiver: launch.configured ? createLocalImportReceiver({ ...launch.configured, destination: `${location.origin}/openchat/import` }) : undefined,
       consent: launch.native && launch.senderWindow ? createLocalImportConsent({ senderWindow: launch.senderWindow }) : undefined };
-    transport.current = active;
-    setBinding(active.binding); setConsentState(active.consent?.state()); setConnectionClosed(false);
+    transport.current = active; setBinding(active.binding); setConsentState(active.consent?.state());
     const receive = (event: MessageEvent) => {
       if (active.closed || transport.current !== active || !accountUnchanged()) return;
-      const receiver = active.receiver;
-      const binding = active.binding;
+      const receiver = active.receiver, binding = active.binding;
       if (!receiver || !binding) {
         const pending = active.consent?.receive(event);
-        if (pending?.kind === "closed") closeConnection("This local request changed or expired. Start a fresh handoff; nothing was saved.");
-        else if (pending) setConsentState(pending);
+        if (pending?.kind === "closed") closeConnection("This request changed or expired. Return to OpenChat; nothing was saved.");
+        else if (pending) {
+          setConsentState(pending);
+          // Receiving only ciphertext needs no second transport prompt. The exact parent,
+          // loopback origin and nonce were checked by consent.receive(); saving still requires
+          // authenticated recipient decryption and the normal sheet's explicit Review & add.
+          if (pending.kind === "pending" && window.parent !== window && launch.senderWindow === window.parent) allowNativeConnection();
+        }
         return;
       }
-      if (binding.isCurrent && !binding.isCurrent()) { closeConnection("This local connection expired or closed. Nothing further will be accepted."); return; }
+      if (binding.isCurrent && !binding.isCurrent()) { closeConnection("This request expired or closed. Nothing further will be accepted."); return; }
       const result = receiver.receive(event);
       if (result.kind === "ignored") return;
       try { binding.senderWindow.postMessage(result.reply, binding.senderOrigin); }
-      catch { closeConnection("The sender is unavailable. Check the receiving app before another handoff."); return; }
+      catch { closeConnection("The sender is unavailable. Check IOU before retrying the same card."); return; }
       if (result.kind === "queued") setDrafts(receiver.pending());
-      if (result.kind === "rejected") setNotice("The sender offered an invalid or changed draft. Nothing was saved.");
+      if (result.kind === "rejected") setNotice("The draft is invalid or changed. Nothing was saved.");
     };
     window.addEventListener("message", receive);
-    const timeout = active.consent
-      ? window.setInterval(() => {
-        if (!active.closed && (launch.senderWindow?.closed || active.consent?.state().kind === "closed")) {
-          closeConnection("This local connection expired or closed. Return to the client to explicitly reconnect.");
-        }
-      }, 1000)
-      : window.setTimeout(() => { if (active.binding) closeConnection("This handoff expired. Return to the client to explicitly reconnect."); }, 30 * 60_000);
+    const timeout = active.consent ? window.setInterval(() => {
+      if (!active.closed && (launch.senderWindow?.closed || active.consent?.state().kind === "closed")) {
+        closeConnection("This connection expired or closed. Return to OpenChat to reopen the same card.");
+      }
+    }, 1000) : window.setTimeout(() => { if (active.binding) closeConnection("This handoff expired. Return to OpenChat to reopen the same card."); }, 30 * 60_000);
     const pageClosed = () => { active.closed = true; active.consent?.close(); active.receiver?.close(); };
     const navigationClosed = () => {
       pageClosed();
-      if (active.consent && transport.current === active) closeConnection("This page’s local connection closed. A save already submitted may still complete; check IOU before retrying.");
+      if (transport.current === active) closeConnection("The connection closed. A submitted save may still complete; check IOU before retrying.");
     };
     window.addEventListener("pagehide", navigationClosed);
     return () => { clearTimeout(timeout); clearInterval(timeout); pageClosed(); window.removeEventListener("message", receive); window.removeEventListener("pagehide", navigationClosed); };
   }, [launch]);
 
-  return <main style={{ maxWidth: 880, margin: "24px auto", padding: 16, overflowWrap: "anywhere" }}>
-    <h1>IOU — private import</h1>
-    <p>The client encrypts the reviewed draft before handing it to IOU. Only the connected IOU user can decrypt it for the linked sheet. Receiving ciphertext does not save an entry. Review the complete entry again before choosing Save in IOU.</p>
-    {binding && <p>Sender: <strong>{binding.senderOrigin}</strong>{connectionClosed ? " (closed)" : ""}</p>}
-    {!binding && <p>No active handoff. You can export a private local app package below, then use the client’s reviewed handoff. A new native local sender needs your permission for this connection only.</p>}
-    {consentState?.kind === "waiting" && <p>Waiting for a local connection request. No draft has been accepted.</p>}
-    {consentState?.kind === "pending" && <section aria-label="Local connection consent">
-      <h2>Allow this local connection once?</h2>
-      <p>Unverified local sender: <strong>{consentState.candidate.senderOrigin}</strong></p>
-      <p>This address does not prove which app opened it. Allow only if you just started this handoff yourself and the address matches the relay you opened. Permission covers this exact window and address, not other localhost ports.</p>
-      <p>Nothing has been accepted or saved. You will still review the receiving account, sheet and every entry before Save in IOU. This request expires after two minutes.</p>
-      <button onClick={allowNativeConnection}>Allow this connection once</button>
-      <button className="secondary" onClick={() => closeConnection("Local connection rejected. No draft was accepted or saved.")}>Reject connection</button>
+  return <PreferencesProvider key={principal ?? state.kind}><TemplatesProvider><SheetKeyProvider><ToastProvider>
+    <LocalDeliveryKeyProvider><LocalImportNavigationProvider enabled={launch.framed}><Layout>
+    {state.kind === "loading" && <p className="muted">Restoring your IOU sign-in…</p>}
+    {state.kind === "anonymous" && <div className="card"><h1>Sign in to IOU</h1><p>Sign in to the account connected in OpenChat to review this draft.</p><SignInButtons /></div>}
+    {consentState?.kind === "pending" && <section className="card" aria-label="Local connection consent">
+      <h2>Open this draft from OpenChat?</h2>
+      <p>Allow this connection only if you just chose Add to IOU. Nothing is saved until you review and confirm it in your sheet.</p>
+      <p className="muted small">Requesting address: {consentState.candidate.senderOrigin}. This address alone does not identify an app.</p>
+      <button onClick={allowNativeConnection}>Continue</button>{" "}
+      <button className="secondary" onClick={() => closeConnection("Connection cancelled. Nothing was saved.")}>Cancel</button>
     </section>}
-    {binding?.isCurrent && !connectionClosed && <button className="secondary" onClick={() => closeConnection("Local connection closed. Local drafts were discarded. A save already submitted may still complete; check IOU before retrying.")}>Close local connection</button>}
     {notice && <p role="status">{notice}</p>}
-    {state.kind === "loading" && <p>Restoring your IOU sign-in…</p>}
-    {state.kind === "anonymous" && <button onClick={() => void signIn().catch(() => setNotice("IOU sign-in did not finish. Nothing was saved; try again explicitly."))}>Sign in to IOU</button>}
-    {state.kind === "authenticated" && <>
-      <p>Signed-in IOU principal: <strong>{state.principal}</strong></p>
-      <button className="secondary" onClick={() => { closeConnection("Signed out of this handoff. Reconnect explicitly before sharing another draft."); void signOut(); }}>Sign out</button>
-      <SheetKeyProvider key={state.principal}>
-        <ImportAccount key={`${state.principal}:${launch.native && connectionClosed ? "closed" : "open"}`} principal={state.principal} drafts={drafts} binding={connectionClosed ? undefined : binding} />
-      </SheetKeyProvider>
-    </>}
-  </main>;
+    {principal && binding && drafts.length === 1 && <ImportAccount key={principal} principal={principal} draft={drafts[0]} binding={binding}
+      isCurrent={() => !transport.current.closed && transport.current.binding === binding && accountUnchanged()} />}
+    {principal && binding && drafts.length === 0 && <p className="muted">Opening your draft…</p>}
+    {drafts.length > 1 && <p role="alert">More than one handoff arrived. Return to OpenChat and reopen one card at a time; nothing was saved.</p>}
+    {!binding && !notice && consentState?.kind !== "pending" && <p className="muted">Open the card with Add to IOU in OpenChat.</p>}
+    </Layout></LocalImportNavigationProvider></LocalDeliveryKeyProvider>
+  </ToastProvider></SheetKeyProvider></TemplatesProvider></PreferencesProvider>;
 }
 
-function ImportAccount({ principal, drafts, binding }: { principal: string; drafts: readonly PendingLocalImport[]; binding?: Binding }) {
+function ImportAccount({ principal, draft, binding, isCurrent }: {
+  principal: string; draft: PendingLocalImport; binding: Binding; isCurrent: () => boolean;
+}) {
   const { actor, err } = useActor();
-  const [sheets, setSheets] = useState<SheetChoice[]>([]);
-  const [selected, setSelected] = useState("");
-  const [loaded, setLoaded] = useState<SheetChoice>();
-  const [defaultCurrency, setDefaultCurrency] = useState("");
+  const [loaded, setLoaded] = useState<{ actor: unknown; context: IouDeliveryContext }>();
   const [error, setError] = useState("");
+  const current = useRef({ principal, draft, binding, isCurrent });
+  current.current = { principal, draft, binding, isCurrent };
   useEffect(() => {
-    let cancelled = false;
+    let cancelled = false; setLoaded(undefined); setError("");
     if (!actor) return;
-    void Promise.all([actor.get_my_pairs(), actor.get_my_user()]).then(([pairs, user]) => {
-      if (cancelled) return;
-      const choices: SheetChoice[] = [];
-      for (const pair of pairs as { id: string; active_sheet_id: [] | [string]; archived_at?: [] | [bigint]; other_principal: { toText(): string } }[]) {
-        const sheetId = unwrap(pair.active_sheet_id);
-        if (typeof sheetId === "string" && /^[a-f0-9]{16}$/.test(sheetId) && unwrap(pair.archived_at) == null) {
-          choices.push({ pairId: pair.id, sheetId, otherPrincipal: pair.other_principal.toText() });
-        }
-      }
-      setSheets(choices);
-      setDefaultCurrency(currencyFromUserRecord(unwrap(user)) ?? "");
-    }).catch(() => { if (!cancelled) setError("IOU could not load your existing sheets. No entry was saved."); });
+    void (async () => {
+      const context = localImportRecipient(draft.envelope.recipientContext, { principal, backendHost, backendCanisterId });
+      const pairs = await actor.get_my_pairs();
+      const pair = pairs.find((item: { id: string; active_sheet_id: [] | [string]; archived_at?: [] | [bigint] }) => item.id === context.pairId && unwrap(item.active_sheet_id) === context.sheetId && unwrap(item.archived_at) == null);
+      if (!pair) throw new Error("The linked sheet is no longer active in this IOU account. Reconnect IOU in OpenChat.");
+      if (!cancelled && current.current.draft === draft && current.current.isCurrent()) setLoaded({ actor, context });
+    })().catch(() => { if (!cancelled) setError("This draft could not be opened in the connected IOU account and active sheet. Check your sign-in, or reconnect IOU in OpenChat."); });
     return () => { cancelled = true; };
-  }, [actor]);
-  return <section>
-    <h2>Choose the IOU destination</h2>
-    <p>Choose the sheet connected in OpenChat. A draft encrypted for another IOU user, backend or sheet cannot be opened here.</p>
-    {(error || err) && <p role="alert">{error || err}</p>}
-    <label>Existing active sheet <select value={selected} disabled={!!loaded} onChange={(event) => setSelected(event.target.value)}>
-      <option value="">Choose a sheet…</option>
-      {sheets.map((sheet) => <option key={sheet.sheetId} value={sheet.sheetId}>Account {sheet.pairId} — sheet {sheet.sheetId} — other member {sheet.otherPrincipal}</option>)}
-    </select></label>
-    {!loaded && <button disabled={!selected} onClick={() => setLoaded(sheets.find((sheet) => sheet.sheetId === selected))}>Load this sheet’s private Types</button>}
-    {loaded && <PrivateSheet key={loaded.sheetId} principal={principal} sheet={loaded} defaultCurrency={defaultCurrency}
-      drafts={drafts} binding={binding} />}
-  </section>;
+  }, [actor, principal, draft, binding]);
+  if (error || err) return <p role="alert">{error || "IOU could not load the connected account. Try again when it is available."}</p>;
+  if (!loaded || loaded.actor !== actor) return <p className="muted">Opening the connected sheet…</p>;
+  return <ImportedSheet key={`${principal}:${draft.importId}:${loaded.context.sheetId}`} context={loaded.context} draft={draft} binding={binding} isCurrent={isCurrent} />;
 }
 
-function PrivateSheet({ principal, sheet, defaultCurrency, drafts, binding }: {
-  principal: string; sheet: SheetChoice; defaultCurrency: string; drafts: readonly PendingLocalImport[]; binding?: Binding;
+function ImportedSheet({ context, draft, binding, isCurrent }: {
+  context: IouDeliveryContext; draft: PendingLocalImport; binding: Binding; isCurrent: () => boolean;
 }) {
   const { actor } = useActor();
   const { identity } = useAuth();
-  const deliveryKeys = useLocalDeliveryKey();
   const { unwrapFor } = useSheetKey();
-  const { shared, loading, ready, readyGeneration, error } = usePairTemplates(sheet.pairId, sheet.sheetId, { requireReadableSlots: true });
-  const [activeId, setActiveId] = useState("");
-  const [editRows, setEditRows] = useState<LocalImportReviewRow[]>([]);
-  const rows = editRows.map((state) => state.row);
-  const typeIds = editRows.map((state) => state.selectedTypeId);
-  const [review, setReview] = useState<Review>();
-  const [locked, setLocked] = useState(false);
-  const [busy, setBusy] = useState(false);
-  const [saved, setSaved] = useState(false);
+  const deliveryKeys = useLocalDeliveryKey();
+  const types = usePairTemplates(context.pairId, context.sheetId, { requireReadableSlots: true });
+  const [drafts, setDrafts] = useState<LocalSheetImport["drafts"]>([]);
   const [notice, setNotice] = useState("");
-  const [decrypting, setDecrypting] = useState(false);
-  const decryptedDraft = useRef<PendingLocalImport>();
-  const decryptSequence = useRef(0);
-  const liveDrafts = useRef(drafts);
-  liveDrafts.current = drafts;
-  const mounted = useRef(true);
-  const current = useRef({ principal, sheetId: sheet.sheetId, binding, actor, identity, ready, readyGeneration });
-  current.current = { principal, sheetId: sheet.sheetId, binding, actor, identity, ready, readyGeneration };
-  const setupContext = useRef({ ...current.current, pairId: sheet.pairId, shared, defaultCurrency });
-  setupContext.current = { ...current.current, pairId: sheet.pairId, shared, defaultCurrency };
-  const [setup, setSetup] = useState<ReturnType<typeof createLocalSetupDownloadFiles> & { context: typeof setupContext.current }>();
-  const [preparingSetup, setPreparingSetup] = useState(false);
-  const setupPending = useRef(false);
-  const setupOwner = useRef(createLocalSetupDownloadOwner());
-  const setupCurrent = !!setup && localSetupContextMatches(setup.context, setupContext.current);
-  useEffect(() => { mounted.current = true; return () => { mounted.current = false; decryptSequence.current++; setupOwner.current.clear(); }; }, []);
-  useEffect(() => { if (setup && !setupCurrent) clearSetup(); }, [setup, setupCurrent]);
-  useEffect(() => {
-    if (decryptedDraft.current && !drafts.includes(decryptedDraft.current)) {
-      decryptSequence.current++; decryptedDraft.current = undefined; setReview(undefined); setEditRows([]); setActiveId("");
-      setNotice("An encrypted retry arrived. Select it again to verify that every retry contains the same reviewed draft.");
-    }
-  }, [drafts]);
-
-  function clearSetup() { setupOwner.current.clear(); setSetup(undefined); }
-
-  function assertCurrent(captured: typeof current.current) {
+  const [saved, setSaved] = useState(false);
+  const [dismissed, setDismissed] = useState(false);
+  const mounted = useRef(true), pending = useRef(false), completed = useRef(false);
+  const saveLock = useRef<ReturnType<typeof createLocalImportSaveLock>>();
+  const current = useRef({ actor, identity, draft, binding, context, ready: types.ready, generation: types.readyGeneration, isCurrent });
+  current.current = { actor, identity, draft, binding, context, ready: types.ready, generation: types.readyGeneration, isCurrent };
+  const readyContext = useRef<typeof current.current>();
+  function assertCurrent(captured = readyContext.current) {
     const live = current.current;
-    if (!mounted.current || !captured.actor || !captured.identity || !captured.readyGeneration ||
-      (captured.binding?.isCurrent && !captured.binding.isCurrent()) ||
-      !live.ready || live.actor !== captured.actor || live.identity !== captured.identity ||
-      live.readyGeneration !== captured.readyGeneration ||
-      !batchImportContextMatches(captured, live.sheetId, live.principal)) {
-      throw new Error("The IOU session or private Type context changed; this draft was not submitted.");
+    if (!mounted.current || !captured || !captured.actor || !captured.identity || !live.ready ||
+        !live.isCurrent() || (live.binding.isCurrent && !live.binding.isCurrent()) ||
+        live.actor !== captured.actor || live.identity !== captured.identity || live.draft !== captured.draft ||
+        live.context !== captured.context || live.binding !== captured.binding || live.generation !== captured.generation) {
+      throw new Error("The IOU account, sheet, Types or connection changed. Nothing further was submitted.");
     }
   }
-
-  function assertSetupCurrent(captured: typeof setupContext.current) {
-    assertCurrent(captured);
-    if (!localSetupContextMatches(captured, setupContext.current)) throw new Error("The private setup context changed");
-  }
-
-  async function chooseDraft(importId: string) {
-    const draft = drafts.find((item) => item.importId === importId);
-    if (!draft || locked || !ready || !deliveryKeys.ready) return;
-    const captured = { ...current.current }, sequence = ++decryptSequence.current;
-    const stillCurrent = () => {
-      assertCurrent(captured);
-      if (sequence !== decryptSequence.current || !liveDrafts.current.includes(draft)) throw new Error("Encrypted draft changed during decryption");
-    };
-    setActiveId(""); setEditRows([]); setReview(undefined); setSaved(false); setDecrypting(true); decryptedDraft.current = undefined;
-    try {
-      const key = await deliveryKeys.load(false);
-      stillCurrent();
-      const recipient = await createLocalDeliveryEncryption(key.publicKey, { principal, backendHost, backendCanisterId,
-        pairId: sheet.pairId, sheetId: sheet.sheetId });
+  useEffect(() => { mounted.current = true; return () => { mounted.current = false; }; }, []);
+  useEffect(() => {
+    let cancelled = false;
+    setDrafts([]); readyContext.current = undefined; setNotice("");
+    if (!types.ready || !types.readyGeneration || !deliveryKeys.ready || !actor || !identity) return;
+    const captured = { ...current.current };
+    const stillCurrent = () => { if (cancelled) throw new Error("Draft review changed"); assertCurrent(captured); };
+    void (async () => {
+      const key = await deliveryKeys.load(false); stillCurrent();
+      const recipient = await createLocalDeliveryEncryption(key.publicKey, context);
       const payload = await decryptPendingLocalImport(draft, key.privateKey, recipient, `${location.origin}/openchat/import`, stillCurrent);
-      stillCurrent(); decryptedDraft.current = draft; setActiveId(importId);
-      setEditRows(payload.entries.map(row => initializeLocalImportReviewRow(row, shared)));
-      setNotice(payload.entries.some(row => row.typeId && !shared.some(type => type.id === row.typeId && type.name === row.typeName))
-        ? "A proposed Type is not available in this sheet. Select a current Type or explicitly use none; no foreign defaults are applied." : "Decrypted locally. Review every field before saving.");
-    } catch { if (mounted.current && sequence === decryptSequence.current) setNotice("This encrypted draft could not be opened for this IOU user and sheet, its key changed, or retries conflict. Reconnect the app; nothing was saved."); }
-    finally { if (mounted.current && sequence === decryptSequence.current) setDecrypting(false); }
-  }
-  function updateRow(index: number, patch: Partial<LocalImportDraft>) {
-    if (locked) return;
-    setEditRows((currentRows) => currentRows.map((state, rowIndex) => rowIndex === index
-      ? { ...state, row: { ...state.row, ...patch } } : state)); setReview(undefined);
-  }
-  function selectType(index: number, selectedId: string) {
-    if (locked || !ready) return;
-    try {
-      const next = editRows.map((state, rowIndex) => rowIndex === index ? applyLocalImportType(state, selectedId, shared) : state);
-      setEditRows(next); setReview(undefined);
-    } catch { setNotice("The selected Type is not available in this IOU account."); setReview(undefined); }
-  }
-  function editDirection(index: number, direction: LocalImportDraft["direction"]) {
-    if (locked) return;
-    setEditRows((currentRows) => currentRows.map((state, rowIndex) => rowIndex === index
-      ? editLocalImportDirection(state, direction) : state)); setReview(undefined);
-  }
-  function prepare() {
-    if (!ready || !decryptedDraft.current || !drafts.includes(decryptedDraft.current)) return;
-    try { setReview({ payloads: prepareLocalImportReview({ rows, selectedTypeIds: typeIds, templates: shared, importId: activeId }), sheet, importId: activeId, draft: decryptedDraft.current }); setNotice(""); }
-    catch (cause) { setNotice((cause as Error).message); setReview(undefined); }
-  }
-  async function save() {
-    if (!review || busy || saved || !actor || !identity || !ready || !readyGeneration) return;
-    const captured = { ...current.current, sheetId: review.sheet.sheetId };
-    const stillCurrent = () => { assertCurrent(captured); if (!liveDrafts.current.includes(review.draft)) throw new Error("Encrypted draft changed before save"); };
-    setLocked(true); setBusy(true); setNotice("");
-    try {
-      const key = await unwrapFor(review.sheet.sheetId);
       stillCurrent();
-      const acknowledgement = await addEntryBatch({ actor: captured.actor, sheetId: review.sheet.sheetId, payloads: [...review.payloads],
-        // The same canonical 32-byte id is reused on every explicit outcome-unknown retry. This
-        // is an import identity only, NOT a claim that OpenChat verified a message or membership.
-        messageHandle: review.importId, relayId: "", sheetKey: key, beforeMutate: stillCurrent });
-      stillCurrent();
-      setSaved(true); setNotice(`Saved ${acknowledgement.accepted_count} entries in the reviewed IOU sheet${acknowledgement.replayed ? " (the earlier save was already accepted)" : ""}.`);
-      // A receipt failure cannot turn an already-confirmed ledger save into an unknown result.
-      // Also do not revive a relay connection that expired while encryption/network I/O awaited.
-      if (binding && current.current.binding === binding) {
-        try { binding.senderWindow.postMessage(buildLocalImportCommittedReceipt(binding.sessionNonce, review.importId, acknowledgement), binding.senderOrigin); }
-        catch { setNotice("Saved in the reviewed IOU sheet. The client could not be notified; do not submit a new proposal to retry this save."); }
-      }
-    } catch {
-      if (mounted.current) setNotice("The save did not return a confirmed result. The exact reviewed data, account, sheet and import ID are locked. Check IOU, or explicitly retry this same save; do not create a new proposal to retry it.");
-    } finally { if (mounted.current) setBusy(false); }
-  }
-  async function prepareSetupFiles() {
-    if (!ready || setupPending.current) return;
-    const captured = { ...setupContext.current };
-    setupPending.current = true;
-    setPreparingSetup(true); clearSetup(); setNotice("");
-    try {
-      const context = createLocalProcessorContext(shared, defaultCurrency);
-      // Explicit setup download only; no message/source data exists in these requests. Never fetch
-      // an app processor during inference or include this private vocabulary in public build files.
-      const { metadata, source } = await verifiedLocalSetupProcessor();
-      assertSetupCurrent(captured);
-      const key = await deliveryKeys.load(true);
-      const deliveryEncryption = await createLocalDeliveryEncryption(key.publicKey, { principal, backendHost, backendCanisterId,
-        pairId: sheet.pairId, sheetId: sheet.sheetId });
-      assertSetupCurrent(captured);
-      const catalog = createIouLocalAppPackage(`${location.origin}/openchat/import`, metadata, {
-        processorContext: context,
-        deliveryEncryption,
-        recipientLabel: `IOU account ${sheet.pairId}; sheet ${sheet.sheetId}. Encrypted to this IOU user and sheet; review again before saving.`,
-      });
-      const prepared = { ...createLocalSetupDownloadFiles(catalog, source), context: captured };
-      setupOwner.current.replace(prepared);
-      setSetup(prepared);
-      setNotice("Setup files verified and ready. Nothing has been downloaded yet. Use each download button below.");
-    } catch { if (mounted.current) setNotice("The app package could not be verified/prepared. No entry or source message was sent."); }
-    finally { setupPending.current = false; if (mounted.current) setPreparingSetup(false); }
-  }
+      const prepared = localImportSheetDrafts(payload.entries, types.shared, draft.importId);
+      readyContext.current = captured;
+      saveLock.current ??= createLocalImportSaveLock(draft.importId, prepared.length);
+      setDrafts(prepared);
+    })().catch(error => { if (!cancelled) setNotice(error instanceof LocalImportReviewError ? error.message : "This draft could not be opened for the connected account, sheet and current Types. Review the card in OpenChat or reconnect IOU; nothing was saved."); });
+    return () => { cancelled = true; };
+  }, [actor, identity, draft, binding, context, types.ready, types.readyGeneration, deliveryKeys.ready]);
 
-  return <section>
-    <h2>Sheet {sheet.sheetId}</h2>
-    <p>Account {sheet.pairId}; other member {sheet.otherPrincipal}. Your entries are encrypted locally for this sheet before saving.</p>
-    {(loading || (!ready && !error)) && <p>Loading this sheet’s Types…</p>}{error && <p role="alert">Could not load this sheet’s Types. Saving is disabled.</p>}
-    <details><summary>Private local-client setup</summary>
-      <p>Exporting shares no chat or image. The catalog contains Type names, trigger words, directions, default currency ({defaultCurrency || "unset"}), public delivery key and visible recipient routing metadata. No private key or sheet secret leaves IOU.</p>
-      <ul>{shared.map((type) => <li key={type.id}>{type.name}: {type.direction === "credit" ? "Owed to you" : "You owe"}; {type.txn_type}; keywords: {(type.keywords ?? []).join(", ") || "name only"}</li>)}</ul>
-      <button disabled={!ready || !deliveryKeys.ready || loading || !!error || preparingSetup} onClick={() => void prepareSetupFiles()}>{preparingSetup ? "Verifying setup files…" : "Prepare setup files"}</button>
-      {setup && <LocalSetupDownloads files={setup.files} disabled={!setupCurrent || loading || !!error}
-        assertCurrent={() => assertSetupCurrent(setup.context)}
-        onRequest={(file) => setNotice(`Download requested: ${file.name}. Check your browser’s Downloads list to confirm it was saved.`)}
-        onError={() => {
-          clearSetup();
-          setNotice("The setup file could not be requested, or the IOU session changed. Prepare fresh setup files before downloading.");
-        }} />}
-    </details>
-    <h2>Review a received draft</h2>
-    {!drafts.length && <p>No draft has been received. Nothing is saved automatically.</p>}
-    {decrypting && <p>Decrypting for this IOU user and sheet…</p>}
-    <select aria-label="Received draft" value={activeId} disabled={locked || decrypting || !deliveryKeys.ready || !ready || loading || !!error} onChange={(event) => void chooseDraft(event.target.value)}>
-      <option value="">Choose an encrypted draft…</option>{drafts.map((draft, index) => <option key={draft.importId} value={draft.importId}>Encrypted draft {index + 1} — {draft.importId}</option>)}
-    </select>
-    {rows.map((row, index) => <fieldset key={index} disabled={locked} style={{ margin: "16px 0", display: "grid", gap: 10 }}>
-      <legend>Entry {index + 1}</legend>
-      {row.typeName && <p>Proposed Type: {row.typeName} ({row.typeId})</p>}
-      <label>Type <select value={typeIds[index] === null ? "" : typeIds[index] ? `type:${typeIds[index]}` : "none"} onChange={(event) => {
-        const id = event.target.value === "none" ? "" : event.target.value.slice(5);
-        selectType(index, id);
-      }}><option value="" disabled>Choose a current Type or None…</option><option value="none">None — use reviewed fields only</option>{shared.map((type) => <option value={`type:${type.id}`} key={type.id}>{type.name}</option>)}</select></label>
-      <label>Kind <select value={row.kind} onChange={(event) => updateRow(index, { kind: event.target.value as LocalImportDraft["kind"] })}><option value="iou">IOU</option><option value="settlement">Settlement</option></select></label>
-      <label>Amount <input type="number" min="0.01" step="0.01" value={Number.isFinite(row.amount) ? row.amount : ""} onChange={(event) => updateRow(index, { amount: Number(event.target.value) })} /></label>
-      <label>Currency <input maxLength={3} value={row.currency} onChange={(event) => updateRow(index, { currency: event.target.value.toUpperCase() })} /></label>
-      <label>Direction <select value={row.direction} onChange={(event) => editDirection(index, event.target.value as LocalImportDraft["direction"])}><option value="credit">Owed to you</option><option value="debt">You owe</option></select></label>
-      <label>Date <input type="date" value={row.date ?? ""} onChange={(event) => updateRow(index, { date: event.target.value })} /></label>
-      <label>Note <textarea rows={3} maxLength={4096} value={row.note ?? ""} onChange={(event) => updateRow(index, { note: event.target.value })} /></label>
-    </fieldset>)}
-    {!!rows.length && !locked && <button onClick={prepare} disabled={!ready || loading || !!error}>Review exact encrypted entry contents</button>}
-    {review && <section><h3>Final save review</h3><p>IOU principal {principal}; account {review.sheet.pairId}; sheet {review.sheet.sheetId}.</p>
-      <p>All stored fields are below, including any selected Type fees and due schedule. No raw message or image is included. Dates marked ts/due_ts are UTC milliseconds.</p>
-      <pre style={{ whiteSpace: "pre-wrap" }}>{JSON.stringify(review.payloads, null, 2)}</pre>
-      <button disabled={busy || saved || !actor || !ready || loading || !!error} onClick={() => void save()}>{saved ? "Saved in IOU" : busy ? "Saving encrypted entries…" : locked ? "Retry the same save in IOU" : "Save in IOU"}</button>
-    </section>}
-    {notice && <p role="status">{notice}</p>}
-  </section>;
+  async function save(payloads: readonly EntryPayload[]) {
+    assertCurrent();
+    if (pending.current || completed.current || dismissed || !saveLock.current) throw new Error("This draft is already being handled.");
+    const captured = readyContext.current!;
+    const exact = saveLock.current(payloads);
+    pending.current = true;
+    try {
+      const key = await unwrapFor(context.sheetId); assertCurrent(captured);
+      const acknowledgement = await addEntryBatch({ actor: captured.actor!, sheetId: context.sheetId, payloads: exact,
+        messageHandle: draft.importId, relayId: "", sheetKey: key, beforeMutate: () => assertCurrent(captured) });
+      assertCurrent(captured); completed.current = true; setSaved(true);
+      setNotice(acknowledgement.replayed ? "Saved in IOU — the earlier save was already accepted." : "Saved in IOU.");
+      try { binding.senderWindow.postMessage(buildLocalImportCommittedReceipt(binding.sessionNonce, draft.importId, acknowledgement), binding.senderOrigin); }
+      catch { setNotice("Saved in IOU. OpenChat could not be notified; do not create another proposal to retry this save."); }
+    } catch {
+      setNotice("The save did not return a confirmed result. Check this sheet before retrying the same reviewed fields.");
+      throw new Error("The save did not return a confirmed result. Check this sheet before retrying the same reviewed fields.");
+    } finally { pending.current = false; }
+  }
+  const localImport: LocalSheetImport = { sheetId: context.sheetId, pairId: context.pairId, importId: draft.importId, drafts,
+    ready: !!readyContext.current && types.ready && !types.error && !dismissed, saved, notice: types.error ? "This sheet’s Types could not be loaded. Saving is disabled." : notice,
+    assertCurrent, save, dismiss: () => { if (!pending.current) setDismissed(true); } };
+  return <SheetPage localImport={localImport} />;
 }

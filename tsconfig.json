@@ -18,5 +18,6 @@
     "types": ["vite/client", "vite-plugin-pwa/client"]
   },
   "include": ["src"],
+  "exclude": ["src/config/localAppFrames.ts", "src/config/localAppFrames.test.ts"],
   "references": [{ "path": "./tsconfig.node.json" }]
 }

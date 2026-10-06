@@ -28,6 +28,7 @@ import { encryptEntryPayload } from "../crypto/devVetkd";
 import { encryptClosingBalances } from "./closingBalances";
 import { useToasts } from "../ui/Toasts";
 import { useNavigate } from "react-router-dom";
+import { openLocalImportNavigation, useLocalImportNavigation } from "../openchat/LocalImportNavigation";
 
 interface CloseSheetButtonProps {
   sheetId: string;
@@ -49,6 +50,7 @@ export function CloseSheetButton({
   const { prefs } = usePreferences();
   const toasts = useToasts();
   const nav = useNavigate();
+  const externalNavigation = useLocalImportNavigation();
   const [confirming, setConfirming] = useState(false);
   const [submitting, setSubmitting] = useState(false);
 
@@ -163,7 +165,9 @@ export function CloseSheetButton({
     <>
       <button
         className="secondary"
-        onClick={() => setConfirming(true)}
+        // Closing is a separate sheet workflow. Leave the framed receiver before offering its
+        // unchanged confirmation, rather than mutating and then relying on an async popup.
+        onClick={() => externalNavigation ? openLocalImportNavigation(`/sheet/${sheetId}`) : setConfirming(true)}
         disabled={entries.length === 0}
       >
         🔒 Close &amp; start new

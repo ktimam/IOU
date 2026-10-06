@@ -2,6 +2,7 @@ import { readFileSync } from "node:fs";
 import { defineConfig, loadEnv, type Plugin } from "vite";
 import react from "@vitejs/plugin-react";
 import { VitePWA } from "vite-plugin-pwa";
+import { isLocalAppFrameRoute, resolveLocalAppFrameOrigins } from "./src/config/localAppFrames";
 import {
   resolveDevLanQcTlsPaths,
   resolveOpenChatDevAllowedHosts,
@@ -46,13 +47,14 @@ const DEV_WATCH_IGNORES = [
 // OpenChat dev allowlist, every other request (static assets, HMR) gets 'none'. frame-ancestors is an
 // allowlist, so unlisted origins are denied; no X-Frame-Options is emitted because XFO cannot express
 // an allowlist (and would only get in the way).
-function devFramingHeaders(frameAncestors: readonly string[]): Plugin {
+function devFramingHeaders(frameAncestors: readonly string[], localAppOrigins: readonly string[]): Plugin {
   return {
     name: "iou-dev-framing",
     configureServer(server) {
       server.middlewares.use((req, res, next) => {
         const isDocument = (req.headers.accept ?? "").includes("text/html");
-        const ancestors = isDocument ? frameAncestors.join(" ") : "'none'";
+        const allowed = localAppOrigins.length > 0 && isLocalAppFrameRoute(req.url) ? localAppOrigins : frameAncestors;
+        const ancestors = isDocument ? allowed.join(" ") : "'none'";
         res.setHeader(
           "Content-Security-Policy",
           `frame-ancestors ${ancestors}`,
@@ -86,6 +88,7 @@ export default defineConfig(({ command, mode }) => {
     env.VITE_IOU_LAN_QC_OPENCHAT_ORIGIN,
     context,
   );
+  const localAppFrameOrigins = resolveLocalAppFrameOrigins(env.IOU_LOCAL_APP_FRAME_ORIGINS, context);
   const openChatDevAllowedHosts = resolveOpenChatDevAllowedHosts(
     env.VITE_IOU_LAN_QC_OPENCHAT_ORIGIN,
     context,
@@ -110,7 +113,7 @@ export default defineConfig(({ command, mode }) => {
 
   return {
     plugins: [
-      devFramingHeaders(openChatDevFrameAncestors),
+      devFramingHeaders(openChatDevFrameAncestors, localAppFrameOrigins),
       react(),
       VitePWA({
         registerType: "autoUpdate",

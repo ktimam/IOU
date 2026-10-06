@@ -1,56 +1,53 @@
 // @vitest-environment-options {"url":"http://localhost:3000/openchat/import"}
-// Real React hooks, receiver and delivery crypto. Authentication and ledger encryption are synthetic boundaries.
-import { act, type ReactNode } from "react";
+// Real normal IOU providers, sheet/forms, Type hooks, receiver and cross-client envelope crypto.
+// Only authentication/actor/ledger-key boundaries are synthetic. No live backend or model runs.
+import { act, StrictMode, type ReactNode } from "react";
 import { createRoot, type Root } from "react-dom/client";
+import { MemoryRouter } from "react-router-dom";
 import { afterEach, beforeEach, beforeAll, describe, expect, it, vi } from "vitest";
 
 const fixture = vi.hoisted(() => ({
-  actor: null as any,
-  actorError: null as string | null,
-  identity: undefined as any,
-  principal: "synthetic-a",
-  decrypt: vi.fn(),
-  decryptCrypto: vi.fn(),
-  realSlots: false,
-  nativeBootstrap: false,
-  unwrap: vi.fn(),
-  encrypt: vi.fn(),
+  actor: null as any, actorError: null as string | null, identity: undefined as any,
+  principal: "synthetic-a", decrypt: vi.fn(), decryptCrypto: vi.fn(), realSlots: false,
+  nativeBootstrap: false, unwrap: vi.fn(), encrypt: vi.fn(),
   sender: { postMessage: vi.fn(), closed: false },
-  deliveryKey: undefined as CryptoKeyPair | undefined,
-  decryptions: [] as Promise<unknown>[],
-  deliverySheet: "0123456789abcdef",
+  deliveryKey: undefined as CryptoKeyPair | undefined, decryptions: [] as Promise<unknown>[],
+  deliverySheet: "0123456789abcdef", deliveryPrincipal: undefined as string | undefined,
 }));
-vi.mock("../../src/features/auth/config", () => ({ host:"http://127.0.0.1:4943", canisterId:"rrkah-fqaaa-aaaaa-aaaaq-cai" }));
+vi.mock("../../src/features/auth/config", () => ({ host: "http://127.0.0.1:4943", canisterId: "rrkah-fqaaa-aaaaa-aaaaq-cai" }));
 vi.mock("../../src/features/openchat/LocalDeliveryKeyProvider", () => ({
-  LocalDeliveryKeyProvider: ({children}:{children:ReactNode})=>children,
-  useLocalDeliveryKey:()=>({ready:!!fixture.identity && !!fixture.actor,load:async()=>fixture.deliveryKey}),
+  LocalDeliveryKeyProvider: ({ children }: { children: ReactNode }) => children,
+  useLocalDeliveryKey: () => ({ ready: !!fixture.identity && !!fixture.actor, load: async () => fixture.deliveryKey }),
 }));
-vi.mock("../../src/features/openchat/localImportHandoff", async original=>{
-  const real=await original<typeof import("../../src/features/openchat/localImportHandoff")>();
-  return {...real,decryptPendingLocalImport:(...args:Parameters<typeof real.decryptPendingLocalImport>)=>{
-    const pending=real.decryptPendingLocalImport(...args);fixture.decryptions.push(pending);return pending;
-  }};
+vi.mock("../../src/features/openchat/localImportHandoff", async original => {
+  const real = await original<typeof import("../../src/features/openchat/localImportHandoff")>();
+  return { ...real, decryptPendingLocalImport: (...args: Parameters<typeof real.decryptPendingLocalImport>) => {
+    const pending = real.decryptPendingLocalImport(...args); fixture.decryptions.push(pending); return pending;
+  } };
 });
 vi.mock("../../src/features/auth/AuthProvider", () => ({
   AuthProvider: ({ children }: { children: ReactNode }) => children,
-  useAuth: () => ({
-    identity: fixture.identity,
+  buildAgent: async () => ({}),
+  useAuth: () => ({ identity: fixture.identity,
     state: fixture.identity ? { kind: "authenticated", identity: fixture.identity, principal: fixture.principal } : { kind: "anonymous" },
-    signIn: vi.fn(), signOut: vi.fn(),
-  }),
+    signIn: vi.fn(), signOut: vi.fn() }),
+}));
+vi.mock("../../src/backend/declarations", () => ({ createActor: () => fixture.actor }));
+vi.mock("../../src/features/openchat/actionInboxClient", () => ({
+  getActionInboxConfig: vi.fn(), pollActionInbox: vi.fn(), acknowledgeActionInbox: vi.fn(),
 }));
 vi.mock("../../src/features/flows/useActor", () => ({
   useActor: () => ({ actor: fixture.actor, err: fixture.actorError }),
   unwrap: (value: unknown) => Array.isArray(value) ? value[0] ?? null : value ?? null,
+  isActive: (value: unknown) => !!value && typeof value === "object" && "Active" in value,
 }));
 vi.mock("../../src/features/flows/SheetKeyContext", () => ({
   SheetKeyProvider: ({ children }: { children: ReactNode }) => children,
-  useSheetKey: () => ({ get: () => undefined, unwrapFor: fixture.unwrap }),
+  useSheetKey: () => ({ get: () => undefined, cache: vi.fn(), unwrapFor: fixture.unwrap }),
 }));
-vi.mock("../../src/features/templates/pairTemplatesActor", async (original) => {
+vi.mock("../../src/features/templates/pairTemplatesActor", async original => {
   const real = await original<typeof import("../../src/features/templates/pairTemplatesActor")>();
-  return {
-    ...real,
+  return { ...real,
     decryptSlot: (...args: Parameters<typeof real.decryptSlot>) => fixture.realSlots ? real.decryptSlot(...args) : fixture.decrypt(...args),
     decryptSlotWithStatus: async (...args: Parameters<typeof real.decryptSlotWithStatus>) => fixture.realSlots
       ? real.decryptSlotWithStatus(...args) : { readable: true, payload: await fixture.decrypt(...args) },
@@ -58,667 +55,376 @@ vi.mock("../../src/features/templates/pairTemplatesActor", async (original) => {
 });
 vi.mock("../../src/features/crypto/devVetkd", () => ({
   encryptEntryPayload: fixture.encrypt, encryptWithSheetKey: vi.fn(), decryptWithSheetKey: fixture.decryptCrypto,
+  decryptName: vi.fn(), encryptName: vi.fn(), isProdVetkd: () => false, deriveUserKey: vi.fn(),
 }));
-vi.mock("../../src/features/openchat/localImportLaunch", async (original) => {
+vi.mock("../../src/features/openchat/localImportLaunch", async original => {
   const real = await original<typeof import("../../src/features/openchat/localImportLaunch")>();
-  return {
-    ...real,
-    localImportSessionNonce: () => fixture.nativeBootstrap ? undefined : "A".repeat(43),
-    localImportNativeBootstrap: () => fixture.nativeBootstrap,
-  };
+  return { ...real, localImportSessionNonce: () => fixture.nativeBootstrap ? undefined : "A".repeat(43),
+    localImportNativeBootstrap: () => fixture.nativeBootstrap };
 });
-import { usePairTemplates, type PairTemplatesApi } from "../../src/features/templates/PairTemplatesContext";
+
 import { LocalImportPage } from "../../src/features/openchat/LocalImportPage";
+import { usePairTemplates, type PairTemplatesApi } from "../../src/features/templates/PairTemplatesContext";
 import type { LocalImportDraft } from "../../src/features/openchat/localImportHandoff";
-import type { EntryBatchActor } from "../../src/features/entries/batchImport";
 import { createLocalAppHandoffSession } from "@oc-test/localAppHandoff";
 import { sealLocalAppDelivery } from "@oc-test/localAppEncryption";
 import { createLocalDeliveryEncryption } from "../../src/features/openchat/localImportEncryption";
+import { localImportSheetDrafts } from "../../src/features/openchat/localImportSheet";
+import { getActionInboxConfig, pollActionInbox, acknowledgeActionInbox } from "../../src/features/openchat/actionInboxClient";
+import { LocalImportNavigationProvider } from "../../src/features/openchat/LocalImportNavigation";
+import { CloseSheetButton } from "../../src/features/entries/CloseSheetButton";
+import { PreferencesProvider } from "../../src/features/settings/usePreferences";
+import { ToastProvider } from "../../src/features/ui/Toasts";
 
-const sheetId = "0123456789abcdef";
-const pairId = "0000000000000001";
-const destination = "http://localhost:3000/openchat/import";
-beforeAll(async()=>{ fixture.deliveryKey=await crypto.subtle.generateKey({name:"ECDH",namedCurve:"P-256"},false,["deriveBits"]); });
-const encryptedRequest=async(entries:readonly LocalImportDraft[],idempotencyKey=importId)=>sealLocalAppDelivery({
-  appId:"iou",appRevision:"local-import-v2",actionId:"iou.entry.import",destination,recipient:"Synthetic recipient",idempotencyKey,payload:{entries},
-  deliveryEncryption:await createLocalDeliveryEncryption(fixture.deliveryKey!.publicKey,{principal:fixture.principal,
-    backendHost:"http://127.0.0.1:4943",backendCanisterId:"rrkah-fqaaa-aaaaa-aaaaq-cai",pairId,sheetId:fixture.deliverySheet}),
-});
-const encryptedOffer=async(entries:readonly LocalImportDraft[],sessionNonce:string,idempotencyKey=importId)=>{
-  const {idempotencyKey:importId,...sealed}=await encryptedRequest(entries,idempotencyKey);
-  return {type:"oc:app-import:offer",version:2,sessionNonce,importId,...sealed};
-};
-const importId = "B".repeat(42) + "A";
+const sheetId = "0123456789abcdef", pairId = "0000000000000001";
+const destination = "http://localhost:3000/openchat/import", senderOrigin = "http://localhost:5190";
+const importId = "B".repeat(42) + "A", sessionNonce = "A".repeat(43);
 const template = { id: "own-type", name: "Own Type", direction: "debt" as const, txn_type: "iou" as const, keywords: [], fee_percent: 10, rev: 1, updatedAt: 1 };
 const slots = { templates: [template], dismissed: [] };
+const entry: LocalImportDraft = { kind: "iou", amount: 100, currency: "USD", direction: "credit", date: "2026-09-26", note: "Synthetic reviewed note" };
 const pair = () => ({ members: [fixture.principal, "synthetic-partner"], templates_a_enc: [], templates_a_iv: [], templates_b_enc: [], templates_b_iv: [] });
-function deferred<T>() {
-  let resolve!: (value: T) => void;
-  let reject!: (reason?: unknown) => void;
-  const promise = new Promise<T>((yes, no) => { resolve = yes; reject = no; });
-  return { promise, resolve, reject };
-}
-let root: Root;
-let container: HTMLDivElement;
-let latest: PairTemplatesApi;
-const renders: boolean[] = [];
-function Probe() {
-  latest = usePairTemplates(pairId, sheetId);
-  renders.push(latest.ready);
-  return null;
-}
-const render = async (child: ReactNode) => { await act(async () => root.render(child)); };
-const flush = async () => { await act(async () => { await Promise.resolve(); }); };
-const button = (text: string) => Array.from(container.querySelectorAll("button")).find(item => item.textContent === text)!;
-const click = async (element: HTMLElement) => { await act(async () => element.click()); };
-const select = async (element: HTMLSelectElement, value: string) => {
-  if(element.getAttribute("aria-label")==="Received draft")fixture.decryptions=[];
-  await act(async () => { element.value = value; element.dispatchEvent(new Event("change", { bubbles: true })); });
-  if(element.getAttribute("aria-label")==="Received draft" && value){
-    await act(async()=>{
-      await vi.waitFor(()=>expect(fixture.decryptions.length).toBeGreaterThan(0));
-      await Promise.allSettled(fixture.decryptions);
-    });
-  }
+const encrypted = { entryKey: new Uint8Array([1]), ciphertext: new Uint8Array([2]), iv: new Uint8Array([3]) };
+let root: Root, container: HTMLDivElement;
+const button = (label: string) => [...container.querySelectorAll("button")].find(node => node.textContent === label);
+const noteInput = () => [...container.querySelectorAll(".entry-form input")].find(node => (node as HTMLInputElement).value === entry.note || (node as HTMLInputElement).value === "User reviewed note") as HTMLInputElement;
+const render = async (child: ReactNode = <LocalImportPage />) => {
+  await act(async () => { root.render(<StrictMode><MemoryRouter>{child}</MemoryRouter></StrictMode>); });
 };
-function identity(principal: string) {
-  fixture.principal = principal;
-  fixture.identity = { getPrincipal: () => ({ toText: () => principal }) };
+const flush = async () => { await act(async () => { await new Promise(resolve => setTimeout(resolve, 5)); }); };
+const waitText = async (text: string) => { await vi.waitFor(async () => { await flush(); expect(container.textContent).toContain(text); }, { timeout: 4000 }); };
+const click = async (element: HTMLElement | undefined) => { expect(element).toBeDefined(); await act(async () => { element!.click(); }); };
+const submit = async () => { const form = container.querySelector(".entry-form"); expect(form).not.toBeNull();
+  await act(async () => { form!.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true })); }); };
+const message = async (data: unknown, origin = senderOrigin, source: unknown = fixture.sender) => {
+  await act(async () => { window.dispatchEvent(new MessageEvent("message", { data, origin, source: source as Window })); });
+};
+function identity(principal = "synthetic-a") {
+  fixture.principal = principal; fixture.identity = { getPrincipal: () => ({ toText: () => principal }) };
 }
-function actor(getPair: () => Promise<unknown> = async () => [pair()]) {
+function actor() {
   return {
-    get_pair: vi.fn(getPair),
+    get_pair: vi.fn(async () => [pair()]),
     get_my_pairs: vi.fn(async () => [{ id: pairId, active_sheet_id: [sheetId], archived_at: [], other_principal: { toText: () => "synthetic-partner" } }]),
     get_my_user: vi.fn(async () => []),
+    get_sheet: vi.fn(async () => [{ id: sheetId, pair_id: pairId, member_a: fixture.principal, member_b: "synthetic-partner", state: { Active: null }, name_enc: [], name_iv: [] }]),
+    list_entries: vi.fn(async () => ({ entries: [] })),
     add_entry_batch: vi.fn(async () => ({ entry_ids: [1n], replayed: false })),
-    set_pair_templates: vi.fn(),
+    set_pair_templates: vi.fn(), set_member_name: vi.fn(), close_sheet_encrypted: vi.fn(),
   };
 }
-async function offer(typeId = "foreign", typeName = "Foreign Type") {
-  await offerRows([{
-    kind: "iou", amount: 100, currency: "USD", direction: "credit", date: "2026-09-26", note: "Synthetic reviewed note", typeId, typeName,
-  }]);
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>(yes => { resolve = yes; }); return { promise, resolve };
 }
-async function offerRows(entries: readonly LocalImportDraft[], offeredId = importId) {
-  const offer=await encryptedOffer(entries,"A".repeat(43),offeredId);
-  await act(async () => {
-    for (const data of [
-      { type: "oc:app-import:hello", version: 2, sessionNonce: "A".repeat(43) }, offer,
-    ]) window.dispatchEvent(new MessageEvent("message", { data, source: fixture.sender as unknown as Window, origin: "http://localhost:5190" }));
+async function encryptedRequest(entries: readonly LocalImportDraft[], idempotencyKey = importId) {
+  return sealLocalAppDelivery({
+    appId: "iou", appRevision: "local-import-v2", actionId: "iou.entry.import", destination,
+    recipient: "Synthetic recipient", idempotencyKey, payload: { entries: JSON.parse(JSON.stringify(entries)) },
+    deliveryEncryption: await createLocalDeliveryEncryption(fixture.deliveryKey!.publicKey, {
+      principal: fixture.deliveryPrincipal ?? fixture.principal, backendHost: "http://127.0.0.1:4943",
+      backendCanisterId: "rrkah-fqaaa-aaaaa-aaaaq-cai", pairId, sheetId: fixture.deliverySheet,
+    }),
   });
 }
-async function mountSheet(selectedSheetId = sheetId) {
-  fixture.deliverySheet=selectedSheetId;
-  await render(<LocalImportPage />);
-  const sheetSelect = container.querySelector("select")!;
-  await select(sheetSelect, selectedSheetId);
-  await click(button("Load this sheet’s private Types"));
+async function offerRows(entries: readonly LocalImportDraft[], nonce = sessionNonce, origin = senderOrigin) {
+  const { idempotencyKey: id, ...sealed } = await encryptedRequest(entries);
+  await message({ type: "oc:app-import:hello", version: 2, sessionNonce: nonce }, origin);
+  await message({ type: "oc:app-import:offer", version: 2, sessionNonce: nonce, importId: id, ...sealed }, origin);
 }
+async function receive(entries: readonly LocalImportDraft[] = [entry]) {
+  fixture.actor = actor(); await render(); await offerRows(entries); await waitText("Review & add");
+}
+async function review(entries: readonly LocalImportDraft[] = [entry]) {
+  await receive(entries); await click(button("Review & add"));
+}
+function plaintexts() { return fixture.encrypt.mock.calls.map(([bytes]) => JSON.parse(new TextDecoder().decode(bytes))); }
+function committed() { return fixture.sender.postMessage.mock.calls.filter(([value]) => value.type === "oc:app-import:committed"); }
+
+beforeAll(async () => { fixture.deliveryKey = await crypto.subtle.generateKey({ name: "ECDH", namedCurve: "P-256" }, false, ["deriveBits"]); });
 beforeEach(() => {
-  vi.clearAllMocks();
-  fixture.sender.postMessage.mockReset();
-  fixture.encrypt.mockReset();
-  vi.stubEnv("VITE_LOCAL_IMPORT_SENDER_ORIGIN", "http://localhost:5190");
+  vi.clearAllMocks(); vi.stubEnv("VITE_LOCAL_IMPORT_SENDER_ORIGIN", senderOrigin);
   vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
-  vi.stubGlobal("fetch", vi.fn(() => { throw new Error("No network expected in this test"); }));
-  Object.defineProperty(window, "opener", { value: fixture.sender, configurable: true });
-  identity("synthetic-a"); fixture.actor = null; fixture.actorError = null; fixture.realSlots = false;
-  fixture.nativeBootstrap = false; fixture.sender.closed = false;
-  fixture.decryptions=[];
-  fixture.unwrap.mockResolvedValue(new Uint8Array(32).fill(7));
-  fixture.decrypt.mockResolvedValue(slots);
-  fixture.encrypt.mockResolvedValue({ entryKey: new Uint8Array([1]), ciphertext: new Uint8Array([2]), iv: new Uint8Array([3]) });
-  renders.length = 0;
+  vi.stubGlobal("fetch", vi.fn(() => { throw new Error("No network expected"); }));
+  localStorage.clear();
+  Object.defineProperty(window, "parent", { configurable: true, value: window });
+  Object.defineProperty(window, "opener", { configurable: true, value: fixture.sender });
+  identity(); fixture.actor = actor(); fixture.actorError = null; fixture.realSlots = false;
+  fixture.nativeBootstrap = false; fixture.sender.closed = false; fixture.deliverySheet = sheetId;
+  fixture.deliveryPrincipal = undefined; fixture.decryptions = [];
+  fixture.unwrap.mockReset().mockResolvedValue(new Uint8Array(32).fill(7));
+  fixture.decrypt.mockReset().mockResolvedValue(slots);
+  fixture.decryptCrypto.mockReset();
+  fixture.encrypt.mockReset().mockResolvedValue(encrypted);
+  fixture.sender.postMessage.mockReset();
   container = document.createElement("div"); document.body.append(container); root = createRoot(container);
 });
+afterEach(async () => {
+  await act(async () => { root.unmount(); }); container.remove();
+  Object.defineProperty(window, "parent", { configurable: true, value: window });
+  Object.defineProperty(window, "opener", { configurable: true, value: null });
+  vi.restoreAllMocks(); vi.unstubAllEnvs(); vi.unstubAllGlobals();
+});
 
-describe("actual local receiver Type and manual-direction editing", () => {
-  const entry: LocalImportDraft = { kind: "iou", amount: 100, currency: "USD", direction: "credit", date: "2026-09-26", note: "Synthetic reviewed note" };
-  const creditType = { ...template, id: "credit-type", name: "Credit Type", direction: "credit" as const };
-  const rowSelect = (label: string, index = 0) => {
-    const fieldset = container.querySelectorAll("fieldset")[index];
-    return [...fieldset.querySelectorAll("label")].find(node => node.textContent?.startsWith(`${label} `))!
-      .querySelector("select")!;
-  };
-  const chooseReceived = async (id = importId) => select(container.querySelector('[aria-label="Received draft"]')!, id);
-  const reviewed = () => JSON.parse(container.querySelector("pre")!.textContent!);
-
-  it.each([false,true])("invalidates a review when a new ciphertext retries the same ID (changed payload %s)",async(changed)=>{
-    fixture.actor=actor();await mountSheet();await offerRows([entry]);await chooseReceived();
-    await click(button("Review exact encrypted entry contents"));expect(button("Save in IOU")).toBeDefined();
-    await offerRows([{...entry,amount:changed?999:entry.amount}]);
-    expect(button("Save in IOU")).toBeUndefined();expect(container.querySelectorAll("fieldset")).toHaveLength(0);
-    expect(fixture.actor.add_entry_batch).not.toHaveBeenCalled();
-    await chooseReceived();
-    if(changed){
-      expect(container.textContent).toContain("retries conflict");expect(container.querySelectorAll("fieldset")).toHaveLength(0);
-      expect(button("Review exact encrypted entry contents")).toBeUndefined();
-    }else{
-      expect(container.querySelectorAll("fieldset")).toHaveLength(1);
-      await click(button("Review exact encrypted entry contents"));expect(reviewed()[0].amount_minor).toBe(10000);
+describe("normal IOU sheet receiver and form", () => {
+  it.each([false, true])("keeps ordinary navigation outside only the framed receiver (%s)", async framed => {
+    const open = vi.spyOn(window, "open").mockReturnValue(null);
+    if (framed) Object.defineProperty(window, "parent", { configurable: true, value: fixture.sender });
+    await receive();
+    for (const path of ["/pairs", "/pair/" + pairId]) {
+      const link = container.querySelector('a[href="' + path + '"]')!;
+      expect(link.getAttribute("target")).toBe(framed ? "_blank" : null);
+      expect(link.getAttribute("rel")).toBe(framed ? "noopener noreferrer" : null);
     }
+    await click(container.querySelector(".user-badge") as HTMLElement);
+    if (framed) expect(open).toHaveBeenCalledWith("http://localhost:3000/settings", "_blank", "noopener,noreferrer");
+    else expect(open).not.toHaveBeenCalled();
     expect(fixture.actor.add_entry_batch).not.toHaveBeenCalled();
   });
-
-  it("blocks a paused save if a different ciphertext arrives before the backend mutation",async()=>{
-    fixture.actor=actor();await mountSheet();await offerRows([entry]);await chooseReceived();
-    await click(button("Review exact encrypted entry contents"));
-    const pending=deferred<{entryKey:Uint8Array;ciphertext:Uint8Array;iv:Uint8Array}>();
-    fixture.encrypt.mockReturnValueOnce(pending.promise);await click(button("Save in IOU"));
-    expect(fixture.encrypt).toHaveBeenCalledOnce();await offerRows([{...entry,amount:999}]);
-    await act(async()=>pending.resolve({entryKey:new Uint8Array([1]),ciphertext:new Uint8Array([2]),iv:new Uint8Array([3])}));
-    expect(fixture.actor.add_entry_batch).not.toHaveBeenCalled();expect(button("Save in IOU")).toBeUndefined();
-    expect(fixture.sender.postMessage.mock.calls.some(([value])=>value.type==="oc:app-import:committed")).toBe(false);
-  });
-
-  it("clears an incoming matched Type without inventing missing pre-Type direction history", async () => {
-    fixture.actor = actor(); await mountSheet();
-    await offerRows([{ ...entry, direction: "debt", typeId: template.id, typeName: template.name }]);
-    await chooseReceived();
-    expect(rowSelect("Type").value).toBe(`type:${template.id}`);
-    await select(rowSelect("Type"), "none");
-    expect(rowSelect("Direction").value).toBe("debt");
-    await click(button("Review exact encrypted entry contents"));
-    expect(reviewed()[0]).toMatchObject({ direction: "debt", amount_minor: 10000 });
-    expect(reviewed()[0]).not.toHaveProperty("fee");
-  });
-
-  it("restores a known receiver direction after Type A, Type B and None", async () => {
-    fixture.decrypt.mockResolvedValue({ templates: [template, creditType], dismissed: [] });
-    fixture.actor = actor(); await mountSheet(); await offerRows([entry]); await chooseReceived();
-    await select(rowSelect("Type"), `type:${template.id}`);
-    expect(rowSelect("Direction").value).toBe("debt");
-    await select(rowSelect("Type"), `type:${creditType.id}`);
-    expect(rowSelect("Direction").value).toBe("credit");
-    await select(rowSelect("Type"), "none");
-    expect(rowSelect("Direction").value).toBe("credit");
-    await click(button("Review exact encrypted entry contents"));
-    expect(reviewed()[0]).toMatchObject({ direction: "credit", amount_minor: 10000 });
-    expect(reviewed()[0]).not.toHaveProperty("fee");
-  });
-
-  it("keeps an explicit direction through later Type and None choices and encrypts only the final DTO", async () => {
-    fixture.decrypt.mockResolvedValue({ templates: [template, creditType], dismissed: [] });
-    fixture.actor = actor(); await mountSheet(); await offerRows([entry]); await chooseReceived();
-    await select(rowSelect("Direction"), "debt");
-    await select(rowSelect("Type"), `type:${creditType.id}`);
-    expect(rowSelect("Direction").value).toBe("debt");
-    await select(rowSelect("Type"), "none");
-    expect(rowSelect("Direction").value).toBe("debt");
-    await select(rowSelect("Type"), `type:${creditType.id}`);
-    await click(button("Review exact encrypted entry contents"));
-    const expected = reviewed()[0];
-    expect(expected).toMatchObject({ direction: "debt", amount_minor: 9000, fee: { percent: 10 } });
-    expect(expected).not.toHaveProperty("directionEdited");
-    expect(expected).not.toHaveProperty("directionBeforeType");
-    expect(expected).not.toHaveProperty("selectedTypeId");
-    await click(button("Save in IOU"));
-    expect(fixture.encrypt).toHaveBeenCalledOnce();
-    expect(JSON.parse(new TextDecoder().decode(fixture.encrypt.mock.calls[0][0]))).toEqual(expected);
-    expect(fixture.actor.add_entry_batch).toHaveBeenCalledOnce();
-  });
-
-  it("isolates manual direction history per entry and resets it when choosing another draft", async () => {
-    fixture.actor = actor(); await mountSheet();
-    await offerRows([entry, { ...entry, note: "Second entry" }]); await chooseReceived();
-    await select(rowSelect("Direction", 0), "credit");
-    await select(rowSelect("Type", 0), `type:${template.id}`);
-    await select(rowSelect("Type", 1), `type:${template.id}`);
-    expect(rowSelect("Direction", 0).value).toBe("credit");
-    expect(rowSelect("Direction", 1).value).toBe("debt");
-    await select(rowSelect("Type", 1), "none");
-    expect(rowSelect("Direction", 1).value).toBe("credit");
-    await click(button("Review exact encrypted entry contents"));
-    expect(reviewed().map((value: { direction: string }) => value.direction)).toEqual(["credit", "credit"]);
-    expect(reviewed()[0]).toHaveProperty("fee.percent", 10);
-    expect(reviewed()[1]).not.toHaveProperty("fee");
-    const anotherId = "C".repeat(42) + "A";
-    await offerRows([entry], anotherId); await chooseReceived(anotherId);
-    expect(button("Save in IOU")).toBeUndefined();
-    await select(rowSelect("Type"), `type:${template.id}`);
-    expect(rowSelect("Direction").value).toBe("debt");
-    await select(rowSelect("Type"), "none");
-    expect(rowSelect("Direction").value).toBe("credit");
-  });
-
-  it.each(["account", "sheet"])("never applies a foreign proposed Type and resets row metadata for a new %s", async (replacement) => {
-    fixture.actor = actor(); await mountSheet(); await offerRows([entry]); await chooseReceived();
-    await select(rowSelect("Direction"), "credit");
-    await select(rowSelect("Type"), `type:${template.id}`);
-    expect(rowSelect("Direction").value).toBe("credit");
-    const selectedSheetId = replacement === "sheet" ? "fedcba9876543210" : sheetId;
-    if (replacement === "account") {
-      identity("synthetic-b"); fixture.actor = actor(); await render(<LocalImportPage />);
-      expect(container.querySelectorAll("fieldset")).toHaveLength(0);
+  it.each([false, true])("runs close-sheet confirmation only in the ordinary sheet, not a frame (%s)", async framed => {
+    const open = vi.spyOn(window, "open").mockReturnValue(null);
+    const payload = localImportSheetDrafts([entry], [], importId)[0].initial as any;
+    await render(<LocalImportNavigationProvider enabled={framed}><PreferencesProvider><ToastProvider>
+      <CloseSheetButton sheetId={sheetId} pairId={pairId} closingDays={30} entries={[payload]} />
+    </ToastProvider></PreferencesProvider></LocalImportNavigationProvider>);
+    await click(button("🔒 Close & start new"));
+    if (framed) {
+      expect(open).toHaveBeenCalledWith("http://localhost:3000/sheet/" + sheetId, "_blank", "noopener,noreferrer");
+      expect(button("Yes, close & start new")).toBeUndefined();
     } else {
-      fixture.actor = actor();
-      fixture.actor.get_my_pairs.mockResolvedValue([{ id: pairId, active_sheet_id: [selectedSheetId], archived_at: [], other_principal: { toText: () => "synthetic-partner" } }]);
+      expect(open).not.toHaveBeenCalled(); expect(button("Yes, close & start new")).toBeDefined();
     }
-    // Changing account closes the exact old connection; choosing a different destination also
-    // requires a fresh receiving page instead of moving an in-progress review to another sheet.
-    await render(null); await mountSheet(selectedSheetId);
-    await offerRows([{ ...entry, typeId: template.id, typeName: "Stale or foreign name" }]);
-    await chooseReceived();
-    expect(rowSelect("Type").value).toBe("");
-    expect(rowSelect("Direction").value).toBe("credit");
-    await click(button("Review exact encrypted entry contents"));
-    expect(button("Save in IOU")).toBeUndefined();
-    await select(rowSelect("Type"), `type:${template.id}`);
-    expect(rowSelect("Direction").value).toBe("debt");
-    await select(rowSelect("Type"), "none");
-    expect(rowSelect("Direction").value).toBe("credit");
-    await click(button("Review exact encrypted entry contents"));
-    expect(reviewed()[0]).not.toHaveProperty("fee");
-    expect(fixture.actor.add_entry_batch).not.toHaveBeenCalled();
+    // Even a blocked popup (or fresh top-level sign-in) cannot close a sheet first.
+    expect(fixture.actor.close_sheet_encrypted).not.toHaveBeenCalled();
+    expect(fixture.encrypt).not.toHaveBeenCalled();
   });
-});
-afterEach(async () => { await act(async () => root.unmount()); container.remove(); vi.useRealTimers(); vi.unstubAllGlobals(); vi.unstubAllEnvs(); });
-
-describe("actual private Type readiness lifecycle", () => {
-  it("is not ready without an actor or until both private slots finish loading", async () => {
-    await render(<Probe />); expect(latest.loading).toBe(false); expect(latest.ready).toBe(false);
-    const fetched = deferred<unknown>(); const decrypted = deferred<typeof slots>();
-    fixture.actor = actor(() => fetched.promise); fixture.decrypt.mockReturnValue(decrypted.promise);
-    await render(<Probe />); expect(latest.ready).toBe(false);
-    fetched.resolve([pair()]); await flush(); expect(latest.ready).toBe(false);
-    decrypted.resolve(slots); await flush(); expect(latest.ready).toBe(true); expect(latest.shared[0].id).toBe(template.id);
-    expect(fixture.actor.set_pair_templates).not.toHaveBeenCalled(); expect(fixture.actor.add_entry_batch).not.toHaveBeenCalled();
-  });
-  it.each(["missing-pair", "not-member"])("fails closed for %s", async (failure) => {
-    fixture.actor = actor(async () => failure === "missing-pair" ? [] : [{ ...pair(), members: ["other-one", "other-two"] }]);
-    await render(<Probe />); expect(latest.ready).toBe(false); expect(latest.error).toBeTruthy(); expect(fixture.unwrap).not.toHaveBeenCalled();
-  });
-  it("does not retain readiness on actor failure, account switch, or a late old-account response", async () => {
-    fixture.actor = actor(); await render(<Probe />); expect(latest.ready).toBe(true);
-    identity("synthetic-b"); fixture.actor = null; fixture.actorError = "Synthetic actor unavailable";
-    renders.length = 0; await render(<Probe />);
-    expect(renders[0]).toBe(false); expect(latest.ready).toBe(false); expect(latest.error).toBe("Synthetic actor unavailable");
-    const oldFetch = deferred<unknown>(); fixture.actorError = null; fixture.actor = actor(() => oldFetch.promise);
-    await render(<Probe />);
-    identity("synthetic-c"); fixture.actor = null; await render(<Probe />);
-    oldFetch.resolve([{ members: ["synthetic-b", "synthetic-partner"] }]); await flush();
-    expect(latest.ready).toBe(false); expect(latest.shared).toEqual([]);
-  });
-  it("keeps legacy partial-slot fallback while strict private import refuses a real decryption failure", async () => {
-    fixture.realSlots = true;
-    fixture.decryptCrypto.mockRejectedValue(new Error("Synthetic authentication tag failure"));
-    fixture.actor = actor(async () => [{ ...pair(), templates_a_enc: [[1, 2]], templates_a_iv: [Array(12).fill(0)] }]);
-    await render(<Probe />);
-    expect(latest.ready).toBe(true); expect(latest.shared).toEqual([]);
-    await mountSheet();
-    expect(fixture.decryptCrypto).toHaveBeenCalled();
-    expect(button("Prepare setup files").disabled).toBe(true);
-    expect((container.querySelector('[aria-label="Received draft"]') as HTMLSelectElement).disabled).toBe(true);
-    expect(container.textContent).toContain("Could not load this sheet’s Types");
-    expect(fixture.actor.add_entry_batch).not.toHaveBeenCalled(); expect(fetch).not.toHaveBeenCalled();
-  });
-  it("allows genuinely absent private slots, without treating absent ciphertext as a decryption error", async () => {
-    fixture.realSlots = true; fixture.actor = actor(); await mountSheet();
-    expect(button("Prepare setup files").disabled).toBe(false);
-    expect(fixture.decryptCrypto).not.toHaveBeenCalled();
-  });
-  it.each([
-    "not valid JSON",
-    JSON.stringify({ v: 3, templates: [], dismissed: [] }),
-    JSON.stringify({ v: 2, templates: [{ id: "broken" }], dismissed: [] }),
-  ])("keeps strict UI disabled for unreadable decoded Type data: %s", async (data) => {
-    fixture.realSlots = true; fixture.decryptCrypto.mockResolvedValue(new TextEncoder().encode(data));
-    fixture.actor = actor(async () => [{ ...pair(), templates_a_enc: [[1, 2]], templates_a_iv: [Array(12).fill(0)] }]);
-    await mountSheet();
-    expect(button("Prepare setup files").disabled).toBe(true);
-    expect(container.textContent).toContain("Could not load this sheet’s Types");
-    expect(fixture.actor.add_entry_batch).not.toHaveBeenCalled();
-  });
-  it("invalidates the ready generation on the first actor-error render, before its reload effect", async () => {
-    fixture.actor = actor(); await render(<Probe />); const generation = latest.readyGeneration;
-    expect(generation).toBeDefined();
-    fixture.actorError = "Synthetic reload"; renders.length = 0;
-    await render(<Probe />);
-    expect(renders[0]).toBe(false); expect(latest.ready).toBe(true); expect(latest.readyGeneration).not.toBe(generation);
-  });
-});
-
-describe("actual local receiver controls", () => {
-  it.each([
-    ["missing", undefined],
-    ["empty", ""],
-    ["noncanonical", "http://localhost:5190/"],
-    ["non-loopback", "http://example.invalid:5190"],
-  ] as const)("does not acknowledge, queue or save a browser handoff with %s sender configuration", async (_reason, senderOrigin) => {
-    vi.stubEnv("VITE_LOCAL_IMPORT_SENDER_ORIGIN", senderOrigin);
-    fixture.actor = actor();
-    await mountSheet();
-    // The browser launch still has its valid nonce and exact opener. Neither is authority
-    // to learn a trusted sender from an incoming hello/offer when configuration is absent/invalid.
-    expect(fixture.nativeBootstrap).toBe(false);
-    expect(window.opener).toBe(fixture.sender);
-    await offer(template.id, template.name);
-    expect(container.textContent).toContain("No active handoff");
-    expect(fixture.sender.postMessage).not.toHaveBeenCalled();
-    expect(container.querySelector('[aria-label="Received draft"]')!.querySelectorAll("option")).toHaveLength(1);
-    expect(container.querySelectorAll("fieldset")).toHaveLength(0);
-    expect(button("Review exact encrypted entry contents")).toBeUndefined();
-    expect(button("Save in IOU")).toBeUndefined();
+  it("loads the bound sheet through actual normal providers; receipt is not save", async () => {
+    await receive([{ ...entry, typeId: template.id, typeName: template.name }]);
+    expect(container.querySelector(".app-shell")).not.toBeNull();
+    expect(container.textContent).toContain("Pending from chat");
+    expect(container.textContent).not.toContain("Verified OpenChat");
+    expect(container.querySelector('select[aria-label="Received draft"]')).toBeNull();
+    expect(container.querySelector("pre")).toBeNull();
+    expect(container.textContent).not.toContain("Load this sheet");
+    expect(fixture.actor.get_sheet).toHaveBeenCalledWith(sheetId);
     expect(fixture.encrypt).not.toHaveBeenCalled();
     expect(fixture.actor.add_entry_batch).not.toHaveBeenCalled();
-    expect(fetch).not.toHaveBeenCalled();
-  });
-
-  it("blocks setup/draft selection before private Types load, then requires an explicit mismatched-Type choice", async () => {
-    const fetched = deferred<unknown>(); fixture.actor = actor(() => fetched.promise);
-    await mountSheet(); await offer();
-    const download = button("Prepare setup files");
-    expect(download.disabled).toBe(true);
-    expect((container.querySelector('[aria-label="Received draft"]') as HTMLSelectElement).disabled).toBe(true);
-    await click(download); expect(fetch).not.toHaveBeenCalled();
-    fetched.resolve([pair()]); await flush(); expect(download.disabled).toBe(false);
-    await select(container.querySelector('[aria-label="Received draft"]')!, importId);
-    const typeSelect = container.querySelector("fieldset select") as HTMLSelectElement;
-    expect(typeSelect.value).toBe("");
-    await click(button("Review exact encrypted entry contents"));
-    expect(container.textContent).toContain("explicitly select None"); expect(button("Save in IOU")).toBeUndefined();
-    await select(typeSelect, "none"); await click(button("Review exact encrypted entry contents"));
-    expect(button("Save in IOU")).toBeDefined(); expect(container.querySelector("pre")!.textContent).not.toContain('"fee"');
-    expect(fixture.actor.add_entry_batch).not.toHaveBeenCalled();
-  });
-  it("clears received drafts, loaded account and export readiness when the account changes", async () => {
-    fixture.actor = actor(); await mountSheet(); await offer(template.id, template.name);
-    await select(container.querySelector('[aria-label="Received draft"]')!, importId);
-    expect(container.querySelectorAll("fieldset")).toHaveLength(1);
-    identity("synthetic-b"); fixture.actor = null; await render(<LocalImportPage />);
-    expect(container.querySelectorAll("fieldset")).toHaveLength(0);
-    expect(button("Prepare setup files")).toBeUndefined();
-    expect(container.textContent).toContain("IOU account changed");
-  });
-  it("locks an outcome-unknown save and retries the same reviewed payload/id without a second approval transition", async () => {
-    fixture.actor = actor(); fixture.actor.add_entry_batch.mockRejectedValueOnce(new Error("Synthetic response lost"));
-    await mountSheet(); await offer(template.id, template.name);
-    await select(container.querySelector('[aria-label="Received draft"]')!, importId);
-    await click(button("Review exact encrypted entry contents"));
-    expect(fixture.actor.add_entry_batch).not.toHaveBeenCalled();
-    await click(button("Save in IOU"));
-    expect((container.querySelector("fieldset") as HTMLFieldSetElement).disabled).toBe(true);
-    expect(fixture.sender.postMessage.mock.calls.some(([value]) => value.type === "oc:app-import:committed")).toBe(false);
-    await click(button("Retry the same save in IOU"));
-    expect(fixture.actor.add_entry_batch).toHaveBeenCalledTimes(2);
-    expect(fixture.actor.add_entry_batch.mock.calls[0][0]).toEqual(fixture.actor.add_entry_batch.mock.calls[1][0]);
-    expect(fixture.encrypt.mock.calls[0][0]).toEqual(fixture.encrypt.mock.calls[1][0]);
-    expect(button("Saved in IOU").disabled).toBe(true);
-    expect(fixture.sender.postMessage.mock.calls.some(([value]) => value.type === "oc:app-import:committed")).toBe(true);
-  });
-  it.each([
-    ["unwrap", "actor"], ["unwrap", "identity"],
-    ["encrypt", "actor"], ["encrypt", "identity"], ["encrypt", "ready-generation"],
-  ] as const)("blocks the old actor after pending %s and same-account %s change", async (stage, change) => {
-    const oldActor = actor(); fixture.actor = oldActor;
-    await mountSheet(); await offer(template.id, template.name);
-    await select(container.querySelector('[aria-label="Received draft"]')!, importId);
-    await click(button("Review exact encrypted entry contents"));
-    const reviewed = container.querySelector("pre")!.textContent;
-    const pendingKey = deferred<Uint8Array>();
-    const pendingEncryption = deferred<{ entryKey: Uint8Array; ciphertext: Uint8Array; iv: Uint8Array }>();
-    if (stage === "unwrap") fixture.unwrap.mockReturnValueOnce(pendingKey.promise);
-    else fixture.encrypt.mockReturnValueOnce(pendingEncryption.promise);
-    await click(button("Save in IOU"));
-    expect(oldActor.add_entry_batch).not.toHaveBeenCalled();
-
-    // Same principal and sheet throughout. Allow the new Type load to finish BEFORE the old save
-    // resumes, so a boolean ready check alone would wrongly accept the previous generation.
-    if (change === "actor") fixture.actor = actor();
-    else if (change === "identity") identity(fixture.principal);
-    else fixture.actorError = "Synthetic hook reload generation";
-    await render(<LocalImportPage />);
-    expect(button("Prepare setup files").disabled).toBe(false);
-    await act(async () => {
-      pendingKey.resolve(new Uint8Array(32).fill(7));
-      pendingEncryption.resolve({ entryKey: new Uint8Array([1]), ciphertext: new Uint8Array([2]), iv: new Uint8Array([3]) });
-    });
-    expect(oldActor.add_entry_batch).not.toHaveBeenCalled();
-    expect(fixture.actor.add_entry_batch).not.toHaveBeenCalled();
-    if (stage === "unwrap") expect(fixture.encrypt).not.toHaveBeenCalled();
-    expect(container.querySelector("pre")!.textContent).toBe(reviewed);
-    expect(fixture.sender.postMessage.mock.calls.some(([value]) => value.type === "oc:app-import:committed")).toBe(false);
-
-    await click(button("Retry the same save in IOU"));
+    await click(button("Review & add"));
+    const form = container.querySelector(".entry-form")!;
+    expect((form.querySelector('input[type="date"]') as HTMLInputElement).value).toBe(entry.date);
+    expect(noteInput().value).toBe(entry.note);
+    await submit(); await waitText("Saved in IOU.");
+    expect(plaintexts()[0]).toMatchObject({ amount_minor: 9000, direction: "credit", note: entry.note,
+      ts: Date.parse("2026-09-26T00:00:00Z"), fee: { gross_amount_minor: 10000, percent: 10 },
+      draft_id: "local:" + importId + ":0", import_message_id: importId });
     expect(fixture.actor.add_entry_batch).toHaveBeenCalledOnce();
-    if (change === "actor") expect(oldActor.add_entry_batch).not.toHaveBeenCalled();
-    const request = fixture.actor.add_entry_batch.mock.calls[0][0];
-    const expectedId = Array.from(atob(importId.replace(/-/g, "+").replace(/_/g, "/") + "="), character => character.charCodeAt(0));
-    expect(request.import_id).toEqual(expectedId);
-    expect(container.querySelector("pre")!.textContent).toBe(reviewed);
-    expect(button("Saved in IOU").disabled).toBe(true);
-  });
-});
-
-describe("actual two-entry receiver, batch adapter and OpenChat receipt composition", () => {
-  const entries: readonly LocalImportDraft[] = [
-    { kind: "iou", amount: 100, currency: "USD", direction: "debt", date: "2026-09-26", note: "Synthetic first reviewed row" },
-    { kind: "settlement", amount: 25, currency: "EGP", direction: "credit", date: "2026-09-27", note: "Synthetic second reviewed row" },
-  ];
-  type BatchRequest = Parameters<EntryBatchActor["add_entry_batch"]>[0];
-
-  async function receiveReviewedBatch() {
-    await mountSheet();
-    const outcomes = vi.fn();
-    const senderOrigin = "http://localhost:5190";
-    const receiverOrigin = "http://localhost:3000";
-    const send = vi.fn((data: unknown, exactOrigin: string) => {
-      expect(exactOrigin).toBe(receiverOrigin);
-      window.dispatchEvent(new MessageEvent("message", {
-        data, source: fixture.sender as unknown as Window, origin: senderOrigin,
-      }));
-    });
-    const session = createLocalAppHandoffSession({
-      request: await encryptedRequest(entries),
-      sessionNonce: "A".repeat(43), receiver: window, send, onOutcome: outcomes,
-    });
-    fixture.sender.postMessage.mockImplementation((data: unknown, exactOrigin: string) => {
-      expect(exactOrigin).toBe(senderOrigin);
-      session.receive({ origin: receiverOrigin, source: window, data });
-    });
-    await act(async () => session.start());
-    expect(outcomes.mock.calls).toEqual([["received"]]);
-    expect(send.mock.calls.map(([data]) => (data as { type: string }).type))
-      .toEqual(["oc:app-import:hello", "oc:app-import:offer"]);
-    expect(fixture.encrypt).not.toHaveBeenCalled();
-    expect(fixture.actor.add_entry_batch).not.toHaveBeenCalled();
-    await select(container.querySelector('[aria-label="Received draft"]')!, importId);
-    await click(button("Review exact encrypted entry contents"));
-    const reviewed = JSON.parse(container.querySelector("pre")!.textContent!);
-    expect(reviewed).toHaveLength(2);
-    expect(reviewed.map((row: { kind: string }) => row.kind)).toEqual(["expense", "payment"]);
-    return { session, outcomes, send, reviewed };
-  }
-
-  it("keeps two committed rows after response loss and reports saved only after explicit same-ID replay", async () => {
-    // Synthetic actor models only sheet/import receipt semantics; it is not a live backend.
-    const ledger: BatchRequest["entries"] = [];
-    const receipts = new Map<string, bigint[]>();
-    const replayReply = deferred<{ entry_ids: bigint[]; replayed: boolean }>();
-    fixture.actor = actor();
-    fixture.actor.add_entry_batch.mockImplementation(async (request: BatchRequest) => {
-      expect(request.sheet_id).toBe(sheetId);
-      expect(request.entries).toHaveLength(2);
-      const key = `${request.sheet_id}:${request.import_id.join(",")}`;
-      if (receipts.has(key)) return replayReply.promise;
-      ledger.push(...structuredClone(request.entries));
-      receipts.set(key, [501n, 502n]);
-      throw new Error("Synthetic response loss after both rows committed");
-    });
-    let encryptionNonce = 0;
-    fixture.encrypt.mockImplementation(async () => {
-      const nonce = ++encryptionNonce;
-      return { entryKey: new Uint8Array([nonce]), ciphertext: new Uint8Array([nonce + 10]), iv: new Uint8Array([nonce + 20]) };
-    });
-    const sender = await receiveReviewedBatch();
-    try {
-      await click(button("Save in IOU"));
-      expect(fixture.actor.add_entry_batch).toHaveBeenCalledOnce();
-      expect(ledger).toHaveLength(2);
-      expect(receipts.size).toBe(1);
-      expect(sender.outcomes.mock.calls).toEqual([["received"]]);
-      expect(fixture.sender.postMessage.mock.calls.some(([message]) => message.type === "oc:app-import:committed")).toBe(false);
-      expect([...container.querySelectorAll("fieldset")].every((row) => row.disabled)).toBe(true);
-      expect(container.textContent).toContain("The save did not return a confirmed result");
-      await flush();
-      expect(fixture.actor.add_entry_batch).toHaveBeenCalledOnce(); // Never retry on rerender/flush.
-
-      await click(button("Retry the same save in IOU"));
-      expect(fixture.actor.add_entry_batch).toHaveBeenCalledTimes(2);
-      expect(sender.outcomes.mock.calls).toEqual([["received"]]); // A pending replay is not saved.
-      expect(ledger).toHaveLength(2);
-      const [first, second] = fixture.actor.add_entry_batch.mock.calls.map(([request]: [BatchRequest]) => request);
-      expect(second.sheet_id).toBe(first.sheet_id);
-      expect(second.import_id).toEqual(first.import_id);
-      expect(second.entries).not.toEqual(first.entries); // Fresh encrypted envelopes retain one import identity.
-      expect(fixture.encrypt.mock.calls.map(([bytes]) => JSON.parse(new TextDecoder().decode(bytes))))
-        .toEqual([...sender.reviewed, ...sender.reviewed]);
-      for (const request of [first, second]) {
-        expect(Object.keys(request).sort()).toEqual(["entries", "import_id", "sheet_id"]);
-        for (const row of request.entries) expect(Object.keys(row).sort()).toEqual(["ciphertext", "entry_key", "iv"]);
-      }
-
-      await act(async () => replayReply.resolve({ entry_ids: receipts.values().next().value!, replayed: true }));
-      expect(ledger).toHaveLength(2);
-      expect(fixture.actor.add_entry_batch).toHaveBeenCalledTimes(2);
-      expect(container.textContent).toContain("Saved 2 entries in the reviewed IOU sheet (the earlier save was already accepted)");
-      expect(button("Saved in IOU").disabled).toBe(true);
-      const committed = fixture.sender.postMessage.mock.calls.filter(([message]) => message.type === "oc:app-import:committed");
-      expect(committed).toEqual([[{
-        type: "oc:app-import:committed", version: 2, sessionNonce: "A".repeat(43),
-        importId, status: "saved", acceptedCount: 2, replayed: true,
-      }, "http://localhost:5190"]]);
-      expect(sender.outcomes.mock.calls).toEqual([["received"], ["saved"]]);
-      expect(sender.send).toHaveBeenCalledTimes(2); // No repeated hello, offer, processor or inference.
-      await click(button("Saved in IOU"));
-      expect(fixture.actor.add_entry_batch).toHaveBeenCalledTimes(2);
-      expect(fetch).not.toHaveBeenCalled();
-    } finally {
-      sender.session.close(); fixture.sender.postMessage.mockReset();
-    }
-  });
-
-  it("never submits a partial batch or a saved receipt when the second row cannot be encrypted", async () => {
-    fixture.actor = actor();
-    fixture.encrypt.mockResolvedValueOnce({ entryKey: new Uint8Array([1]), ciphertext: new Uint8Array([2]), iv: new Uint8Array([3]) })
-      .mockRejectedValueOnce(new Error("Synthetic second-row encryption failure"));
-    const sender = await receiveReviewedBatch();
-    try {
-      await click(button("Save in IOU"));
-      expect(fixture.encrypt).toHaveBeenCalledTimes(2);
-      expect(fixture.actor.add_entry_batch).not.toHaveBeenCalled();
-      expect(sender.outcomes.mock.calls).toEqual([["received"]]);
-      expect(fixture.sender.postMessage.mock.calls.some(([message]) => message.type === "oc:app-import:committed")).toBe(false);
-      expect(button("Retry the same save in IOU").disabled).toBe(false);
-      expect([...container.querySelectorAll("fieldset")].every((row) => row.disabled)).toBe(true);
-      await flush();
-      expect(fixture.actor.add_entry_batch).not.toHaveBeenCalled();
-      expect(fetch).not.toHaveBeenCalled();
-    } finally {
-      sender.session.close(); fixture.sender.postMessage.mockReset();
-    }
-  });
-});
-
-describe("actual native receiver consent controls", () => {
-  beforeEach(() => { vi.stubEnv("VITE_LOCAL_IMPORT_SENDER_ORIGIN", undefined); });
-  const nativeOrigin = "http://localhost:54621";
-  const connectionId = "C".repeat(42) + "A";
-  const message = async (data: unknown, senderOrigin = nativeOrigin, senderWindow: unknown = fixture.sender) => {
-    await act(async () => { window.dispatchEvent(new MessageEvent("message", {
-      data, origin: senderOrigin, source: senderWindow as Window,
-    })); });
-  };
-  const connect = () => message({ type: "oc:app-import:connect", version: 1, connectionId });
-  const offerFor = (sessionNonce: string) => encryptedOffer([{ kind: "iou", amount: 100, currency: "USD", direction: "credit",
-      date: "2026-09-26", note: "Synthetic reviewed note", typeId: template.id, typeName: template.name }],sessionNonce);
-  const connectedReply = () => fixture.sender.postMessage.mock.calls.find(([value]) => value.type === "oc:app-import:connected")?.[0];
-  const loadNative = async () => { fixture.nativeBootstrap = true; fixture.actor = actor(); await mountSheet(); await connect(); };
-  const allowAndOffer = async () => {
-    await click(button("Allow this connection once"));
-    const sessionNonce = connectedReply().sessionNonce;
-    await message({ type: "oc:app-import:hello", version: 2, sessionNonce });
-    await message(await offerFor(sessionNonce));
-    return sessionNonce;
-  };
-
-  it("requires explicit exact-origin consent before replying or queuing; Save remains separate", async () => {
-    await loadNative();
-    expect(container.textContent).toContain(`Unverified local sender: ${nativeOrigin}`);
-    expect(fixture.sender.postMessage).not.toHaveBeenCalled();
-    await message(await offerFor("A".repeat(43)));
-    await message({ type: "oc:app-import:hello", version: 2, sessionNonce: "A".repeat(43) });
-    expect(fixture.sender.postMessage).not.toHaveBeenCalled();
-    expect(container.querySelector('[aria-label="Received draft"]')!.querySelectorAll("option")).toHaveLength(1);
-
-    const sessionNonce = await allowAndOffer();
-    expect(sessionNonce).toMatch(/^[A-Za-z0-9_-]{42}[AEIMQUYcgkosw048]$/);
-    expect(sessionNonce).not.toBe(connectionId);
-    expect(fixture.sender.postMessage.mock.calls.every(([, exactOrigin]) => exactOrigin === nativeOrigin)).toBe(true);
-    expect(fixture.sender.postMessage.mock.calls.map(([value]) => value.type)).toEqual([
-      "oc:app-import:connected", "oc:app-import:ready", "oc:app-import:received",
-    ]);
-    expect(container.querySelector('[aria-label="Received draft"]')!.querySelectorAll("option")).toHaveLength(2);
-    expect(fixture.actor.add_entry_batch).not.toHaveBeenCalled(); expect(fixture.encrypt).not.toHaveBeenCalled();
+    expect(committed()).toHaveLength(1);
+    expect(committed()[0][0]).toMatchObject({ status: "saved", acceptedCount: 1 });
     expect(fetch).not.toHaveBeenCalled();
-    await select(container.querySelector('[aria-label="Received draft"]')!, importId);
-    await click(button("Review exact encrypted entry contents"));
-    expect(fixture.actor.add_entry_batch).not.toHaveBeenCalled();
-    await click(button("Save in IOU"));
-    expect(fixture.actor.add_entry_batch).toHaveBeenCalledOnce(); expect(fixture.encrypt).toHaveBeenCalledOnce();
-    expect(fixture.sender.postMessage.mock.calls.at(-1)?.[0].type).toBe("oc:app-import:committed");
-    expect(fixture.actor.add_entry_batch.mock.calls[0][0]).not.toHaveProperty("payload");
+    expect(getActionInboxConfig).not.toHaveBeenCalled();
+    expect(pollActionInbox).not.toHaveBeenCalled();
+    expect(acknowledgeActionInbox).not.toHaveBeenCalled();
   });
-
-  it("does not learn a sender from another window or follow a changed opener after capture", async () => {
-    fixture.nativeBootstrap = true; fixture.actor = actor(); await mountSheet();
-    const changedSender = { postMessage: vi.fn() };
-    Object.defineProperty(window, "opener", { value: changedSender, configurable: true });
-    await message({ type: "oc:app-import:connect", version: 1, connectionId }, nativeOrigin, changedSender);
-    expect(button("Allow this connection once")).toBeUndefined(); expect(changedSender.postMessage).not.toHaveBeenCalled();
-    await connect(); expect(button("Allow this connection once")).toBeDefined();
-    await click(button("Reject connection"));
-    await connect(); await message(await offerFor("A".repeat(43)));
-    expect(fixture.sender.postMessage).not.toHaveBeenCalled(); expect(button("Allow this connection once")).toBeUndefined();
-    expect(fixture.actor.add_entry_batch).not.toHaveBeenCalled();
+  it("allows ordinary final note edits in the existing EntryForm", async () => {
+    await review();
+    const textarea = noteInput();
+    await act(async () => {
+      Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")!.set!.call(textarea, "User reviewed note");
+      textarea.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+    await submit(); await waitText("Saved in IOU.");
+    expect(plaintexts()[0].note).toBe("User reviewed note");
   });
-
-  it("ignores mismatched post-consent source, origin and nonce", async () => {
-    await loadNative(); await click(button("Allow this connection once"));
-    const sessionNonce = connectedReply().sessionNonce;
-    const hello = { type: "oc:app-import:hello", version: 2, sessionNonce };
-    await message(hello, "http://localhost:54622"); await message(hello, nativeOrigin, {});
-    await message({ ...hello, sessionNonce: connectionId });
-    await message(await offerFor(sessionNonce));
-    expect(fixture.sender.postMessage).toHaveBeenCalledOnce();
-    expect(container.querySelector('[aria-label="Received draft"]')!.querySelectorAll("option")).toHaveLength(1);
+  it.each(["missing-date", "stale-type"])("blocks %s with a precise correction, then accepts a corrected fresh handoff", async reason => {
+    const rows = reason === "missing-date" ? [{ ...entry, date: undefined }] : [{ ...entry, typeId: "old", typeName: "Old" }];
+    await render(); await offerRows(rows);
+    await waitText(reason === "missing-date" ? "Set a date in the OpenChat card" : "Reconnect IOU in OpenChat and create a new proposal");
+    expect(button("Review & add")).toBeUndefined(); expect(fixture.actor.add_entry_batch).not.toHaveBeenCalled();
+    // A corrected card is a fresh user-initiated handoff; never overwrite a received request.
+    await act(async () => { root.unmount(); }); root = createRoot(container);
+    await render(); await offerRows([entry]); await waitText("Review & add");
+    await click(button("Review & add")); expect(container.querySelector(".entry-form")).not.toBeNull();
   });
-
-  it.each(["expiry", "closed-opener", "logout", "account-change", "navigation"])("invalidates pending consent on %s", async reason => {
-    vi.useFakeTimers(); await loadNative();
-    if (reason === "expiry") await act(async () => { await vi.advanceTimersByTimeAsync(120_000); });
-    if (reason === "closed-opener") { fixture.sender.closed = true; await act(async () => { await vi.advanceTimersByTimeAsync(1000); }); }
-    if (reason === "logout") await click(button("Sign out"));
-    if (reason === "account-change") { identity("synthetic-b"); fixture.actor = actor(); await render(<LocalImportPage />); }
-    if (reason === "navigation") await act(async () => { window.dispatchEvent(new Event("pagehide")); });
-    expect(button("Allow this connection once")).toBeUndefined();
-    await connect(); expect(fixture.sender.postMessage).not.toHaveBeenCalled();
+  it.each(["principal", "sheet", "archived"])("does not open a mismatched %s recipient", async mismatch => {
+    if (mismatch === "principal") fixture.deliveryPrincipal = "synthetic-other";
+    if (mismatch === "sheet") fixture.deliverySheet = "fedcba9876543210";
+    if (mismatch === "archived") fixture.actor.get_my_pairs.mockResolvedValue([{ id: pairId, active_sheet_id: [sheetId], archived_at: [1n] }]);
+    await render(); await offerRows([entry]); await waitText("could not be opened in the connected IOU account");
+    expect(button("Review & add")).toBeUndefined(); expect(fixture.decryptions).toHaveLength(0);
     expect(fixture.actor.add_entry_batch).not.toHaveBeenCalled();
   });
-
-  it.each(["close", "expiry", "navigation"])("blocks a paused native save after %s and discards unsaved review state", async reason => {
-    vi.useFakeTimers(); await loadNative(); await allowAndOffer();
-    await select(container.querySelector('[aria-label="Received draft"]')!, importId);
-    await click(button("Review exact encrypted entry contents"));
-    const pending = deferred<{ entryKey: Uint8Array; ciphertext: Uint8Array; iv: Uint8Array }>();
+  it("sanitizes arbitrary actor errors instead of printing identifiers", async () => {
+    fixture.actor.get_my_pairs.mockRejectedValue(new Error("private-principal-and-raw-backend-id"));
+    await render(); await offerRows([entry]); await waitText("could not be opened in the connected IOU account");
+    expect(container.textContent).not.toContain("private-principal-and-raw-backend-id");
+  });
+  it("waits for readable current Types, never treating a failed slot as empty", async () => {
+    fixture.decrypt.mockRejectedValue(new Error("opaque-private-slot"));
+    await render(); await offerRows([entry]); await waitText("Types could not be loaded");
+    expect(button("Review & add")).toBeUndefined(); expect(container.textContent).not.toContain("opaque-private-slot");
+    expect(fixture.actor.add_entry_batch).not.toHaveBeenCalled();
+  });
+  it("ignores other sender windows, origins and nonces before accepting a valid browser offer", async () => {
+    await render();
+    for (const [origin, source, nonce] of [
+      ["http://localhost:5191", fixture.sender, sessionNonce], [senderOrigin, {}, sessionNonce],
+      [senderOrigin, fixture.sender, "C".repeat(42) + "A"],
+    ] as const) await message({ type: "oc:app-import:hello", version: 2, sessionNonce: nonce }, origin, source);
+    expect(fixture.sender.postMessage).not.toHaveBeenCalled();
+    await offerRows([entry]); await waitText("Review & add");
+    expect(fixture.sender.postMessage.mock.calls.every(([, origin]) => origin === senderOrigin)).toBe(true);
+  });
+  it.each([false, true])("closes an old form when ciphertext changes (conflict %s)", async changed => {
+    await review();
+    await offerRows([{ ...entry, amount: changed ? 999 : 100 }]);
+    await flush(); expect(container.querySelector(".entry-form")).toBeNull();
+    if (changed) { await waitText("could not be opened for the connected"); expect(button("Review & add")).toBeUndefined(); }
+    else await waitText("Review & add");
+    expect(fixture.actor.add_entry_batch).not.toHaveBeenCalled();
+  });
+  it.each(["identity", "actor", "principal", "navigation", "ciphertext"])("blocks a paused mutation after %s changes", async change => {
+    await review(); const firstActor = fixture.actor, pending = deferred<typeof encrypted>();
     fixture.encrypt.mockReturnValueOnce(pending.promise);
-    await click(button("Save in IOU")); expect(fixture.encrypt).toHaveBeenCalledOnce();
-    if (reason === "close") await click(button("Close local connection"));
-    else if (reason === "navigation") await act(async () => { window.dispatchEvent(new Event("pagehide")); });
-    else await act(async () => { await vi.advanceTimersByTimeAsync(600_000); });
-    await act(async () => { pending.resolve({ entryKey: new Uint8Array([1]), ciphertext: new Uint8Array([2]), iv: new Uint8Array([3]) }); });
+    await submit(); expect(fixture.encrypt).toHaveBeenCalledOnce();
+    if (change === "identity") { identity(); await render(); }
+    if (change === "actor") { fixture.actor = actor(); await render(); }
+    if (change === "principal") { identity("synthetic-b"); fixture.actor = actor(); await render(); }
+    if (change === "navigation") await messagePageHide();
+    if (change === "ciphertext") await offerRows([{ ...entry, amount: 999 }]);
+    await act(async () => { pending.resolve(encrypted); }); await flush();
+    expect(firstActor.add_entry_batch).not.toHaveBeenCalled(); expect(committed()).toHaveLength(0);
+  });
+  it("never retries an unknown single-entry save automatically and refuses changed fields", async () => {
+    await review();
+    fixture.actor.add_entry_batch.mockRejectedValueOnce(new Error("unknown result"));
+    await submit(); await waitText("did not return a confirmed result"); await flush();
+    expect(fixture.actor.add_entry_batch).toHaveBeenCalledOnce(); expect(committed()).toHaveLength(0);
+    const textarea = noteInput();
+    await act(async () => {
+      Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")!.set!.call(textarea, "Changed after attempt");
+      textarea.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+    await submit(); expect(fixture.actor.add_entry_batch).toHaveBeenCalledOnce();
+    expect(container.textContent).toContain("save was already attempted");
+  });
+});
+
+async function messagePageHide() { await act(async () => { window.dispatchEvent(new Event("pagehide")); }); }
+
+describe("normal batch confirmation with real OpenChat sender", () => {
+  const rows = [{ ...entry, kind: "iou" as const, amount: 11.11 }, { ...entry, kind: "settlement" as const, amount: 22.22 }];
+  async function connectSender() {
+    expect(localImportSheetDrafts(rows, [template], importId)).toHaveLength(2);
+    await render(); const request = await encryptedRequest(rows), outcomes = vi.fn();
+    const receiver = { postMessage: vi.fn((data: unknown, origin: string) => {
+      expect(origin).toBe("http://localhost:3000");
+      window.dispatchEvent(new MessageEvent("message", { data, origin: senderOrigin, source: fixture.sender as unknown as Window }));
+    }) };
+    const session = createLocalAppHandoffSession({ request, receiver, send: receiver.postMessage, sessionNonce, onOutcome: outcomes });
+    fixture.sender.postMessage.mockImplementation((data: unknown, origin: string) => {
+      expect(origin).toBe(senderOrigin); session.receive({ origin: "http://localhost:3000", source: receiver, data });
+    });
+    await act(async () => { session.start(); });
+    await vi.waitFor(() => expect(fixture.decryptions.length).toBeGreaterThan(0));
+    let decrypted: PromiseSettledResult<unknown>[] = [];
+    await act(async () => { decrypted = await Promise.allSettled(fixture.decryptions); });
+    expect(decrypted.filter(value => value.status === "rejected")).toEqual([]);
+    await waitText("Review & add");
+    expect(outcomes.mock.calls).toEqual([["received"]]); expect(fixture.actor.add_entry_batch).not.toHaveBeenCalled();
+    await click(button("Review & add")); expect(button("Add all 2 entries")).toBeDefined();
+    return { session, outcomes, receiver };
+  }
+  it("saves only after existing Add all, reuses one import identity after response loss, and reports Saved only on acknowledgment", async () => {
+    const ledger: unknown[] = []; let attempted = false;
+    fixture.actor.add_entry_batch.mockImplementation(async (request: any) => {
+      if (!attempted) { attempted = true; ledger.push(...request.entries); throw new Error("response lost after commit"); }
+      return { entry_ids: [501n, 502n], replayed: true };
+    });
+    const sender = await connectSender();
+    try {
+      await click(button("Add all 2 entries")); await waitText("did not return a confirmed result");
+      expect(ledger).toHaveLength(2); expect(committed()).toHaveLength(0);
+      await flush(); expect(fixture.actor.add_entry_batch).toHaveBeenCalledOnce();
+      await click(button("Add all 2 entries")); await waitText("earlier save was already accepted");
+      expect(ledger).toHaveLength(2); expect(fixture.actor.add_entry_batch).toHaveBeenCalledTimes(2);
+      const requests = fixture.actor.add_entry_batch.mock.calls.map(([request]: any[]) => request);
+      expect(requests[1].import_id).toEqual(requests[0].import_id);
+      for (const request of requests) {
+        expect(Object.keys(request).sort()).toEqual(["entries", "import_id", "sheet_id"]);
+        for (const item of request.entries) expect(Object.keys(item).sort()).toEqual(["ciphertext", "entry_key", "iv"]);
+      }
+      expect(plaintexts().map(value => value.txn_type)).toEqual(["iou", "settlement", "iou", "settlement"]);
+      expect(sender.outcomes.mock.calls).toEqual([["received"], ["saved"]]);
+      expect(sender.receiver.postMessage).toHaveBeenCalledTimes(2); expect(committed()).toHaveLength(1);
+    } finally { sender.session.close(); }
+  });
+  it("does not partially save or acknowledge when the second entry cannot encrypt", async () => {
+    const sender = await connectSender();
+    try {
+      fixture.encrypt.mockResolvedValueOnce(encrypted).mockRejectedValueOnce(new Error("second row failed"));
+      await click(button("Add all 2 entries")); await waitText("did not return a confirmed result");
+      expect(fixture.encrypt).toHaveBeenCalledTimes(2); expect(fixture.actor.add_entry_batch).not.toHaveBeenCalled();
+      expect(sender.outcomes.mock.calls).toEqual([["received"]]); expect(committed()).toHaveLength(0);
+    } finally { sender.session.close(); }
+  });
+});
+
+describe("native fullscreen parent binding", () => {
+  const origin = "http://localhost:54621", connectionId = "C".repeat(42) + "A";
+  const connect = () => message({ type: "oc:app-import:connect", version: 1, connectionId }, origin);
+  const reply = () => fixture.sender.postMessage.mock.calls.find(([value]) => value.type === "oc:app-import:connected")?.[0];
+  async function mountNative(framed = true) {
+    fixture.nativeBootstrap = true; vi.stubEnv("VITE_LOCAL_IMPORT_SENDER_ORIGIN", undefined);
+    if (framed) Object.defineProperty(window, "parent", { configurable: true, value: fixture.sender });
+    await render(); await connect();
+  }
+  it("auto-binds ciphertext reception from the exact parent, with normal final review/save still required", async () => {
+    await mountNative(); expect(reply()).toBeDefined();
+    expect(button("Continue")).toBeUndefined(); expect(container.textContent).not.toContain("Requesting address");
+    await offerRows([entry], reply().sessionNonce, origin); await waitText("Review & add");
     expect(fixture.actor.add_entry_batch).not.toHaveBeenCalled();
-    expect(fixture.sender.postMessage.mock.calls.some(([value]) => value.type === "oc:app-import:committed")).toBe(false);
-    expect(button("Save in IOU")).toBeUndefined(); expect(container.querySelectorAll("fieldset")).toHaveLength(0);
+    await click(button("Review & add")); await submit(); await waitText("Saved in IOU.");
+    expect(fixture.actor.add_entry_batch).toHaveBeenCalledOnce();
+    expect(fixture.sender.postMessage.mock.calls.every(([, target]) => target === origin)).toBe(true);
+  });
+  it("keeps explicit consent for the legacy top-level opener route", async () => {
+    await mountNative(false); expect(reply()).toBeUndefined(); expect(button("Continue")).toBeDefined();
+    await click(button("Continue")); expect(reply()).toBeDefined();
+    expect(fixture.actor.add_entry_batch).not.toHaveBeenCalled();
+  });
+  it("does not adopt a changed parent, unknown source or non-loopback sender", async () => {
+    fixture.nativeBootstrap = true; vi.stubEnv("VITE_LOCAL_IMPORT_SENDER_ORIGIN", undefined);
+    Object.defineProperty(window, "parent", { configurable: true, value: fixture.sender }); await render();
+    const stranger = { postMessage: vi.fn(), closed: false };
+    Object.defineProperty(window, "parent", { configurable: true, value: stranger });
+    await message({ type: "oc:app-import:connect", version: 1, connectionId }, origin, stranger);
+    await message({ type: "oc:app-import:connect", version: 1, connectionId }, "https://stranger.example");
+    expect(reply()).toBeUndefined(); expect(stranger.postMessage).not.toHaveBeenCalled();
+  });
+  it.each(["expiry", "closed", "navigation", "logout"])("invalidates the receiver and paused save on %s", async reason => {
+    let now = Date.now(); vi.spyOn(Date, "now").mockImplementation(() => now);
+    await mountNative(); const nonce = reply().sessionNonce;
+    await offerRows([entry], nonce, origin); await waitText("Review & add"); await click(button("Review & add"));
+    const pending = deferred<typeof encrypted>(), oldActor = fixture.actor;
+    fixture.encrypt.mockReturnValueOnce(pending.promise); await submit();
+    if (reason === "expiry") now += 600_001;
+    if (reason === "closed") fixture.sender.closed = true;
+    if (reason === "navigation") await messagePageHide();
+    if (reason === "logout") { fixture.identity = undefined; await render(); }
+    await message({ type: "oc:app-import:hello", version: 2, sessionNonce: nonce }, origin);
+    await act(async () => { pending.resolve(encrypted); }); await flush();
+    expect(oldActor.add_entry_batch).not.toHaveBeenCalled(); expect(committed()).toHaveLength(0);
+  });
+});
+
+describe("strict Type readiness hook", () => {
+  let latest: PairTemplatesApi;
+  function Probe() { latest = usePairTemplates(pairId, sheetId, { requireReadableSlots: true }); return null; }
+  it("keeps readiness false until both private slots are loaded and invalidates on identity change", async () => {
+    const pending = deferred<typeof slots>(); fixture.decrypt.mockReturnValue(pending.promise);
+    await render(<Probe />); expect(latest!.ready).toBe(false);
+    await act(async () => { pending.resolve(slots); }); expect(latest!.ready).toBe(true);
+    const generation = latest!.readyGeneration;
+    identity(); fixture.decrypt.mockReturnValue(new Promise(() => {})); await render(<Probe />);
+    expect(latest!.ready).toBe(false); expect(latest!.readyGeneration).not.toBe(generation);
   });
 });

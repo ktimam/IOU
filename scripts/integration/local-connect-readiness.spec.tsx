@@ -13,6 +13,8 @@ const fixture = vi.hoisted(() => ({
   templates: null as any,
   templateHook: vi.fn(),
   opener: { closed: false, postMessage: vi.fn() },
+  parent: { closed: false, postMessage: vi.fn() },
+  keyring: { get: vi.fn(), unwrapFor: vi.fn() },
   signIn: vi.fn(), signOut: vi.fn(),
   deliveryKey: undefined as any,
   loadDeliveryKey: vi.fn(),
@@ -30,6 +32,7 @@ vi.mock("../../src/features/flows/useActor", () => ({
 }));
 vi.mock("../../src/features/flows/SheetKeyContext", () => ({
   SheetKeyProvider: ({ children }: { children: ReactNode }) => children,
+  useSheetKey: () => fixture.keyring,
 }));
 vi.mock("../../src/features/openchat/LocalDeliveryKeyProvider", () => ({
   LocalDeliveryKeyProvider: ({ children }: { children: ReactNode }) => children,
@@ -98,15 +101,19 @@ beforeEach(async () => {
   }, exportKey: webcrypto.subtle.exportKey.bind(webcrypto.subtle) } });
   vi.stubGlobal("fetch", vi.fn(() => { throw new Error("No network before explicit consent"); }));
   Object.defineProperty(window, "opener", { configurable: true, value: fixture.opener });
+  Object.defineProperty(window, "parent", { configurable: true, value: window });
   window.history.replaceState(null, "", "/openchat/connect");
   fixture.identity = { privateMaterial: "private-key-material" }; fixture.principal = "synthetic-a";
   fixture.opener.closed = false; fixture.opener.postMessage.mockReset();
+  fixture.parent.closed = false; fixture.parent.postMessage.mockReset();
+  fixture.keyring.get.mockReturnValue(undefined); fixture.keyring.unwrapFor.mockResolvedValue(undefined);
   fixture.signIn.mockResolvedValue(undefined); fixture.signOut.mockResolvedValue(undefined);
   fixture.templates = { shared: [type], ready: true, readyGeneration: {}, loading: false, error: undefined };
   fixture.actor = {
     get_my_pairs: vi.fn(async () => [sheetId, otherSheetId].map((id, index) => ({ id: index ? "2222222222222222" : "1111111111111111",
       active_sheet_id: [id], archived_at: [], other_principal: { toText: () => "synthetic-partner" } }))),
     get_my_user: vi.fn(async () => [{ default_currency: ["EGP"] }]),
+    get_sheet: vi.fn(async () => []), get_pair: vi.fn(async () => []),
     add_entry_batch: vi.fn(), set_pair_templates: vi.fn(),
   };
   container = document.createElement("div"); document.body.append(container); root = createRoot(container);
@@ -138,13 +145,16 @@ describe("no-file IOU setup consent", () => {
     expect(container.querySelector("select")).toBeNull();
     await request(); await select(sheetId);
     expect(container.textContent).toContain(clientOrigin);
-    expect(container.textContent).toContain(`sheet ${sheetId}`);
+    expect(container.textContent).toContain("Account 1 — Current sheet");
+    for (const privateId of [sheetId, otherSheetId, "1111111111111111", "synthetic-a", "synthetic-partner"]) {
+      expect(container.textContent).not.toContain(privateId);
+    }
     expect(container.textContent).toContain("Private Choice: You owe; keywords: private-keyword");
     expect(fixture.templateHook).toHaveBeenCalledWith("1111111111111111", sheetId, { requireReadableSlots: true });
     expect(fetch).not.toHaveBeenCalled();
     expect(fixture.opener.postMessage).not.toHaveBeenCalled();
     const fetcher = publicFetch();
-    await click(button("Connect / share setup")!);
+    await click(button("Connect")!);
     // Wait for the real asynchronous WebCrypto digest, not a mocked verification result.
     await settledDigest();
     expect(fixture.opener.postMessage).toHaveBeenCalledOnce();
@@ -155,7 +165,7 @@ describe("no-file IOU setup consent", () => {
     const app = JSON.parse(message.catalogJson).apps[0];
     expect(app.destination).toBe("http://localhost:3000/openchat/import");
     expect(app.processor).toEqual(metadata);
-    expect(app.recipientLabel).toContain(sheetId);
+    expect(app.recipientLabel).toBe("Account 1 — Current sheet");
     expect(app.deliveryEncryption).toMatchObject({ version: 1, scheme: "p256-hkdf-sha256-aes-256-gcm-v1", keyId: expect.stringMatching(/^[a-f0-9]{64}$/) });
     expect(app.deliveryEncryption.publicKeySpki).toBeTruthy();
     expect(fixture.loadDeliveryKey).toHaveBeenCalledWith(true);
@@ -183,9 +193,9 @@ describe("no-file IOU setup consent", () => {
     expect(button("Sign in to IOU")).toBeDefined();
     expect(fixture.actor.get_my_pairs).not.toHaveBeenCalled();
     fixture.identity = {}; await render(); await select(sheetId);
-    expect(button("Connect / share setup")).toBeDefined();
+    expect(button("Connect")).toBeDefined();
     fixture.principal = "synthetic-b"; fixture.identity = {}; await render();
-    expect(button("Connect / share setup")).toBeUndefined();
+    expect(button("Connect")).toBeUndefined();
     expect(container.textContent).toContain("sign-in changed");
     expect(fixture.opener.postMessage).not.toHaveBeenCalled();
   });
@@ -196,9 +206,9 @@ describe("no-file IOU setup consent", () => {
     if (reason === "nonce") await request({ connectionId: "B".repeat(42) + "A" });
     if (reason === "sheet") await select(otherSheetId);
     if (reason === "cancel") await click(button("Cancel connection")!);
-    expect(button("Connect / share setup")).toBeUndefined();
+    expect(button("Connect")).toBeUndefined();
     await request();
-    expect(button("Connect / share setup")).toBeUndefined();
+    expect(button("Connect")).toBeUndefined();
     expect(fixture.opener.postMessage).not.toHaveBeenCalled();
     expect(fetch).not.toHaveBeenCalled();
   });
@@ -208,7 +218,7 @@ describe("no-file IOU setup consent", () => {
     try {
       await ready();
       const gate = deferred<void>(); publicFetch({ wait: gate.promise });
-      await click(button("Connect / share setup")!);
+      await click(button("Connect")!);
       expect(fetch).toHaveBeenCalledTimes(2);
       if (reason === "account") { fixture.principal = "synthetic-b"; fixture.identity = {}; await render(); }
       if (reason === "identity") { fixture.identity = {}; await render(); }
@@ -232,14 +242,14 @@ describe("no-file IOU setup consent", () => {
   it("requires readable private Types and never substitutes empty public setup", async () => {
     fixture.templates = { ...fixture.templates, ready: false, error: "could not decrypt" };
     await ready();
-    expect(button("Connect / share setup")!.disabled).toBe(true);
-    await click(button("Connect / share setup")!);
+    expect(button("Connect")!.disabled).toBe(true);
+    await click(button("Connect")!);
     expect(fetch).not.toHaveBeenCalled(); expect(fixture.opener.postMessage).not.toHaveBeenCalled();
   });
 
   it("rejects a processor integrity mismatch before sharing any private catalog", async () => {
     await ready(); publicFetch({ sha256: "f".repeat(64) });
-    await click(button("Connect / share setup")!);
+    await click(button("Connect")!);
     await settledDigest();
     expect(container.textContent).toContain("could not be verified");
     expect(fixture.opener.postMessage).not.toHaveBeenCalled();
@@ -247,20 +257,58 @@ describe("no-file IOU setup consent", () => {
 
   it("does not resend after a postMessage failure with unknown delivery outcome", async () => {
     await ready(); publicFetch(); fixture.opener.postMessage.mockImplementationOnce(() => { throw new Error("closed during send"); });
-    await click(button("Connect / share setup")!);
+    await click(button("Connect")!);
     await settledDigest();
     expect(container.textContent).toContain("delivery outcome is unknown");
     await request();
     expect(fixture.opener.postMessage).toHaveBeenCalledOnce();
-    expect(button("Connect / share setup")).toBeUndefined();
+    expect(button("Connect")).toBeUndefined();
   });
 
   it.each(["no-opener", "query", "fragment"])("rejects an unbound %s launch", async (reason) => {
     if (reason === "no-opener") Object.defineProperty(window, "opener", { configurable: true, value: null });
     else window.history.replaceState(null, "", `/openchat/connect${reason === "query" ? "?code=not-accepted" : "#not-accepted"}`);
     await render(); await request();
-    expect(container.textContent).toContain("plain URL");
+    expect(container.textContent).toContain("Open Apps in OpenChat and choose Connect to start.");
     expect(fixture.actor.get_my_pairs).not.toHaveBeenCalled();
+    expect(fixture.opener.postMessage).not.toHaveBeenCalled();
+  });
+
+  it("binds embedded setup to its exact parent and shares only after Connect", async () => {
+    Object.defineProperty(window, "parent", { configurable: true, value: fixture.parent });
+    await render();
+    await request(); // An opener cannot claim an embedded page's parent-bound connection.
+    expect(container.querySelector("select")).toBeNull();
+    expect(fixture.actor.get_my_pairs).not.toHaveBeenCalled();
+    await request({}, clientOrigin, fixture.parent); await select(sheetId);
+    expect(container.textContent).toContain(clientOrigin);
+    expect(container.textContent).toContain("Account 1 — Current sheet");
+    expect(container.textContent).not.toContain(sheetId);
+    expect(container.textContent).not.toContain(fixture.principal);
+    expect(fetch).not.toHaveBeenCalled();
+    expect(fixture.parent.postMessage).not.toHaveBeenCalled();
+    publicFetch(); await click(button("Connect")!); await settledDigest();
+    expect(fixture.parent.postMessage).toHaveBeenCalledOnce();
+    expect(fixture.parent.postMessage).toHaveBeenCalledWith(expect.objectContaining({
+      type: "oc:app-setup:result", version: 1, appId: "iou", connectionId,
+    }), clientOrigin);
+    expect(fixture.opener.postMessage).not.toHaveBeenCalled();
+    expect(fixture.actor.add_entry_batch).not.toHaveBeenCalled();
+    expect(fixture.actor.set_pair_templates).not.toHaveBeenCalled();
+    await request({}, clientOrigin, fixture.parent);
+    expect(fixture.parent.postMessage).toHaveBeenCalledOnce();
+  });
+
+  it("invalidates an embedded connection when its bound parent changes origin", async () => {
+    Object.defineProperty(window, "parent", { configurable: true, value: fixture.parent });
+    await render(); await request({}, clientOrigin, fixture.parent); await select(sheetId);
+    expect(button("Connect")).toBeDefined();
+    await request({}, "https://other.example", fixture.parent);
+    expect(button("Connect")).toBeUndefined();
+    await request({}, clientOrigin, fixture.parent);
+    expect(button("Connect")).toBeUndefined();
+    expect(fetch).not.toHaveBeenCalled();
+    expect(fixture.parent.postMessage).not.toHaveBeenCalled();
     expect(fixture.opener.postMessage).not.toHaveBeenCalled();
   });
 });

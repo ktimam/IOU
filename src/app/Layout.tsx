@@ -2,6 +2,7 @@ import type { ReactNode } from "react";
 import { useNavigate } from "react-router-dom";
 import { useAuth } from "../features/auth/AuthProvider";
 import { usePreferences } from "../features/settings/usePreferences";
+import { openLocalImportNavigation, useLocalImportNavigation } from "../features/openchat/LocalImportNavigation";
 
 // Persistent username badge shown top-right of every page. It doubles as the
 // settings entry point (tap → /settings, the merged profile+settings hub), so
@@ -11,6 +12,7 @@ function UserBadge() {
   const { state } = useAuth();
   const { prefs } = usePreferences();
   const nav = useNavigate();
+  const externalNavigation = useLocalImportNavigation();
   if (state.kind !== "authenticated") return null;
   const name = prefs.profileName.trim();
   const initial = (name || "?").slice(0, 1).toUpperCase();
@@ -18,7 +20,7 @@ function UserBadge() {
     <div className="topbar">
       <button
         className="user-badge"
-        onClick={() => nav("/settings")}
+        onClick={() => externalNavigation ? openLocalImportNavigation("/settings") : nav("/settings")}
         title="Profile & settings"
       >
         <span className="user-badge-avatar" aria-hidden>

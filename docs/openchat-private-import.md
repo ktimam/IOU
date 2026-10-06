@@ -8,12 +8,94 @@ draft received by IOU is not saved until its final review is confirmed.
 encryption at Save. The September 26 plaintext transport is obsolete. Source changes
 and passing tests do not update previously installed APKs or served bundles automatically.
 
-## Current local-test checkpoint: 2026-10-06
+## Normal user flow (UI repair, 2026-10-06)
+
+Use **Apps → IOU → Connect**, select the named IOU account/sheet, and confirm
+**Connect**. The client shows IOU's connection screen directly, not a transport
+page or file-import form. No entry is shared or saved during connection.
+
+After **Propose**, review the original inline card and select **Add to IOU**.
+The approved fields are encrypted in OpenChat before delivery. IOU opens the
+already-connected sheet and uses its existing **Pending from chat → Review & add**
+entry form (or batch confirmation) and **Save**. There is no intermediate JSON
+page, pairing-code step, manual draft picker, or second destination selection.
+Receiving a draft never saves it automatically. Unavailable or changed account,
+sheet, key or Type bindings fail closed; the UI explains the required correction.
+
+Desktop browser verification on 2026-10-06 passed the repaired normal flow: reconnect
+retained sign-in and showed the named account/sheet and Types; a synthetic 45.67
+proposal opened the normal sheet directly through **Add to IOU**, with no intermediate
+JSON page, manual IDs or transport button. **Review & add** used the existing entry
+form and honored the selected Type's 10% fee. Explicit saving returned **Saved in IOU**
+and OpenChat's **Saved** acknowledgement; fresh normal sheet navigation found exactly
+one matching row, gross 45.67 and net 41.10.
+
+That browser interaction used the repaired r1 preview. The subsequent r2 preview
+adds the recovery-message correction directing users to **Apps → Reconnect**; its
+source, output and unchanged transport headers were verified before activation at
+the same origin. Its retained evidence is under
+`F:/Temp/OpenChat-IOU/pr-flow-repair-20261006/web-r2/artifacts/`.
+
+Browser r3 is now served at the same origin with the narrow Saved-status fix. Its
+source/compiled UI, relay output and unchanged AI assets passed independent checks,
+and the replacement preserved the exact security headers. Evidence is under
+`F:/Temp/OpenChat-IOU/pr-flow-repair-20261006/web-r3/artifacts/`; its version is
+`2.0.0-localtest.63d10d313e0ac88441122a01a18cdd98`. Subsequent actual browser checks
+with IOU r4 retained the account and source-linked card after reload: no automatic
+send or new tab, acknowledgement unchecked, and Reopen disabled. Explicit reopening
+then Review & add and saving returned "Saved in IOU — the earlier save was already
+accepted." OpenChat showed Saved and the corrected "The app reports that this request
+was saved." Fresh history retained one row for each browser/native test note.
+
+IOU r4's `source.json` is SHA-256
+`bc0779909901f43369a64a8ff385058eff081aae8c8cda748f4e722cba523ff2`, under
+`F:/Temp/OpenChat-IOU/pr-flow-repair-20261006/iou-r4/`. App/node TypeScript checks,
+228 unit tests and 90 integration tests passed. Runtime source identity and HTTP
+framing policy were checked; only exact localhost origins 5190, 5192 and 5193 are
+allowed on the import/connect routes, with no wildcard.
+
+The repaired x86 APK subsequently passed its normal connection and review/save
+flow on persistent emulator-5554. Apps → IOU reconnect showed friendly sheet names
+and Types; cancel/reopen reused the same fixed ports successfully. Propose → inline
+card → Add to IOU opened the normal sheet's Pending from chat → Review & add and
+unchanged entry form. Explicit Add entry saved synthetic 45.67 USD, 2026-10-06,
+You owe, note `TEST ONLY - APK UI repair`, with the Type's 10% fee and net 41.10.
+IOU displayed Saved in IOU and the native card displayed Add to IOU Saved.
+The normal submit handler awaited its backend reload, and a subsequent sheet snapshot
+contained the row with that unique test note, gross 45.67 and net 41.10. This is backend
+reload readback, not a separate-session independent readback. The local form screenshot is
+`F:/Temp/OpenChat-IOU/pr-flow-repair-20261006/emulator-normal-iou-form.png`.
+A later fresh browser history page independently confirmed that native test-note row.
+After the narrow status correction, the final x86 APK was installed in place and
+retained the existing account and same card. Only explicit acknowledgement enabled
+Reopen; the normal existing sign-in returned to the original IOU sheet and entry
+form with the same date, note and 10% fee/net 41.10. Explicit Add entry returned the
+earlier-save-already-accepted result, with one native test-note row. Back in OpenChat,
+Saved and the corrected saved-status sentence were visible. Final local evidence is
+`final-apk-normal-iou-review.png` and `final-apk-saved-card.png` under
+`F:/Temp/OpenChat-IOU/pr-flow-repair-20261006/`.
+
+The final x86 APK SHA-256 is
+`1dab809a8af3aea89546c8b1f58499d29cf24842dc249bb48b1da5fdd56dd769`; the matching
+ARM artifact is `84aa572be993bcf0f7f22265eda4ecbfdd78747414c45baf84b2d0ede351f0e0`.
+Their shared build is `ab7e55a2161f1747404a2699cd01a3ea`, with source record SHA-256
+`b90916cbf31b0695af427b4ae27d59baee105d8518c01b07c804deb3e2988f8c`. Both artifact
+reports and `APK-COMPACT.json` are in `pr-flow-repair-20261006/apk-saved-status/artifacts/`
+under the project temp root. This proves the stated synthetic review/replay flow,
+not native GPU inference or physical-phone acceptance; ARM remains statically verified only.
+
+The earlier stale-status and blocked Open active sheet issues are resolved. Actual
+browser navigation now opens Details in a new top-level IOU account tab, where Open
+active sheet works normally. The restricted receiving-frame CSP is unchanged.
+No global release, new model-accuracy or public-provider qualification is claimed.
+
+## Previous local-test checkpoint: 2026-10-06 (before this UI repair)
 
 The tested sources are IOU `1ce9eef2105ced88aaa8b533018dbe6926223a40` and
 OpenChat `d0b00668c342d6b4bc09f93e19c2f023c6c07926`. This checkpoint covers the
-original demonstrated PR behavior on fork `main`, not a broader image-extraction
-contract. Prompts, model weights, backend services and product code were unchanged
+image and encrypted-delivery behavior on fork `main`, not complete PR UI parity
+or a broader image-extraction contract. The extra transport/import pages were still
+present in this checkpoint. Prompts, model weights, backend services and product code were unchanged
 during these final checks. Normal setup uses **Apps**; review uses the restored
 PR-style inline card at its source message, not the former private-draft manager panel.
 Cards remain private and encrypted on the sender device; delivery still requires
@@ -76,14 +158,21 @@ existing components, in order, without rebuilding or reinstalling anything:
    mention OpenChat. Do not substitute `dfx start`, reset, deploy or automatic repair.
    An incomplete checkpoint requires separate backup-first recovery approval.
 2. Start only the known verified IOU frontend snapshot, not a dirty development
-   checkout containing unaccepted model/processor experiments. For this checkpoint
-   the served source is
-   `F:/Temp/OpenChat-IOU/iou-pr-card-ui-preview-20261005/source`, frozen from IOU
-   `1ce9eef2105ced88aaa8b533018dbe6926223a40`. From that directory use its installed Vite command
+   checkout containing unaccepted model/processor experiments. The UI-repair source
+   activated on 2026-10-06 is
+   `F:/Temp/OpenChat-IOU/pr-flow-repair-20261006/iou-r4/source`; its `source.json`
+   receipt is SHA-256 `bc0779909901f43369a64a8ff385058eff081aae8c8cda748f4e722cba523ff2`.
+   This supersedes the initial repair snapshot `iou/source` (receipt SHA-256
+   `f3fc197e45c0e48fc69f45c06858c1dea59bb10b2fe035d13e2af47959c7033d`) and the
+   earlier `iou-pr-card-ui-preview-20261005` restart example; both remain historical.
+   Activation does not establish successful delivery or Save. From the repaired
+   source directory use its installed Vite command
    `node node_modules/vite/bin/vite.js --host 127.0.0.1 --port 3000 --strictPort`.
    The launcher must pass an explicitly present empty `VITE_IC_URL` in the child
    environment, plus `VITE_LOCAL_IMPORT_SENDER_ORIGIN=http://localhost:5190` for
-   this browser origin. Keep the existing local network, port and canister settings;
+   this browser origin. Also preserve the exact local framing configuration described
+   below: browser `http://localhost:5190`, native handoff `http://localhost:5192`,
+   and native setup `http://localhost:5193`. Keep the existing local network, port and canister settings;
    do not let a stale LAN override replace the preserved local gateway. Use the
    existing IOU-only launcher that supplies these values, not the general launcher.
 3. From the fork checkout, reuse the selected, already verified frozen web artifact:
@@ -111,19 +200,29 @@ This is the sender's origin, not IOU's own origin (for example,
 `http://localhost:3000`). It must be a canonical HTTP loopback origin: no trailing
 slash, path, query, fragment or wildcard. `localhost` and `127.0.0.1` are different
 origins. IOU never learns or automatically trusts a sender origin from an incoming
-message; a valid browser handoff also requires its launch nonce and exact opener.
+message; a valid browser handoff also requires its launch nonce and exact parent
+frame window (or the original opener in the historical top-level path).
 
 Restart the IOU Vite frontend after changing this startup configuration. For built
 assets, rebuild with the setting and serve the new assets; a browser reload alone
 does not apply a changed launch/build environment. IOU can still render, sign in
-and connect or prepare setup files without this setting, so those steps do not prove
-that browser handoff is configured. If an expected browser handoff shows **No active
-handoff**, check the effective frontend setting for a missing, invalid or outdated
-origin, as well as whether the nonce/opener connection was lost.
+and connect without this setting, so those steps do not prove that browser handoff
+is configured. If delivery remains at **Open the card with Add to IOU in OpenChat**
+or the connection expires, check the effective frontend setting for a missing,
+invalid or outdated origin, as well as whether the nonce or exact parent-window
+binding was lost. Setup-file preparation is historical recovery, not a current
+connection step.
 
-The native plain-URL flow is separate: it can request explicit, exact-origin,
-one-time connection consent without this fixed browser sender setting. Do not
-replace that consent with a wildcard or automatically trusted local sender.
+The native flow uses dedicated local-test transport origins, not arbitrary local
+ports. Its one-use launch capability is erased before IOU loads. The receiver binds
+the exact parent, origin and nonce and accepts ciphertext only; recipient decryption
+and the ordinary IOU review/Save remain required. Setup sharing still requires the
+user's explicit **Connect**. None of this proves official OpenChat provenance.
+
+For the local development frontend only, pass `IOU_LOCAL_APP_FRAME_ORIGINS` as a
+JSON array of exact loopback origins for the browser relay and native setup/handoff
+listeners. No wildcard is allowed. This opt-in affects only `/openchat/connect` and
+`/openchat/import`, and is ignored by production builds and non-local networks.
 
 ## Connect IOU
 
@@ -132,18 +231,18 @@ or processor file downloads or uploads are required.
 
 1. In OpenChat, open **Apps**. IOU appears automatically when it is listed
    in the operator-configured directory.
-2. Choose **Connect** for IOU. Continue to the IOU connection page opened by the
+2. Choose **Connect** for IOU. The IOU connection screen opens directly in the
    client; opening `/openchat/connect` directly does not create a setup request.
 3. Check the exact **Requesting client** address. Continue only if you recognize
    it and just started this request. Sign in to IOU separately if needed, verify
-   the signed-in identity, and choose the intended **Existing active sheet**.
+   account, and choose the intended named **Sheet**.
 4. Wait for that sheet's private Types to load. Review the account/sheet reminder,
    currency, Type names, keywords and **Owed to you** / **You owe** directions.
    IOU also recovers the signed-in user's delivery keypair and shares ONLY its public
    key/fingerprint and bound recipient context. The private key and separate sheet key,
    fees, schedules, entries and sign-in credentials remain in IOU. No message/image/draft
    is exchanged during setup. Missing or changed delivery keys require reconnection.
-5. Choose **Connect / share setup**, then return to OpenChat and check that it
+5. Choose **Connect**, then return to OpenChat and check that it
    accepted the setup. Enable IOU in the intended chat; connection does not
    automatically enable it or save an entry.
 
@@ -167,14 +266,16 @@ Changing publisher origin or requiring a new client protocol is not a compatible
 The local-test client remembers connected or imported setup, selected app/action and
 enabled chats on this device, isolated by the signed-in OpenChat account and backend.
 That local setup contains private Type names and is not chat-encrypted or synced.
-Use **Forget this account's app setup and ALL saved private cards on this device**
-to remove setup and all saved cards. Up to eight private cards are saved separately
+Use the app's existing **Disconnect** control to remove its connection. Disconnecting
+does not erase retained cards. Up to eight private cards are saved separately
 in a device-local encrypted collection, scoped to OpenChat account/backend.
 Approval tokens and transport details remain ephemeral. Restoring a card requires fresh
 review; an attempted delivery retains the same request ID and is never retried automatically.
 Signing out clears the live card view but retains the encrypted local collection.
-**Discard** removes only the selected card, retaining the collection and encryption key
-even when no cards remain. **Forget** removes setup, all saved cards and the encryption key.
+Cancel the selected unsent card or use **Details → Remove from this device** on a
+retained card to remove it, retaining the other cards and collection key. The former
+global **Forget** control belonged to the removed private-app manager and is not a
+normal-flow instruction.
 These local operations do not recall a delivered request or undo an entry already saved in IOU.
 
 ## Historical recovery with setup files
@@ -227,8 +328,8 @@ empty-Type exports do not include the selector. A client must support the new
 declaration before accepting it. Directory-managed setup follows the update/reconnect
 rules above; manually imported recovery setup requires a fresh matching pair.
 
-The baseline is held only in the sender's draft session. Advanced JSON preserves
-explicit values and disables automatic defaults, including after row reordering.
+The baseline is held only in the sender's draft session. Explicit field edits are
+authoritative; there is no advanced-JSON editor in the normal user flow.
 After card recovery following reload or logout/return, all saved values are treated
 as manual. Changing Type still updates its ID/name but does not reapply direction
 defaults; clearing Type cannot reconstruct the former direction. Edit direction
@@ -244,14 +345,15 @@ unusable catalog.
 1. Create and review a private draft in the client. Check every outgoing field and
    the destination before explicitly approving the handoff.
 2. OpenChat encrypts the fields before its relay/native handoff. IOU accepts only the
-   version-2 encrypted offer, not legacy plaintext. Authenticate separately in IOU,
-   select the linked receiving account/sheet and decrypt locally with the user's recovered
+   version-2 encrypted offer, not legacy plaintext. Authenticate separately in IOU
+   if necessary. The already-linked receiving account/sheet is resolved and checked
+   automatically before local decryption with the user's recovered
    delivery private key. Recipient context, destination, action, revision and request ID
    are cryptographically bound. The context is not proof of OpenChat chat membership.
-3. Select the received draft, review its Types and fields, then choose
-   **Review exact encrypted entry contents**. This final review includes applicable
+3. In the normal sheet, choose **Pending from chat → Review & add** and review the
+   existing entry form or batch confirmation. This final review includes applicable
    IOU-owned fees and schedules, not just the model’s proposed values.
-4. Select **Save in IOU** only for the reviewed entry. Entry contents are separately encrypted
+4. Select **Save** only for the reviewed entry. Entry contents are separately encrypted
    locally for the selected sheet before the authenticated write.
 
 Public discovery never includes recipient keys. The trusted exact-origin Connect flow
