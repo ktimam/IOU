@@ -8,6 +8,56 @@ draft received by IOU is not saved until its final review is confirmed.
 encryption at Save. The September 26 plaintext transport is obsolete. Source changes
 and passing tests do not update previously installed APKs or served bundles automatically.
 
+## Current local-test checkpoint: 2026-10-06
+
+The tested sources are IOU `1ce9eef2105ced88aaa8b533018dbe6926223a40` and
+OpenChat `d0b00668c342d6b4bc09f93e19c2f023c6c07926`. This checkpoint covers the
+original demonstrated PR behavior on fork `main`, not a broader image-extraction
+contract. Prompts, model weights, backend services and product code were unchanged
+during these final checks. Normal setup uses **Apps**; review uses the restored
+PR-style inline card at its source message, not the former private-draft manager panel.
+Cards remain private and encrypted on the sender device; delivery still requires
+sender approval followed by separate IOU review and Save.
+
+- **Desktop images:** fresh normal-UI tests passed with both Gemma and the smaller
+  all-q4 Qwen. The Arabic receipt produced 12,900 EGP, 2026-08-14 and Settlement.
+  The date-range image produced 1,912.15 USD, 2026-07-19, the app-defined test Type
+  and its **You owe** default, with the displayed July 19–August 6 range in the note.
+  Qwen passed Arabic → date-range → Arabic without restart or model switching;
+  Gemma passed the date-range image after switching back to its retained cache.
+  Gemma's Arabic result also passed encrypted delivery, separate review/Save and
+  fresh sheet readback in the dedicated acceptance account. The other proposals
+  were inspected and cancelled, not saved. These browser results were directly
+  observed by the testing agent; the independent record review did not replay them.
+- **Final x86 APK:** in-place installation retained the existing account. Normal
+  IOU reconnect passed. A restart before the final delivery restored the account,
+  chat and prior private-card link, with usable app setup; restored fields were not
+  separately reinspected. The reviewed synthetic 44.45 USD card passed encrypted
+  handoff, matching receiver review, explicit Save, helper/APK **Saved** acknowledgement
+  and a fresh normal sheet readback showing one matching row. Its date was
+  2026-10-06, kind IOU and direction **You owe**; Type was unset and note empty.
+  This verifies delivery fidelity, not extraction of the synthetic text's note or
+  Type. No post-save restart or same-ID replay was tested in this final run. The
+  earlier 44.44 test was left before receiver review and was not saved.
+- **Remaining boundaries:** the foreground, secure emulator WebView exposes WebGPU
+  but returns a null adapter. No device or model inference was requested, so native
+  image inference has not passed. The matching ARM APK is built and statically
+  verified but not installed on a physical phone; phone testing remains deferred.
+  Prior scoped advisory deferrals remain unchanged; this run did not perform a
+  fresh advisory scan or establish public-release acceptance. A successful reconnect
+  does not prove the cause of previous intermittent failures.
+
+The final APK SHA-256 values are
+`09e9f1aee2bb6e0b4c1cee3217c0bb0e52b6df94dc253fc92e9c2b72987e3682`
+(x86_64) and
+`e19253bf1746ecdc401f20c76098dbb770442c44021ee6240b249006a403588f`
+(aarch64). Evidence is retained locally in
+`F:/Temp/OpenChat-IOU/pr-only-final-20261006/artifacts/acceptance-progress.json`
+and `independent-acceptance-inventory.json` in that directory. The latter separates
+artifact verification, saved UI evidence and direct browser observations. These
+records do not turn browser passes into APK GPU acceptance. Original test images,
+screenshots and account identifiers remain private local evidence, not repo fixtures.
+
 ## Restart the existing local-test environment
 
 The general `scripts/live/start-environment.ps1` launcher belongs to the legacy
@@ -25,7 +75,11 @@ existing components, in order, without rebuilding or reinstalling anything:
    config, state directory, canisters and account data, even where historical names
    mention OpenChat. Do not substitute `dfx start`, reset, deploy or automatic repair.
    An incomplete checkpoint requires separate backup-first recovery approval.
-2. Start only the IOU frontend from this checkout with the installed Vite command
+2. Start only the known verified IOU frontend snapshot, not a dirty development
+   checkout containing unaccepted model/processor experiments. For this checkpoint
+   the served source is
+   `F:/Temp/OpenChat-IOU/iou-pr-card-ui-preview-20261005/source`, frozen from IOU
+   `1ce9eef2105ced88aaa8b533018dbe6926223a40`. From that directory use its installed Vite command
    `node node_modules/vite/bin/vite.js --host 127.0.0.1 --port 3000 --strictPort`.
    The launcher must pass an explicitly present empty `VITE_IC_URL` in the child
    environment, plus `VITE_LOCAL_IMPORT_SENDER_ORIGIN=http://localhost:5190` for
@@ -76,7 +130,7 @@ replace that consent with a wildcard or automatically trusted local sender.
 Use the client's configured public app directory for normal setup. No manual catalog
 or processor file downloads or uploads are required.
 
-1. In OpenChat, open **Private apps**. IOU appears automatically when it is listed
+1. In OpenChat, open **Apps**. IOU appears automatically when it is listed
    in the operator-configured directory.
 2. Choose **Connect** for IOU. Continue to the IOU connection page opened by the
    client; opening `/openchat/connect` directly does not create a setup request.
@@ -101,7 +155,7 @@ login bridge; this procedure is not a claim of native runtime acceptance.
 
 ## Setup updates and local storage
 
-Opening **Private apps** refreshes the public directory. Compatible updates from
+Opening **Apps** refreshes the public directory. Compatible updates from
 the same approved publisher are verified and installed without file uploads or
 another APK update, provided the client already supports the directory and protocol.
 Updates wait while processing or any private cards are retained; a failed update
@@ -123,9 +177,15 @@ Signing out clears the live card view but retains the encrypted local collection
 even when no cards remain. **Forget** removes setup, all saved cards and the encryption key.
 These local operations do not recall a delivered request or undo an entry already saved in IOU.
 
-## Advanced recovery with setup files
+## Historical recovery with setup files
 
-Keep file export/import for explicit recovery, not normal connection. Manually
+The following file-based workflow records the older recovery UI. The current
+normal **Apps → Connect** flow does not require the removed **Private apps**
+workspace or manual files; do not use these historical controls as current UI
+acceptance instructions.
+
+Keep file export/import for explicit recovery in a compatible historical client,
+not normal connection. Manually
 imported setup is not silently assigned to a publisher or replaced automatically.
 When using this recovery path, prepare and import a fresh matching pair after an update.
 
