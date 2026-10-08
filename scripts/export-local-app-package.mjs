@@ -9,18 +9,25 @@ import { createLocalAppPublicDirectory, verifyCatalogOnlyProcessor } from "./lib
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const argument = process.argv.slice(2);
-const usage = () => { throw new Error("Usage: node scripts/export-local-app-package.mjs --destination <import URL> [--catalog-only] [--output-directory <staging directory>]"); };
+const usage = () => { throw new Error("Usage: node scripts/export-local-app-package.mjs --destination <import URL> [--inbox-host <replica origin> --inbox-canister-id <canister ID>] [--catalog-only] [--output-directory <staging directory>]"); };
 if (argument.length < 2 || argument[0] !== "--destination" || !argument[1]) usage();
 let catalogOnly = false;
 const publicOutput = path.join(root, "public/openchat");
 let output = publicOutput;
 let outputSpecified = false;
+let inboxHost, inboxCanisterId;
 for (let index = 2; index < argument.length; index++) {
   if (argument[index] === "--catalog-only" && !catalogOnly) catalogOnly = true;
   else if (argument[index] === "--output-directory" && !outputSpecified && argument[index + 1]) {
     output = path.resolve(argument[++index]); outputSpecified = true;
+  } else if (argument[index] === "--inbox-host" && !inboxHost && argument[index + 1]) {
+    inboxHost = argument[++index];
+  } else if (argument[index] === "--inbox-canister-id" && !inboxCanisterId && argument[index + 1]) {
+    inboxCanisterId = argument[++index];
   } else usage();
 }
+if (!!inboxHost !== !!inboxCanisterId) usage();
+const inboxRoute = inboxHost ? { version: 1, kind: "ic-canister", host: inboxHost, canisterId: inboxCanisterId } : undefined;
 // Use the already installed Vite dependency; do not fetch/install a new bundler.
 const requireFromVite = createRequire(import.meta.resolve("vite"));
 const { build } = requireFromVite("esbuild");
@@ -44,7 +51,7 @@ if (catalogOnly) {
 const generator = await build({ ...common, entryPoints: [path.join(root, "src/features/openchat/localAppPackage.ts")], format: "cjs", platform: "node" });
 const context = vm.createContext({ module: { exports: {} }, URL, TextEncoder });
 vm.runInContext(generator.outputFiles[0].text, context, { timeout: 1000 });
-const catalog = context.module.exports.createIouLocalAppPackage(argument[1], { sha256: metadata.sha256, byteLength: metadata.byteLength });
+const catalog = context.module.exports.createIouLocalAppPackage(argument[1], { sha256: metadata.sha256, byteLength: metadata.byteLength }, undefined, inboxRoute);
 const catalogBytes = Buffer.from(JSON.stringify(catalog, null, 2) + "\n");
 const directory = createLocalAppPublicDirectory(catalog, catalogBytes, metadata);
 mkdirSync(output, { recursive: true });

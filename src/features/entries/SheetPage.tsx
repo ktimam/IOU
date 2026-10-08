@@ -55,6 +55,7 @@ import {
 import { BatchConfirmModal } from "./BatchConfirmModal";
 import type { LocalSheetImport } from "../openchat/localImportSheet";
 import { useLocalImportNavigation } from "../openchat/LocalImportNavigation";
+import { useDurableInbox } from "../openchat/useDurableInbox";
 import {
   addEntryBatch,
   batchImportContextMatches,
@@ -235,13 +236,13 @@ const SORT_OPTIONS: { value: SortKey; label: string }[] = [
   { value: "amount-asc", label: "Smallest amount" },
 ];
 
-export function SheetPage({ localImport }: { localImport?: LocalSheetImport } = {}) {
+export function SheetPage({ localImport: handoffImport }: { localImport?: LocalSheetImport } = {}) {
   const externalNavigation = useLocalImportNavigation();
   const navigationProps = externalNavigation ? { target: "_blank", rel: "noopener noreferrer" } : {};
   const { sheetId: routeSheetId = "" } = useParams();
-  const sheetId = localImport?.sheetId ?? routeSheetId;
-  const isLocalImport = !!localImport;
-  const { state } = useAuth();
+  const sheetId = handoffImport?.sheetId ?? routeSheetId;
+  const isLocalImport = !!handoffImport;
+  const { state, identity } = useAuth();
   const principal = state.kind === "authenticated" ? state.principal : null;
   const inboxDedupe = useMemo(
     () => loadScopedInboxState(principal),
@@ -273,6 +274,10 @@ export function SheetPage({ localImport }: { localImport?: LocalSheetImport } = 
   // the legacy personal store feeds nothing here.
   const pairTemplates = usePairTemplates(sheet?.pair_id as string | undefined, sheetId);
   const allTemplates = pairTemplates.shared;
+  const durableInbox = useDurableInbox({ enabled: !isLocalImport, actor, principal, identity,
+    sheetId, pairId: sheet?.pair_id, ready: pairTemplates.ready && !pairTemplates.error && isActive(sheet?.state),
+    generation: pairTemplates.readyGeneration, templates: allTemplates, unwrapFor });
+  const localImport = handoffImport ?? durableInbox.active;
   // PARTNER-authored types (id not live in MY slot) get a badge.
   const partnerSharedIds = new Set(
     pairTemplates.shared.filter((s) => !pairTemplates.myIds.has(s.id)).map((s) => s.id),
@@ -465,16 +470,16 @@ export function SheetPage({ localImport }: { localImport?: LocalSheetImport } = 
     setPendingChatKey(null);
     setPendingMessageId(null);
   };
-  const reviewLocalImport = () => {
-    if (!localImport?.ready || localImport.saved || !principal || !localImport.drafts.length) return;
+  const reviewLocalImport = (target = localImport) => {
+    if (!target?.ready || target.saved || !principal || !target.drafts.length) return;
     try {
-      localImport.assertCurrent();
-      if (localImport.drafts.length > 1) {
-        setBatch({ drafts: [...localImport.drafts], messageId: localImport.importId,
-          relayId: "", chatKey: null, context: { sheetId, principal }, localImportId: localImport.importId });
+      target.assertCurrent();
+      if (target.drafts.length > 1) {
+        setBatch({ drafts: [...target.drafts], messageId: target.importId,
+          relayId: "", chatKey: null, context: { sheetId, principal }, localImportId: target.importId });
       } else {
         closeEntryModal();
-        setModal({ initial: localImport.drafts[0].initial, entryId: null, localImportId: localImport.importId });
+        setModal({ initial: target.drafts[0].initial, entryId: null, localImportId: target.importId });
       }
     } catch (cause) { toasts.show({ kind: "error", text: (cause as Error).message }); }
   };
@@ -1350,21 +1355,34 @@ export function SheetPage({ localImport }: { localImport?: LocalSheetImport } = 
       </section>
 
       {localImport?.notice && <p role="status">{localImport.notice}</p>}
-      {!modal && isActive(sheet.state) && pending.length + visibleInbox.length + (localImport?.ready && !localImport.saved ? 1 : 0) > 0 && (
+      {!localImport && durableInbox.notice && <p role="status">{durableInbox.notice}</p>}
+      {!modal && isActive(sheet.state) && pending.length + visibleInbox.length + durableInbox.items.length + (handoffImport?.ready && !handoffImport.saved ? 1 : 0) > 0 && (
         <section className="card" style={{ marginBottom: 12 }}>
-          <h2 style={{ marginTop: 0 }}>✨ Pending from chat ({pending.length + visibleInbox.length + (localImport?.ready && !localImport.saved ? 1 : 0)})</h2>
+          <h2 style={{ marginTop: 0 }}>✨ Pending from chat ({pending.length + visibleInbox.length + durableInbox.items.length + (handoffImport?.ready && !handoffImport.saved ? 1 : 0)})</h2>
           <p className="muted small" style={{ marginTop: 0 }}>
             Drafts your AI assistant sent. Review each before it's saved — nothing is
             written until you confirm.
           </p>
           <ul style={{ listStyle: "none", padding: 0, margin: 0 }}>
-            {localImport?.ready && !localImport.saved && <li className="row" style={{ justifyContent: "space-between", alignItems: "center", gap: 8, padding: "6px 0" }}>
-              <span className="small">{batchSummary({ drafts: [...localImport.drafts], errors: [] })}</span>
+            {handoffImport?.ready && !handoffImport.saved && <li className="row" style={{ justifyContent: "space-between", alignItems: "center", gap: 8, padding: "6px 0" }}>
+              <span className="small">{batchSummary({ drafts: [...handoffImport.drafts], errors: [] })}</span>
               <span className="row" style={{ gap: 6 }}>
-                <button className="secondary small" onClick={reviewLocalImport}>Review &amp; add</button>
-                <button className="secondary small" onClick={() => localImport.dismiss()} title="Dismiss without adding">✕</button>
+                <button className="secondary small" onClick={() => reviewLocalImport(handoffImport)}>Review &amp; add</button>
+                <button className="secondary small" onClick={() => handoffImport.dismiss()} title="Dismiss without adding">✕</button>
               </span>
             </li>}
+            {durableInbox.items.map(item => <li key={`durable-${item.id}`} className="row" style={{ justifyContent: "space-between", alignItems: "center", gap: 8, padding: "6px 0" }}>
+              <span className="small">{item.error || batchSummary({ drafts: [...(item.drafts ?? [])], errors: [] })}</span>
+              <span className="row" style={{ gap: 6 }}>
+                <button className="secondary small" disabled={durableInbox.busy || !!item.error || !item.drafts?.length}
+                  onClick={() => {
+                    try { reviewLocalImport(durableInbox.select(item)); }
+                    catch (cause) { toasts.show({ kind: "error", text: (cause as Error).message }); }
+                  }}>Review &amp; add</button>
+                <button className="secondary small" disabled={durableInbox.busy}
+                  onClick={() => void durableInbox.dismiss(item)} title="Dismiss without adding">✕</button>
+              </span>
+            </li>)}
             {[...pending, ...visibleInbox].map((p) => {
               // Single OR multi-entry card: batchSummary renders the count ("N entries: …") for a
               // multi card and the plain summary for a single one (byte-identical to before).
@@ -1499,6 +1517,11 @@ export function SheetPage({ localImport }: { localImport?: LocalSheetImport } = 
               </button>
             )}
           </>
+        )}
+        {!isLocalImport && (
+          <Link className="btn secondary" to={`/sheet/${sheetId}/transfer`}>
+            Import / export JSON
+          </Link>
         )}
         {entries.length > 0 && (
           <button

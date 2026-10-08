@@ -499,7 +499,40 @@ type OpenChatPrivateMatchContextResult = variant {
     KeyUnavailable;
 };
 
+// Generic encrypted durable delivery. No plaintext app fields or OpenChat provenance claim.
+type EncryptedInboxError = variant { NotAuthorized; InvalidRequest; NotFound; Expired; Revoked; Conflict; Capacity; CounterExhausted };
+type EncryptedInboxCreateGrant = record {
+    app_id : text; app_revision : text; action_id : text; destination : text;
+    recipient_key_id : text; recipient_context : text; write_capability_hash : blob;
+    expires_at_ms : nat64;
+};
+type EncryptedInboxGrant = record {
+    inbox_id : text; app_id : text; app_revision : text; action_id : text; destination : text;
+    recipient_key_id : text; recipient_context : text;
+    created_at_ms : nat64; expires_at_ms : nat64; revoked : bool;
+};
+type EncryptedInboxGrantPage = record { grants : vec EncryptedInboxGrant; next : opt text };
+type EncryptedInboxDeposit = record { inbox_id : text; write_capability : blob; request_id : text; encrypted_payload : blob };
+type EncryptedInboxStatus = variant { Pending; Saved; Dismissed };
+type EncryptedInboxDisposition = variant { Saved; Dismissed };
+type EncryptedInboxReceipt = record {
+    inbox_id : text; request_id : text; body_sha256 : blob;
+    received_at_ms : nat64; expires_at_ms : nat64; status : EncryptedInboxStatus; replayed : bool;
+};
+type EncryptedInboxList = record { inbox_id : text; after_id : opt text };
+type EncryptedInboxItem = record { receipt : EncryptedInboxReceipt; encrypted_payload : blob };
+type EncryptedInboxPage = record { items : vec EncryptedInboxItem; next : opt text };
+type EncryptedInboxAcknowledge = record {
+    inbox_id : text; request_id : text; body_sha256 : blob; disposition : EncryptedInboxDisposition;
+};
+
 service : {
+    create_encrypted_inbox_grant : (EncryptedInboxCreateGrant) -> (variant { Ok : EncryptedInboxGrant; Err : EncryptedInboxError });
+    list_encrypted_inbox_grants : (opt text) -> (variant { Ok : EncryptedInboxGrantPage; Err : EncryptedInboxError });
+    revoke_encrypted_inbox_grant : (text) -> (variant { Ok : bool; Err : EncryptedInboxError });
+    deposit_encrypted_inbox : (EncryptedInboxDeposit) -> (variant { Ok : EncryptedInboxReceipt; Err : EncryptedInboxError });
+    list_encrypted_inbox : (EncryptedInboxList) -> (variant { Ok : EncryptedInboxPage; Err : EncryptedInboxError });
+    acknowledge_encrypted_inbox : (EncryptedInboxAcknowledge) -> (variant { Ok : EncryptedInboxReceipt; Err : EncryptedInboxError });
     // Phase 1
     whoami : () -> (opt text) query;
     get_my_user : () -> (opt UserRecord) query;

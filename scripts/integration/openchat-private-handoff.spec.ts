@@ -66,9 +66,10 @@ const retainedImageCaptures=[smallerQwenCapture,gemmaCapture].flatMap((capture)=
 describe("actual IOU export through actual OpenChat proposal/conformance/project/receiver",()=>{
   it("binds the shipped public catalog to the actual encrypted private setup and persisted provenance",async()=>{
     const artifactRoot=resolve(dirname(fileURLToPath(import.meta.url)),"../../public/openchat");
-    const sourceUrl="http://localhost:3000/openchat/apps-v1.json";
     const directoryJson=readFileSync(resolve(artifactRoot,"apps-v1.json"),"utf8");
     const publicCatalogJson=readFileSync(resolve(artifactRoot,"local-app-v1.json"),"utf8");
+    const publicApp=JSON.parse(publicCatalogJson).apps[0];
+    const sourceUrl=new URL("/openchat/apps-v1.json",publicApp.destination).href;
     const processorBytes=readFileSync(resolve(artifactRoot,"local-processor-v1.js"));
     const metadata=JSON.parse(readFileSync(resolve(artifactRoot,"local-processor-v1.sha256.json"),"utf8"));
     const descriptor=parseLocalAppDirectory(directoryJson,sourceUrl).apps[0];
@@ -76,12 +77,18 @@ describe("actual IOU export through actual OpenChat proposal/conformance/project
     expect(descriptor.processor).toMatchObject({sha256:createHash("sha256").update(processorBytes).digest("hex"),byteLength:processorBytes.byteLength});
     expect(metadata).toMatchObject({sha256:descriptor.processor.sha256,byteLength:descriptor.processor.byteLength});
     const advertised=publicLocalAppCatalog(publicCatalogJson,descriptor);
-    const setup=createIouLocalAppPackage(destination,metadata,{recipientLabel:"Synthetic account and sheet",deliveryEncryption,
-      processorContext:createLocalProcessorContext([{id:"synthetic-acceptance",name:"Synthetic acceptance",direction:"debt",txn_type:"iou",keywords:["TESTONLY"]}],"USD")});
+    const publicInbox=publicApp.deliveryInbox;
+    const connectedEncryption=publicInbox?await createLocalDeliveryEncryption(deliveryKey.publicKey,{...recipientContext,
+      backendHost:publicInbox.host,backendCanisterId:publicInbox.canisterId}):deliveryEncryption;
+    const connectedInbox=publicInbox?{...publicInbox,inboxId:"a".repeat(64),writeCapability:"A".repeat(43),expiresAtMs:Date.now()+600000}:undefined;
+    const setup=createIouLocalAppPackage(publicApp.destination,metadata,{recipientLabel:"Synthetic account and sheet",deliveryEncryption:connectedEncryption,
+      ...(connectedInbox?{deliveryInbox:connectedInbox}:{}),
+      processorContext:createLocalProcessorContext([{id:"synthetic-acceptance",name:"Synthetic acceptance",direction:"debt",txn_type:"iou",keywords:["TESTONLY"]}],"USD")},publicInbox);
     const json=JSON.stringify(setup);
     // Parse separately: a valid private encryption/context DTO is not proof of public-recipe binding.
     const parsed=parseLocalAppCatalog(json).apps[0];
-    expect(parsed.deliveryEncryption).toEqual(deliveryEncryption);
+    expect(parsed.deliveryEncryption).toEqual(connectedEncryption);
+    if(connectedInbox)expect(parsed.deliveryInbox).toEqual(connectedInbox);
     expect(parsed.actions[0].draftEditor?.choices[0].options[0]).toMatchObject({value:"synthetic-acceptance",label:"Synthetic acceptance"});
     const connected=bindConnectedLocalApp(json,advertised);
     expect(connected).toEqual(parsed);

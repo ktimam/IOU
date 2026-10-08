@@ -100,6 +100,20 @@ export function resolveDevLanQcOrigin(
   return parsePrivateLanHttpsOrigin(value);
 }
 
+/** Explicit private phone-test II endpoint only; never used by production or non-local networks. */
+export function resolveDevLanQcIdentityOrigin(
+  value: string | undefined,
+  context: DevLanQcContext,
+): string | undefined {
+  if (!context.isDevelopment || context.dfxNetwork !== "local") return undefined;
+  if (value === undefined || value === "") return undefined;
+  const errorMessage =
+    "VITE_IOU_LAN_QC_II_ORIGIN must be an exact canonical Tailscale HTTPS origin with an explicit port";
+  const origin = requireTailscaleHttpsOrigin(value, true, errorMessage);
+  if (new URL(origin).origin !== origin) throw new Error(errorMessage);
+  return origin;
+}
+
 export function resolveOpenChatDevOrigin(
   value: string | undefined,
   context: DevLanQcContext,

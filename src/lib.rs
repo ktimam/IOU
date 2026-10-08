@@ -31,6 +31,12 @@ use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 
+mod durable_inbox;
+use durable_inbox::{
+    AcknowledgeRequest, CreateGrantRequest, DeliveryReceipt, DepositRequest, DurableInbox,
+    GrantPage, InboxGrant, InboxPage, InboxResult, ListInboxRequest,
+};
+
 type Memory = VirtualMemory<DefaultMemoryImpl>;
 
 // Resource limits are deliberately generous for normal household/property-manager use while
@@ -449,9 +455,14 @@ impl Storable for RecoveryKey {
 //     adding duplicates even if client-side parsing or encryption later drifts.
 //     Additive fresh region.
 //
+//   MemoryIds 30..37: generic durable encrypted inbox (see durable_inbox.rs):
+//     grants, owner grant index, immutable requests/tombstones, pending index,
+//     request expiry index, owner usage, global usage cell, grant expiry index.
+//     Fresh regions; no existing entries, keys or OpenChat bindings migrate.
+//
 //   DO NOT re-use these orphaned MemoryIds for a new structure
 //   with a different key/value type — see issue #7. If you need
-//   a new region, use the next free number (currently 30+).
+//   a new region, use the next free number (currently 38+).
 
 // v1.5.0 (schema v3 -> v4): added optional encrypted name fields to Pair,
 // Sheet, PairSummary, CreateSheetReq.
@@ -501,11 +512,18 @@ impl Storable for RecoveryKey {
 // v1.20.0 (schema v17 -> v18): added MemoryId 29 ENTRY_BATCH_RECEIPTS. Existing
 // entries require no migration; receipts are written only by the new atomic
 // batch endpoint and survive state-preserving upgrades.
-const SCHEMA_VERSION: u32 = 18;
+// v1.21.0 (schema v18 -> v19): additive encryption-blind durable inbox at
+// MemoryIds 30..37. Existing application records and keys remain byte-compatible.
+const SCHEMA_VERSION: u32 = 19;
 
 thread_local! {
     static MEMORY_MANAGER: RefCell<MemoryManager<DefaultMemoryImpl>> =
         RefCell::new(MemoryManager::init(DefaultMemoryImpl::default()));
+    static DURABLE_INBOX: RefCell<DurableInbox<Memory>> = RefCell::new(
+        DurableInbox::init(std::array::from_fn(|index| {
+            MEMORY_MANAGER.with(|manager| manager.borrow().get(MemoryId::new(30 + index as u8)))
+        }))
+    );
 
     static VERSION: RefCell<StableCell<u32, Memory>> = RefCell::new(
         StableCell::init(
@@ -1231,6 +1249,13 @@ fn inspect_message() {
         // App-authoritative shared-account fan-out. The method itself pins the exact UserIndex
         // canister caller; it is intentionally not a normal signed-in-user endpoint.
         "c2c_authorize_ai_action_recipients",
+        // Generic encrypted delivery: the deposit alone is capability-authorized and anonymous.
+        "create_encrypted_inbox_grant",
+        "list_encrypted_inbox_grants",
+        "revoke_encrypted_inbox_grant",
+        "deposit_encrypted_inbox",
+        "list_encrypted_inbox",
+        "acknowledge_encrypted_inbox",
     ];
     if !allowed.contains(&method_name.as_str()) {
         ic_cdk::trap(format!(
@@ -1289,6 +1314,11 @@ fn inspect_message() {
         "remove_pending_chat_route_link",
         "connect_openchat",
         "disconnect_openchat",
+        "create_encrypted_inbox_grant",
+        "list_encrypted_inbox_grants",
+        "revoke_encrypted_inbox_grant",
+        "list_encrypted_inbox",
+        "acknowledge_encrypted_inbox",
     ];
     if require_auth_methods.contains(&method_name.as_str())
         && caller == candid::Principal::anonymous()
@@ -1303,6 +1333,71 @@ fn inspect_message() {
 }
 
 // ───────────────────────── Phase 1 endpoints (auth + config) ─────────────────────────
+
+// Owner-scoped replicated reads are deliberate: pending membership and exact acknowledgement
+// receipts come from consensus. The backend stores ciphertext only and never saves IOU entries
+// through these methods. A write capability is not proof of OpenChat provenance or user approval.
+#[ic_cdk::update]
+fn create_encrypted_inbox_grant(request: CreateGrantRequest) -> InboxResult<InboxGrant> {
+    DURABLE_INBOX.with(|store| {
+        store.borrow_mut().create_grant(
+            ic_cdk::api::msg_caller(),
+            request,
+            ic_cdk::api::time() / 1_000_000,
+        )
+    })
+}
+
+#[ic_cdk::update]
+fn list_encrypted_inbox_grants(after_id: Option<String>) -> InboxResult<GrantPage> {
+    DURABLE_INBOX.with(|store| {
+        store.borrow_mut().list_grants(
+            ic_cdk::api::msg_caller(),
+            after_id,
+            ic_cdk::api::time() / 1_000_000,
+        )
+    })
+}
+
+#[ic_cdk::update]
+fn revoke_encrypted_inbox_grant(inbox_id: String) -> InboxResult<bool> {
+    DURABLE_INBOX.with(|store| {
+        store
+            .borrow_mut()
+            .revoke(ic_cdk::api::msg_caller(), inbox_id)
+    })
+}
+
+#[ic_cdk::update]
+fn deposit_encrypted_inbox(request: DepositRequest) -> InboxResult<DeliveryReceipt> {
+    DURABLE_INBOX.with(|store| {
+        store
+            .borrow_mut()
+            .deposit(request, ic_cdk::api::time() / 1_000_000)
+    })
+}
+
+#[ic_cdk::update]
+fn list_encrypted_inbox(request: ListInboxRequest) -> InboxResult<InboxPage> {
+    DURABLE_INBOX.with(|store| {
+        store.borrow_mut().list(
+            ic_cdk::api::msg_caller(),
+            request,
+            ic_cdk::api::time() / 1_000_000,
+        )
+    })
+}
+
+#[ic_cdk::update]
+fn acknowledge_encrypted_inbox(request: AcknowledgeRequest) -> InboxResult<DeliveryReceipt> {
+    DURABLE_INBOX.with(|store| {
+        store.borrow_mut().acknowledge(
+            ic_cdk::api::msg_caller(),
+            request,
+            ic_cdk::api::time() / 1_000_000,
+        )
+    })
+}
 
 #[ic_cdk::query]
 fn whoami() -> Option<String> {

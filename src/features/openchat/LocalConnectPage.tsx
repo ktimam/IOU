@@ -14,6 +14,7 @@ import { host as backendHost, canisterId as backendCanisterId } from "../auth/co
 import { decryptName } from "../crypto/devVetkd";
 import { localAppSenderWindow } from "./localAppSender";
 import { localConnectionLabel, localConnectionLabels } from "./localConnectionLabels";
+import { createDurableInboxGrant, type DurableInboxActor, type DurableInboxRoute } from "./durableInboxService";
 
 type Consent = ReturnType<typeof createLocalAppSetupConsent>;
 type SheetChoice = { pairId: string; sheetId: string; accountName: string; sheetName: string };
@@ -173,6 +174,11 @@ function ConnectSheet({ principal, sheet, defaultCurrency, opener, consent, stat
   async function share() {
     if (pending.current || !ready || !deliveryKeys.ready || !consent.isCurrent(state.binding) || opener.closed) return;
     const captured = { ...current.current };
+    const assertCurrent = () => {
+      if (!mounted.current || opener.closed || !consent.isCurrent(state.binding) || !localSetupContextMatches(captured, current.current)) {
+        throw new Error("Setup session changed");
+      }
+    };
     pending.current = true; setBusy(true); setNotice("");
     try {
       const context = createLocalProcessorContext(shared, defaultCurrency);
@@ -181,14 +187,24 @@ function ConnectSheet({ principal, sheet, defaultCurrency, opener, consent, stat
       const deliveryEncryption = await createLocalDeliveryEncryption(key.publicKey, {
         principal, backendHost, backendCanisterId, pairId: sheet.pairId, sheetId: sheet.sheetId,
       });
-      if (!mounted.current || opener.closed || !consent.isCurrent(state.binding) || !localSetupContextMatches(captured, current.current)) {
-        throw new Error("Setup session changed");
-      }
+      assertCurrent();
+      const publicInbox: DurableInboxRoute = { version: 1, kind: "ic-canister", host: backendHost, canisterId: backendCanisterId };
+      const destination = `${location.origin}/openchat/import`;
+      // Validate the complete private recipe before consuming a grant slot. No capability is
+      // minted for invalid Types, processor metadata, public route or encryption metadata.
+      createIouLocalAppPackage(destination, metadata, { processorContext: context, deliveryEncryption,
+        recipientLabel: localConnectionLabel(sheet) }, publicInbox);
+      const deliveryInbox = await createDurableInboxGrant({
+        actor: actor as unknown as DurableInboxActor, host: backendHost, canisterId: backendCanisterId,
+        binding: { appId: "iou", appRevision: "local-import-v2", actionId: "iou.entry.import", destination, recipient: deliveryEncryption }, assertCurrent,
+      });
+      assertCurrent();
       const catalog = createIouLocalAppPackage(`${location.origin}/openchat/import`, metadata, {
         processorContext: context,
         deliveryEncryption,
+        deliveryInbox,
         recipientLabel: localConnectionLabel(sheet),
-      });
+      }, publicInbox);
       const response = consent.approve(state.binding, JSON.stringify(catalog));
       opener.postMessage(response, state.binding.senderOrigin);
       onShared();
@@ -205,7 +221,7 @@ function ConnectSheet({ principal, sheet, defaultCurrency, opener, consent, stat
     {(loading || (!ready && !error)) && <p>Loading this sheet’s private Types…</p>}
     {error && <p role="alert">This sheet’s private Types could not be read. Sharing is disabled.</p>}
     {ready && <ul>{shared.map(type => <li key={type.id}>{type.name}: {type.direction === "credit" ? "Owed to you" : "You owe"}; keywords: {(type.keywords ?? []).join(", ") || "name only"}</li>)}</ul>}
-    <p>OpenChat will remember this connection on this device. Entries still need your review and Save in IOU.</p>
+    <p>OpenChat will remember this connection on this device. It may deliver encrypted drafts for 90 days; pending drafts stay in IOU for up to 30 days and still need your review and Save.</p>
     <button disabled={!ready || !deliveryKeys.ready || loading || !!error || busy} onClick={() => void share()}>{busy ? "Connecting…" : "Connect"}</button>
     {notice && <p role="status">{notice}</p>}
   </section>;

@@ -19,6 +19,12 @@ vi.mock("../../src/features/openchat/LocalDeliveryKeyProvider", () => ({
   LocalDeliveryKeyProvider: ({ children }: { children: ReactNode }) => children,
   useLocalDeliveryKey: () => ({ ready: !!fixture.identity && !!fixture.actor, load: async () => fixture.deliveryKey }),
 }));
+// This receiver suite already supplies its authenticated key provider. Normal-sheet
+// durable inbox polling is disabled in this embedded import flow and owns no key session.
+vi.mock("../../src/features/openchat/consumerKeypair", () => ({
+  captureConsumerKeypairSession: vi.fn(() => { throw new Error("Embedded import must not start normal-sheet inbox polling"); }),
+  loadExistingConsumerKeypair: vi.fn(() => { throw new Error("Embedded import must use its supplied key provider"); }),
+}));
 vi.mock("../../src/features/openchat/localImportHandoff", async original => {
   const real = await original<typeof import("../../src/features/openchat/localImportHandoff")>();
   return { ...real, decryptPendingLocalImport: (...args: Parameters<typeof real.decryptPendingLocalImport>) => {

@@ -4,6 +4,20 @@ import { DIRECTION_LABELS } from "../entries/directionLabels";
 import { orderedCurrencies } from "../settings/currencies";
 import { IOU_LOCAL_APP_REVISION, parseLocalDeliveryEncryption, type LocalDeliveryEncryption } from "./localImportEncryption";
 import { createIouLocalCardView } from "./localCardView";
+import { localDeliveryDecode } from "./localImportEncryption";
+import type { ConnectedDurableInbox, DurableInboxRoute } from "./durableInboxService";
+
+/** Public routing is operator configuration; capabilities are private Connect output only. */
+function validateInboxRoute(route: DurableInboxRoute): void {
+  const keys = Object.keys(route).sort().join(",");
+  const host = new URL(route.host);
+  if (keys !== "canisterId,host,kind,version" || route.version !== 1 || route.kind !== "ic-canister" ||
+    host.origin !== route.host || host.username || host.password ||
+    (host.protocol !== "https:" && !(host.protocol === "http:" && ["localhost", "127.0.0.1", "[::1]"].includes(host.hostname))) ||
+    !/^[a-z0-9-]{5,100}$/.test(route.canisterId) || ["aaaaa-aa", "2vxsx-fae"].includes(route.canisterId)) {
+    throw new Error("Invalid public IOU inbox route");
+  }
+}
 
 /** Strict final review DTO, separate from the model/evidence schema and owned entirely by IOU. */
 export const iouLocalDraftSchema = {
@@ -28,7 +42,8 @@ export function createIouLocalAppPackage(destination: string, processor: { sha25
   recipientLabel: string;
   processorContext: LocalProcessorContext;
   deliveryEncryption?: LocalDeliveryEncryption;
-}) {
+  deliveryInbox?: ConnectedDurableInbox;
+}, publicInbox?: DurableInboxRoute) {
   const url = new URL(destination);
   if (url.username || url.password || url.search || url.hash || url.pathname !== "/openchat/import" ||
     (url.protocol !== "https:" && !(url.protocol === "http:" && ["localhost", "127.0.0.1"].includes(url.hostname))) ||
@@ -40,6 +55,16 @@ export function createIouLocalAppPackage(destination: string, processor: { sha25
     !privateSetup.recipientLabel.trim() || privateSetup.recipientLabel.length > 512)) throw new Error("Invalid private IOU export.");
   const deliveryEncryption = privateSetup?.deliveryEncryption && parseLocalDeliveryEncryption(privateSetup.deliveryEncryption);
   if (privateSetup?.deliveryEncryption && !deliveryEncryption) throw new Error("Invalid IOU delivery encryption setup");
+  if (publicInbox) validateInboxRoute(publicInbox);
+  const privateInbox = privateSetup?.deliveryInbox;
+  if (privateInbox) {
+    if (!deliveryEncryption || !publicInbox || Object.keys(privateInbox).sort().join(",") !== "canisterId,expiresAtMs,host,inboxId,kind,version,writeCapability" ||
+      privateInbox.version !== publicInbox.version || privateInbox.kind !== publicInbox.kind || privateInbox.host !== publicInbox.host ||
+      privateInbox.canisterId !== publicInbox.canisterId || !/^[a-f0-9]{64}$/.test(privateInbox.inboxId) ||
+      !Number.isSafeInteger(privateInbox.expiresAtMs) || privateInbox.expiresAtMs <= Date.now()) throw new Error("Invalid private IOU inbox setup");
+    localDeliveryDecode(privateInbox.writeCapability, 32);
+  }
+  const deliveryInbox = privateInbox ?? publicInbox;
   // The isolated IOU processor already verifies text currency evidence and composes the note.
   // Preserve its reviewed private defaults and optional Type through the host's final conformance
   // pass. Raw source echo is not a field in this private handoff contract.
@@ -89,6 +114,7 @@ export function createIouLocalAppPackage(destination: string, processor: { sha25
   return { version: 1, apps: [{
     id: "iou", revision: IOU_LOCAL_APP_REVISION, name: "IOU", description: "Receive encrypted private transaction drafts, then review and save encrypted entries in IOU.",
     destination: url.href, processor: { sha256: processor.sha256, byteLength: processor.byteLength },
+    ...(deliveryInbox ? { deliveryInbox: { ...deliveryInbox } } : {}),
     ...(deliveryEncryption ? { deliveryEncryption } : {}),
     ...(privateSetup ? { recipientLabel: privateSetup.recipientLabel } : {}), actions: [{
       definition: {

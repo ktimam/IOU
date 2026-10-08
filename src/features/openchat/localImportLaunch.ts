@@ -2,16 +2,22 @@ import { isLocalImportId } from "./localImportHandoff";
 
 let sessionNonce: string | undefined;
 let nativeBootstrap = false;
+let inboxLaunch: Readonly<{ inboxId: string; requestId: string }> | undefined;
 
-/** The URL carries only a non-secret handshake nonce, never an entry or account identifier. */
+/** URLs carry only non-secret handshake/inbox selectors, never fields or write capabilities. */
 export function captureLocalImportLaunch(target: Pick<Window, "location" | "history"> = window): void {
   sessionNonce = undefined;
   nativeBootstrap = false;
+  inboxLaunch = undefined;
   if (target.location.pathname !== "/openchat/import") return;
   // A plain URL permits only a metadata/consent prompt, never an authorized sender. Malformed
   // fragments or query parameters must not fall back to native bootstrap after URL scrubbing.
   nativeBootstrap = !target.location.hash && !target.location.search;
   const fragment = new URLSearchParams(target.location.hash.slice(1));
+  const inboxId = fragment.get("oc-inbox"), requestId = fragment.get("oc-request");
+  if (!target.location.search && fragment.size === 2 && /^[a-f0-9]{64}$/.test(inboxId ?? "") && isLocalImportId(requestId)) {
+    inboxLaunch = Object.freeze({ inboxId: inboxId!, requestId });
+  }
   const nonce = fragment.get("sessionNonce");
   sessionNonce = fragment.size === 1 && isLocalImportId(nonce) ? nonce : undefined;
   target.history.replaceState(target.history.state, "", target.location.pathname);
@@ -19,6 +25,7 @@ export function captureLocalImportLaunch(target: Pick<Window, "location" | "hist
 
 export function localImportSessionNonce(): string | undefined { return sessionNonce; }
 export function localImportNativeBootstrap(): boolean { return nativeBootstrap; }
+export function localInboxLaunch() { return inboxLaunch; }
 
 /** Initial local-only prototype allowlist. Never learn a trusted sender from incoming messages. */
 export function localImportSenderOrigin(value: unknown): string | undefined {

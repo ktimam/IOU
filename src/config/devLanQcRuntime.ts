@@ -1,5 +1,6 @@
 import {
   resolveDevLanQcOrigin,
+  resolveDevLanQcIdentityOrigin,
   shouldFetchRootKeyForNetwork,
 } from "./devLanQc";
 
@@ -21,6 +22,19 @@ export const DEV_LAN_QC_IC_ORIGIN = resolveDevLanQcOrigin(
   {
     isDevelopment:
       viteEnvironment.DEV === true || nodeEnvironment.NODE_ENV === "development",
+    dfxNetwork: DFX_NETWORK,
+  },
+);
+
+/** A new testing origin does not migrate the previous origin's IOU session or identity. */
+export const DEV_LAN_QC_II_ORIGIN = resolveDevLanQcIdentityOrigin(
+  (viteEnvironment.VITE_IOU_LAN_QC_II_ORIGIN as string | undefined) ??
+    nodeEnvironment.VITE_IOU_LAN_QC_II_ORIGIN,
+  {
+    // An explicitly production Vite build always wins over a stale development shell.
+    isDevelopment:
+      viteEnvironment.DEV === true ||
+      (viteEnvironment.DEV === undefined && nodeEnvironment.NODE_ENV === "development"),
     dfxNetwork: DFX_NETWORK,
   },
 );

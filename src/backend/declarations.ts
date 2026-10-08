@@ -27,6 +27,36 @@ const DEFAULT_CANISTER_ID =
 type IDL = any;
 
 export const idlFactory = ({ IDL: idl }: { IDL: IDL }) => {
+  const EncryptedInboxError = idl.Variant({
+    NotAuthorized: idl.Null, InvalidRequest: idl.Null, NotFound: idl.Null, Expired: idl.Null,
+    Revoked: idl.Null, Conflict: idl.Null, Capacity: idl.Null, CounterExhausted: idl.Null,
+  });
+  const EncryptedInboxBinding = {
+    app_id: idl.Text, app_revision: idl.Text, action_id: idl.Text, destination: idl.Text,
+    recipient_key_id: idl.Text, recipient_context: idl.Text,
+  };
+  const EncryptedInboxCreateGrant = idl.Record({ ...EncryptedInboxBinding,
+    write_capability_hash: idl.Vec(idl.Nat8), expires_at_ms: idl.Nat64,
+  });
+  const EncryptedInboxGrant = idl.Record({ ...EncryptedInboxBinding,
+    inbox_id: idl.Text, created_at_ms: idl.Nat64, expires_at_ms: idl.Nat64, revoked: idl.Bool,
+  });
+  const EncryptedInboxGrantPage = idl.Record({ grants: idl.Vec(EncryptedInboxGrant), next: idl.Opt(idl.Text) });
+  const EncryptedInboxDeposit = idl.Record({ inbox_id: idl.Text, write_capability: idl.Vec(idl.Nat8),
+    request_id: idl.Text, encrypted_payload: idl.Vec(idl.Nat8),
+  });
+  const EncryptedInboxReceipt = idl.Record({ inbox_id: idl.Text, request_id: idl.Text,
+    body_sha256: idl.Vec(idl.Nat8), received_at_ms: idl.Nat64, expires_at_ms: idl.Nat64,
+    status: idl.Variant({ Pending: idl.Null, Saved: idl.Null, Dismissed: idl.Null }), replayed: idl.Bool,
+  });
+  const EncryptedInboxList = idl.Record({ inbox_id: idl.Text, after_id: idl.Opt(idl.Text) });
+  const EncryptedInboxPage = idl.Record({ items: idl.Vec(idl.Record({ receipt: EncryptedInboxReceipt,
+    encrypted_payload: idl.Vec(idl.Nat8) })), next: idl.Opt(idl.Text),
+  });
+  const EncryptedInboxAcknowledge = idl.Record({ inbox_id: idl.Text, request_id: idl.Text,
+    body_sha256: idl.Vec(idl.Nat8), disposition: idl.Variant({ Saved: idl.Null, Dismissed: idl.Null }),
+  });
+  const InboxResult = (value: IDL) => idl.Variant({ Ok: value, Err: EncryptedInboxError });
   const UserRecord = idl.Record({
     user_principal: idl.Principal,
     wrapped_display_name: idl.Vec(idl.Nat8),
@@ -393,6 +423,12 @@ export const idlFactory = ({ IDL: idl }: { IDL: IDL }) => {
     // Phase 1
     whoami: idl.Func([], [idl.Opt(idl.Text)], ["query"]),
     get_my_user: idl.Func([], [idl.Opt(UserRecord)], ["query"]),
+    create_encrypted_inbox_grant: idl.Func([EncryptedInboxCreateGrant], [InboxResult(EncryptedInboxGrant)], []),
+    list_encrypted_inbox_grants: idl.Func([idl.Opt(idl.Text)], [InboxResult(EncryptedInboxGrantPage)], []),
+    revoke_encrypted_inbox_grant: idl.Func([idl.Text], [InboxResult(idl.Bool)], []),
+    deposit_encrypted_inbox: idl.Func([EncryptedInboxDeposit], [InboxResult(EncryptedInboxReceipt)], []),
+    list_encrypted_inbox: idl.Func([EncryptedInboxList], [InboxResult(EncryptedInboxPage)], []),
+    acknowledge_encrypted_inbox: idl.Func([EncryptedInboxAcknowledge], [InboxResult(EncryptedInboxReceipt)], []),
     set_display_name: idl.Func(
       [idl.Vec(idl.Nat8), idl.Vec(idl.Nat8)],
       [UserRecord],

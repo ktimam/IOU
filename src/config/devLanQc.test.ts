@@ -5,6 +5,7 @@ import {
   parsePrivateLanHttpOrigin,
   parsePrivateLanHttpsOrigin,
   resolveDevLanQcOrigin,
+  resolveDevLanQcIdentityOrigin,
   resolveDevLanQcTlsPaths,
   shouldFetchRootKeyForNetwork,
 } from "./devLanQc";
@@ -141,6 +142,60 @@ describe("resolveDevLanQcOrigin", () => {
         dfxNetwork: "ic",
       }),
     ).toBeUndefined();
+  });
+});
+
+describe("resolveDevLanQcIdentityOrigin", () => {
+  const localDev = { isDevelopment: true, dfxNetwork: "local" };
+
+  it.each([
+    "https://device.sample-tailnet.ts.net:9444",
+    "https://phone.sample-tailnet.ts.net:1",
+    "https://device.sample-tailnet.ts.net:65535",
+  ])("accepts an explicit exact private II endpoint: %s", (origin) => {
+    expect(resolveDevLanQcIdentityOrigin(origin, localDev)).toBe(origin);
+  });
+
+  it.each([undefined, ""])("preserves the existing local default when unset: %s", (origin) => {
+    expect(resolveDevLanQcIdentityOrigin(origin, localDev)).toBeUndefined();
+  });
+
+  it.each([
+    "http://device.sample-tailnet.ts.net:9444",
+    "https://identity.example:9444",
+    "https://localhost:9444",
+    "https://127.0.0.1:9444",
+    "https://192.168.1.10:9444",
+    "https://device.sample-tailnet.ts.net",
+    "https://device.sample-tailnet.ts.net:0",
+    "https://device.sample-tailnet.ts.net:65536",
+    "https://device.sample-tailnet.ts.net:09444",
+    "https://device.sample-tailnet.ts.net:443",
+    "https://device.sample-tailnet.ts.net:9444/",
+    "https://device.sample-tailnet.ts.net:9444/authorize",
+    "https://device.sample-tailnet.ts.net:9444?canisterId=other",
+    "https://device.sample-tailnet.ts.net:9444#authorize",
+    "https://user:secret@device.sample-tailnet.ts.net:9444",
+    "https://DEVICE.sample-tailnet.ts.net:9444",
+    "https://device.sample-tailnet.ts.net.evil:9444",
+    "https://device.sample-tailnet.ts.net.:9444",
+    " https://device.sample-tailnet.ts.net:9444",
+    "https://device.sample-tailnet.ts.net:9444\n",
+    "https://device.sample-tailnet.ts.net:9444\r\n",
+    "https://device.sample-tailnet.ts.net:9444\u200b",
+    "javascript:alert(1)",
+  ])("rejects a broadened or noncanonical II target: %s", (origin) => {
+    expect(() => resolveDevLanQcIdentityOrigin(origin, localDev)).toThrow(/VITE_IOU_LAN_QC_II_ORIGIN/);
+  });
+
+  it.each([
+    { isDevelopment: false, dfxNetwork: "local" },
+    { isDevelopment: true, dfxNetwork: "ic" },
+    { isDevelopment: false, dfxNetwork: "ic" },
+    { isDevelopment: true, dfxNetwork: "staging" },
+  ])("ignores even invalid stale overrides outside local development: %j", (context) => {
+    expect(resolveDevLanQcIdentityOrigin("https://device.sample-tailnet.ts.net:9444", context)).toBeUndefined();
+    expect(resolveDevLanQcIdentityOrigin("not a valid origin", context)).toBeUndefined();
   });
 });
 

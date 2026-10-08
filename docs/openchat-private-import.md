@@ -10,6 +10,109 @@ and passing tests do not update previously installed APKs or served bundles auto
 
 ## Normal user flow (UI repair, 2026-10-06)
 
+### Durable inbox correction (2026-10-08)
+
+The current implementation restores asynchronous encrypted delivery. It requires the
+updated IOU backend and frontend, the updated OpenChat client, and one explicit
+**Apps → IOU → Reconnect** to authorize its write-only inbox. Merely updating this
+document or the public directory does not upgrade an installed APK.
+
+1. Connect selects the IOU sheet and exchanges its public encryption key plus a
+   scoped write-only inbox capability. Public discovery contains only the generic
+   endpoint, never this capability or private sheet configuration.
+2. **Add to IOU** encrypts the reviewed fields in OpenChat and saves the exact
+   encrypted request in the device-local card before sending it. The generic inbox
+   transport does not require an IOU window to be open.
+3. IOU's existing canister stores ciphertext before acknowledging **Pending**.
+   This is not a ledger save. Closing either app does not remove the pending item.
+4. On the linked sheet, the signed-in IOU owner sees **Pending from chat**. IOU
+   recovers the existing recipient key, decrypts locally, and uses the original
+   **Review & add** form or batch confirmation. This also works on another device
+   signed in to the same IOU identity with access to the same key and sheet.
+5. **Save** separately encrypts the ledger entries and writes one idempotent batch.
+   Only then does IOU acknowledge the inbox item. A lost response can be retried
+   with the same request ID without appending another batch. **Dismiss** explicitly
+   removes the pending item without adding a ledger entry.
+
+Pending items and acknowledgement tombstones have a 30-day retention period from
+first delivery. Reviewing is not required immediately. An expired item is no longer
+returned; bounded maintenance later reclaims its storage. Connect grants last up to
+90 days; expiration/revocation blocks new deposits, not review of still-live items.
+IOU retains at most 32 grants per owner, including revoked grants still inside
+their retention window. Each explicit Connect creates a new grant; repeated
+reconnections or an unknown setup outcome can exhaust that quota. Check whether
+OpenChat accepted the prior connection before trying again. Revoke is not an
+immediate quota reset: bounded cleanup removes eligible expired grants after their
+30-day post-expiry retention. A capacity error must not trigger automatic reconnect,
+discard pending items or erase the existing connection. These are IOU backend
+limits, not OpenChat model or card-count rules.
+An unknown save outcome remains pending; a confirmed save with a failed inbox
+acknowledgement is shown as saved with pending cleanup, not as a failed ledger save.
+Unreadable ciphertext, changed Types, or a missing recipient key are not silently
+discarded or replaced.
+
+The backend is encryption-blind but sees routing metadata, identities, sizes and
+timing. The capability authorizes deposit only, not reading or acknowledging. It is
+not proof of official OpenChat provenance. No official OpenChat canister changes,
+message upload for verification, model changes, or new intermediary page are needed.
+The generic inbox methods live in IOU's existing backend; other apps can implement
+the same protocol without app-specific OpenChat code.
+
+The older window-based handoff remains a compatibility path for previously connected
+clients. Its unsaved receiver state was memory-only; those past handoffs are not
+automatically migrated into the new inbox. Reconnect and use a newly reviewed card
+for the new protocol; do not reinterpret an uncertain old delivery as a new save.
+
+### Durable inbox live verification (2026-10-08)
+
+The upgraded local backend passed 119 Rust tests. Each frozen frontend profile
+(local and private-network) passed TypeScript, 104 unit tests and 123 integration
+tests. Registry generation 9 was published. The frozen model prompts, processor
+and model configuration were preserved; none of these checks reran model inference.
+
+Live testing then established the following with one synthetic request:
+
+- Actual Connect supplied a private inbox grant. A temporary sender harness used
+  production OpenChat encryption and transport to deposit while all IOU pages were
+  closed. The backend returned `Pending`; replaying the identical ciphertext and
+  request ID returned `Pending` with `replayed: true`.
+- Closing and reopening the entire isolated browser restored the decrypted request
+  in the normal sheet's **Pending from chat**, without saving it.
+- A second, independent fresh browser profile signed in as the same local simulated
+  Internet Identity. No authentication state or key was copied between profiles;
+  backend-backed key recovery decrypted the same pending request there.
+- The existing **Review & add** form and **Add entry** action saved one synthetic
+  12.34 USD entry. A normal UI reload showed exactly one matching synthetic row,
+  22 history entries (previously 21), and no remaining pending header.
+
+This proves the stated local encrypted transport, durable pending recovery and
+normal IOU review/save/readback. The sender was a harness, not a complete journey
+through OpenChat's normal inline card UI. Its localStorage held synthetic
+ciphertext for replay; production encrypted OpenChat card storage was covered by
+separate unit tests, not exercised by that harness. Simulated local identity is
+not passkey/provider or production Internet Identity acceptance.
+
+Both ARM64 and x86_64 APKs subsequently passed independent package verification:
+the expected signer, unchanged native/authentication inputs and DEX parity, and
+all 1,617 packaged frontend assets matched the reviewed build. The ARM64 artifact
+SHA-256 is `51ec6e2ee7ad33e47201614aeacc258f3209263d217cb95b55a6160f2a1adfa9`.
+This is build/embedded-asset verification, not installed-app flow acceptance.
+
+The verified x86_64 APK was then installed over the existing emulator local-test
+package without clearing its data. Its signer was unchanged; the normal `/chats`
+page displayed the existing account avatar without a new sign-in. The runtime
+reported `2.0.0-localtest.332edbd15feaba1360674ee62b28e7f3`, matching the verified
+build, with native Credential Manager authentication and OTA disabled. Its APK
+SHA-256 is `4ed415ca361e16e039ccd0037466a6cb30574f7a473670d84132efd6844e247c`.
+Installation, startup and version checks passed. App discovery remained unverified
+when the bounded check stopped because WebView debugging was slow. No new sign-in,
+app connection, inference, delivery or Save was attempted. The new APK's complete
+emulator and physical-phone flows remain unverified; no physical phone was connected
+for this checkpoint.
+
+The older dated acceptance records below remain evidence for their respective
+builds, not verification of this new inbox.
+
 Use **Apps → IOU → Connect**, select the named IOU account/sheet, and confirm
 **Connect**. The client shows IOU's connection screen directly, not a transport
 page or file-import form. No entry is shared or saved during connection.
@@ -265,11 +368,24 @@ Changing publisher origin or requiring a new client protocol is not a compatible
 
 The local-test client remembers connected or imported setup, selected app/action and
 enabled chats on this device, isolated by the signed-in OpenChat account and backend.
-That local setup contains private Type names and is not chat-encrypted or synced.
+That local setup contains private Type names and an inbox write capability. New
+setup writes are AES-GCM encrypted in device-local IndexedDB with a nonextractable
+key; this is not chat encryption or synchronization. Legacy setup remains readable
+and is encrypted on the next write. Same-origin client code can use the key, so this
+does not protect against malicious client code. Forgetting setup removes its key.
 Use the app's existing **Disconnect** control to remove its connection. Disconnecting
-does not erase retained cards. Up to eight private cards are saved separately
-in a device-local encrypted collection, scoped to OpenChat account/backend.
-Approval tokens and transport details remain ephemeral. Restoring a card requires fresh
+is device-local: it does not invoke IOU's authenticated grant-revocation endpoint.
+A previously shared write capability therefore remains valid until its expiry or
+explicit backend revocation; Disconnect is not a claim of remote authority removal.
+It stops use of that connection on this client and does not erase retained cards or
+pending requests already delivered to IOU. Private cards have no fixed count limit and are
+saved separately in a device-local encrypted collection, scoped to OpenChat
+account/backend, with a 16 MiB collection safety budget. Normal cards remain bounded
+to 256 KiB; only a card containing a sealed inbox request may use the 384 KiB bound
+for its exact encrypted delivery bytes. The collection budget remains 16 MiB.
+Approval tokens remain ephemeral. Inbox cards also retain the exact encrypted
+delivery bytes and receipt inside the encrypted local card for safe retries.
+Restoring a card requires fresh
 review; an attempted delivery retains the same request ID and is never retried automatically.
 Signing out clears the live card view but retains the encrypted local collection.
 Cancel the selected unsent card or use **Details → Remove from this device** on a
@@ -344,7 +460,7 @@ unusable catalog.
 
 1. Create and review a private draft in the client. Check every outgoing field and
    the destination before explicitly approving the handoff.
-2. OpenChat encrypts the fields before its relay/native handoff. IOU accepts only the
+2. OpenChat encrypts the fields before its inbox deposit (or legacy relay/native handoff). IOU accepts only the
    version-2 encrypted offer, not legacy plaintext. Authenticate separately in IOU
    if necessary. The already-linked receiving account/sheet is resolved and checked
    automatically before local decryption with the user's recovered
@@ -369,7 +485,7 @@ and sheet. Do not generate a new proposal to retry a save: a new proposal has a 
 identity and may produce a duplicate. A received acknowledgement alone does not
 prove that an entry was persisted.
 
-IOU removes the browser handshake nonce from its URL after capturing it. Reloading
+For the older window-based compatibility path only, IOU removes the browser handshake nonce from its URL after capturing it. Reloading
 or closing the receiver loses its in-memory handoff and any unsaved received draft;
 reloading the plain URL does not restore that browser connection. After correcting
 the frontend configuration, use the existing client draft's explicit same-ID retry

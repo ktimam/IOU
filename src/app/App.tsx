@@ -11,6 +11,7 @@ import {Pair} from "../features/flows/Pair";
 import {NewSheet} from "../features/flows/NewSheet";
 import { SheetKeyProvider } from "../features/flows/SheetKeyContext";
 import { SheetPage } from "../features/entries/SheetPage";
+import { SheetTransferPage } from "../features/backup/SheetTransferPage";
 import { ArchivedSheetsPage } from "../features/entries/ArchivedSheetsPage";
 import { ToastProvider } from "../features/ui/Toasts";
 import { ErrorBoundary } from "./ErrorBoundary";
@@ -26,6 +27,8 @@ import { OpenChatCardPage } from "../features/openchat/OpenChatCardPage";
 import { OpenChatLocalProcessorPage } from "../features/openchat/OpenChatLocalProcessorPage";
 import { OpenChatPrivateMatchPage } from "../features/openchat/OpenChatPrivateMatchPage";
 import { LocalImportPage } from "../features/openchat/LocalImportPage";
+import { localInboxLaunch } from "../features/openchat/localImportLaunch";
+import { DurableInboxRedirect } from "../features/openchat/DurableInboxRedirect";
 import { LocalConnectPage } from "../features/openchat/LocalConnectPage";
 import { AcceptInvitePage } from "../features/invite/AcceptInvitePage";
 import { useDeepLinks } from "../features/deeplinks/deepLink";
@@ -48,7 +51,9 @@ export function App() {
           siblings of the splat below so neither mounts AuthProvider et al. */}
       <Route path="/openchat/card" element={new URLSearchParams(window.location.search).get("oc-app-process") === "1" ? <OpenChatLocalProcessorPage /> : <OpenChatCardPage />} />
       <Route path="/openchat/private-match" element={<OpenChatPrivateMatchPage />} />
-      <Route path="/openchat/import" element={<LocalImportPage />} />
+      {/* Inbox navigation must use the root splat below. Nesting AuthedApp under the exact
+          import route rebases its descendant Routes to / and incorrectly renders Hello. */}
+      {!localInboxLaunch() && <Route path="/openchat/import" element={<LocalImportPage />} />}
       <Route path="/openchat/connect" element={<LocalConnectPage />} />
       <Route path="/*" element={<AuthedApp />} />
     </Routes>
@@ -95,6 +100,7 @@ function SessionProviders() {
             <ManifestTypesSync />
             <EmbeddedBanner />
             <Routes>
+              <Route path="/openchat/import" element={<DurableInboxRedirect />} />
               <Route path="/" element={<Hello />} />
               {/* /me is merged into /settings — keep the path (deep link iou://me)
                   as a redirect. */}
@@ -108,6 +114,7 @@ function SessionProviders() {
               <Route path="/pair/:pairId" element={<Pair />} />
               <Route path="/sheet/new" element={<NewSheet />} />
               <Route path="/sheet/:sheetId" element={<SheetPage />} />
+              <Route path="/sheet/:sheetId/transfer" element={<SheetTransferPage />} />
               <Route
                 path="/pair/:pairId/archived"
                 element={<ArchivedSheetsPage />}

@@ -25,7 +25,7 @@ vi.mock("../../src/features/auth/AuthProvider", () => ({
     state: fixture.identity ? { kind: "authenticated", principal: fixture.principal } : { kind: "anonymous" },
     signIn: fixture.signIn, signOut: fixture.signOut }),
 }));
-vi.mock("../../src/features/auth/config", () => ({ host: "http://127.0.0.1:4943", canisterId: "aaaaa-aa" }));
+vi.mock("../../src/features/auth/config", () => ({ host: "http://127.0.0.1:4943", canisterId: "rrkah-fqaaa-aaaaa-aaaaq-cai" }));
 vi.mock("../../src/features/flows/useActor", () => ({
   useActor: () => ({ actor: fixture.actor, err: undefined }),
   unwrap: (value: unknown) => Array.isArray(value) ? value[0] ?? null : value ?? null,
@@ -37,6 +37,12 @@ vi.mock("../../src/features/flows/SheetKeyContext", () => ({
 vi.mock("../../src/features/openchat/LocalDeliveryKeyProvider", () => ({
   LocalDeliveryKeyProvider: ({ children }: { children: ReactNode }) => children,
   useLocalDeliveryKey: () => ({ ready: !!fixture.identity, load: fixture.loadDeliveryKey }),
+}));
+// Connect uses the already mocked authenticated key provider. Receiving/listing is a
+// separate service test boundary; do not instantiate a second key/backend session here.
+vi.mock("../../src/features/openchat/consumerKeypair", () => ({
+  captureConsumerKeypairSession: vi.fn(() => { throw new Error("Connect must not own the receiving key session"); }),
+  loadExistingConsumerKeypair: vi.fn(() => { throw new Error("Connect must use its existing key provider"); }),
 }));
 vi.mock("../../src/features/templates/PairTemplatesContext", () => ({
   usePairTemplates: (...args: unknown[]) => { fixture.templateHook(...args); return fixture.templates; },
@@ -98,7 +104,7 @@ beforeEach(async () => {
   fixture.loadDeliveryKey.mockResolvedValue(fixture.deliveryKey);
   vi.stubGlobal("crypto", { subtle: { digest: (algorithm: string, bytes: BufferSource) => {
     const pending = webcrypto.subtle.digest(algorithm, bytes); digests.push(pending); return pending;
-  }, exportKey: webcrypto.subtle.exportKey.bind(webcrypto.subtle) } });
+  }, exportKey: webcrypto.subtle.exportKey.bind(webcrypto.subtle) }, getRandomValues: webcrypto.getRandomValues.bind(webcrypto) });
   vi.stubGlobal("fetch", vi.fn(() => { throw new Error("No network before explicit consent"); }));
   Object.defineProperty(window, "opener", { configurable: true, value: fixture.opener });
   Object.defineProperty(window, "parent", { configurable: true, value: window });
@@ -115,6 +121,9 @@ beforeEach(async () => {
     get_my_user: vi.fn(async () => [{ default_currency: ["EGP"] }]),
     get_sheet: vi.fn(async () => []), get_pair: vi.fn(async () => []),
     add_entry_batch: vi.fn(), set_pair_templates: vi.fn(),
+    create_encrypted_inbox_grant: vi.fn(async (input: Record<string, unknown>) => ({ Ok: {
+      ...input, inbox_id: "a".repeat(64), created_at_ms: BigInt(Date.now() - 1), revoked: false,
+    } })),
   };
   container = document.createElement("div"); document.body.append(container); root = createRoot(container);
 });
@@ -153,6 +162,7 @@ describe("no-file IOU setup consent", () => {
     expect(fixture.templateHook).toHaveBeenCalledWith("1111111111111111", sheetId, { requireReadableSlots: true });
     expect(fetch).not.toHaveBeenCalled();
     expect(fixture.opener.postMessage).not.toHaveBeenCalled();
+    expect(fixture.actor.create_encrypted_inbox_grant).not.toHaveBeenCalled();
     const fetcher = publicFetch();
     await click(button("Connect")!);
     // Wait for the real asynchronous WebCrypto digest, not a mocked verification result.
@@ -168,6 +178,12 @@ describe("no-file IOU setup consent", () => {
     expect(app.recipientLabel).toBe("Account 1 — Current sheet");
     expect(app.deliveryEncryption).toMatchObject({ version: 1, scheme: "p256-hkdf-sha256-aes-256-gcm-v1", keyId: expect.stringMatching(/^[a-f0-9]{64}$/) });
     expect(app.deliveryEncryption.publicKeySpki).toBeTruthy();
+    expect(app.deliveryInbox).toMatchObject({ version: 1, kind: "ic-canister", host: "http://127.0.0.1:4943",
+      canisterId: "rrkah-fqaaa-aaaaa-aaaaq-cai", inboxId: "a".repeat(64), writeCapability: expect.stringMatching(/^[A-Za-z0-9_-]{43}$/) });
+    expect(fixture.actor.create_encrypted_inbox_grant).toHaveBeenCalledOnce();
+    const submittedGrant = fixture.actor.create_encrypted_inbox_grant.mock.calls[0][0];
+    expect(submittedGrant).not.toHaveProperty("write_capability");
+    expect(submittedGrant.recipient_key_id).toBe(app.deliveryEncryption.keyId);
     expect(fixture.loadDeliveryKey).toHaveBeenCalledWith(true);
     expect(app.actions[0].processorContext).toMatchObject({ defaultCurrency: "EGP", draftEditorDefaults: "host-v1",
       types: [{ id: type.id, name: type.name, direction: "debt", keywords: type.keywords, txn_type: "iou" }] });
@@ -236,6 +252,7 @@ describe("no-file IOU setup consent", () => {
       await settledDigest();
       expect(fixture.opener.postMessage).not.toHaveBeenCalled();
       expect(fixture.actor.add_entry_batch).not.toHaveBeenCalled();
+      expect(fixture.actor.create_encrypted_inbox_grant).not.toHaveBeenCalled();
     } finally { clock.mockRestore(); }
   });
 
@@ -263,6 +280,20 @@ describe("no-file IOU setup consent", () => {
     await request();
     expect(fixture.opener.postMessage).toHaveBeenCalledOnce();
     expect(button("Connect")).toBeUndefined();
+  });
+
+  it("does not share a private capability after Types change during the grant update", async () => {
+    await ready(); publicFetch();
+    const gate = deferred<unknown>();
+    fixture.actor.create_encrypted_inbox_grant.mockImplementationOnce(() => gate.promise);
+    await click(button("Connect")!); await settledDigest();
+    await vi.waitFor(() => expect(fixture.actor.create_encrypted_inbox_grant).toHaveBeenCalledOnce());
+    const submitted = fixture.actor.create_encrypted_inbox_grant.mock.calls[0][0];
+    fixture.templates = { ...fixture.templates, shared: [{ ...type, name: "Changed after consent" }], readyGeneration: {} };
+    await render();
+    await act(async () => { gate.resolve({ Ok: { ...submitted, inbox_id: "a".repeat(64), created_at_ms: BigInt(Date.now() - 1), revoked: false } }); });
+    expect(fixture.opener.postMessage).not.toHaveBeenCalled();
+    expect(fixture.actor.add_entry_batch).not.toHaveBeenCalled();
   });
 
   it.each(["no-opener", "query", "fragment"])("rejects an unbound %s launch", async (reason) => {

@@ -8,9 +8,12 @@ import { iouActionManifest } from "./actionManifest";
 import { DIRECTION_LABELS } from "../entries/directionLabels";
 import { orderedCurrencies } from "../settings/currencies";
 import { parseLocalImportPayload } from "./localImportHandoff";
+import { createLocalDeliveryEncryption } from "./localImportEncryption";
+import type { DurableInboxRoute } from "./durableInboxService";
 
 const destination = "http://localhost:3000/openchat/import";
 const processor = { sha256: "a".repeat(64), byteLength: 1234 };
+const inboxRoute: DurableInboxRoute = { version: 1, kind: "ic-canister", host: "https://icp-api.io", canisterId: "rrkah-fqaaa-aaaaa-aaaaq-cai" };
 const types = [
   { id: "private-credit", name: "Private credit", keywords: ["alpha"], direction: "credit" as const, txn_type: "iou" as const, fee_percent: 50 },
   { id: "private-debt", name: "Private debt", keywords: ["beta"], direction: "debt" as const, txn_type: "settlement" as const },
@@ -19,6 +22,33 @@ const presentation = { version: 1, enumLabels: [
   { field: "kind", options: [{ value: "iou", label: "IOU" }, { value: "settlement", label: "Settlement" }] },
   { field: "direction", options: [{ value: "credit", label: "Owed to you" }, { value: "debt", label: "You owe" }] },
 ] };
+
+describe("durable encrypted inbox setup separation", () => {
+  it("publishes only operator routing, with no grant, recipient or private capability", () => {
+    const app = createIouLocalAppPackage(destination, processor, undefined, inboxRoute).apps[0];
+    expect(app.deliveryInbox).toEqual(inboxRoute);
+    expect(Object.keys(app.deliveryInbox!)).toHaveLength(4);
+    expect(JSON.stringify(app)).not.toMatch(/writeCapability|inboxId|recipientContext|recipientKeyId/);
+  });
+  it.each([
+    { host: "http://remote.example" }, { host: "https://icp-api.io/api" }, { canisterId: "aaaaa-aa" },
+    { canisterId: "2vxsx-fae" }, { writeCapability: "A".repeat(43) }, { inboxId: "a".repeat(64) },
+  ])("rejects invalid/private fields in public route %j", patch => {
+    expect(() => createIouLocalAppPackage(destination, processor, undefined, { ...inboxRoute, ...patch })).toThrow(/public IOU inbox/);
+  });
+  it("shares a capability only with encryption metadata and the identical advertised route", async () => {
+    const keys = await crypto.subtle.generateKey({ name: "ECDH", namedCurve: "P-256" }, true, ["deriveBits"]);
+    const deliveryEncryption = await createLocalDeliveryEncryption(keys.publicKey, { principal: "synthetic-user", backendHost: inboxRoute.host,
+      backendCanisterId: inboxRoute.canisterId, pairId: "0000000000000001", sheetId: "0000000000000002" });
+    const deliveryInbox = { ...inboxRoute, inboxId: "a".repeat(64), writeCapability: "A".repeat(43), expiresAtMs: Date.now() + 100000 };
+    const setup = { recipientLabel: "Synthetic destination", processorContext: createLocalProcessorContext([], "EGP"), deliveryEncryption, deliveryInbox };
+    expect(createIouLocalAppPackage(destination, processor, setup, inboxRoute).apps[0].deliveryInbox).toEqual(deliveryInbox);
+    expect(() => createIouLocalAppPackage(destination, processor, setup)).toThrow(/private IOU inbox/);
+    expect(() => createIouLocalAppPackage(destination, processor, { ...setup, deliveryEncryption: undefined }, inboxRoute)).toThrow(/private IOU inbox/);
+    expect(() => createIouLocalAppPackage(destination, processor, { ...setup, deliveryInbox: { ...deliveryInbox, host: "https://other.example" } }, inboxRoute)).toThrow(/private IOU inbox/);
+    expect(() => createIouLocalAppPackage(destination, processor, { ...setup, deliveryInbox: { ...deliveryInbox, expiresAtMs: 1 } }, inboxRoute)).toThrow(/private IOU inbox/);
+  });
+});
 
 describe("checked-in public IOU package freshness", () => {
   // Explicit staging verification only; normal/CI runs still check canonical
@@ -32,7 +62,7 @@ describe("checked-in public IOU package freshness", () => {
     const catalog = JSON.parse(artifact("local-app-v1.json").toString("utf8"));
     const metadata = JSON.parse(artifact("local-processor-v1.sha256.json").toString("utf8"));
     expect(catalog.apps).toHaveLength(1);
-    const expected = createIouLocalAppPackage(catalog.apps[0].destination, metadata);
+    const expected = createIouLocalAppPackage(catalog.apps[0].destination, metadata, undefined, catalog.apps[0].deliveryInbox);
     // Compare the whole source-produced recipe: stale card rows/schema must fail even when
     // their old public-file digests still agree. Private setup is never included here.
     expect(catalog).toEqual(expected);
