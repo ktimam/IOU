@@ -18,6 +18,7 @@
     "mainnet:check": "node scripts/mainnet.mjs --check",
     "mainnet:identity": "node scripts/mainnet.mjs --check-identity",
     "test:mainnet": "node --test scripts/lib/mainnet-plan.test.mjs scripts/lib/mainnet-publication.test.mjs",
+    "test:mainnet:backend": "bash scripts/lib/mainnet-backend.test.sh",
     "cap:sync": "pnpm build && cap sync android",
     "cap:open:android": "cap open android",
     "cap:add:android": "cap add android",

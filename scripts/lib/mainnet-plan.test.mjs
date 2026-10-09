@@ -155,3 +155,10 @@ test('refuses linked output directories and hard-linked prepared or CLI files', 
   assert.throws(() => safeCopyMainnetWasm(f.source, cliOutput, f), /existing or linked CLI/);
   assert.equal(readFileSync(sentinel, 'utf8'), 'do-not-overwrite');
 });
+
+test('refuses a Cargo-style hard-linked source until the build normalizes it', () => {
+  const f = files(), dependency = path.join(path.dirname(f.source), 'cached-dependency.wasm');
+  linkSync(f.source, dependency);
+  assert.throws(() => safeCopyMainnetWasm(f.source, f.prepared, f), /regular, unlinked file/);
+  assert.equal(readFileSync(dependency, 'utf8'), 'synthetic-mainnet-wasm');
+});

@@ -21,11 +21,18 @@ do not create identities/canisters, convert ICP, change controllers or publish
 assets. The old wallet deployment path was removed because its second frontend
 build lost production flags and its backend used the local encryption key.
 
-#### 1. Establish recovery before funding
+#### 1. Verify access and review recovery before funding
 
 Use a dedicated production Internet Identity. Register passkeys usable on two
-devices, keep an independent hardware-key/recovery method, and keep recovery
-material offline, outside source control, temp folders and chat. A synced
+devices and verify the phone passkey with a fresh Internet Identity sign-in.
+Registration alone is not a sign-in check. A successful phone sign-in proves
+access to that Internet Identity, not CLI access on another computer or canister
+controller authority.
+
+An independent hardware security key or offline recovery phrase is recommended.
+The owner may explicitly decline a recovery phrase; it is not a mandatory
+deployment gate. Respect that choice unless the owner asks to revisit it. Keep any
+recovery material offline, outside source control, temp folders and chat. A synced
 passkey is convenient but is not an independent backup if its provider account
 is lost. Do not reuse the emulator's simulated identity or testing PIN.
 
@@ -37,7 +44,9 @@ icp identity principal --identity iou-production
 ```
 
 Sign in to the **same Internet Identity using the default CLI origin** on the
-second computer and verify that the principal matches exactly. Do not use
+second computer and verify that the principal matches exactly. This separate
+check verifies the second computer's CLI access; using a phone passkey to sign
+in on the first computer does not complete it. Do not use
 `--app nns.ic0.app`: deployment administration need not share the treasury's
 NNS principal. Use password-protected session storage if the operating system
 has no usable keyring; never fall back silently to plaintext. Expired delegated
@@ -85,8 +94,13 @@ this preparation.
 
 ```sh
 pnpm test:mainnet
+bash scripts/lib/mainnet-backend.test.sh
 icp build -e ic
 ```
+
+On Windows, run the Bash regression command from the repository root in the
+existing Ubuntu WSL environment. It uses synthetic fixtures only, without Rust
+compilation, credentials or network calls.
 
 - New backend installs are built with `--no-default-features --features mainnet`,
   selecting vetKD `key_1`. The normal local build still selects `dfx_test_key`.
@@ -258,18 +272,18 @@ crypto code has a clearly-labeled fallback path for dev only.
 ## 5. Mainnet deploy
 
 ### 5.1 First deploy
-```bash
-dfx deploy --network ic
-```
 
-The first deploy is **the most expensive** (canister creation + initial
-cycles allocation). Subsequent `dfx deploy` calls are cheap.
+Follow the guarded **Mainnet preparation and recoverable administration**
+workflow in section 1. Its checks and builds do not deploy anything; canister
+creation, funding and installation remain separate owner-approved steps.
+The legacy bare `dfx` mainnet commands are superseded by that workflow.
 
 ### 5.2 Subsequent deploys
-```bash
-dfx deploy iou_backend --network ic       # canister upgrade (preserves state)
-dfx deploy iou_assets --network ic       # asset upload
-```
+
+Use the same reviewed `icp.yaml` workflow with explicit `-e ic`,
+`--identity iou-production`, verified canister mappings and `--no-create`, as
+described in section 1. Preserve existing backend data and the stored vetKD key;
+never reinstall a data-bearing canister or rotate its key implicitly.
 
 We pin Candid types early; only bump them when we deploy a new version
 to mainnet, with an explicit migration in `postupgrade`.
@@ -288,7 +302,7 @@ to mainnet, with an explicit migration in `postupgrade`.
 - [ ] Cycle balance > 5 SDR before first deploy
 - [ ] `docs/` reflect the shipped behavior
 - [ ] Top-up script tested in dry-run mode
-- [ ] README explains `dfx deploy` from a fresh clone
+- [ ] README explains guarded mainnet preparation and owner-approved deployment from a fresh checkout
 
 ---
 
