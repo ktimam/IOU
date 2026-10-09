@@ -76,7 +76,7 @@ export default mergeConfig(base, {
     "import.meta.env.VITE_IOU_PROD_VETKD": JSON.stringify("0"),
   },
   test: {
-    include: ["scripts/integration/openchat-private-handoff.spec.ts", "scripts/integration/local-import-readiness.spec.tsx", "scripts/integration/local-connect-readiness.spec.tsx", "scripts/integration/local-delivery-key-provider.spec.tsx", "scripts/integration/durable-inbox-hook.spec.tsx", "scripts/integration/durable-inbox-routing.spec.tsx"],
+    include: ["scripts/integration/openchat-private-handoff.spec.ts", "scripts/integration/local-import-readiness.spec.tsx", "scripts/integration/local-connect-readiness.spec.tsx", "scripts/integration/local-delivery-key-provider.spec.tsx", "scripts/integration/durable-inbox-hook.spec.tsx", "scripts/integration/durable-inbox-routing.spec.tsx", "scripts/integration/sheet-sign-in.spec.tsx"],
     maxWorkers: 1,
     minWorkers: 1,
     env: { VITE_IOU_PROD_VETKD: "0", VITE_IC_URL: "" },

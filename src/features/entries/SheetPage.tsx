@@ -9,6 +9,7 @@ import { useParams, Link } from "react-router-dom";
 import { unwrap, isActive, useActor } from "../flows/useActor";
 import { useSheetKey } from "../flows/SheetKeyContext";
 import { useAuth } from "../auth/AuthProvider";
+import { SignInButtons } from "../auth/SignInButtons";
 import {
   encryptEntryPayload,
   decryptName,
@@ -1172,8 +1173,17 @@ export function SheetPage({ localImport: handoffImport }: { localImport?: LocalS
     }
   }
 
-  if (!state.kind || state.kind !== "authenticated") {
-    return <p>Please sign in.</p>;
+  if (state.kind === "loading") {
+    return <p role="status">Loading sign-in…</p>;
+  }
+  if (state.kind !== "authenticated") {
+    return (
+      <section className="card">
+        <h2>Sign in to IOU</h2>
+        <p>Please sign in to the IOU account connected to this sheet.</p>
+        <SignInButtons />
+      </section>
+    );
   }
   if (loading && !sheet) return <p>Loading…</p>;
   if (err) return <p className="err">{err}</p>;
