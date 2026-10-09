@@ -14,6 +14,12 @@ const state = vi.hoisted(() => ({
   secure: new Map<string, string>(),
   setCalls: [] as string[],
   transportCalls: 0,
+  publicKeyCalls: 0,
+  wrapCalls: 0,
+  wrapGate: null as Promise<void> | null,
+  getCalls: 0,
+  getError: null as Error | null,
+  getGate: null as Promise<void> | null,
   setError: null as Error | null,
   setGate: null as Promise<void> | null,
   setStarted: vi.fn(),
@@ -48,9 +54,19 @@ vi.mock('../../backend/declarations', () => ({
   createActor: (agent: { identity: Identity }) => {
     const principal = agent.identity.getPrincipal().toText();
     return {
-      vetkd_public_key: async () => new Uint8Array(96),
-      vetkd_wrap_consumer_key: async () => new Uint8Array([1, 2, 3]),
+      vetkd_public_key: async () => {
+        state.publicKeyCalls++;
+        return new Uint8Array(96);
+      },
+      vetkd_wrap_consumer_key: async () => {
+        state.wrapCalls++;
+        if (state.wrapGate) await state.wrapGate;
+        return new Uint8Array([1, 2, 3]);
+      },
       get_consumer_keypair: async () => {
+        state.getCalls++;
+        if (state.getGate) await state.getGate;
+        if (state.getError) throw state.getError;
         const remote = state.remotes.get(principal);
         return {
           mutation_epoch: state.epochs.get(principal) ?? 0n,
@@ -210,6 +226,12 @@ beforeEach(() => {
   state.secure.clear();
   state.setCalls = [];
   state.transportCalls = 0;
+  state.publicKeyCalls = 0;
+  state.wrapCalls = 0;
+  state.wrapGate = null;
+  state.getCalls = 0;
+  state.getError = null;
+  state.getGate = null;
   state.setError = null;
   state.setGate = null;
   state.setStarted.mockReset();
@@ -230,6 +252,168 @@ beforeEach(() => {
   });
   state.secureDel.mockImplementation(async (key: string) => {
     state.secure.delete(key);
+  });
+});
+
+// Model the existing login preload recovering a previously connected account.
+async function recoveredSession() {
+  const seed = await freshModule();
+  seed.configureConsumerKeypairBackend(identity);
+  await seed.loadOrCreateConsumerKeypair();
+  const mod = await freshModule();
+  mod.configureConsumerKeypairBackend(identity);
+  const key = await mod.loadOrCreateConsumerKeypair();
+  const ticket = mod.captureConsumerKeypairSession(identity.getPrincipal().toText());
+  return { mod, key, ticket };
+}
+
+describe('receive-only verified session key reuse', () => {
+  it('keeps cold recovery reading authoritative state after vetKD completes', async () => {
+    const { key } = await recoveredSession();
+    const cold = await freshModule();
+    cold.configureConsumerKeypairBackend(identity);
+    let release!: () => void;
+    state.wrapGate = new Promise<void>(resolve => { release = resolve; });
+    const reads = state.getCalls;
+    const wraps = state.wrapCalls;
+    const pending = cold.loadExistingConsumerKeypair(cold.captureConsumerKeypairSession());
+    await vi.waitFor(() => expect(state.wrapCalls).toBe(wraps + 1));
+    expect(state.getCalls).toBe(reads);
+    release();
+    expect((await pending).publicKeySpkiPem).toBe(key.publicKeySpkiPem);
+    expect(state.getCalls).toBe(reads + 1);
+  });
+
+  it('rechecks the backend on every warm receive without repeating vetKD recovery', async () => {
+    const { mod, key, ticket } = await recoveredSession();
+    const reads = state.getCalls;
+    const wraps = state.wrapCalls;
+    const publicKeys = state.publicKeyCalls;
+    const first = await mod.loadExistingConsumerKeypair(ticket);
+    const second = await mod.loadExistingConsumerKeypair(ticket);
+
+    expect(first.publicKeySpkiPem).toBe(key.publicKeySpkiPem);
+    expect(second.publicKeySpkiPem).toBe(key.publicKeySpkiPem);
+    expect(first.privateKey.extractable).toBe(false);
+    expect(state.getCalls).toBe(reads + 2);
+    expect(state.wrapCalls).toBe(wraps);
+    expect(state.publicKeyCalls).toBe(publicKeys);
+    expect(state.setCalls).toHaveLength(1);
+    expect(localSet).not.toHaveBeenCalled();
+  });
+
+  it('recovers again when the remote epoch advances even with the same public key', async () => {
+    const { mod, key, ticket } = await recoveredSession();
+    const principal = identity.getPrincipal().toText();
+    const wraps = state.wrapCalls;
+    state.epochs.set(principal, state.epochs.get(principal)! + 1n);
+
+    const recovered = await mod.loadExistingConsumerKeypair(ticket);
+    expect(recovered.publicKeySpkiPem).toBe(key.publicKeySpkiPem);
+    expect(state.wrapCalls).toBe(wraps + 1);
+    await mod.loadExistingConsumerKeypair(ticket);
+    expect(state.wrapCalls).toBe(wraps + 1);
+  });
+
+  it('does not memoize a fallback when the wrapped bytes change without an epoch change', async () => {
+    const { mod, key, ticket } = await recoveredSession();
+    const principal = identity.getPrincipal().toText();
+    const remote = state.remotes.get(principal)!;
+    state.remotes.set(principal, { ...remote, wrapped_private_key: new Uint8Array(40) });
+    const wraps = state.wrapCalls;
+
+    // Existing receive-only recovery may use the matching local copy, but a
+    // damaged remote blob is not successful backend verification to memoize.
+    expect((await mod.loadExistingConsumerKeypair(ticket)).publicKeySpkiPem).toBe(key.publicKeySpkiPem);
+    expect((await mod.loadExistingConsumerKeypair(ticket)).publicKeySpkiPem).toBe(key.publicKeySpkiPem);
+    expect(state.wrapCalls).toBe(wraps + 2);
+    expect(state.setCalls).toHaveLength(1);
+  });
+
+  it('rejects a changed public key instead of returning the warm key', async () => {
+    const { mod, ticket } = await recoveredSession();
+    const principal = identity.getPrincipal().toText();
+    const remote = state.remotes.get(principal)!;
+    state.remotes.set(principal, { ...remote, public_key_pem: (await makeLegacyStored()).pem });
+
+    await expect(mod.loadExistingConsumerKeypair(ticket)).rejects.toThrow(/not replaced/i);
+    expect(state.setCalls).toHaveLength(1);
+  });
+
+  it('recovers a legitimate replacement key from another device instead of returning the warm key', async () => {
+    const { mod, key, ticket } = await recoveredSession();
+    const principal = identity.getPrincipal().toText();
+    state.remotes.delete(principal);
+    state.epochs.set(principal, state.epochs.get(principal)! + 1n);
+    const otherDevice = await freshModule();
+    otherDevice.configureConsumerKeypairBackend(identity);
+    const replacement = await otherDevice.loadOrCreateConsumerKeypair();
+
+    const recovered = await mod.loadExistingConsumerKeypair(ticket);
+    expect(recovered.publicKeySpkiPem).toBe(replacement.publicKeySpkiPem);
+    expect(recovered.publicKeySpkiPem).not.toBe(key.publicKeySpkiPem);
+    expect(state.setCalls).toHaveLength(2);
+  });
+
+  it('fails closed on remote deletion or a failed authoritative read, even with a warm key', async () => {
+    const { mod, ticket } = await recoveredSession();
+    state.getError = new Error('authoritative read unavailable');
+    await expect(mod.loadExistingConsumerKeypair(ticket)).rejects.toThrow(/authoritative read unavailable/);
+
+    state.getError = null;
+    state.remotes.delete(identity.getPrincipal().toText());
+    await expect(mod.loadExistingConsumerKeypair(ticket)).rejects.toThrow(/unavailable/);
+    expect(state.setCalls).toHaveLength(1);
+  });
+
+  it('invalidates the memo on same-principal reconfiguration, logout and account changes', async () => {
+    const { mod, key, ticket } = await recoveredSession();
+    let wraps = state.wrapCalls;
+    mod.configureConsumerKeypairBackend(identity);
+    await expect(mod.loadExistingConsumerKeypair(ticket)).rejects.toThrow(/authentication changed/);
+    const current = mod.captureConsumerKeypairSession(identity.getPrincipal().toText());
+    expect((await mod.loadExistingConsumerKeypair(current)).publicKeySpkiPem).toBe(key.publicKeySpkiPem);
+    expect(state.wrapCalls).toBe(wraps + 1);
+
+    mod.configureConsumerKeypairBackend(null);
+    await expect(mod.loadExistingConsumerKeypair(mod.captureConsumerKeypairSession())).rejects.toThrow(/authenticated/);
+    mod.configureConsumerKeypairBackend(otherIdentity);
+    await expect(mod.loadExistingConsumerKeypair(mod.captureConsumerKeypairSession())).rejects.toThrow(/unavailable/);
+    mod.configureConsumerKeypairBackend(identity);
+    wraps = state.wrapCalls;
+    expect((await mod.loadExistingConsumerKeypair(mod.captureConsumerKeypairSession())).publicKeySpkiPem).toBe(key.publicKeySpkiPem);
+    expect(state.wrapCalls).toBe(wraps + 1);
+  });
+
+  it('rejects a warm receive if authentication changes during its authoritative read', async () => {
+    const { mod, ticket } = await recoveredSession();
+    let release!: () => void;
+    state.getGate = new Promise<void>(resolve => { release = resolve; });
+    const reads = state.getCalls;
+    const pending = mod.loadExistingConsumerKeypair(ticket);
+    await vi.waitFor(() => expect(state.getCalls).toBe(reads + 1));
+    mod.configureConsumerKeypairBackend(otherIdentity);
+    release();
+
+    await expect(pending).rejects.toThrow(/authentication changed/);
+  });
+
+  it('clearing waits for a warm authoritative read and never resurrects its old key', async () => {
+    const { mod, ticket } = await recoveredSession();
+    let release!: () => void;
+    state.getGate = new Promise<void>(resolve => { release = resolve; });
+    const reads = state.getCalls;
+    const pending = mod.loadExistingConsumerKeypair(ticket);
+    const outcome = Promise.allSettled([pending]);
+    await vi.waitFor(() => expect(state.getCalls).toBe(reads + 1));
+    const clearing = mod.clearConsumerKeypair(ticket);
+    expect(state.deleteStarted).not.toHaveBeenCalled();
+    release();
+    expect((await outcome)[0].status).toBe('rejected');
+    await clearing;
+    await expect(mod.loadExistingConsumerKeypair(mod.captureConsumerKeypairSession())).rejects.toThrow(/unavailable/);
+    expect(state.remotes.has(identity.getPrincipal().toText())).toBe(false);
+    expect(state.setCalls).toHaveLength(1);
   });
 });
 

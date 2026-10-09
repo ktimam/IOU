@@ -15,6 +15,8 @@ type Options = {
   sheetId: string;
   pairId: string | undefined;
   ready: boolean;
+  /** True only while the current sheet's required Types are still loading. */
+  waiting?: boolean;
   generation: unknown;
   templates: readonly TxnTemplate[];
   unwrapFor: (sheetId: string) => Promise<Uint8Array>;
@@ -26,6 +28,7 @@ export function useDurableInbox(options: Options) {
   live.current = options;
   const mounted = useRef(true);
   const [loaded, setLoaded] = useState<{ owner: Options; items: DurableInboxItem[] }>();
+  const [loadState, setLoadState] = useState<{ owner: Options; pending: boolean }>();
   const [selection, setSelection] = useState<{ owner: Options; item: DurableInboxItem }>();
   const [notice, setNotice] = useState("");
   const [refreshTick, setRefreshTick] = useState(0);
@@ -71,6 +74,7 @@ export function useDurableInbox(options: Options) {
     const load = async () => {
       if (loading || cancelled || working.current) return;
       loading = true;
+      setLoadState({ owner: captured, pending: true });
       const revision = operationRevision.current;
       try {
         assert();
@@ -84,7 +88,10 @@ export function useDurableInbox(options: Options) {
         if (!cancelled && matches(captured) && !working.current && revision === operationRevision.current) {
           setNotice("Pending entries could not be refreshed. Existing drafts were not removed. Retry when IOU is available.");
         }
-      } finally { loading = false; }
+      } finally {
+        loading = false;
+        if (!cancelled && matches(captured)) setLoadState({ owner: captured, pending: false });
+      }
     };
     void load();
     const visible = () => { if (document.visibilityState === "visible") void load(); };
@@ -95,6 +102,8 @@ export function useDurableInbox(options: Options) {
     options.ready, options.generation, options.templates, refreshTick]);
 
   const items = loaded && matches(loaded.owner) ? loaded.items : [];
+  const loading = options.enabled && !!options.actor && !!options.principal && !!options.identity && !!options.pairId && !busy &&
+    (!!options.waiting || (options.ready && (!loadState || !matches(loadState.owner) || loadState.pending)));
   const selected = selection && matches(selection.owner) && items.some(item => item.id === selection.item.id)
     ? selection : undefined;
 
@@ -162,6 +171,6 @@ export function useDurableInbox(options: Options) {
     return forReview(item, captured);
   }
 
-  return { items, notice, busy, refresh, select, dismiss,
+  return { items, notice, busy, loading, refresh, select, dismiss,
     active: selected ? forReview(selected.item, selected.owner) : undefined };
 }

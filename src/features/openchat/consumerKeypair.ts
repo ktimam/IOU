@@ -268,6 +268,17 @@ async function unwrapStored(wrapped: Uint8Array, K_wrap: Uint8Array): Promise<St
 
 let backendIdentity: Identity | null = null;
 let sessionGeneration = 0;
+// Only a successfully unwrapped, validated backend copy can populate this
+// session-only memo. Every receive still reads the authoritative remote state;
+// an unchanged key does not need another pair of vetKD calls to recover it.
+let verifiedSessionKey: {
+  storageKey: string;
+  generation: number;
+  mutationEpoch: bigint;
+  publicKeyPem: string;
+  wrappedPrivateKey: Uint8Array;
+  keypair: ConsumerKeypair;
+} | null = null;
 let inflight: {
   principal: string;
   generation: number;
@@ -312,6 +323,7 @@ export function configureConsumerKeypairBackend(identity: Identity | null): void
   backendIdentity = identity && !identity.getPrincipal().isAnonymous() ? identity : null;
   sessionGeneration++;
   inflight = null;
+  verifiedSessionKey = null;
   // Do not retain another account's plaintext key material in web memory.
   memoryCache.clear();
 }
@@ -536,6 +548,21 @@ async function syncWithBackend(identity: Identity, generation: number, allowProv
   }
   const actor = await buildBackendActor(identity);
   assertCurrentSession(principal, generation);
+  const verified = verifiedSessionKey;
+  if (!allowProvision && verified && verified.storageKey === storageKey && verified.generation === generation) {
+    const current = decodeRemoteState(await actor.get_consumer_keypair());
+    assertCurrentSession(principal, generation);
+    const wrapped = current.keypair ? new Uint8Array(current.keypair.wrapped_private_key) : null;
+    if (current.keypair && wrapped && verified.mutationEpoch === current.mutationEpoch &&
+      verified.publicKeyPem === current.keypair.public_key_pem &&
+      verified.wrappedPrivateKey.length === wrapped.length &&
+      verified.wrappedPrivateKey.every((byte, index) => byte === wrapped[index])) {
+      return verified.keypair;
+    }
+    // Deletion/reset or changed bytes cannot retain the old shortcut. Recover
+    // through the original path, including its fresh read after vetKD finishes.
+    verifiedSessionKey = null;
+  }
   const K_wrap = await deriveWrapKey(principal, actor);
   assertCurrentSession(principal, generation);
 
@@ -543,17 +570,24 @@ async function syncWithBackend(identity: Identity, generation: number, allowProv
   assertCurrentSession(principal, generation);
   const remote = remoteState.keypair;
   const mutationEpoch = remoteState.mutationEpoch;
+  const wrappedPrivateKey = remote ? new Uint8Array(remote.wrapped_private_key) : null;
+  // A recovery failure/local fallback must not preserve an earlier memo.
+  verifiedSessionKey = null;
 
   if (remote) {
     try {
-      const stored = await unwrapStored(new Uint8Array(remote.wrapped_private_key), K_wrap);
+      const stored = await unwrapStored(wrappedPrivateKey!, K_wrap);
       await validateStored(stored);
       if (pemOf(stored) !== remote.public_key_pem) {
         throw new Error("wrapped consumer key does not match its public key");
       }
       await persistLocalForSession(storageKey, stored, principal, generation);
       if (production) purgeLegacy(storageKey);
-      return await importStoredForSession(stored, principal, generation);
+      const keypair = await importStoredForSession(stored, principal, generation);
+      assertCurrentSession(principal, generation);
+      verifiedSessionKey = { storageKey, generation, mutationEpoch,
+        publicKeyPem: remote.public_key_pem, wrappedPrivateKey: wrappedPrivateKey!, keypair };
+      return keypair;
     } catch (cause) {
       assertCurrentSession(principal, generation);
       if (!allowProvision) {
@@ -796,6 +830,7 @@ export async function clearConsumerKeypair(
   sessionGeneration++;
   const clearingGeneration = sessionGeneration;
   inflight = null; // drop any memoized sync — the next load must not resurrect the old keypair
+  verifiedSessionKey = null;
   memoryCache.delete(storageKey);
   purgeLegacy(storageKey);
   let failure: unknown;

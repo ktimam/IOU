@@ -277,6 +277,7 @@ export function SheetPage({ localImport: handoffImport }: { localImport?: LocalS
   const allTemplates = pairTemplates.shared;
   const durableInbox = useDurableInbox({ enabled: !isLocalImport, actor, principal, identity,
     sheetId, pairId: sheet?.pair_id, ready: pairTemplates.ready && !pairTemplates.error && isActive(sheet?.state),
+    waiting: pairTemplates.loading && !pairTemplates.error && isActive(sheet?.state),
     generation: pairTemplates.readyGeneration, templates: allTemplates, unwrapFor });
   const localImport = handoffImport ?? durableInbox.active;
   // PARTNER-authored types (id not live in MY slot) get a badge.
@@ -1366,6 +1367,7 @@ export function SheetPage({ localImport: handoffImport }: { localImport?: LocalS
 
       {localImport?.notice && <p role="status">{localImport.notice}</p>}
       {!localImport && durableInbox.notice && <p role="status">{durableInbox.notice}</p>}
+      {!localImport && !modal && durableInbox.loading && !durableInbox.items.length && <p role="status">Checking pending entries…</p>}
       {!modal && isActive(sheet.state) && pending.length + visibleInbox.length + durableInbox.items.length + (handoffImport?.ready && !handoffImport.saved ? 1 : 0) > 0 && (
         <section className="card" style={{ marginBottom: 12 }}>
           <h2 style={{ marginTop: 0 }}>✨ Pending from chat ({pending.length + visibleInbox.length + durableInbox.items.length + (handoffImport?.ready && !handoffImport.saved ? 1 : 0)})</h2>

@@ -24,6 +24,7 @@ let options: Options, api: Inbox, root: Root, container: HTMLDivElement, pending
 function Probe() {
   api = useDurableInbox(options);
   return <section><h2>Pending from chat ({api.items.length})</h2><p role="status">{api.notice}</p>
+    {api.loading && !api.items.length && <p role="status">Checking pending entries…</p>}
     {api.items.map(value => <div key={value.id}><span>{value.error ?? "Encrypted draft ready for review"}</span>
       <button disabled={api.busy || !!value.error} onClick={() => api.select(value)}>Review &amp; add</button>
       <button disabled={api.busy} onClick={() => void api.dismiss(value)}>Dismiss</button></div>)}</section>;
@@ -58,6 +59,51 @@ beforeEach(() => {
 afterEach(async () => { await act(async () => { root.unmount(); }); container.remove(); vi.useRealTimers(); vi.unstubAllGlobals(); });
 
 describe("durable inbox normal-sheet lifecycle", () => {
+  it("shows initial pending loading until the current sheet's read completes", async () => {
+    const gate = deferred<{ items: DurableInboxItem[]; errors: string[] }>(); fixture.load.mockReturnValue(gate.promise);
+    await render();
+    expect(api.loading).toBe(true); expect(api.busy).toBe(false);
+    expect(container.textContent).toContain("Checking pending entries…");
+    await act(async () => { gate.resolve({ items: [item], errors: [] }); });
+    expect(api.loading).toBe(false); expect(api.items).toHaveLength(1);
+    expect(container.textContent).not.toContain("Checking pending entries…");
+    expect(fixture.save).not.toHaveBeenCalled(); expect(fixture.dismiss).not.toHaveBeenCalled();
+  });
+  it("finishes loading for an empty inbox or a failed initial read", async () => {
+    fixture.load.mockResolvedValue({ items: [], errors: [] });
+    await render(); expect(api.loading).toBe(false); expect(api.items).toHaveLength(0);
+    fixture.load.mockRejectedValue(new Error("unavailable")); change("sheet"); await render();
+    expect(api.loading).toBe(false); expect(api.items).toHaveLength(0);
+    expect(container.textContent).not.toContain("Checking pending entries…");
+    expect(api.notice).toMatch(/could not be refreshed/);
+  });
+  it("shows prerequisite loading only while this sheet's Types are being loaded", async () => {
+    options = { ...options, ready: false, waiting: true }; await render();
+    expect(api.loading).toBe(true); expect(fixture.load).not.toHaveBeenCalled();
+    options = { ...options, waiting: false }; await render();
+    expect(api.loading).toBe(false); expect(fixture.load).not.toHaveBeenCalled();
+    options = { ...options, waiting: true, enabled: false }; await render(); expect(api.loading).toBe(false);
+    options = { ...options, enabled: true, identity: null }; await render(); expect(api.loading).toBe(false);
+  });
+  it("does not let a stale read clear the new sheet's loading indication", async () => {
+    const old = deferred<{ items: DurableInboxItem[]; errors: string[] }>();
+    const current = deferred<{ items: DurableInboxItem[]; errors: string[] }>();
+    fixture.load.mockReturnValue(old.promise); await render();
+    fixture.load.mockReturnValue(current.promise); change("sheet"); await render();
+    await act(async () => { old.resolve({ items: [item], errors: [] }); });
+    expect(api.loading).toBe(true); expect(api.items).toHaveLength(0);
+    await act(async () => { current.resolve({ items: [], errors: [] }); });
+    expect(api.loading).toBe(false); expect(api.items).toHaveLength(0);
+  });
+  it("keeps loaded entries visible and review enabled during a background refresh", async () => {
+    await render(); const gate = deferred<{ items: DurableInboxItem[]; errors: string[] }>();
+    fixture.load.mockReturnValue(gate.promise); await visible();
+    expect(api.loading).toBe(true); expect(api.busy).toBe(false); expect(api.items).toHaveLength(1);
+    expect(container.textContent).not.toContain("Checking pending entries…");
+    expect(container.querySelector("button")?.disabled).toBe(false);
+    await act(async () => { gate.resolve({ items: [item], errors: [] }); });
+    expect(api.loading).toBe(false); expect(api.items).toHaveLength(1);
+  });
   it("reloads backend pending across unmount/remount without saving or dismissing", async () => {
     await render(); expect(api.items).toHaveLength(1);
     await act(async () => { root.unmount(); }); root = createRoot(container); await render();
