@@ -7,10 +7,10 @@ edition = "2021"
 crate-type = ["cdylib"]
 
 [features]
-# Reserved for mainnet-only knobs (none today). The default build
-# already includes the inspect_message hook — see lib.rs for why
-# the v1.2.3 version works on both PocketIC and IC mainnet.
+# Mainnet selects key_1 only when the vetKD stable cell is first created.
+# Existing canisters retain their stored key name across every upgrade.
 default = []
+mainnet = []
 
 [dependencies]
 candid = "0.10"

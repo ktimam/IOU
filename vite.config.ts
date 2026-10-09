@@ -78,7 +78,20 @@ function devFramingHeaders(frameAncestors: readonly string[], localAppOrigins: r
 // canister calls during dev go to the local dfx replica at
 // http://127.0.0.1:4943 directly, so no proxy is needed.
 export default defineConfig(({ command, mode }) => {
-  const env = loadEnv(mode, ".", "");
+  const mainnetBuild = process.env.IOU_MAINNET_BUILD === "1";
+  const env = mainnetBuild ? process.env : loadEnv(mode, ".", "");
+  if (command === "build" && env.VITE_DFX_NETWORK === "ic" && !mainnetBuild) {
+    throw new Error("Use scripts/mainnet.mjs --build-assets for a validated, isolated mainnet build.");
+  }
+  if (mainnetBuild && (command !== "build" || env.VITE_DFX_NETWORK !== "ic")) {
+    throw new Error("IOU_MAINNET_BUILD requires an explicit mainnet build.");
+  }
+  if (mainnetBuild && (!env.VITE_IOU_BACKEND_CANISTER_ID || env.VITE_IOU_PROD_VETKD !== "1")) {
+    throw new Error("Mainnet builds require the reviewed backend ID and production vetKD.");
+  }
+  if (mainnetBuild && env.NODE_ENV !== "production") {
+    throw new Error("Mainnet builds require NODE_ENV=production; development sign-in paths must stay disabled.");
+  }
   const context = {
     // `vite build` deliberately ignores this setting, even if a developer's shell still has it.
     isDevelopment: command === "serve",
@@ -112,6 +125,7 @@ export default defineConfig(({ command, mode }) => {
   );
 
   return {
+    envDir: mainnetBuild ? false : undefined,
     plugins: [
       devFramingHeaders(openChatDevFrameAncestors, localAppFrameOrigins),
       react(),

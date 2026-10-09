@@ -318,26 +318,25 @@ a release.
 ## Deploy to IC mainnet
 
 ```bash
-# 1. Set up a cycles wallet (one-time)
-dfx identity --network ic get-wallet   # or create one
+# Link a production Internet Identity; keep recovery material offline.
+icp identity link web iou-production --storage keyring
+icp identity principal --identity iou-production
 
-# 2. Build the prod-vetkd canister (the prod adapter is wired
-#    in Cargo.toml behind a build-time feature; dfx 0.27 handles
-#    the cost_call system API)
-cargo build --target wasm32-unknown-unknown --release
-
-# 3. Build the PWA with the prod vetkd path enabled
-VITE_IOU_PROD_VETKD=1 pnpm build
-
-# 4. Deploy
-IOU_WALLET=xxxxx-cycles-wallet-principal pnpm deploy:ic
+# After verifying the same principal on a second device and reviewing IDs:
+export IOU_MAINNET_CONFIG=scripts/mainnet.config.local.json
+pnpm mainnet:check
+pnpm mainnet:identity
+pnpm test:mainnet
 ```
 
-The deploy script (`scripts/deploy-prod.sh`) verifies dfx
->= 0.27, requires `IOU_WALLET` env var, builds the canister
-with the prod-vetkd feature, builds the PWA with
-`VITE_IOU_PROD_VETKD=1`, deploys to `--network ic`, and prints
-the live URL.
+Follow [the mainnet preparation and recovery procedure](docs/06-deployment-and-costs.md).
+The reviewed tool is ICP CLI 1.6.0. `icp.yaml` includes only IOU backend/assets;
+`dfx.json` remains the local project. `pnpm deploy:ic` now defaults to the same
+**non-deploying** preflight. Funding, canister creation and installation are
+separate reviewed steps, not automatic side effects. Production builds use a
+separate output directory, explicit mainnet frontend settings, and the `mainnet`
+Cargo feature for the first-install vetKD key. Existing stored key names are
+never silently changed on upgrade.
 
 ## Mobile (Capacitor Android)
 

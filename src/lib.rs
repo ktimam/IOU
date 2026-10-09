@@ -39,6 +39,18 @@ use durable_inbox::{
 
 type Memory = VirtualMemory<DefaultMemoryImpl>;
 
+// This is a first-install default, never a key-rotation mechanism. StableCell::init reads an
+// existing value unchanged, even when an upgrade was built with a different feature selection.
+// Changing a deployed key name would invalidate deterministic encryption keys and their cache.
+#[cfg(feature = "mainnet")]
+const DEFAULT_VETKD_KEY_NAME: &str = "key_1";
+#[cfg(not(feature = "mainnet"))]
+const DEFAULT_VETKD_KEY_NAME: &str = "dfx_test_key";
+
+fn init_vetkd_key_name<M: ic_stable_structures::Memory>(memory: M) -> StableCell<String, M> {
+    StableCell::init(memory, DEFAULT_VETKD_KEY_NAME.to_string()).expect("VETKD_KEY_NAME cell init")
+}
+
 // Resource limits are deliberately generous for normal household/property-manager use while
 // putting a hard ceiling on attacker-controlled stable-memory growth. They are enforced at the
 // canister boundary; UI limits are not a security boundary.
@@ -580,11 +592,9 @@ thread_local! {
         ));
 
     static VETKD_KEY_NAME: RefCell<StableCell<String, Memory>> = RefCell::new(
-        StableCell::init(
+        init_vetkd_key_name(
             MEMORY_MANAGER.with(|m| m.borrow().get(MemoryId::new(8))),
-            "dfx_test_key".to_string(),
         )
-            .expect("VETKD_KEY_NAME cell init")
     );
 
     // v1.4.0 (solo sheets): each principal registers their P-256 wrap
@@ -3778,8 +3788,9 @@ fn list_entries(sheet_id: String, cursor: Option<u64>, limit: u32) -> ListEntrie
 // symmetric key to get K_sheet (32 bytes).
 //
 // Requires dfx 0.27+ on local (which exports the cost_call system
-// API that ic-cdk 0.20 needs). On the IC mainnet, vetkd_test_key
-// is enabled by default on system subnets.
+// API that ic-cdk 0.20 needs). Build with --features mainnet for a new mainnet
+// canister to select key_1; the default local build selects dfx_test_key.
+// Upgrades preserve the stored key name regardless of the build feature.
 
 use ic_cdk_management_canister::{
     VetKDCurve, VetKDDeriveKeyArgs, VetKDDeriveKeyResult, VetKDKeyId, VetKDPublicKeyArgs,
@@ -7208,6 +7219,34 @@ mod tests {
         assert_eq!(decoded, vec![0x5A; 32]);
     }
     use ic_stable_structures::VectorMemory;
+
+    #[cfg(not(feature = "mainnet"))]
+    #[test]
+    fn vetkd_key_name_uses_local_default_for_fresh_memory() {
+        let cell = init_vetkd_key_name(VectorMemory::default());
+        assert_eq!(cell.get(), "dfx_test_key");
+    }
+
+    #[cfg(feature = "mainnet")]
+    #[test]
+    fn vetkd_key_name_uses_mainnet_default_for_fresh_memory() {
+        let cell = init_vetkd_key_name(VectorMemory::default());
+        assert_eq!(cell.get(), "key_1");
+    }
+
+    #[test]
+    fn vetkd_key_name_reopens_existing_value_without_mutation() {
+        for existing in ["dfx_test_key", "key_1", "test_key_1", "legacy-configured-key"] {
+            let memory = VectorMemory::default();
+            let cell = StableCell::init(memory.clone(), existing.to_string()).unwrap();
+            let original_bytes = memory.borrow().clone();
+            drop(cell);
+
+            let reopened = init_vetkd_key_name(memory.clone());
+            assert_eq!(reopened.get(), existing);
+            assert_eq!(*memory.borrow(), original_bytes);
+        }
+    }
 
     #[test]
     fn entry_key_format_is_unique_per_sheet_and_id() {

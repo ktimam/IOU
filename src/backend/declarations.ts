@@ -4,6 +4,7 @@
 // the public Candid interface declared in src/iou_backend.did.
 
 import { Actor, HttpAgent, type Identity } from "@dfinity/agent";
+import { requireMainnetCanisterId, resolveMainnetConfig } from "../config/mainnetConfig";
 
 // Read an env var in a way that's safe under both Vite (browser-like
 // globals, no `process`) and Node (where we run the smoke test).
@@ -13,15 +14,20 @@ function readEnv(name: string): string | undefined {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const proc = (globalThis as any).process;
   if (proc && proc.env && name in proc.env) return proc.env[name];
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const meta = (import.meta as any).env;
+  const meta = import.meta.env;
   if (meta && name in meta) return meta[name];
   return undefined;
 }
 
-const DEFAULT_HOST = readEnv("IOU_HOST") ?? "http://127.0.0.1:4943";
+// Browser build configuration wins over a process shim. Node-only tools retain their env support.
+const mainnet = resolveMainnetConfig(
+  import.meta.env ??
+  (globalThis as { process?: { env?: Record<string, string | undefined> } }).process?.env ??
+  {},
+);
+const DEFAULT_HOST = mainnet?.host ?? readEnv("IOU_HOST") ?? "http://127.0.0.1:4943";
 const DEFAULT_CANISTER_ID =
-  readEnv("VITE_IOU_BACKEND_CANISTER_ID") ?? "uxrrr-q7777-77774-qaaaq-cai";
+  mainnet?.canisterId ?? readEnv("VITE_IOU_BACKEND_CANISTER_ID") ?? "uxrrr-q7777-77774-qaaaq-cai";
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 type IDL = any;
@@ -611,12 +617,16 @@ export function createActor(
     canisterId = hostOrCanisterId ?? DEFAULT_CANISTER_ID;
   } else {
     const host = hostOrCanisterId ?? DEFAULT_HOST;
+    if (mainnet && host !== mainnet.host) {
+      throw new Error(`Mainnet actors must use ${mainnet.host}`);
+    }
     agent = new HttpAgent({ identity: identityOrAgent, host });
-    if (host.includes("127.0.0.1") || host.includes("localhost")) {
+    if (!mainnet && (host.includes("127.0.0.1") || host.includes("localhost"))) {
       agent.fetchRootKey();
     }
     canisterId = canisterIdOverride ?? DEFAULT_CANISTER_ID;
   }
+  if (mainnet) requireMainnetCanisterId(canisterId);
   return Actor.createActor(idlFactory, { agent, canisterId });
 }
 

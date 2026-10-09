@@ -8,6 +8,124 @@
 
 ## 1. The decision: single backend canister for v1
 
+### Mainnet preparation and recoverable administration (2026-10-09)
+
+The mainnet project is `icp.yaml`: **IOU backend + IOU assets only**. It does not
+deploy Internet Identity, modify official OpenChat canisters, or add a separate
+inbox canister. The durable inbox stays in the IOU backend. `dfx.json` and the
+running local/Tailscale environment remain separate and unchanged.
+
+**Current stage: preparation, not deployment.** `pnpm mainnet:check` and the old
+`pnpm deploy:ic` entry point perform only an offline configuration check. They
+do not create identities/canisters, convert ICP, change controllers or publish
+assets. The old wallet deployment path was removed because its second frontend
+build lost production flags and its backend used the local encryption key.
+
+#### 1. Establish recovery before funding
+
+Use a dedicated production Internet Identity. Register passkeys usable on two
+devices, keep an independent hardware-key/recovery method, and keep recovery
+material offline, outside source control, temp folders and chat. A synced
+passkey is convenient but is not an independent backup if its provider account
+is lost. Do not reuse the emulator's simulated identity or testing PIN.
+
+With reviewed **ICP CLI 1.6.0**, link the identity on each computer:
+
+```sh
+icp identity link web iou-production --storage keyring
+icp identity principal --identity iou-production
+```
+
+Sign in to the **same Internet Identity using the default CLI origin** on the
+second computer and verify that the principal matches exactly. Do not use
+`--app nns.ic0.app`: deployment administration need not share the treasury's
+NNS principal. Use password-protected session storage if the operating system
+has no usable keyring; never fall back silently to plaintext. Expired delegated
+sessions are renewed with `icp identity reauth iou-production`, not by exporting
+and copying a long-lived deployment key. Linking and recovery verification
+require the owner's interaction; automation must not receive recovery secrets.
+
+See the official [web-linked identity guide](https://cli.internetcomputer.org/1.5/guides/managing-identities/).
+
+#### 2. Approve exact deployment coordinates
+
+Before creating/funding anything, review the production principal, recovery
+check, source commit, cycle budget and controllers. Prefer direct installation
+by that principal: IOU records the authenticated installer as creator; a
+wallet/proxy-mediated install may record the proxy instead. Additional
+controllers each have full control; adding two controllers is **not** multisig.
+
+After approved creation of the two empty canisters (or verifying existing
+canisters), copy `scripts/mainnet.config.example.json` to the ignored
+`scripts/mainnet.config.local.json`. Fill in the **public** deployment principal
+and canister IDs. No passwords/keys belong in this file. Preserve these public
+coordinates in the release record for use on other computers.
+
+Set `IOU_MAINNET_CONFIG` to that file and run:
+
+```sh
+pnpm mainnet:check
+pnpm mainnet:identity
+icp project show
+```
+
+`mainnet:identity` compares the named CLI identity to the expected principal; it
+does not prove controller access or second-device recovery. Neither command
+changes account/canister state. Use `IOU_ICP_CLI` for an explicitly located CLI
+binary. Use `icp canister link <name> <principal> -e ic` to record verified
+existing IDs on a second computer; do not force-replace mappings or create
+replacement canisters. Check both controller lists independently.
+
+#### 3. Build and verify before installing
+
+Only build a reviewed source revision; the checker reports a dirty workspace
+as a release blocker. Existing model/reconnect experiments must not silently
+enter a production build. No dependency audit or dependency upgrade is part of
+this preparation.
+
+```sh
+pnpm test:mainnet
+icp build -e ic
+```
+
+- New backend installs are built with `--no-default-features --features mainnet`,
+  selecting vetKD `key_1`. The normal local build still selects `dfx_test_key`.
+  Upgrades **preserve the stored key name**, even if it differs from the build
+  default. Never rotate it implicitly or reinstall a data-bearing canister.
+- Rust mainnet output lives under `target/mainnet`, separate from the local
+  WASM. On Windows the build wrapper uses the existing Ubuntu WSL Rust
+  toolchain; CLI identity keys are not passed to WSL.
+- Frontend output is isolated under `.icp/mainnet-build/dist`. Every build
+  explicitly uses the mainnet API, real backend ID and production vetKD;
+  `.env.local` and inherited development `VITE_*` settings are not loaded;
+  `NODE_ENV=production` is forced so development sign-in paths stay disabled.
+- Published discovery URLs use the assets canister's certified HTTPS origin;
+  the inbox route points to the IOU backend on `https://icp-api.io`. The exact
+  checked-in processor bytes and action definitions are retained, and catalog
+  integrity hashes are regenerated. Local `public/` assets are not modified.
+- The staged response policy removes local replica connectivity but preserves
+  the existing framing restrictions. Additional unofficial-client embedding
+  origins need explicit review; this workflow does not open framing to everyone.
+
+Do not use bare `icp deploy` (its implicit environment is local). Actual install
+or upgrade remains a separate, owner-approved step, using explicit `-e ic`,
+`--identity iou-production`, verified ID mappings and `--no-create`. Before
+upgrading any existing backend, inspect `get_vetkd_key_name`, preserve its data
+and verify compatibility. The feature flag does not migrate an existing local
+encryption key to a production key.
+
+After deployment, verify certified delivery, `get_vetkd_key_name == key_1`,
+both controller lists, real-II login on two devices, encrypted sheet creation
+and recovery, app discovery/connection, and encrypted inbox receipt plus
+approval. These mainnet checks are not replaced by local unit tests. Keep
+mainnet IDs/origin stable: moving local test data requires an explicit migration,
+not copying local encrypted state into a new canister. Update the fork's app
+directory configuration separately; no official OpenChat backend change is needed.
+
+The cost figures below are historical planning estimates, not an approved
+deployment funding amount. Recheck live cycle pricing and agree a budget before
+any ICP conversion/top-up.
+
 | Aspect | Single canister (v1) | Multi-canister (v2+) |
 |---|---|---|
 | Storage | All stable memory in one place | Sharded, but cross-canister calls add latency and cycles |
@@ -104,14 +222,14 @@ tier.
   a third party.
 
 ### 3.3 Mainnet top-up workflow
-```
-dfx ledger --network ic balance                # check ICP balance
-dfx cycles convert --amount 5                 # convert ICP to cycles
-dfx canister status iou_backend               # check canister cycle balance
-dfx canister deposit-cycles iou_backend 1000  # top up
+```sh
+icp cycles balance -n ic --identity iou-production
+icp canister status iou_backend -e ic --identity iou-production
+icp canister status iou_assets -e ic --identity iou-production
 ```
 
-We wrap these in a script with sane defaults and a `--dry-run` flag.
+These are status checks. Agree an explicit conversion/top-up amount before
+running any funding command; the preparation scripts never spend funds.
 
 ---
 

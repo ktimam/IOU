@@ -1,0 +1,7 @@
+{
+  "network": "ic",
+  "identity": "iou-production",
+  "expectedPrincipal": "REPLACE_WITH_VERIFIED_DEPLOYER_PRINCIPAL",
+  "backendCanisterId": "REPLACE_WITH_MAINNET_BACKEND_CANISTER_ID",
+  "assetsCanisterId": "REPLACE_WITH_MAINNET_ASSETS_CANISTER_ID"
+}
