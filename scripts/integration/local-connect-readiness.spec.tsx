@@ -5,6 +5,8 @@ import { createHash, webcrypto } from "node:crypto";
 import { act, StrictMode, type ReactNode } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { Principal } from "@dfinity/principal";
+import { IDL } from "@dfinity/candid";
 
 const fixture = vi.hoisted(() => ({
   identity: undefined as unknown,
@@ -18,6 +20,7 @@ const fixture = vi.hoisted(() => ({
   signIn: vi.fn(), signOut: vi.fn(),
   deliveryKey: undefined as any,
   loadDeliveryKey: vi.fn(),
+  loadSetupSheet: vi.fn(),
 }));
 vi.mock("../../src/features/auth/AuthProvider", () => ({
   AuthProvider: ({ children }: { children: ReactNode }) => children,
@@ -47,11 +50,21 @@ vi.mock("../../src/features/openchat/consumerKeypair", () => ({
 vi.mock("../../src/features/templates/PairTemplatesContext", () => ({
   usePairTemplates: (...args: unknown[]) => { fixture.templateHook(...args); return fixture.templates; },
 }));
+// The read-only sheet loader has separate real-crypto unit coverage. Keep this
+// mounted suite focused on scope, parent binding, consent and session invalidation.
+vi.mock("../../src/features/openchat/localSetupSheet", () => ({
+  loadLocalSetupSheet: (...args: unknown[]) => fixture.loadSetupSheet(...args),
+}));
 import { LocalConnectPage } from "../../src/features/openchat/LocalConnectPage";
 import { LOCAL_APP_SETUP_MS } from "../../src/features/openchat/localAppSetupConsent";
+import { localSetupAccountId } from "../../src/features/openchat/localAppSetupV2";
+import { createLocalProcessorContext } from "../../src/features/openchat/localProcessorContext";
 
 const sheetId = "0123456789abcdef";
 const otherSheetId = "fedcba9876543210";
+// Use the real wire decoder: vec nat64 is a BigUint64Array, not a normal JS array.
+const decodedSheetIds = (ids: readonly string[]) => IDL.decode([IDL.Vec(IDL.Nat64)],
+  IDL.encode([IDL.Vec(IDL.Nat64)], [ids.map(id => BigInt(`0x${id}`))]))[0] as BigUint64Array;
 const connectionId = "A".repeat(43);
 const clientOrigin = "https://client.example";
 const source = new TextEncoder().encode("// synthetic public processor; never executed");
@@ -115,6 +128,11 @@ beforeEach(async () => {
   fixture.keyring.get.mockReturnValue(undefined); fixture.keyring.unwrapFor.mockResolvedValue(undefined);
   fixture.signIn.mockResolvedValue(undefined); fixture.signOut.mockResolvedValue(undefined);
   fixture.templates = { shared: [type], ready: true, readyGeneration: {}, loading: false, error: undefined };
+  fixture.loadSetupSheet.mockImplementation(async ({ sheetId: selectedSheet }: { sheetId: string }) => ({
+    sheetId: selectedSheet, pairId: selectedSheet === sheetId ? "1111111111111111" : "2222222222222222",
+    label: selectedSheet === sheetId ? "First account — Current sheet" : "Second account — Current sheet",
+    processorContext: createLocalProcessorContext([type as any], "EGP"),
+  }));
   fixture.actor = {
     get_my_pairs: vi.fn(async () => [sheetId, otherSheetId].map((id, index) => ({ id: index ? "2222222222222222" : "1111111111111111",
       active_sheet_id: [id], archived_at: [], other_principal: { toText: () => "synthetic-partner" } }))),
@@ -127,6 +145,144 @@ beforeEach(async () => {
   };
   container = document.createElement("div"); document.body.append(container); root = createRoot(container);
 });
+
+describe("scoped account and per-chat setup in the existing iframe page", () => {
+  const handle = "B".repeat(42) + "A";
+  async function scopeFixture(mapped = sheetId) {
+    fixture.principal = Principal.selfAuthenticating(new Uint8Array([1, 2, 3])).toText();
+    const links = new Map(mapped ? [[handle, mapped]] : []);
+    fixture.actor.chat_sheet_links = vi.fn(async () => [...links].map(([chat_key, id]) => ({ chat_key, sheet_id: BigInt(`0x${id}`) })));
+    fixture.actor.chat_routable_sheet_ids = vi.fn(async () => decodedSheetIds([sheetId, otherSheetId]));
+    fixture.actor.set_chat_sheet_link = vi.fn(async (key: string, id: bigint) => { links.set(key, id.toString(16).padStart(16, "0")); });
+    fixture.actor.list_encrypted_inbox_grants = vi.fn(async () => ({ Ok: { grants: [], next: [] } }));
+    Object.defineProperty(window, "parent", { configurable: true, value: fixture.parent });
+    const accountId = await localSetupAccountId({ principal: fixture.principal, backendHost: "http://127.0.0.1:4943", backendCanisterId: "rrkah-fqaaa-aaaaa-aaaaq-cai" });
+    return { accountId, links };
+  }
+  async function requestScope(setupContext: unknown) {
+    await render(); await request({ version: 2, setupContext }, clientOrigin, fixture.parent);
+  }
+  async function waitForCommit(assertion: () => void) {
+    // Each act must finish to commit state after real WebCrypto resolves. Polling
+    // DOM inside one long act can hold that render until its own timeout.
+    const deadline = performance.now() + 1000;
+    while (performance.now() < deadline) {
+      try { assertion(); return; } catch { /* Preserve the same bounded retry as waitFor. */ }
+      const remaining = deadline - performance.now();
+      if (remaining > 0) await act(async () => { await new Promise(resolve => setTimeout(resolve, Math.min(20, remaining))); });
+    }
+    assertion();
+  }
+  async function waitEnabled(label: string) {
+    await waitForCommit(() => expect(button(label)?.disabled).toBe(false));
+  }
+  async function waitShared() {
+    await waitForCommit(() => expect(fixture.parent.postMessage).toHaveBeenCalledOnce());
+    return JSON.parse(fixture.parent.postMessage.mock.calls[0][0].catalogJson);
+  }
+  it("connects the IOU account without a sheet picker or sheet reads", async () => {
+    const { accountId } = await scopeFixture();
+    await requestScope({ version: 2, scope: "account", routes: [] }); await waitEnabled("Connect");
+    expect(container.textContent).toContain("Connect your IOU account. Each chat keeps its separately selected sheet.");
+    expect(container.querySelector("select")).toBeNull();
+    expect(fixture.actor.get_my_pairs).not.toHaveBeenCalled();
+    expect(fixture.actor.chat_sheet_links).not.toHaveBeenCalled();
+    expect(container.textContent).toContain("encrypted drafts for 90 days");
+    expect(container.textContent).toContain("up to 30 days and still need your review and Save");
+    expect(fixture.loadDeliveryKey).not.toHaveBeenCalled();
+    expect(fixture.parent.postMessage).not.toHaveBeenCalled();
+    publicFetch(); await click(button("Connect")!);
+    const result = await waitShared();
+    expect(container.textContent).toContain("Setup was sent to the requesting client.");
+    expect(container.textContent).toContain("Connect IOU to OpenChat without sharing entries, sign-in or private keys.");
+    expect(container.textContent).not.toContain("Choose the sheet to use with OpenChat.");
+    expect(container.querySelector("select")).toBeNull();
+    expect(result).toMatchObject({ version: 2, scope: "account", accountId, routes: [] });
+    expect(JSON.parse(result.catalogJson).apps[0].deliveryEncryption).toBeUndefined();
+    expect(fixture.actor.set_chat_sheet_link).not.toHaveBeenCalled();
+    expect(fixture.actor.create_encrypted_inbox_grant).not.toHaveBeenCalled();
+    expect(fixture.parent.postMessage.mock.calls[0]).toEqual([expect.objectContaining({ version: 2, connectionId }), clientOrigin]);
+    expect(fixture.opener.postMessage).not.toHaveBeenCalled();
+  });
+  it("preselects this chat's existing sheet and saves only after explicit consent", async () => {
+    const { accountId } = await scopeFixture(otherSheetId);
+    await requestScope({ version: 2, scope: "chat", accountId, handle }); await waitEnabled("Save setup");
+    expect(container.textContent).toContain("Choose the sheet to use with OpenChat.");
+    expect(container.querySelector("select")?.value).toBe(otherSheetId);
+    expect(container.textContent).toContain("Private Choice: You owe; keywords: private-keyword");
+    expect(container.textContent).toContain("Currency: EGP");
+    expect(container.textContent).toContain("up to 30 days and still need your review and Save");
+    expect(fixture.actor.set_chat_sheet_link).not.toHaveBeenCalled();
+    expect(fixture.actor.create_encrypted_inbox_grant).not.toHaveBeenCalled();
+    publicFetch(); await click(button("Save setup")!);
+    const result = await waitShared();
+    expect(result.routes).toHaveLength(1); expect(result.routes[0].handle).toBe(handle);
+    expect(JSON.parse(result.routes[0].catalogJson).apps[0].recipientLabel).toContain("Second account");
+    expect(fixture.actor.set_chat_sheet_link).not.toHaveBeenCalled();
+    expect(fixture.actor.create_encrypted_inbox_grant).toHaveBeenCalledOnce();
+  });
+  it.each([sheetId, "1234567890123456"])("loads Candid nat64 routing IDs for sheet %s without coercing hexadecimal strings", async id => {
+    const { accountId } = await scopeFixture(id);
+    const routed = decodedSheetIds([id]);
+    expect(routed).toBeInstanceOf(BigUint64Array);
+    fixture.actor.chat_routable_sheet_ids.mockResolvedValue(routed);
+    fixture.actor.get_my_pairs.mockResolvedValue([{ id: "1111111111111111", active_sheet_id: [id], archived_at: [],
+      other_principal: { toText: () => "synthetic-partner" } }]);
+    await requestScope({ version: 2, scope: "chat", accountId, handle }); await waitEnabled("Save setup");
+    expect([...container.querySelectorAll("option")].map(option => option.value)).toEqual(["", id]);
+    expect(container.querySelector("select")?.value).toBe(id);
+    expect(fixture.actor.set_chat_sheet_link).not.toHaveBeenCalled();
+    expect(fixture.actor.create_encrypted_inbox_grant).not.toHaveBeenCalled();
+    expect(fixture.parent.postMessage).not.toHaveBeenCalled();
+  });
+  it("does not choose a sheet for an unconfigured chat and writes only its explicit choice", async () => {
+    const { accountId, links } = await scopeFixture("");
+    await requestScope({ version: 2, scope: "chat", accountId, handle });
+    await waitForCommit(() => expect(container.querySelectorAll("option"), container.textContent ?? "").toHaveLength(3));
+    expect(container.querySelector("select")?.value).toBe(""); expect(button("Save setup")?.disabled).toBe(true);
+    await select(sheetId); await waitEnabled("Save setup"); publicFetch(); await click(button("Save setup")!); await waitShared();
+    expect(fixture.actor.set_chat_sheet_link).toHaveBeenCalledExactlyOnceWith(handle, BigInt(`0x${sheetId}`));
+    expect([...links]).toEqual([[handle, sheetId]]);
+  });
+  it("rejects another IOU account before sheet reads, key recovery or mutation", async () => {
+    await scopeFixture();
+    await requestScope({ version: 2, scope: "chat", accountId: "D".repeat(42) + "A", handle });
+    await waitForCommit(() => expect(container.textContent).toContain("Sign in to the IOU account already connected"));
+    expect(button("Save setup")?.disabled).toBe(true);
+    expect(fixture.actor.get_my_pairs).not.toHaveBeenCalled(); expect(fixture.loadDeliveryKey).not.toHaveBeenCalled();
+    expect(fixture.actor.set_chat_sheet_link).not.toHaveBeenCalled(); expect(fixture.actor.create_encrypted_inbox_grant).not.toHaveBeenCalled();
+  });
+  it("keeps the Type preview and disables sharing when either private slot is unreadable", async () => {
+    const { accountId } = await scopeFixture(); fixture.loadSetupSheet.mockRejectedValueOnce(new Error("unreadable Types"));
+    await requestScope({ version: 2, scope: "chat", accountId, handle });
+    await waitForCommit(() => expect(container.textContent).toContain("This sheet’s private Types could not be read. Sharing is disabled."));
+    expect(button("Save setup")?.disabled).toBe(true); expect(fixture.loadDeliveryKey).not.toHaveBeenCalled();
+    expect(fixture.actor.create_encrypted_inbox_grant).not.toHaveBeenCalled();
+  });
+  it("rejects Type changes between the visible preview and explicit Save setup", async () => {
+    const { accountId } = await scopeFixture();
+    await requestScope({ version: 2, scope: "chat", accountId, handle }); await waitEnabled("Save setup");
+    const load = fixture.loadSetupSheet.getMockImplementation()!;
+    fixture.loadSetupSheet.mockImplementationOnce(async (...args: unknown[]) => {
+      const sheet = await load(...args); return { ...sheet, processorContext: { ...sheet.processorContext, types: [] } };
+    });
+    publicFetch(); await click(button("Save setup")!);
+    await waitForCommit(() => expect(container.textContent).toContain("setup changed after its preview"));
+    expect(fixture.parent.postMessage).not.toHaveBeenCalled(); expect(fixture.actor.create_encrypted_inbox_grant).not.toHaveBeenCalled();
+    expect(fixture.actor.set_chat_sheet_link).not.toHaveBeenCalled();
+  });
+  it("cannot share or write a mapping after its authenticated session changes during grant creation", async () => {
+    const { accountId } = await scopeFixture(), gate = deferred<any>();
+    fixture.actor.create_encrypted_inbox_grant.mockImplementationOnce(() => gate.promise);
+    await requestScope({ version: 2, scope: "chat", accountId, handle }); await waitEnabled("Save setup");
+    publicFetch(); await click(button("Save setup")!);
+    await waitForCommit(() => expect(fixture.actor.create_encrypted_inbox_grant).toHaveBeenCalledOnce());
+    const submitted = fixture.actor.create_encrypted_inbox_grant.mock.calls[0][0];
+    fixture.identity = { privateMaterial: "new-session" }; await render();
+    await act(async () => { gate.resolve({ Ok: { ...submitted, inbox_id: "a".repeat(64), created_at_ms: BigInt(Date.now() - 1), revoked: false } }); });
+    expect(fixture.parent.postMessage).not.toHaveBeenCalled(); expect(fixture.actor.set_chat_sheet_link).not.toHaveBeenCalled();
+  });
+});
 afterEach(async () => {
   await act(async () => { root.unmount(); }); container.remove();
   vi.useRealTimers(); vi.unstubAllGlobals(); vi.unstubAllEnvs();
@@ -138,10 +294,13 @@ describe("no-file IOU setup consent", () => {
     await render();
     await act(async () => { await vi.advanceTimersByTimeAsync(1000); });
     expect(container.textContent).toContain("Waiting for a setup request");
+    expect(container.textContent).toContain("Connect IOU to OpenChat without sharing entries, sign-in or private keys.");
+    expect(container.textContent).not.toContain("Choose the sheet to use with OpenChat.");
     expect(container.textContent).not.toContain("Connection closed or expired");
     expect(vi.getTimerCount()).toBe(1);
     await request();
     expect(container.textContent).toContain(clientOrigin);
+    expect(container.textContent).toContain("Choose the sheet to use with OpenChat.");
     expect(container.querySelector("select")).not.toBeNull();
     expect(fixture.opener.postMessage).not.toHaveBeenCalled();
     expect(fetch).not.toHaveBeenCalled();
@@ -221,7 +380,11 @@ describe("no-file IOU setup consent", () => {
     if (reason === "origin") await request({}, "https://other.example");
     if (reason === "nonce") await request({ connectionId: "B".repeat(42) + "A" });
     if (reason === "sheet") await select(otherSheetId);
-    if (reason === "cancel") await click(button("Cancel connection")!);
+    if (reason === "cancel") {
+      await click(button("Cancel connection")!);
+      expect(container.textContent).toContain("Connect IOU to OpenChat without sharing entries, sign-in or private keys.");
+      expect(container.textContent).not.toContain("Choose the sheet to use with OpenChat.");
+    }
     expect(button("Connect")).toBeUndefined();
     await request();
     expect(button("Connect")).toBeUndefined();

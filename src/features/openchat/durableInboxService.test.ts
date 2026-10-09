@@ -90,6 +90,46 @@ describe("explicit encrypted inbox connection", () => {
     const a = actor(); vi.mocked(a.create_encrypted_inbox_grant).mockImplementation(async input => ok({ ...grant, ...input, recipient_key_id: "0".repeat(64) }));
     await expect(create(a)).rejects.toThrow(/binding changed/);
   });
+  it.each([500, 120_000])("keeps the default grant within the backend ceiling when the client clock is %ims ahead", async aheadMs => {
+    const a = actor(), serverNow = Date.now() - aheadMs;
+    vi.mocked(a.create_encrypted_inbox_grant).mockImplementation(async input => {
+      // Mirror the real canister's independent clock and strict maximum; the
+      // previous Date.now() + 90-day default fails this boundary.
+      if (input.expires_at_ms <= BigInt(serverNow) || input.expires_at_ms - BigInt(serverNow) > BigInt(DURABLE_INBOX_GRANT_MS)) {
+        return { Err: { InvalidRequest: null } };
+      }
+      return ok({ ...grant, ...input, created_at_ms: BigInt(serverNow) });
+    });
+    const connected = await create(a);
+    expect(a.create_encrypted_inbox_grant).toHaveBeenCalledOnce();
+    expect(connected.expiresAtMs - serverNow).toBeGreaterThan(0);
+    expect(connected.expiresAtMs - serverNow).toBeLessThanOrEqual(DURABLE_INBOX_GRANT_MS);
+    expect(connected.expiresAtMs - serverNow).toBeGreaterThan(DURABLE_INBOX_GRANT_MS - 5 * 60_000);
+  });
+  it("preserves an explicit valid expiry instead of silently shortening it", async () => {
+    const a = actor(), expiresAtMs = Date.now() + DURABLE_INBOX_GRANT_MS - 60_000;
+    expect((await create(a, { expiresAtMs })).expiresAtMs).toBe(expiresAtMs);
+    expect(vi.mocked(a.create_encrypted_inbox_grant).mock.calls[0][0].expires_at_ms).toBe(BigInt(expiresAtMs));
+  });
+  it("keeps the exact explicit maximum strict and rejects one millisecond above it", async () => {
+    const now = Date.now(), clock = vi.spyOn(Date, "now").mockReturnValue(now);
+    try {
+      const a = actor(), expiresAtMs = now + DURABLE_INBOX_GRANT_MS;
+      expect((await create(a, { expiresAtMs })).expiresAtMs).toBe(expiresAtMs);
+      vi.mocked(a.create_encrypted_inbox_grant).mockClear();
+      await expect(create(a, { expiresAtMs: expiresAtMs + 1 })).rejects.toThrow("Invalid inbox expiry");
+      expect(a.create_encrypted_inbox_grant).not.toHaveBeenCalled();
+    } finally { clock.mockRestore(); }
+  });
+  it("does not bypass or retry the backend ceiling when clock skew exceeds the default headroom", async () => {
+    const a = actor(), serverNow = Date.now() - 6 * 60_000;
+    vi.mocked(a.create_encrypted_inbox_grant).mockImplementation(async input => {
+      expect(input.expires_at_ms - BigInt(serverNow)).toBeGreaterThan(BigInt(DURABLE_INBOX_GRANT_MS));
+      return { Err: { InvalidRequest: null } };
+    });
+    await expect(create(a)).rejects.toThrow("The encrypted inbox operation could not be completed");
+    expect(a.create_encrypted_inbox_grant).toHaveBeenCalledOnce();
+  });
   it("checks the session immediately before and after the update", async () => {
     const a = actor(); let current = true;
     vi.mocked(a.create_encrypted_inbox_grant).mockImplementation(async input => { current = false; return ok({ ...grant, ...input }); });

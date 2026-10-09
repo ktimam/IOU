@@ -112,6 +112,7 @@ export function createIouLocalAppPackage(destination: string, processor: { sha25
     if (!processorContext) throw new Error("Private Type context exceeds the local processor limits after adding editor defaults.");
   }
   return { version: 1, apps: [{
+    setupScopes: ["account", "chat"],
     id: "iou", revision: IOU_LOCAL_APP_REVISION, name: "IOU", description: "Receive encrypted private transaction drafts, then review and save encrypted entries in IOU.",
     destination: url.href, processor: { sha256: processor.sha256, byteLength: processor.byteLength },
     ...(deliveryInbox ? { deliveryInbox: { ...deliveryInbox } } : {}),

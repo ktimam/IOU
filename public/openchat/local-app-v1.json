@@ -2,6 +2,10 @@
   "version": 1,
   "apps": [
     {
+      "setupScopes": [
+        "account",
+        "chat"
+      ],
       "id": "iou",
       "revision": "local-import-v2",
       "name": "IOU",

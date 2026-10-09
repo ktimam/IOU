@@ -10,6 +10,73 @@ and passing tests do not update previously installed APKs or served bundles auto
 
 ## Normal user flow (UI repair, 2026-10-06)
 
+### Separate account connection and chat setup (2026-10-09)
+
+Setup protocol v2 separates **Apps → IOU → Connect/Reconnect** from the chat's
+**Open setup**. Account connection verifies the current IOU identity and recovers
+its existing delivery key; it has no sheet picker. It refreshes only the requested
+saved chat routes and does not write, remove or guess their sheet mappings.
+
+**Open setup** presents the active sheets available to the signed-in IOU account,
+preselects that chat's saved sheet, and changes only that chat's opaque route after
+**Save setup**. IOU persists the mapping through its existing authenticated
+`chat_sheet_links` API. The handle is client routing metadata, not a claim that the
+official OpenChat backend has verified chat membership. No OpenChat canister change
+is required. A mismatched IOU account fails before key recovery or mapping changes.
+The existing currency and private Type preview remains visible in chat setup;
+unreadable slots or a changed preview disable sharing rather than exporting partial
+or stale configuration.
+
+For an existing v1 connection, account reconnect can preserve the explicitly linked
+legacy recipient only if its identity, backend, sheet and delivery key still match.
+It does not recover unknown historical per-chat mappings. Missing mappings require
+**Open setup** for that chat. Existing proposal and delivery records are not retargeted.
+
+The public catalog advertises `setupScopes: ["account", "chat"]`; the explicit,
+origin- and nonce-bound v2 exchange carries the opaque account identity and at most
+32 route configurations within a 1 MiB bound. Each returned private route has its
+own delivery recipient context and private Type vocabulary. Account identity is stable
+across delivery-key renewal but distinct for different IOU principals or backends.
+
+Valid, unexpired inbox capabilities are reused only when owner-authenticated grant
+metadata matches the same recipient, destination and revision and the capability
+hash matches the grant's owner-bound inbox ID. Reconnecting does
+not mint a grant per chat unnecessarily, and duplicate routes to the same sheet can
+share a grant. Missing/expired grants still use the existing 32-grant quota and can
+fail closed; the complete response is size-checked before grant creation, and a
+failed setup never removes old grants or pending entries. The default
+grant expiry has five minutes of headroom inside the unchanged backend 90-day
+maximum, avoiding rejection from small positive client clock skew. Explicit expiry
+requests retain their strict bound.
+
+On October 9, the verified local frontends were activated and registry generation
+10 was published. The updated x86 APK was installed in place; a cold emulator
+restart retained the existing account, private cards and IOU chat opt-in. The final
+normal emulator flow selected an existing synthetic sheet through **Open setup**
+and saved its route. App-level **Reconnect** then presented no sheet picker and
+completed successfully. After force-stopping and reopening only the local-test APK,
+the account, chat opt-in and configured route were restored. **Open setup**
+automatically preselected the same sheet and displayed both private Types without
+manual reselection. Account/chat reconnect and restart acceptance passed.
+
+Live testing exposed two return-shape bugs: `vec nat64` decodes as
+`BigUint64Array`, and `active_sheet_id` belongs to `PairSummary`, not `Pair`.
+Both were corrected in the active IOU frontend. The focused schema/loader suite
+passed 15 tests, and each frozen IOU runtime passed all 132 integration tests.
+These checks created no financial entries and did not rerun model accuracy,
+install an APK on a physical phone or change an official OpenChat canister.
+
+Known cancellation limitation: cancelling in the embedded IOU page and returning
+can leave the native chat-setup attempt waiting. Main Apps does not expose its
+Cancel action for that chat-initiated attempt. Reloading the APK page alone did
+not release it; force-stopping and reopening only the local-test APK cleared it
+while preserving the account, private cards, settings and pending route handle.
+This workaround is not a passing cancellation-protocol test.
+
+The dated acceptance below describes earlier builds; setup v1 remains a compatibility
+path for them. Model prompts, processor behavior and financial save semantics are
+not part of this correction.
+
 ### Durable inbox correction (2026-10-08)
 
 The current implementation restores asynchronous encrypted delivery. It requires the
@@ -17,9 +84,11 @@ updated IOU backend and frontend, the updated OpenChat client, and one explicit
 **Apps → IOU → Reconnect** to authorize its write-only inbox. Merely updating this
 document or the public directory does not upgrade an installed APK.
 
-1. Connect selects the IOU sheet and exchanges its public encryption key plus a
-   scoped write-only inbox capability. Public discovery contains only the generic
-   endpoint, never this capability or private sheet configuration.
+1. In setup-v1 compatibility mode, Connect selects the IOU sheet and exchanges its
+   public encryption key plus a scoped write-only inbox capability. In the scoped
+   setup flow described above, account Connect/Reconnect and per-chat Open setup
+   are separate. Public discovery contains only the generic endpoint, never this
+   capability or private sheet configuration.
 2. **Add to IOU** encrypts the reviewed fields in OpenChat and saves the exact
    encrypted request in the device-local card before sending it. The generic inbox
    transport does not require an IOU window to be open.
@@ -39,7 +108,7 @@ first delivery. Reviewing is not required immediately. An expired item is no lon
 returned; bounded maintenance later reclaims its storage. Connect grants last up to
 90 days; expiration/revocation blocks new deposits, not review of still-live items.
 IOU retains at most 32 grants per owner, including revoked grants still inside
-their retention window. Each explicit Connect creates a new grant; repeated
+their retention window. In the original v1 connection flow, each explicit Connect creates a new grant; repeated
 reconnections or an unknown setup outcome can exhaust that quota. Check whether
 OpenChat accepted the prior connection before trying again. Revoke is not an
 immediate quota reset: bounded cleanup removes eligible expired grants after their
@@ -337,17 +406,23 @@ or processor file downloads or uploads are required.
 2. Choose **Connect** for IOU. The IOU connection screen opens directly in the
    client; opening `/openchat/connect` directly does not create a setup request.
 3. Check the exact **Requesting client** address. Continue only if you recognize
-   it and just started this request. Sign in to IOU separately if needed, verify
-   account, and choose the intended named **Sheet**.
-4. Wait for that sheet's private Types to load. Review the account/sheet reminder,
-   currency, Type names, keywords and **Owed to you** / **You owe** directions.
+   it and just started this request. Sign in to IOU separately if needed and verify
+   the account. Choose **Connect**, then return to OpenChat and check that it accepted
+   the account connection. Account Connect/Reconnect has no sheet picker.
+4. Enable IOU in the intended chat and choose **Open setup** in that chat's app
+   settings. Choose the intended named **Sheet**; an existing mapping is preselected.
+   Wait for its private Types to load. Review the account/sheet reminder, currency,
+   Type names, keywords and **Owed to you** / **You owe** directions.
    IOU also recovers the signed-in user's delivery keypair and shares ONLY its public
    key/fingerprint and bound recipient context. The private key and separate sheet key,
    fees, schedules, entries and sign-in credentials remain in IOU. No message/image/draft
    is exchanged during setup. Missing or changed delivery keys require reconnection.
-5. Choose **Connect**, then return to OpenChat and check that it
-   accepted the setup. Enable IOU in the intended chat; connection does not
-   automatically enable it or save an entry.
+5. Choose **Save setup**, then return to OpenChat and check that it accepted this
+   chat's setup. Connection does not automatically enable other chats or save entries.
+
+Setup-v1 compatibility clients combine account connection and sheet selection in
+one **Connect** screen. That older flow does not implement the separate scoped
+account/chat setup above.
 
 The setup request expires after ten minutes. If the requester closes, the page
 reloads, or the identity/destination changes during setup, start a fresh **Connect**
@@ -362,8 +437,11 @@ the same approved publisher are verified and installed without file uploads or
 another APK update, provided the client already supports the directory and protocol.
 Updates wait while processing or any private cards are retained; a failed update
 retains the last working setup. Changes requiring a new private recipe, trust or destination
-ask for **Reconnect**. After changing the IOU account, sheet, Types or currency,
-reconnect and review the new setup rather than assuming the remembered copy changed.
+ask for **Reconnect**. Account reconnect refreshes the existing chat destinations;
+it does not reassign them or silently accept another IOU identity. To choose a
+different sheet for one chat, use that chat's **Open setup** and **Save setup**.
+After changing Types or currency, explicitly refresh and review the affected setup
+rather than assuming the remembered copy changed.
 Changing publisher origin or requiring a new client protocol is not a compatible update.
 
 The local-test client remembers connected or imported setup, selected app/action and

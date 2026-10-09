@@ -83,3 +83,44 @@ describe("explicit IOU setup consent binding", () => {
     expect(f.consent.receive(f.event()).kind).toBe("shared");
   });
 });
+
+describe("version-two scoped setup consent", () => {
+  const accountId = "B".repeat(42) + "A";
+  const setupContext = { version: 2, scope: "account", accountId, routes: [] };
+  const response = (patch: Record<string, unknown> = {}) => JSON.stringify({ version: 2, scope: "account", appId: "iou", accountId,
+    catalogJson: '{"version":1,"apps":[]}', routes: [], ...patch });
+  it("pins the scope and account before sharing a single version-two reply", () => {
+    const f = fixture(), state = f.consent.receive(f.event({ version: 2, setupContext }));
+    if (state.kind !== "pending") throw new Error("Expected setup consent");
+    expect(state.binding.setupContext).toEqual(setupContext);
+    expect(f.opener.postMessage).not.toHaveBeenCalled();
+    expect(f.consent.approve(state.binding, response())).toMatchObject({ version: 2, connectionId: id, appId: "iou", catalogJson: response() });
+    expect(() => f.consent.approve(state.binding, response())).toThrow();
+  });
+  it.each([
+    { version: 1, setupContext },
+    { version: 2, setupContext: { ...setupContext, chatId: "not-permitted" } },
+    { version: 2, setupContext: { version: 2, scope: "chat", handle: id } },
+  ])("rejects mixed or incomplete protocol metadata %j", patch => {
+    const f = fixture(); expect(f.consent.receive(f.event(patch)).kind).toBe("waiting");
+  });
+  it.each(["downgrade", "account", "scope"])("closes rather than changing a pending %s context", change => {
+    const f = fixture(); f.consent.receive(f.event({ version: 2, setupContext }));
+    const event = change === "downgrade" ? f.event() : f.event({ version: 2, setupContext: change === "account"
+      ? { ...setupContext, accountId: id } : { version: 2, scope: "chat", accountId, handle: id } });
+    expect(f.consent.receive(event).kind).toBe("closed");
+  });
+  it.each([{ accountId: id }, { scope: "chat" }, { routes: [{ handle: id, catalogJson: "{}" }] }, { extra: true }])(
+    "rejects a response that does not match the pinned request %j", patch => {
+      const f = fixture(), state = f.consent.receive(f.event({ version: 2, setupContext }));
+      if (state.kind !== "pending") throw new Error("Expected setup consent");
+      expect(() => f.consent.approve(state.binding, response(patch))).toThrow();
+      expect(f.consent.state().kind).toBe("pending");
+      expect(f.opener.postMessage).not.toHaveBeenCalled();
+    });
+  it("does not evaluate a setupContext accessor", () => {
+    const f = fixture(), event = f.event({ version: 2, setupContext }), getter = vi.fn(() => setupContext);
+    Object.defineProperty(event.data, "setupContext", { enumerable: true, get: getter });
+    expect(f.consent.receive(event).kind).toBe("waiting"); expect(getter).not.toHaveBeenCalled();
+  });
+});

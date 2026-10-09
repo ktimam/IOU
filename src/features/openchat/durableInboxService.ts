@@ -12,6 +12,9 @@ import { createLocalImportSaveLock, localImportRecipient, localImportSheetDrafts
 
 export const DURABLE_INBOX_MAX_BODY_BYTES = 128 * 1024;
 export const DURABLE_INBOX_GRANT_MS = 90 * 24 * 60 * 60 * 1000;
+// The backend enforces 90 days using its own clock. Leave room for small
+// client/server skew instead of requesting the exact maximum from Date.now().
+const DURABLE_INBOX_GRANT_CLOCK_HEADROOM_MS = 5 * 60 * 1000;
 type Opt<T> = [] | [T];
 type Blob = number[] | Uint8Array;
 export type DurableInboxResult<T> = { Ok: T } | { Err: object };
@@ -114,7 +117,7 @@ export async function createDurableInboxGrant(options: {
   assertCurrent(); origin(options.host); canonicalPrincipal(options.canisterId); destinationUrl(binding.destination);
   if (binding.appId !== "iou" || binding.appRevision !== IOU_LOCAL_APP_REVISION || binding.actionId !== "iou.entry.import" ||
     !parseLocalDeliveryEncryption(binding.recipient)) throw new Error("Invalid IOU inbox binding");
-  const now = Date.now(), expiresAtMs = options.expiresAtMs ?? now + DURABLE_INBOX_GRANT_MS;
+  const now = Date.now(), expiresAtMs = options.expiresAtMs ?? now + DURABLE_INBOX_GRANT_MS - DURABLE_INBOX_GRANT_CLOCK_HEADROOM_MS;
   if (!Number.isSafeInteger(expiresAtMs) || expiresAtMs <= now || expiresAtMs > now + DURABLE_INBOX_GRANT_MS) throw new Error("Invalid inbox expiry");
   const capability = crypto.getRandomValues(new Uint8Array(32));
   try {

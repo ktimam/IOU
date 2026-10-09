@@ -15,6 +15,8 @@ import { decryptName } from "../crypto/devVetkd";
 import { localAppSenderWindow } from "./localAppSender";
 import { localConnectionLabel, localConnectionLabels } from "./localConnectionLabels";
 import { createDurableInboxGrant, type DurableInboxActor, type DurableInboxRoute } from "./durableInboxService";
+import { LocalSetupV2Panel } from "./LocalSetupV2Panel";
+import { LocalSetupTypesPreview } from "./LocalSetupTypesPreview";
 
 type Consent = ReturnType<typeof createLocalAppSetupConsent>;
 type SheetChoice = { pairId: string; sheetId: string; accountName: string; sheetName: string };
@@ -69,7 +71,11 @@ function ConnectSession({ opener }: { opener: Window }) {
 
   return <main style={{ maxWidth: 880, margin: "24px auto", padding: 16, overflowWrap: "anywhere" }}>
     <h1>Connect IOU</h1>
-    <p>Choose the sheet to use with OpenChat. Connecting shares its Types and preferences, but not your entries, sign-in or private keys.</p>
+    <p>{state.kind !== "pending"
+      ? "Connect IOU to OpenChat without sharing entries, sign-in or private keys."
+      : state.binding.setupContext?.scope === "account"
+        ? "Connect your IOU account. Each chat keeps its separately selected sheet. No entries, sign-in or private keys are shared."
+        : "Choose the sheet to use with OpenChat. Connecting shares its Types and preferences, but not your entries, sign-in or private keys."}</p>
     {state.kind === "waiting" && <p>Waiting for a setup request. Nothing has been shared.</p>}
     {state.kind === "pending" && <section aria-label="Setup requester">
       <p>Requesting client: <strong>{state.binding.senderOrigin}</strong></p>
@@ -84,8 +90,9 @@ function ConnectSession({ opener }: { opener: Window }) {
       <p>Signed in to IOU.</p>
       <button className="secondary" onClick={() => { close("Signed out. Start a fresh Connect request before sharing setup."); void signOut(); }}>Sign out</button>
       {state.kind === "pending" && consent && <SheetKeyProvider key={auth.principal}>
-        <ConnectAccount key={auth.principal} principal={auth.principal} opener={opener} consent={consent} state={state}
-          close={close} onShared={() => setState(consent.state())} />
+        {state.binding.setupContext ? <LocalSetupV2Panel key={auth.principal} principal={auth.principal} opener={opener} consent={consent} state={state}
+          close={close} onShared={() => setState(consent.state())} /> : <ConnectAccount key={auth.principal} principal={auth.principal} opener={opener} consent={consent} state={state}
+          close={close} onShared={() => setState(consent.state())} />}
       </SheetKeyProvider>}
     </>}
     {notice && <p role="status">{notice}</p>}
@@ -217,10 +224,7 @@ function ConnectSheet({ principal, sheet, defaultCurrency, opener, consent, stat
   }
   return <section aria-label="Private setup consent">
     <h2>{localConnectionLabel(sheet)}</h2>
-    <p>Currency: {defaultCurrency || "Not set"}</p>
-    {(loading || (!ready && !error)) && <p>Loading this sheet’s private Types…</p>}
-    {error && <p role="alert">This sheet’s private Types could not be read. Sharing is disabled.</p>}
-    {ready && <ul>{shared.map(type => <li key={type.id}>{type.name}: {type.direction === "credit" ? "Owed to you" : "You owe"}; keywords: {(type.keywords ?? []).join(", ") || "name only"}</li>)}</ul>}
+    <LocalSetupTypesPreview defaultCurrency={defaultCurrency} loading={loading} ready={ready} error={!!error} types={shared} />
     <p>OpenChat will remember this connection on this device. It may deliver encrypted drafts for 90 days; pending drafts stay in IOU for up to 30 days and still need your review and Save.</p>
     <button disabled={!ready || !deliveryKeys.ready || loading || !!error || busy} onClick={() => void share()}>{busy ? "Connecting…" : "Connect"}</button>
     {notice && <p role="status">{notice}</p>}
