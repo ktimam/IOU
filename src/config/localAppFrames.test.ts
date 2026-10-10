@@ -19,5 +19,9 @@ describe("scoped local app framing", () => {
     for (const route of ["/", "/signin", "/sheet/example", "/src/main.tsx", "/openchat/import?origin=attacker", "/openchat/connect/"]) expect(isLocalAppFrameRoute(route)).toBe(false);
     expect(isLocalAppFrameRoute("/openchat/import")).toBe(true);
     expect(isLocalAppFrameRoute("/openchat/connect")).toBe(true);
+    expect(isLocalAppFrameRoute("/openchat/connect.html")).toBe(true);
+    for (const route of ["/openchat/connect.html/", "/openchat/connect.html?code=bad", "/openchat/connect.html/../sheet/example"]) {
+      expect(isLocalAppFrameRoute(route)).toBe(false);
+    }
   });
 });

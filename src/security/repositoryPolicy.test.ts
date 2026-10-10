@@ -5,6 +5,16 @@ import { describe, expect, it } from 'vitest';
 const root = process.cwd();
 const read = (relative: string): string => readFileSync(path.join(root, relative), 'utf8');
 
+type AssetRule = { match: string; enable_aliasing?: boolean; headers: Record<string, string> };
+// This repository's policy is JSON with whole-line comments, not executable configuration.
+const assetRules = (): AssetRule[] => JSON.parse(read('public/.ic-assets.json5').replace(/^\s*\/\/.*$/gm, ''));
+function frameAncestors(rule: AssetRule): string[] {
+  const directives = rule.headers['Content-Security-Policy'].split(';').map(value => value.trim().split(/\s+/));
+  const matches = directives.filter(([name]) => name === 'frame-ancestors');
+  expect(matches, `${rule.match}: exactly one frame-ancestors directive`).toHaveLength(1);
+  return matches[0].slice(1).sort();
+}
+
 describe('repository security policy', () => {
   it('keeps local publication artifacts out of the repository root', () => {
     const ignore = read('.gitignore').split(/\r?\n/);
@@ -238,12 +248,35 @@ describe('repository security policy', () => {
     );
     expect(vite).toMatch(/cors:\s*true/);
 
-    const assetPolicy = read('public/.ic-assets.json5');
-    const wildcardHeaders = assetPolicy.match(
-      /\x22Access-Control-Allow-Origin\x22\s*:\s*\x22\*\x22/g,
-    );
-    // Both the generic assets and the later index.html override must carry ACAO.
-    expect(wildcardHeaders).toHaveLength(2);
+    const rules = assetRules();
+    for (const match of ['**/*', 'index.html', 'openchat/connect.html']) {
+      const matching = rules.filter(rule => rule.match === match);
+      expect(matching, `one explicit header policy for ${match}`).toHaveLength(1);
+      expect(matching[0].headers['Access-Control-Allow-Origin']).toBe('*');
+    }
+  });
+
+  it('adds the exact APK ancestor only to the physical Connect document, never the main SPA', () => {
+    const rules = assetRules();
+    const defaults = rules.find(rule => rule.match === '**/*')!;
+    const index = rules.find(rule => rule.match === 'index.html')!;
+    const connect = rules.find(rule => rule.match === 'openchat/connect.html')!;
+    expect(frameAncestors(defaults)).toEqual(["'none'"]);
+    expect(frameAncestors(index)).toEqual(['https://oc.app']);
+    expect(frameAncestors(connect)).toEqual(['http://localhost:5193', 'https://oc.app']);
+    expect(connect.enable_aliasing).toBe(false);
+    expect(rules.indexOf(connect)).toBeGreaterThan(rules.indexOf(defaults));
+    expect(defaults.headers['X-Frame-Options']).toBe('DENY');
+    expect(index.headers['X-Frame-Options']).toBe('');
+    expect(connect.headers).toEqual({ ...index.headers, 'Content-Security-Policy': expect.any(String) });
+    const withoutFraming = (policy: string) => policy.split(';').map(value => value.trim())
+      .filter(value => value && !value.startsWith('frame-ancestors '));
+    expect(withoutFraming(connect.headers['Content-Security-Policy']))
+      .toEqual(withoutFraming(index.headers['Content-Security-Policy']));
+    for (const rule of rules.filter(rule => rule !== connect)) {
+      expect(frameAncestors(rule), `${rule.match}: no APK or other local framing exception`)
+        .toEqual(rule.match === 'index.html' ? ['https://oc.app'] : ["'none'"]);
+    }
   });
 
   it('restarts ActionInbox polling when the authenticated actor becomes ready', () => {

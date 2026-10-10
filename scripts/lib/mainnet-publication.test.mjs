@@ -74,8 +74,11 @@ test("accepts only the dedicated project build output and leaves Vite assets int
   const f = fixture(); f.outputDirectory = path.join(f.root, ".icp", "mainnet-build", "dist");
   mkdirSync(f.outputDirectory, { recursive: true });
   writeFileSync(path.join(f.outputDirectory, "index.html"), "reviewed Vite output");
+  mkdirSync(path.join(f.outputDirectory, "openchat"), { recursive: true });
+  writeFileSync(path.join(f.outputDirectory, "openchat", "connect.html"), "reviewed dedicated Connect output");
   stageMainnetPublication(f);
   assert.equal(readFileSync(path.join(f.outputDirectory, "index.html"), "utf8"), "reviewed Vite output");
+  assert.equal(readFileSync(path.join(f.outputDirectory, "openchat", "connect.html"), "utf8"), "reviewed dedicated Connect output");
   assert.ok(existsSync(path.join(f.outputDirectory, "openchat", "apps-v1.json")));
 });
 
@@ -191,4 +194,39 @@ test("fails closed when an explicit asset CSP/connect policy is absent or ambigu
     assert.throws(() => stageMainnetPublication(f), /asset CSP|Asset policy/);
     assert.equal(existsSync(f.outputDirectory), false);
   }
+});
+
+test("stages the dedicated Connect framing exception without relaxing index or local network access", () => {
+  const f = fixture(), before = sourceHashes(f);
+  const parsePolicy = file => JSON.parse(readFileSync(file, "utf8").replace(/^\s*\/\/.*$/gm, ""));
+  const original = parsePolicy(path.join(f.root, "public", ".ic-assets.json5"));
+  stageMainnetPublication(f);
+  const staged = parsePolicy(path.join(f.outputDirectory, ".ic-assets.json5"));
+  const directive = (rule, name) => {
+    const matches = rule.headers["Content-Security-Policy"].split(";")
+      .map(part => part.trim().split(/\s+/)).filter(parts => parts[0] === name);
+    assert.equal(matches.length, 1, `${rule.match}: exactly one ${name}`);
+    return matches[0].slice(1).sort();
+  };
+  const ancestors = new Map([
+    ["**/*", ["'none'"]], ["index.html", ["https://oc.app"]],
+    ["openchat/connect.html", ["http://localhost:5193", "https://oc.app"]],
+  ]);
+  for (const [match, expected] of ancestors) {
+    const matches = staged.filter(rule => rule.match === match);
+    assert.equal(matches.length, 1, `one explicit policy for ${match}`);
+    const rule = matches[0], source = original.find(entry => entry.match === match);
+    assert.deepEqual(directive(rule, "frame-ancestors"), expected);
+    assert.deepEqual({ ...rule, headers: { ...rule.headers, "Content-Security-Policy": "checked separately" } },
+      { ...source, headers: { ...source.headers, "Content-Security-Policy": "checked separately" } });
+    const stripConnections = policy => policy.split(";").map(value => value.trim())
+      .filter(value => value && !value.startsWith("connect-src "));
+    assert.deepEqual(stripConnections(rule.headers["Content-Security-Policy"]),
+      stripConnections(source.headers["Content-Security-Policy"]));
+    assert.ok(directive(rule, "connect-src").includes("https://icp-api.io"));
+    assert.ok(directive(rule, "connect-src").every(value =>
+      !/localhost|127\.0\.0\.1|\[::1\]|\.ts\.net|https?:\/\/(?:10\.|192\.168\.)/.test(value)));
+  }
+  assert.equal(staged.find(rule => rule.match === "openchat/connect.html").enable_aliasing, false);
+  assert.deepEqual(sourceHashes(f), before);
 });

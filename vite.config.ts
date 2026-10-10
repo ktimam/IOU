@@ -1,4 +1,5 @@
 import { readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
 import { defineConfig, loadEnv, type Plugin } from "vite";
 import react from "@vitejs/plugin-react";
 import { VitePWA } from "vite-plugin-pwa";
@@ -131,6 +132,11 @@ export default defineConfig(({ command, mode }) => {
       react(),
       VitePWA({
         registerType: "autoUpdate",
+        workbox: {
+          // Never substitute index.html (with its different framing policy) for setup.
+          navigateFallbackDenylist: [/^\/openchat\/connect\.html(?:$|[/?])/],
+          globIgnores: ["**/openchat/connect.html"],
+        },
         includeAssets: ["favicon.svg"],
         manifest: {
           name: "IOU",
@@ -167,6 +173,12 @@ export default defineConfig(({ command, mode }) => {
     ],
     build: {
       outDir: "dist",
+      rollupOptions: {
+        input: {
+          main: fileURLToPath(new URL("./index.html", import.meta.url)),
+          connect: fileURLToPath(new URL("./openchat/connect.html", import.meta.url)),
+        },
+      },
       // Production maps previously shipped full sourcesContent, including removed code.
       // Keep debugging maps private and generate them only in a separately controlled job.
       sourcemap: false,

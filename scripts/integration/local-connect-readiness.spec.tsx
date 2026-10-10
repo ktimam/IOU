@@ -1,4 +1,4 @@
-// @vitest-environment-options {"url":"http://localhost:3000/openchat/connect"}
+// @vitest-environment-options {"url":"http://localhost:3000/openchat/connect.html"}
 // Actual setup page, consent state machine, app catalog builder and processor integrity check.
 // Authentication, authenticated actor reads and the decrypted-Type hook are synthetic boundaries.
 import { createHash, webcrypto } from "node:crypto";
@@ -121,7 +121,7 @@ beforeEach(async () => {
   vi.stubGlobal("fetch", vi.fn(() => { throw new Error("No network before explicit consent"); }));
   Object.defineProperty(window, "opener", { configurable: true, value: fixture.opener });
   Object.defineProperty(window, "parent", { configurable: true, value: window });
-  window.history.replaceState(null, "", "/openchat/connect");
+  window.history.replaceState(null, "", "/openchat/connect.html");
   fixture.identity = { privateMaterial: "private-key-material" }; fixture.principal = "synthetic-a";
   fixture.opener.closed = false; fixture.opener.postMessage.mockReset();
   fixture.parent.closed = false; fixture.parent.postMessage.mockReset();
@@ -461,10 +461,25 @@ describe("no-file IOU setup consent", () => {
 
   it.each(["no-opener", "query", "fragment"])("rejects an unbound %s launch", async (reason) => {
     if (reason === "no-opener") Object.defineProperty(window, "opener", { configurable: true, value: null });
-    else window.history.replaceState(null, "", `/openchat/connect${reason === "query" ? "?code=not-accepted" : "#not-accepted"}`);
+    else window.history.replaceState(null, "", `/openchat/connect.html${reason === "query" ? "?code=not-accepted" : "#not-accepted"}`);
     await render(); await request();
     expect(container.textContent).toContain("Open Apps in OpenChat and choose Connect to start.");
     expect(fixture.actor.get_my_pairs).not.toHaveBeenCalled();
+    expect(fixture.opener.postMessage).not.toHaveBeenCalled();
+  });
+
+  it.each(["/openchat/connect/", "/openchat/connect.html/", "/openchat/connect.html/other", "/sheet/example"])("does not mount setup for another path or alias: %s", async (path) => {
+    window.history.replaceState(null, "", path);
+    await render(); await request();
+    expect(container.textContent).toContain("Open Apps in OpenChat and choose Connect to start.");
+    expect(fixture.actor.get_my_pairs).not.toHaveBeenCalled();
+    expect(fixture.opener.postMessage).not.toHaveBeenCalled();
+  });
+
+  it("retains the exact legacy SPA setup route for existing web clients", async () => {
+    window.history.replaceState(null, "", "/openchat/connect");
+    await ready();
+    expect(button("Connect")).toBeDefined();
     expect(fixture.opener.postMessage).not.toHaveBeenCalled();
   });
 

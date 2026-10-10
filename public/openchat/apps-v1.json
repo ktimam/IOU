@@ -16,7 +16,7 @@
         "sha256": "196703fb408946978cb079203ee693996a19e949745a783e0e8222b4c39f9ae3",
         "byteLength": 91005
       },
-      "setupUrl": "/openchat/connect"
+      "setupUrl": "/openchat/connect.html"
     }
   ]
 }

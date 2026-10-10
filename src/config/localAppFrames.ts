@@ -17,5 +17,5 @@ export function resolveLocalAppFrameOrigins(value: unknown, context: { isDevelop
 }
 
 export function isLocalAppFrameRoute(requestUrl: string | undefined): boolean {
-  return requestUrl === "/openchat/import" || requestUrl === "/openchat/connect";
+  return requestUrl === "/openchat/import" || requestUrl === "/openchat/connect" || requestUrl === "/openchat/connect.html";
 }

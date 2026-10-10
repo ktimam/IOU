@@ -24,7 +24,7 @@ type SheetChoice = { pairId: string; sheetId: string; accountName: string; sheet
 /** Authenticated setup only: no draft receiver, transaction write, processor execution or OC call. */
 export function LocalConnectPage() {
   const [opener] = useState(() => localAppSenderWindow(window));
-  if (!opener || opener.closed || location.pathname !== "/openchat/connect" || location.search || location.hash) {
+  if (!opener || opener.closed || !["/openchat/connect", "/openchat/connect.html"].includes(location.pathname) || location.search || location.hash) {
     return <main><h1>Connect IOU</h1><p>Open Apps in OpenChat and choose Connect to start.</p></main>;
   }
   return <AuthProvider><LocalDeliveryKeyProvider><ConnectSession opener={opener} /></LocalDeliveryKeyProvider></AuthProvider>;

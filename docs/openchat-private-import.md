@@ -10,6 +10,41 @@ and passing tests do not update previously installed APKs or served bundles auto
 
 ## Normal user flow (UI repair, 2026-10-06)
 
+### Connection-only document and APK framing
+
+Public discovery advertises `/openchat/connect.html`, a separate physical HTML
+asset rendering the same **Connect IOU** screen and account/chat setup protocol.
+It does not load the main app router, sheet pages, import receiver or transaction
+save UI. The legacy `/openchat/connect` SPA route remains available to existing
+web clients, with the main document's unchanged framing policy.
+
+Only the new connection asset additionally permits `http://localhost:5193`, the
+APK's existing on-device setup helper. It retains the existing `https://oc.app`
+ancestor. Normal IOU pages do not gain loopback framing permission. The asset
+disables extensionless aliases; its exact URL is excluded from PWA precaching and
+the main-document navigation fallback. A browser still controlled by an older
+service worker must receive the normal IOU service-worker update before relying
+on the new routing policy; do not clear accounts or private data to update it.
+
+The helper origin is not proof of a signed APK. Existing parent/origin/nonce,
+expiry, account and explicit-consent checks still apply. This authenticated setup
+page uses the existing IOU origin and identity settings; changing only its path
+does not select a different Internet Identity principal. Browser storage
+partitioning can still require sign-in inside the connection context.
+
+This requires publishing the updated IOU frontend/directory. It does not require
+an OpenChat canister change, an APK update or a new user-facing screen. Encrypted
+inbox delivery, model prompts and processor bytes are unchanged.
+
+Local verification on October 10 used an isolated production build, mounted
+connection/protocol tests, publication/header regressions and fresh Edge browser
+storage. The browser fixture served the built bytes with their staged asset
+headers: Connect rendered for the exact helper, other IOU routes and unapproved
+loopback parents were blocked, and an active service worker fetched Connect's
+own document while retaining ordinary SPA fallback. This is not a deployed
+asset-canister test or a live Internet Identity/phone sign-in test; those remain
+post-publication checks. No user account was accessed by these framing tests.
+
 ### Separate account connection and chat setup (2026-10-09)
 
 Setup protocol v2 separates **Apps → IOU → Connect/Reconnect** from the chat's

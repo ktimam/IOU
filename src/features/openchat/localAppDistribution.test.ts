@@ -20,7 +20,7 @@ describe("IOU-owned public client distribution", () => {
     expect(directory).toEqual({ version: 1, apps: [{ id: app.id, name: app.name, description: app.description, revision: app.revision,
       catalog: { url: "/openchat/local-app-v1.json", sha256: digest(catalogBytes), byteLength: catalogBytes.byteLength },
       processor: { url: "/openchat/local-processor-v1.js", sha256: digest(processorBytes), byteLength: processorBytes.byteLength },
-      setupUrl: "/openchat/connect",
+      setupUrl: "/openchat/connect.html",
     }] });
     expect(app.processor).toEqual({ sha256: metadata.sha256, byteLength: metadata.byteLength });
     expect(directory.apps[0].processor.sha256).toBe(metadata.sha256);
