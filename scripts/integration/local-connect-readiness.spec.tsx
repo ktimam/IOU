@@ -180,6 +180,52 @@ describe("scoped account and per-chat setup in the existing iframe page", () => 
     await waitForCommit(() => expect(fixture.parent.postMessage).toHaveBeenCalledOnce());
     return JSON.parse(fixture.parent.postMessage.mock.calls[0][0].catalogJson);
   }
+  it.each(["account", "chat"])("cancels %s setup through its bound parent without sharing or saving", async scope => {
+    const { accountId } = await scopeFixture();
+    const setupContext = scope === "account" ? { version: 2, scope, routes: [] } : { version: 2, scope, accountId, handle };
+    await requestScope(setupContext); await waitEnabled(scope === "account" ? "Connect" : "Save setup");
+    await click(button("Cancel connection")!);
+    expect(fixture.parent.postMessage).toHaveBeenCalledExactlyOnceWith({ type: "oc:app-setup:cancel", version: 2, connectionId, appId: "iou" }, clientOrigin);
+    expect(fixture.opener.postMessage).not.toHaveBeenCalled();
+    expect(fixture.loadDeliveryKey).not.toHaveBeenCalled();
+    expect(fixture.actor.create_encrypted_inbox_grant).not.toHaveBeenCalled();
+    expect(fixture.actor.set_chat_sheet_link).not.toHaveBeenCalled();
+    expect(fixture.actor.add_entry_batch).not.toHaveBeenCalled();
+    await request({ version: 2, setupContext }, clientOrigin, fixture.parent);
+    expect(button("Cancel connection")).toBeUndefined();
+    expect(button("Connect")).toBeUndefined(); expect(button("Save setup")).toBeUndefined();
+    expect(fixture.parent.postMessage).toHaveBeenCalledOnce();
+  });
+  it("cancels an in-flight chat setup before grant creation and rejects its late result", async () => {
+    const { accountId } = await scopeFixture(""), gate = deferred<void>();
+    await requestScope({ version: 2, scope: "chat", accountId, handle });
+    await waitForCommit(() => expect(container.querySelectorAll("option")).toHaveLength(3));
+    await select(sheetId); await waitEnabled("Save setup"); publicFetch({ wait: gate.promise });
+    await click(button("Save setup")!);
+    await waitForCommit(() => expect(fetch).toHaveBeenCalledTimes(2));
+    await click(button("Cancel connection")!);
+    await act(async () => { gate.resolve(); }); await settledDigest();
+    expect(fixture.parent.postMessage).toHaveBeenCalledExactlyOnceWith({ type: "oc:app-setup:cancel", version: 2, connectionId, appId: "iou" }, clientOrigin);
+    expect(fixture.actor.create_encrypted_inbox_grant).not.toHaveBeenCalled();
+    expect(fixture.actor.set_chat_sheet_link).not.toHaveBeenCalled();
+    expect(fixture.actor.add_entry_batch).not.toHaveBeenCalled();
+  });
+  it("does not share or save a chat mapping when Cancel follows an already submitted grant", async () => {
+    const { accountId } = await scopeFixture(""), gate = deferred<any>();
+    fixture.actor.create_encrypted_inbox_grant.mockImplementationOnce(() => gate.promise);
+    await requestScope({ version: 2, scope: "chat", accountId, handle });
+    await waitForCommit(() => expect(container.querySelectorAll("option")).toHaveLength(3));
+    await select(sheetId); await waitEnabled("Save setup"); publicFetch();
+    await click(button("Save setup")!);
+    await waitForCommit(() => expect(fixture.actor.create_encrypted_inbox_grant).toHaveBeenCalledOnce());
+    const submitted = fixture.actor.create_encrypted_inbox_grant.mock.calls[0][0];
+    await click(button("Cancel connection")!);
+    await act(async () => { gate.resolve({ Ok: { ...submitted, inbox_id: "a".repeat(64), created_at_ms: BigInt(Date.now() - 1), revoked: false } }); });
+    expect(fixture.parent.postMessage).toHaveBeenCalledExactlyOnceWith({ type: "oc:app-setup:cancel", version: 2, connectionId, appId: "iou" }, clientOrigin);
+    expect(fixture.actor.create_encrypted_inbox_grant).toHaveBeenCalledOnce();
+    expect(fixture.actor.set_chat_sheet_link).not.toHaveBeenCalled();
+    expect(fixture.actor.add_entry_batch).not.toHaveBeenCalled();
+  });
   it("connects the IOU account without a sheet picker or sheet reads", async () => {
     const { accountId } = await scopeFixture();
     await requestScope({ version: 2, scope: "account", routes: [] }); await waitEnabled("Connect");
@@ -388,11 +434,22 @@ describe("no-file IOU setup consent", () => {
     expect(button("Connect")).toBeUndefined();
     await request();
     expect(button("Connect")).toBeUndefined();
-    expect(fixture.opener.postMessage).not.toHaveBeenCalled();
+    if (reason === "cancel") expect(fixture.opener.postMessage).toHaveBeenCalledExactlyOnceWith({ type: "oc:app-setup:cancel", version: 1, connectionId, appId: "iou" }, clientOrigin);
+    else expect(fixture.opener.postMessage).not.toHaveBeenCalled();
     expect(fetch).not.toHaveBeenCalled();
+    expect(fixture.actor.create_encrypted_inbox_grant).not.toHaveBeenCalled();
+    expect(fixture.actor.add_entry_batch).not.toHaveBeenCalled();
   });
 
-  it.each(["account", "identity", "actor", "types", "generation", "unreadable", "logout", "pagehide", "unmount", "closed", "expiry"])("blocks late async setup delivery after %s changes", async (reason) => {
+  it("keeps explicit cancellation final when notifying the opener fails", async () => {
+    await ready(); fixture.opener.postMessage.mockImplementationOnce(() => { throw new Error("closed during cancel"); });
+    await click(button("Cancel connection")!); await request();
+    expect(button("Connect")).toBeUndefined(); expect(button("Cancel connection")).toBeUndefined();
+    expect(fixture.opener.postMessage).toHaveBeenCalledOnce();
+    expect(fetch).not.toHaveBeenCalled(); expect(fixture.actor.create_encrypted_inbox_grant).not.toHaveBeenCalled();
+  });
+
+  it.each(["account", "identity", "actor", "types", "generation", "unreadable", "logout", "pagehide", "unmount", "closed", "expiry", "cancel"])("blocks late async setup delivery after %s changes", async (reason) => {
     const clock = vi.spyOn(Date, "now").mockReturnValue(1000);
     try {
       await ready();
@@ -406,6 +463,7 @@ describe("no-file IOU setup consent", () => {
       if (reason === "generation") { fixture.templates = { ...fixture.templates, readyGeneration: {} }; await render(); }
       if (reason === "unreadable") { fixture.templates = { ...fixture.templates, ready: false, loading: true }; await render(); }
       if (reason === "logout") await click(button("Sign out")!);
+      if (reason === "cancel") await click(button("Cancel connection")!);
       if (reason === "pagehide") await act(async () => { window.dispatchEvent(new Event("pagehide")); });
       if (reason === "unmount") await act(async () => { root.render(null); });
       if (reason === "closed") fixture.opener.closed = true;
@@ -413,7 +471,8 @@ describe("no-file IOU setup consent", () => {
       await act(async () => { gate.resolve(); });
       // Await both public byte reads and a real digest completion before asserting non-delivery.
       await settledDigest();
-      expect(fixture.opener.postMessage).not.toHaveBeenCalled();
+      if (reason === "cancel") expect(fixture.opener.postMessage).toHaveBeenCalledExactlyOnceWith({ type: "oc:app-setup:cancel", version: 1, connectionId, appId: "iou" }, clientOrigin);
+      else expect(fixture.opener.postMessage).not.toHaveBeenCalled();
       expect(fixture.actor.add_entry_batch).not.toHaveBeenCalled();
       expect(fixture.actor.create_encrypted_inbox_grant).not.toHaveBeenCalled();
     } finally { clock.mockRestore(); }

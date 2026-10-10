@@ -82,6 +82,25 @@ describe("explicit IOU setup consent binding", () => {
     expect(() => f.consent.approve(state.binding, "{}")).toThrow();
     expect(f.consent.receive(f.event()).kind).toBe("shared");
   });
+  it("cancels only the current binding once without a catalog and rejects late approval", () => {
+    const f = fixture(), state = f.request();
+    expect(() => f.consent.cancel({ ...state.binding })).toThrow("expired or changed");
+    expect(f.consent.isCurrent(state.binding)).toBe(true);
+    expect(f.consent.cancel(state.binding)).toEqual({ type: "oc:app-setup:cancel", version: 1, connectionId: id, appId: "iou" });
+    expect(f.consent.state()).toEqual({ kind: "closed" });
+    expect(f.consent.isCurrent(state.binding)).toBe(false);
+    expect(() => f.consent.cancel(state.binding)).toThrow("expired or changed");
+    expect(() => f.consent.approve(state.binding, "{}")).toThrow("expired or changed");
+    expect(f.consent.receive(f.event()).kind).toBe("closed");
+    expect(f.opener.postMessage).not.toHaveBeenCalled();
+  });
+  it.each(["expired", "shared", "closed"])("does not cancel an already %s binding", outcome => {
+    const f = fixture(), state = f.request();
+    if (outcome === "expired") f.clock(1000 + LOCAL_APP_SETUP_MS);
+    if (outcome === "shared") f.consent.approve(state.binding, "{}");
+    if (outcome === "closed") f.consent.close();
+    expect(() => f.consent.cancel(state.binding)).toThrow("expired or changed");
+  });
 });
 
 describe("version-two scoped setup consent", () => {
@@ -89,6 +108,13 @@ describe("version-two scoped setup consent", () => {
   const setupContext = { version: 2, scope: "account", accountId, routes: [] };
   const response = (patch: Record<string, unknown> = {}) => JSON.stringify({ version: 2, scope: "account", appId: "iou", accountId,
     catalogJson: '{"version":1,"apps":[]}', routes: [], ...patch });
+  it.each([setupContext, { version: 2, scope: "chat", accountId, handle: id }])("cancels a scoped request without exposing its context", context => {
+    const f = fixture(), state = f.consent.receive(f.event({ version: 2, setupContext: context }));
+    if (state.kind !== "pending") throw new Error("Expected setup consent");
+    expect(f.consent.cancel(state.binding)).toEqual({ type: "oc:app-setup:cancel", version: 2, connectionId: id, appId: "iou" });
+    expect(f.consent.state()).toEqual({ kind: "closed" });
+    expect(() => f.consent.approve(state.binding, response())).toThrow("expired or changed");
+  });
   it("pins the scope and account before sharing a single version-two reply", () => {
     const f = fixture(), state = f.consent.receive(f.event({ version: 2, setupContext }));
     if (state.kind !== "pending") throw new Error("Expected setup consent");

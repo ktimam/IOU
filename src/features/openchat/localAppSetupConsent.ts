@@ -71,6 +71,14 @@ export function createLocalAppSetupConsent(options: { opener: MessageEventSource
       const active = current();
       return active.kind === "pending" && active.binding === binding;
     },
+    cancel(binding: LocalAppSetupBinding) {
+      const active = current();
+      if (active.kind !== "pending" || active.binding !== binding) throw new Error("Setup connection expired or changed");
+      // Consume before posting so a late async approval cannot race cancellation.
+      close();
+      return Object.freeze({ type: "oc:app-setup:cancel" as const, version: binding.setupContext ? 2 as const : 1 as const,
+        connectionId: binding.connectionId, appId });
+    },
     approve(binding: LocalAppSetupBinding, catalogJson: string) {
       const active = current();
       if (active.kind !== "pending" || active.binding !== binding) throw new Error("Setup connection expired or changed");

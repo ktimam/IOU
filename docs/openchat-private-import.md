@@ -112,12 +112,42 @@ passed 15 tests, and each frozen IOU runtime passed all 132 integration tests.
 These checks created no financial entries and did not rerun model accuracy,
 install an APK on a physical phone or change an official OpenChat canister.
 
-Known cancellation limitation: cancelling in the embedded IOU page and returning
+At that checkpoint, cancelling in the embedded IOU page and returning
 can leave the native chat-setup attempt waiting. Main Apps does not expose its
 Cancel action for that chat-initiated attempt. Reloading the APK page alone did
 not release it; force-stopping and reopening only the local-test APK cleared it
 while preserving the account, private cards, settings and pending route handle.
 This workaround is not a passing cancellation-protocol test.
+
+### Setup cancellation correction (2026-10-10)
+
+IOU's explicit **Cancel** consumes its current consent binding and sends a
+one-shot `oc:app-setup:cancel` message to the exact captured OpenChat origin and
+window. The message includes only the setup version, connection ID and app ID.
+Expired/stale consent cannot cancel another attempt; a late preparation result
+cannot send setup or save a chat mapping after cancellation. Cancellation cannot
+undo a grant already submitted to the backend.
+
+The updated OpenChat client verifies that message and releases the native setup
+listener. Its existing Apps detail can also cancel a chat-started attempt,
+allowing retry without an APK restart. Existing connections, destinations, cards
+and entries remain unchanged. Closing the browser before its initial local
+challenge completes may require **Apps → IOU → Cancel connection**; browser
+teardown alone is not guaranteed.
+
+Both preserved local/Tailscale runtimes passed TypeScript, 41 consent tests and
+151 cross-client integration tests before activation. This is not a model,
+delivery or mainnet acceptance rerun. CI work remains explicitly deferred.
+
+The updated x86 APK then passed the actual emulator flow without a process
+restart: **Open setup → IOU Cancel → retry → Apps Cancel connection → retry →
+IOU Cancel**. Each opening retained the same synthetic sheet and its two Types;
+OpenChat retained the account, chat opt-in and private cards. No Save setup or
+financial Save was pressed. The phone APK is a separate artifact, not a physical
+phone test. Directory refresh succeeded after setup ended. A separate app-level
+Reconnect opened the account-only consent screen without a sheet picker; cancelling
+it returned to the same APK process with Reconnect enabled and the prior connection
+unchanged. Both emulator and phone APK packages passed independent artifact checks.
 
 The dated acceptance below describes earlier builds; setup v1 remains a compatibility
 path for them. Model prompts, processor behavior and financial save semantics are

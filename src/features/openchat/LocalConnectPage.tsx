@@ -41,6 +41,15 @@ function ConnectSession({ opener }: { opener: Window }) {
     const consent = consentRef.current;
     consent?.close(); setState(consent?.state() ?? { kind: "closed" }); setNotice(message);
   }, []);
+  const cancel = () => {
+    const consent = consentRef.current, active = consent?.state();
+    try {
+      if (active?.kind === "pending") {
+        opener.postMessage(consent!.cancel(active.binding), active.binding.senderOrigin);
+      }
+    } catch { /* Keep cancellation final even when the requesting window has closed. */ }
+    close("Setup request cancelled. Nothing was shared.");
+  };
   useEffect(() => {
     if (previousAuth.current && (previousAuth.current.principal !== principal || previousAuth.current.identity !== identity)) {
       close("The IOU sign-in changed. Nothing further will be shared. Start a fresh Connect request.");
@@ -80,7 +89,7 @@ function ConnectSession({ opener }: { opener: Window }) {
     {state.kind === "pending" && <section aria-label="Setup requester">
       <p>Requesting client: <strong>{state.binding.senderOrigin}</strong></p>
       <p>Connect only if you started this request and recognize this address.</p>
-      <button className="secondary" onClick={() => close("Setup request cancelled. Nothing was shared.")}>Cancel connection</button>
+      <button className="secondary" onClick={cancel}>Cancel connection</button>
     </section>}
     {state.kind === "closed" && <p>Connection closed or expired. Start a fresh Connect request; this page will not share automatically.</p>}
     {state.kind === "shared" && <p>Setup was sent to the requesting client. No entry was saved. Check the client to confirm it accepted the setup.</p>}
