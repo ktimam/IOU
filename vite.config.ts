@@ -134,7 +134,7 @@ export default defineConfig(({ command, mode }) => {
         registerType: "autoUpdate",
         workbox: {
           // Never substitute index.html (with its different framing policy) for setup.
-          navigateFallbackDenylist: [/^\/openchat\/connect\.html(?:$|[/?])/],
+          navigateFallbackDenylist: [/^\/openchat\/connect(?:\.html)?(?:$|[/?])/],
           globIgnores: ["**/openchat/connect.html"],
         },
         includeAssets: ["favicon.svg"],

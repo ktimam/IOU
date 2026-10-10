@@ -12,17 +12,20 @@ and passing tests do not update previously installed APKs or served bundles auto
 
 ### Connection-only document and APK framing
 
-Public discovery advertises `/openchat/connect.html`, a separate physical HTML
-asset rendering the same **Connect IOU** screen and account/chat setup protocol.
-It does not load the main app router, sheet pages, import receiver or transaction
-save UI. The legacy `/openchat/connect` SPA route remains available to existing
-web clients, with the main document's unchanged framing policy.
+Public discovery retains the stable `/openchat/connect` setup URL. The asset
+canister resolves that extensionless alias to the separate physical
+`openchat/connect.html` document, rendering the same **Connect IOU** screen and
+account/chat setup protocol. It does not load the main app router, sheet pages,
+import receiver or transaction save UI. OpenChat includes the setup URL in its
+installed publisher identity, so retaining it preserves existing connections
+without changing publisher trust or asking users to replace their setup.
 
 Only the new connection asset additionally permits `http://localhost:5193`, the
 APK's existing on-device setup helper. It retains the existing `https://oc.app`
 ancestor. Normal IOU pages do not gain loopback framing permission. The asset
-disables extensionless aliases; its exact URL is excluded from PWA precaching and
-the main-document navigation fallback. A browser still controlled by an older
+enables its stable extensionless alias; the physical HTML is excluded from PWA
+precaching and both URL spellings bypass the main-document navigation fallback.
+A browser still controlled by an older
 service worker must receive the normal IOU service-worker update before relying
 on the new routing policy; do not clear accounts or private data to update it.
 
@@ -36,14 +39,22 @@ This requires publishing the updated IOU frontend/directory. It does not require
 an OpenChat canister change, an APK update or a new user-facing screen. Encrypted
 inbox delivery, model prompts and processor bytes are unchanged.
 
-Local verification on October 10 used an isolated production build, mounted
+Earlier local verification on October 10 used an isolated production build, mounted
 connection/protocol tests, publication/header regressions and fresh Edge browser
 storage. The browser fixture served the built bytes with their staged asset
-headers: Connect rendered for the exact helper, other IOU routes and unapproved
-loopback parents were blocked, and an active service worker fetched Connect's
-own document while retaining ordinary SPA fallback. This is not a deployed
-asset-canister test or a live Internet Identity/phone sign-in test; those remain
-post-publication checks. No user account was accessed by these framing tests.
+headers: the physical `/openchat/connect.html` entry rendered for the exact helper,
+other IOU routes and unapproved loopback parents were blocked, and an active
+service worker fetched that document while retaining ordinary SPA fallback.
+That earlier fixture also rejected the extensionless `/openchat/connect` URL,
+alongside trailing-slash/path-suffix variants; those results predate the alias fix.
+The refreshed localhost and Tailscale development frontends subsequently passed
+HTTP checks for both URL spellings serving the same connection-only document,
+with the main SPA framing unchanged and existing directory/catalog/processor
+bytes preserved. Each preserved runtime also passed its TypeScript check,
+41 focused tests and 145 cross-client integration tests.
+Neither this fixture nor the earlier checks establish deployed asset-canister
+behavior or live Internet Identity/phone sign-in; those remain separate checks.
+No user account was accessed by the framing tests.
 
 ### Separate account connection and chat setup (2026-10-09)
 

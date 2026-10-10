@@ -13,7 +13,8 @@ export function createLocalAppPublicDirectory(catalog, catalogBytes, processor) 
   return { version: 1, apps: [{ id: app.id, name: app.name, description: app.description, revision: app.revision,
     catalog: { url: "/openchat/local-app-v1.json", sha256: digest(catalogBytes), byteLength: catalogBytes.byteLength },
     processor: { url: "/openchat/local-processor-v1.js", sha256: processor.sha256, byteLength: processor.byteLength },
-    setupUrl: "/openchat/connect.html",
+    // setupUrl is part of the installed publisher identity; retain the stable alias.
+    setupUrl: "/openchat/connect",
   }] };
 }
 

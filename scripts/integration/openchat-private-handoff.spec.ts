@@ -73,6 +73,8 @@ describe("actual IOU export through actual OpenChat proposal/conformance/project
     const processorBytes=readFileSync(resolve(artifactRoot,"local-processor-v1.js"));
     const metadata=JSON.parse(readFileSync(resolve(artifactRoot,"local-processor-v1.sha256.json"),"utf8"));
     const descriptor=parseLocalAppDirectory(directoryJson,sourceUrl).apps[0];
+    // Installed clients pin this setup URL as part of the publisher identity.
+    expect(descriptor.setupUrl).toBe(new URL("/openchat/connect",sourceUrl).href);
     expect(descriptor.catalog).toMatchObject({sha256:createHash("sha256").update(publicCatalogJson).digest("hex"),byteLength:Buffer.byteLength(publicCatalogJson)});
     expect(descriptor.processor).toMatchObject({sha256:createHash("sha256").update(processorBytes).digest("hex"),byteLength:processorBytes.byteLength});
     expect(metadata).toMatchObject({sha256:descriptor.processor.sha256,byteLength:descriptor.processor.byteLength});

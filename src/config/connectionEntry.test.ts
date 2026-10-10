@@ -1,4 +1,4 @@
-import { readFileSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
 import ts from 'typescript';
 
@@ -46,6 +46,13 @@ describe('dedicated Connect HTML entry', () => {
     expect(read('index.html')).toContain('/src/main.tsx');
   });
 
+  it('does not shadow the stable extensionless alias with a physical asset or directory', () => {
+    for (const relative of ['openchat/connect', 'openchat/connect/index.html',
+      'public/openchat/connect', 'public/openchat/connect/index.html']) {
+      expect(existsSync(new URL(`../../${relative}`, import.meta.url)), relative).toBe(false);
+    }
+  });
+
   it('excludes Connect from both service-worker navigation fallback and precaching', () => {
     const denylist = property('navigateFallbackDenylist');
     expect(ts.isArrayLiteralExpression(denylist)).toBe(true);
@@ -54,10 +61,11 @@ describe('dedicated Connect HTML entry', () => {
       return new RegExp(literal.slice(1, separator), literal.slice(separator + 1));
     });
     expect(patterns.length).toBeGreaterThan(0);
-    for (const url of ['/openchat/connect.html', '/openchat/connect.html?x=1', '/openchat/connect.html/extra']) {
+    for (const url of ['/openchat/connect', '/openchat/connect?x=1', '/openchat/connect/extra',
+      '/openchat/connect.html', '/openchat/connect.html?x=1', '/openchat/connect.html/extra']) {
       expect(patterns.some(pattern => pattern.test(url)), url).toBe(true);
     }
-    for (const url of ['/', '/signin', '/settings', '/openchat/connect', '/openchat/connect.htmlx']) {
+    for (const url of ['/', '/signin', '/settings', '/openchat/connect.htmlx', '/openchat/connect-other']) {
       expect(patterns.some(pattern => pattern.test(url)), url).toBe(false);
     }
     const ignores = descendants(property('globIgnores')).filter(ts.isStringLiteral).map(node => node.text);

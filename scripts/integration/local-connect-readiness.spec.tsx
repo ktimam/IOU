@@ -476,7 +476,7 @@ describe("no-file IOU setup consent", () => {
     expect(fixture.opener.postMessage).not.toHaveBeenCalled();
   });
 
-  it("retains the exact legacy SPA setup route for existing web clients", async () => {
+  it("retains the exact stable publisher setup URL for existing clients", async () => {
     window.history.replaceState(null, "", "/openchat/connect");
     await ready();
     expect(button("Connect")).toBeDefined();

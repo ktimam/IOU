@@ -58,6 +58,7 @@ test("stages exact reviewed processor and actions, changing only public destinat
   expected.apps[0].destination = `${origin}/openchat/import`;
   expected.apps[0].deliveryInbox = { version: 1, kind: "ic-canister", host: "https://icp-api.io", canisterId };
   assert.deepEqual(json(path.join(staged, "local-app-v1.json")), expected);
+  assert.equal(json(path.join(staged, "apps-v1.json")).apps[0].setupUrl, "/openchat/connect");
   const processor = verifyCatalogOnlyProcessor({
     processorBytes: readFileSync(path.join(staged, "local-processor-v1.js")),
     metadataBytes: readFileSync(path.join(staged, "local-processor-v1.sha256.json")),
@@ -227,6 +228,6 @@ test("stages the dedicated Connect framing exception without relaxing index or l
     assert.ok(directive(rule, "connect-src").every(value =>
       !/localhost|127\.0\.0\.1|\[::1\]|\.ts\.net|https?:\/\/(?:10\.|192\.168\.)/.test(value)));
   }
-  assert.equal(staged.find(rule => rule.match === "openchat/connect.html").enable_aliasing, false);
+  assert.equal(staged.find(rule => rule.match === "openchat/connect.html").enable_aliasing, true);
   assert.deepEqual(sourceHashes(f), before);
 });

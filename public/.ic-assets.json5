@@ -12,7 +12,8 @@
 //   ASSET KEYS (physical files), never request paths, so a `/openchat/card` match would hit nothing;
 //   a route-only rule would not isolate a framing permission from the rest of the SPA.
 //   openchat/connect.html is therefore a separate physical document, with a connection-only
-//   bootstrap. Only it additionally allows the APK helper at http://localhost:5193. That origin
+//   bootstrap. Its extensionless /openchat/connect alias preserves the installed publisher URL.
+//   Only this document additionally allows the APK helper at http://localhost:5193. That origin
 //   is not proof of an APK identity; setup still requires bound requests and explicit consent.
 //   Do not assume cross-origin frames are signed out: this setup page uses normal IOU auth.
 //   Every other asset (JS/CSS/fonts/…) stays 'none'/DENY.
@@ -59,10 +60,11 @@
     "disable_security_policy_warning": true
   },
   {
-    // Physical connection entry only. No extensionless aliases and no index.html fallback here.
+    // The stable /openchat/connect alias resolves to this physical connection document, not index.html.
+    // Retain that publisher URL for installed clients; do not replace it with the .html spelling.
     // Keep the existing official web origin; add only the exact native Connect helper origin.
     "match": "openchat/connect.html",
-    "enable_aliasing": false,
+    "enable_aliasing": true,
     "headers": {
       "Content-Security-Policy": "default-src 'self'; connect-src 'self' http://127.0.0.1:40436 https://icp-api.io https://*.icp0.io https://*.ic0.app https://api.frankfurter.dev; script-src 'self' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self'; object-src 'none'; base-uri 'self'; form-action 'self'; frame-ancestors https://oc.app http://localhost:5193;",
       "X-Content-Type-Options": "nosniff",

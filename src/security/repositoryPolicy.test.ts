@@ -264,7 +264,7 @@ describe('repository security policy', () => {
     expect(frameAncestors(defaults)).toEqual(["'none'"]);
     expect(frameAncestors(index)).toEqual(['https://oc.app']);
     expect(frameAncestors(connect)).toEqual(['http://localhost:5193', 'https://oc.app']);
-    expect(connect.enable_aliasing).toBe(false);
+    expect(connect.enable_aliasing).toBe(true);
     expect(rules.indexOf(connect)).toBeGreaterThan(rules.indexOf(defaults));
     expect(defaults.headers['X-Frame-Options']).toBe('DENY');
     expect(index.headers['X-Frame-Options']).toBe('');

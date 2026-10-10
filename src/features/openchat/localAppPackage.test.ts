@@ -82,7 +82,7 @@ describe("checked-in public IOU package freshness", () => {
       id: app.id, name: app.name, description: app.description, revision: app.revision,
       catalog: { url: "/openchat/local-app-v1.json", sha256: digest(catalogBytes), byteLength: catalogBytes.byteLength },
       processor: { url: "/openchat/local-processor-v1.js", ...processorIdentity },
-      setupUrl: "/openchat/connect.html",
+      setupUrl: "/openchat/connect",
     }] });
   });
 });
