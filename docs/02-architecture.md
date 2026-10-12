@@ -1,5 +1,7 @@
 # IOU — Architecture (v2)
 
+**Current implementation:** the backend is Rust. [Account keys and recovery](account-vault.md) specifies the implemented account-root vault, locally generated sheet keys, explicit migration, and unchanged OpenChat encrypted inbox path. The original Motoko, Telegram and per-sheet VetKD material below is historical design context, not the current key protocol or deployment instructions.
+
 > Single Motoko backend canister + a Vite/React PWA + a Telegram bot (in v1)
 > for image-based entry. End-to-end encryption with `vetkd`-wrapped per-sheet
 > keys. Single canister for v1; multi-canister deferred to v2+ (see

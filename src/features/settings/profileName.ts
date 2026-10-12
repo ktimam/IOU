@@ -1,7 +1,7 @@
 // The user's global display name: encrypted in their caller-scoped UserRecord and cached locally.
 //
 // The canister already owns `wrapped_display_name` + `display_name_iv`; older UI paths simply did
-// not use them consistently. Production derives the same per-principal vetKD material used for the
+// not use them consistently. Production reads the same per-principal root material used for the
 // durable OpenChat consumer secret, then `encryptWithSheetKey` applies its separate name-key HKDF
 // domain before AES-GCM. Dev keeps using its existing per-principal self-ECDH simulation.
 
@@ -11,10 +11,8 @@ import {
   encryptWithSheetKey,
   isProdVetkd,
 } from "../crypto/devVetkd";
-import {
-  deriveConsumerWrapKeyProd,
-  loadOrCreateTransportKey,
-} from "../crypto/prodVetkd";
+import { requireAccountRoot } from "../crypto/vaultAccess";
+import type { AccountVaultActor } from "../crypto/accountVault";
 
 export const LEGACY_PLAINTEXT_DISPLAY_NAME_IV = "v1-dev-iv-not-secure";
 
@@ -43,8 +41,7 @@ export type ProfileNameRecord = {
 export type ProfileNameActor = {
   get_my_user: () => Promise<unknown>;
   set_display_name: (wrappedDisplayName: number[], displayNameIv: number[]) => Promise<unknown>;
-  vetkd_public_key: () => Promise<ArrayLike<number>>;
-  vetkd_wrap_consumer_key: (transportPublicKey: number[]) => Promise<ArrayLike<number>>;
+  get_account_vault?: AccountVaultActor["get_account_vault"];
 };
 
 /** Shared by the read-side hydration guard and its pre-write guard. */
@@ -167,27 +164,19 @@ export function reconcileProfileName(
   return { use: localText };
 }
 
-/** Existing account-key derivation, reused so production names decrypt on every signed-in device. */
+/** Cached historical account root: no paid derivation on profile reads/writes. */
 export async function deriveProfileNameKey(
   principal: string,
-  actor: Pick<ProfileNameActor, "vetkd_public_key" | "vetkd_wrap_consumer_key">,
+  actor: Pick<ProfileNameActor, "get_account_vault">,
 ): Promise<Uint8Array> {
   if (!isProdVetkd()) return deriveUserKey(principal);
-  const transport = await loadOrCreateTransportKey();
-  const masterPublicKey = new Uint8Array(await actor.vetkd_public_key());
-  const encryptedVetKey = new Uint8Array(
-    await actor.vetkd_wrap_consumer_key(Array.from(transport.publicKey)),
-  );
-  return deriveConsumerWrapKeyProd(
-    principal,
-    transport,
-    masterPublicKey,
-    encryptedVetKey,
-  );
+  // This returns a disposable copy of the same historical key material;
+  // caller cleanup cannot zero another consumer's active key.
+  return requireAccountRoot(actor, principal);
 }
 
 export async function persistEncryptedProfileName(
-  actor: Pick<ProfileNameActor, "set_display_name" | "vetkd_public_key" | "vetkd_wrap_consumer_key">,
+  actor: Pick<ProfileNameActor, "set_display_name" | "get_account_vault">,
   principal: string,
   name: string,
 ): Promise<void> {

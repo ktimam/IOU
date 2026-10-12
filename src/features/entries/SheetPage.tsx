@@ -34,6 +34,7 @@ import { CloseSheetButton } from "./CloseSheetButton";
 import { downloadCsv, entriesToCsv } from "./csvExport";
 import { useToasts } from "../ui/Toasts";
 import { buildInviteLink } from "../flows/inviteLink";
+import { createVaultInvite } from "../crypto/vaultInvites";
 import { isProdVetkd } from "../crypto/devVetkd";
 import { usePreferences } from "../settings/usePreferences";
 import { usePairTemplates } from "../templates/PairTemplatesContext";
@@ -303,23 +304,22 @@ export function SheetPage({ localImport: handoffImport }: { localImport?: LocalS
   const [draftOpen, setDraftOpen] = useState(false);
   const [draftText, setDraftText] = useState("");
   const [draftErrors, setDraftErrors] = useState<string[]>([]);
-  // Invite link (share modal): builds <origin>/pair/accept#c/s/k — the key rides
-  // in the fragment (dev) so the invitee self-joins with no creator "grant".
+  // Production fragments carry an independent unlock secret, never the sheet key.
   const [inviteOpen, setInviteOpen] = useState(false);
   const [inviteLink, setInviteLink] = useState<string | null>(null);
   const [inviteBusy, setInviteBusy] = useState(false);
   async function openInvite() {
-    if (!actor) return;
+    if (!actor || !principal) return;
     setInviteBusy(true);
     try {
-      // Mint a FRESH, live single-use code every time (the stored pair.invite_code
-      // goes stale once consumed and after a partner leaves — see issue_invite).
-      const code = (await (actor as any).issue_invite(sheet.pair_id)) as string;
-      let kSheet: Uint8Array | undefined;
-      if (!isProdVetkd()) {
-        kSheet = get(sheetId) ?? (await unwrapFor(sheetId));
+      const kSheet = get(sheetId) ?? (await unwrapFor(sheetId));
+      if (isProdVetkd()) {
+        const invite = await createVaultInvite(actor, principal, sheetId, kSheet);
+        setInviteLink(buildInviteLink(window.location.origin, invite));
+      } else {
+        const code = (await (actor as any).issue_invite(sheet.pair_id)) as string;
+        setInviteLink(buildInviteLink(window.location.origin, { code, sheetId, kSheet }));
       }
-      setInviteLink(buildInviteLink(window.location.origin, { code, sheetId, kSheet }));
       setInviteOpen(true);
     } catch (e) {
       toasts.show({ kind: "error", text: (e as Error).message });

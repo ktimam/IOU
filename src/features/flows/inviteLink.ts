@@ -4,11 +4,11 @@
 // flow. Opening it lets the invitee self-join (accept_invite) with immediate
 // read/write access — no creator step. The secret material rides in the URL
 // FRAGMENT (`#…`), which browsers never send to any server, so the invite code
-// and (in the dev/P-256 build) the sheet key K_sheet stay client-only.
+// and independent production invite unlock secret stay client-only.
 //
 // Format:  <origin>/pair/accept#c=<invite_code>&s=<active_sheet_id>&k=<base64url(K_sheet)>
-// In the prod (vetkd IBE) build `k` is omitted — the IC re-derives K_sheet for
-// any member, so membership alone (accept_invite flipping member_b) suffices.
+// Production uses `v=1&u=<random invite secret>` to unlock an encrypted server
+// envelope. `k` remains a development-only raw key; old production links fail closed.
 //
 // SECURITY: the link is a single-use bearer capability — whoever holds it can
 // accept once (the canister consumes the invite on accept). Treat it like a
@@ -20,6 +20,7 @@ export type InviteParams = {
   code: string;
   sheetId: string;
   keyB64u?: string; // present in dev; absent in prod
+  inviteSecretB64u?: string; // independent 256-bit production invite secret, never K_sheet
 };
 
 // URL-safe base64 (no padding), portable across browser + node (tests).
@@ -45,15 +46,20 @@ export function b64uDecode(s: string): Uint8Array {
   return out;
 }
 
-/** Build the shareable invite link. Omit `kSheet` in the prod build. */
+/** Build a bearer link; never mix development raw keys and production secrets. */
 export function buildInviteLink(
   origin: string,
-  p: { code: string; sheetId: string; kSheet?: Uint8Array },
+  p: { code: string; sheetId: string; kSheet?: Uint8Array; inviteSecretB64u?: string },
 ): string {
+  if (p.kSheet && p.inviteSecretB64u) throw new Error("Ambiguous invitation key format");
   const frag = new URLSearchParams();
   frag.set("c", p.code);
   frag.set("s", p.sheetId);
   if (p.kSheet && p.kSheet.length > 0) frag.set("k", b64uEncode(p.kSheet));
+  if (p.inviteSecretB64u) {
+    if (!/^[A-Za-z0-9_-]{43}$/.test(p.inviteSecretB64u) || b64uEncode(b64uDecode(p.inviteSecretB64u)) !== p.inviteSecretB64u) throw new Error("Invalid invitation secret");
+    frag.set("v", "1"); frag.set("u", p.inviteSecretB64u);
+  }
   // strip a trailing slash on origin so we never emit "…//pair/accept"
   const base = origin.replace(/\/+$/, "");
   return `${base}${ACCEPT_PATH}#${frag.toString()}`;
@@ -71,5 +77,11 @@ export function parseInviteFragment(fragment: string): InviteParams | null {
   const sheetId = (q.get("s") || "").trim();
   if (!code || !sheetId) return null;
   const k = (q.get("k") || "").trim();
+  const secret = (q.get("u") || "").trim();
+  if (secret || q.has("v")) {
+    if (k || q.get("v") !== "1" || !/^[A-Za-z0-9_-]{43}$/.test(secret)) return null;
+    try { if (b64uEncode(b64uDecode(secret)) !== secret) return null; } catch { return null; }
+    return { code, sheetId, inviteSecretB64u: secret };
+  }
   return { code, sheetId, keyB64u: k || undefined };
 }

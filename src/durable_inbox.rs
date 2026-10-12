@@ -1330,7 +1330,10 @@ mod tests {
     #[test]
     fn host_wrapper_keeps_fresh_stable_regions_and_separates_anonymous_deposit() {
         let source = include_str!("lib.rs");
-        assert!(source.contains("const SCHEMA_VERSION: u32 = 19;"));
+        assert!(
+            crate::SCHEMA_VERSION >= 19,
+            "durable inbox stable regions require schema >= 19"
+        );
         assert!(source.contains("MemoryId::new(30 + index as u8)"));
         let inspect = source
             .split("fn inspect_message() {")

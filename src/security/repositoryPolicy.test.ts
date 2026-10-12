@@ -286,7 +286,7 @@ describe('repository security policy', () => {
     expect(start).toBeGreaterThanOrEqual(0);
     expect(end).toBeGreaterThan(start);
     const pollingEffect = sheetPage.slice(start, end);
-    expect(pollingEffect).toMatch(/\}, \[actor, principal, handledInboxIds\]\);/);
+    expect(pollingEffect).toMatch(/\}, \[actor, principal, handledInboxIds, isLocalImport\]\);/);
     expect(pollingEffect).toMatch(/cancelled = true/);
     expect(pollingEffect).toMatch(/clearInterval\(iv\)/);
     expect(pollingEffect).toMatch(/inboxAckQueueRef\.current/);

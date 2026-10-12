@@ -7,26 +7,20 @@
 //    P-256 ECDH, then held in memory. Requires the partner's
 //    P-256 public key to be registered first (Pair page).
 //
-// 2. Prod path (VITE_IOU_PROD_VETKD=1):
-//    K_sheet is derived on demand via the IC's vetkd IBE. The PWA
-//    creates an ephemeral BLS12-381 G1 transport key pair per JS session. To
-//    unwrap, it calls vetkd_wrap_sheet_key (which returns the IBE
-//    ciphertext) and decrypts via @dfinity/vetkeys. No partner
-//    public key needed; the IC vets the unwrap.
+// 2. Production: read the member's encrypted key envelope and open it with
+//    the account vault. Missing legacy keys require explicit migration.
+//    Reads never call VetKD or invent a replacement key.
 //
 // Either way, K_sheet is held in memory only — never on disk.
 
 import { createContext, useContext, useState, useCallback, useEffect, useRef } from "react";
 import { createActor } from "../../backend/declarations";
 import { recoverSheetKey, deriveUserKeypair } from "../crypto/devVetkd";
-import {
-  isProdVetkd,
-  prepareProdSheetKey,
-  deriveProdSheetKeyWithRetry,
-} from "../crypto/prodVetkd";
+import { isProdVetkd } from "../crypto/prodVetkd";
 import { useAuth, buildAgent } from "../auth/AuthProvider";
 import { SessionGeneration } from "../auth/sessionIsolation";
 import { unwrap } from "./useActor";
+import { readVaultSheetKey } from "../crypto/vaultSheets";
 
 type SheetKeyMap = Record<string, Uint8Array>;
 type PartnerKeyMap = Record<string, string>; // sheetId -> wrap-sender's public key (b64)
@@ -101,11 +95,8 @@ export function SheetKeyProvider({ children }: { children: React.ReactNode }) {
     const actor = createActor(agent) as any;
 
     if (isProdVetkd()) {
-      // Prod path: vetkd IBE. Each device holds its own transport
-      // key; the IC's vetkd decrypts the same K_sheet for any
-      // device whose transport public key was registered.
-      const prepared = await prepareProdSheetKey(actor);
-      const K_sheet = await deriveProdSheetKeyWithRetry(actor, sheetId, prepared);
+      // The account vault is already unlocked by the authenticated gate.
+      const K_sheet = await readVaultSheetKey(actor, identity.getPrincipal().toText(), sheetId);
       session.current.assertCurrent(ticket, K_sheet);
       setKeys((prev) => ({ ...prev, [sheetId]: K_sheet }));
       return K_sheet;

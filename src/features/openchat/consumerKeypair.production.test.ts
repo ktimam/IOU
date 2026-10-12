@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Identity } from '@dfinity/agent';
 import { Principal } from '@dfinity/principal';
 
@@ -137,22 +137,23 @@ vi.mock('../crypto/devVetkd', () => ({
   }),
 }));
 
-vi.mock('../crypto/prodVetkd', () => ({
-  loadOrCreateTransportKey: async () => {
-    state.transportCalls++;
-    return {
-      secretKey: new Uint8Array(32).fill(state.transportCalls),
-      publicKey: new Uint8Array(48).fill(state.transportCalls + 1),
-      publicKeyB64: 'transport-' + state.transportCalls,
-    };
-  },
-  deriveConsumerWrapKeyProd: async (principal: string) => {
+// Model the account vault returning the identical historical wrap material.
+// wrapCalls counts local vault reads, not paid VetKD calls.
+vi.mock('../crypto/vaultAccess', () => ({
+  requireAccountRoot: async (_actor: unknown, principal: string) => {
+    state.wrapCalls++;
+    if (state.wrapGate) await state.wrapGate;
     const key = new Uint8Array(32);
     const bytes = new TextEncoder().encode(principal);
     for (let i = 0; i < bytes.length; i++) key[i % key.length] ^= bytes[i];
     return key;
   },
 }));
+
+afterEach(() => {
+  expect(state.publicKeyCalls).toBe(0);
+  expect(state.transportCalls).toBe(0);
+});
 
 vi.mock('../crypto/mobileSecureStorage', () => ({
   isMobileNative: () => state.native,
@@ -268,7 +269,7 @@ async function recoveredSession() {
 }
 
 describe('receive-only verified session key reuse', () => {
-  it('keeps cold recovery reading authoritative state after vetKD completes', async () => {
+  it('keeps cold recovery reading authoritative state after the account vault unlock completes', async () => {
     const { key } = await recoveredSession();
     const cold = await freshModule();
     cold.configureConsumerKeypairBackend(identity);
@@ -284,7 +285,7 @@ describe('receive-only verified session key reuse', () => {
     expect(state.getCalls).toBe(reads + 1);
   });
 
-  it('rechecks the backend on every warm receive without repeating vetKD recovery', async () => {
+  it('rechecks the backend on every warm receive without repeating account vault reads', async () => {
     const { mod, key, ticket } = await recoveredSession();
     const reads = state.getCalls;
     const wraps = state.wrapCalls;
@@ -447,7 +448,7 @@ describe('production consumer key storage', () => {
 
     expect(second.publicKeySpkiPem).toBe(first.publicKeySpkiPem);
     expect(state.setCalls).toHaveLength(1);
-    expect(state.transportCalls).toBe(2);
+    expect(state.transportCalls).toBe(0);
     expect(localSet).not.toHaveBeenCalled();
   });
 

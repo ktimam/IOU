@@ -227,6 +227,15 @@ type CreateSheetReq = record {
     name_enc : opt vec nat8;   // optional E2E-encrypted sheet name at creation
     name_iv : opt vec nat8;
 };
+type AccountVault = record { revision : nat64; payload : blob };
+type AccountWrappingKey = record { key_id : text; public_key : blob; vault_revision : nat64 };
+type SheetKeyInfo = record { scheme : text; key_id : text };
+type SheetInviteEnvelope = record { pair_id : text; key_id : text; envelope : blob };
+type CreateSheetV2Req = record {
+    pair_id : text; closing_window_days : nat32;
+    wrapped_key_a : blob; wrapped_key_b : blob;
+    name_enc : opt blob; name_iv : opt blob; key_id : text;
+};
 
 type EncryptedClosingBalances = record {
     entry_key : vec nat8;
@@ -563,6 +572,17 @@ service : {
     get_my_pairs : () -> (vec PairSummary) query;
     get_pair : (text) -> (opt Pair) query;
     create_sheet : (CreateSheetReq) -> (Sheet);
+    create_sheet_v2 : (CreateSheetV2Req) -> (variant { Ok : Sheet; Err : text });
+    get_sheet_key_info : (text) -> (variant { Ok : SheetKeyInfo; Err : text }) query;
+    set_sheet_wrapped_key : (text, text, blob) -> (variant { Ok; Err : text });
+    set_sheet_recipient_wrapped_key : (text, text, principal, blob) -> (variant { Ok; Err : text });
+    get_account_vault : () -> (opt AccountVault) query;
+    set_account_vault : (nat64, blob) -> (variant { Ok : nat64; Err : text });
+    get_account_wrapping_key : (principal) -> (opt AccountWrappingKey) query;
+    register_account_wrapping_key : (nat64, text, blob) -> (variant { Ok; Err : text });
+    acquire_account_root : (text, blob, bool) -> (variant { Ok : blob; Err : text });
+    set_sheet_invite_envelope : (text, text, blob) -> (variant { Ok; Err : text });
+    get_sheet_invite_envelope : (text, text) -> (variant { Ok : SheetInviteEnvelope; Err : text }) query;
     get_sheet : (text) -> (opt Sheet) query;
     get_sheet_wrapped_key : (text) -> (opt vec nat8) query;
     close_sheet_encrypted : (text, EncryptedClosingBalances) -> ();

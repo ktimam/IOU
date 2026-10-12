@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { createHash } from "node:crypto";
+import { readFileSync } from "node:fs";
 import candidateProfiles from "../../../docs/model-prompts/direction-v1-candidate.json";
 import revision2Profiles from "../../../docs/model-prompts/direction-v1-revision2-candidate.json";
 import activeProfiles from "./modelImageProfiles.json";
@@ -88,9 +89,10 @@ describe("inactive direction-v1 contract", () => {
     }
   });
 
-  it("changes only the key count and one literal-direction instruction in each existing prompt", () => {
+  it("changes only the key count and one literal-direction instruction in each preserved baseline prompt", () => {
     const rule = '"direction_text": look for these exact printed labels: "Owed to you", "You owe". Copy a label only if that exact label is visible in the image. If neither label is printed, output "". Do not infer a label from payment status, names, bank accounts or arrows.';
-    const qwen = activeProfiles.templates["qwen3-vl-2b-instruct-q4"].template
+    // This inactive experiment predates the active prompt's later grouping/format qualification.
+    const qwen = readFileSync(new URL("../../../docs/model-prompts/qwen3-vl-2b-total-row-image.txt", import.meta.url), "utf8").replaceAll("\r\n", "\n")
       .replace("Use exactly four keys", "Use exactly five keys")
       .replace("\n\nDo not add separate amount", `\n\n${rule}\n\nDo not add separate amount`);
     const gemma = activeProfiles.templates["gemma-4-e2b-it-q4"].template

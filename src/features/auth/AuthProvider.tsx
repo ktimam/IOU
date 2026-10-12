@@ -1,14 +1,12 @@
-import { createContext, useContext, useEffect, useState, type ReactNode } from "react";
+import { createContext, useContext, useEffect, useRef, useState, type ReactNode } from "react";
 import { AuthClient } from "@dfinity/auth-client";
 import { HttpAgent, type Identity } from "@dfinity/agent";
 import { Secp256k1KeyIdentity } from "@dfinity/identity-secp256k1";
 import { shouldFetchLocalRootKey } from "../../config/devLanQcRuntime";
 import { canisterId, host, internetIdentityUrl } from "./config";
-
-type AuthState =
-  | { kind: "loading" }
-  | { kind: "anonymous" }
-  | { kind: "authenticated"; identity: Identity; principal: string };
+import { clearAccountVaultDevice, clearAccountVaultMemory } from "../crypto/accountVault";
+import { AuthSession, REQUESTED_DELEGATION_TTL, type AuthState } from "./authSession";
+import { AUTH_LOGOUT_CHANNEL, readAuthLogoutSignal, type AuthLogoutSignal } from "./authLogoutSignal";
 
 type AuthCtx = {
   state: AuthState;
@@ -74,70 +72,63 @@ export function loadDevIdentityForDiagnostics(): Secp256k1KeyIdentity | null {
 
 export function AuthProvider({ children }: { children: ReactNode }) {
   const [state, setState] = useState<AuthState>({ kind: "loading" });
+  const logoutChannel = useRef<BroadcastChannel | null>(null);
+  const sessionRef = useRef<AuthSession>();
+  if (!sessionRef.current) sessionRef.current = new AuthSession({
+    createClient: options => AuthClient.create(options),
+    onState: setState,
+    restoreDevIdentity: () => import.meta.env.DEV ? loadDevIdentityIfPresent() : null,
+    createDevIdentity: () => {
+      if (!import.meta.env.DEV) throw new Error("Development sign-in is unavailable.");
+      return loadOrCreateDevIdentity();
+    },
+    forgetDevIdentity: () => {
+      if (typeof localStorage !== "undefined") localStorage.removeItem(DEV_IDENTITY_KEY);
+    },
+    clearMemory: clearAccountVaultMemory,
+    clearDevice: clearAccountVaultDevice,
+  });
+  const session = sessionRef.current;
 
   useEffect(() => {
-    let cancelled = false;
-    (async () => {
-      // DEV-only test hook (?e2eDelayAuth=<ms>): hold the "loading" state for a beat so a UI test
-      // can assert transient loading renders (no premature redirect) before auth resolves. The
-      // whole branch tree-shakes out of production builds.
-      if (import.meta.env.DEV) {
-        const delay = Number(new URLSearchParams(globalThis.location?.search ?? "").get("e2eDelayAuth"));
-        if (Number.isFinite(delay) && delay > 0) {
-          await new Promise((r) => setTimeout(r, Math.min(delay, 10_000)));
-        }
-      }
-      const client = await AuthClient.create();
-      if (cancelled) return;
-      if (await client.isAuthenticated()) {
-        const identity = client.getIdentity();
-        setState({
-          kind: "authenticated",
-          identity,
-          principal: identity.getPrincipal().toText(),
-        });
-      } else {
-        // No II delegation. Re-hydrate a persisted dev identity if one
-        // exists (the "Sign in (dev)" path stores it in localStorage).
-        // Gated on DEV so a production build never auto-restores a dev
-        // identity — there the branch tree-shakes away.
-        const dev = import.meta.env.DEV ? loadDevIdentityIfPresent() : null;
-        if (dev) {
-          setState({
-            kind: "authenticated",
-            identity: dev,
-            principal: dev.getPrincipal().toText(),
-          });
-        } else {
-          setState({ kind: "anonymous" });
-        }
-      }
-    })();
-    return () => {
-      cancelled = true;
+    // Preserve the development-only loading-state fixture without changing production auth.
+    const requestedDelay = import.meta.env.DEV
+      ? Number(new URLSearchParams(globalThis.location?.search ?? "").get("e2eDelayAuth")) : 0;
+    void session.restore(Number.isFinite(requestedDelay) ? requestedDelay : 0);
+    const check = () => session.checkExpiry();
+    const receive = (value: unknown) => {
+      const signal = readAuthLogoutSignal(value);
+      if (signal) void session.refreshAfterRemoteSignOut(signal.principal).catch(() => {
+        // A failed remote vault purge stays locked; do not restore persisted auth.
+      });
     };
-  }, []);
+    const storage = (event: StorageEvent) => {
+      if (event.key === AUTH_LOGOUT_CHANNEL && event.newValue) receive(event.newValue);
+    };
+    try {
+      if (typeof BroadcastChannel !== "undefined") {
+        const channel = new BroadcastChannel(AUTH_LOGOUT_CHANNEL);
+        channel.onmessage = event => receive(event.data);
+        logoutChannel.current = channel;
+      }
+    } catch { /* Storage events remain available when BroadcastChannel is unavailable. */ }
+    window.addEventListener("focus", check);
+    window.addEventListener("storage", storage);
+    document.addEventListener("visibilitychange", check);
+    return () => {
+      window.removeEventListener("focus", check);
+      window.removeEventListener("storage", storage);
+      document.removeEventListener("visibilitychange", check);
+      logoutChannel.current?.close();
+      logoutChannel.current = null;
+      session.suspend();
+    };
+  }, [session]);
 
   async function signIn() {
-    const client = await AuthClient.create();
-    await new Promise<void>((resolve, reject) => {
-      client.login({
-        // v1.3.2: use the II URL from config instead of the
-        // inline ternary. The inline version was wrong on local
-        // (it pointed at the bare replica host instead of the
-        // II-canister subdomain `http://<II_ID>.127.0.0.1:4943`).
-        // internetIdentityUrl already does the right thing.
-        identityProvider: internetIdentityUrl,
-        maxTimeToLive: BigInt(30) * BigInt(24) * BigInt(60) * BigInt(60) * BigInt(1_000_000_000),
-        onSuccess: () => resolve(),
-        onError: (e) => reject(e),
-      });
-    });
-    const identity = client.getIdentity();
-    setState({
-      kind: "authenticated",
-      identity,
-      principal: identity.getPrincipal().toText(),
+    await session.signIn({
+      identityProvider: internetIdentityUrl,
+      maxTimeToLive: REQUESTED_DELEGATION_TTL,
     });
   }
 
@@ -150,28 +141,24 @@ export function AuthProvider({ children }: { children: ReactNode }) {
    * local replica without setting up II.
    */
   async function signInDev() {
-    const identity = loadOrCreateDevIdentity();
-    setState({
-      kind: "authenticated",
-      identity,
-      principal: identity.getPrincipal().toText(),
-    });
+    session.signInDev();
   }
 
   async function signOut() {
-    // v1.3.2: also log out of the II delegation. Without this,
-    // the II delegation persists in IndexedDB across signOut,
-    // and the next mount effect (`isAuthenticated()`) re-hydrates
-    // the user — "sign out" didn't actually sign the user out.
-    const client = await AuthClient.create();
-    await client.logout();
-    // Clear any persisted dev identity too — a fresh "Sign in
-    // (dev)" gets a new principal. The user can sign in with
-    // II separately.
-    if (typeof localStorage !== "undefined") {
-      localStorage.removeItem(DEV_IDENTITY_KEY);
+    const principal = session.state.kind === "authenticated" ? session.state.principal : undefined;
+    try {
+      await session.signOut();
+    } finally {
+      if (principal) {
+        const signal: AuthLogoutSignal = { version: 1, principal, nonce: crypto.randomUUID() };
+        try { logoutChannel.current?.postMessage(signal); } catch { /* The storage fallback remains available. */ }
+        // Compatibility fallback for browsers without BroadcastChannel; no secrets are persisted.
+        try {
+          localStorage.setItem(AUTH_LOGOUT_CHANNEL, JSON.stringify(signal));
+          localStorage.removeItem(AUTH_LOGOUT_CHANNEL);
+        } catch { /* Auth and vault cleanup do not depend on the notification fallback. */ }
+      }
     }
-    setState({ kind: "anonymous" });
   }
 
   return (

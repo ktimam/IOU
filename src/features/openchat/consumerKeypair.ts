@@ -5,8 +5,8 @@
 // fingerprint (sha256 of the raw 65-byte point) is what the inbox `actions` replicated update is keyed by.
 //
 // v1.8.0 (multi-user keys): the keypair is CANISTER-BACKED. The private key is wrapped client-side
-// (AES-GCM under a key derived via the SAME vetkd mechanism the sheet keys use — dev sim: the
-// self-ECDH user key from devVetkd; prod: vetkd_wrap_consumer_key + @dfinity/vetkeys) and stored on
+// (AES-GCM under the historical consumer wrap material — dev sim: the
+// self-ECDH user key; production: the protected account-vault root) and stored on
 // the IOU backend via set_consumer_keypair / get_consumer_keypair, so ANY of the user's devices can
 // recover it. Production web keeps plaintext only in session memory; native production uses
 // platform secure storage. The old localStorage record is read only for an ordered one-time migration
@@ -24,7 +24,7 @@ import { createActor } from "../../backend/declarations";
 import { shouldFetchLocalRootKey } from "../../config/devLanQcRuntime";
 import { host } from "../auth/config";
 import { deriveUserKey, isProdVetkd } from "../crypto/devVetkd";
-import { loadOrCreateTransportKey, deriveConsumerWrapKeyProd } from "../crypto/prodVetkd";
+import { requireAccountRoot } from "../crypto/vaultAccess";
 import {
   isMobileNative,
   secureDel,
@@ -419,25 +419,18 @@ async function buildBackendActor(identity: Identity): Promise<any> {
 }
 
 /**
- * The 32-byte key the consumer private key is wrapped under. Same vetkd
- * mechanism as the sheet keys:
+ * The unchanged 32-byte key the consumer private key is wrapped under:
  *   - dev sim: the self-ECDH per-user key (devVetkd.deriveUserKey — the
  *     key the templates already use). Device-bound, like all dev-sim keys.
- *   - prod: vetkd_wrap_consumer_key + @dfinity/vetkeys — identical on
- *     every device of the same user (the IC vets the unwrap).
+ *   - prod: the account vault returns the historical VetKD-derived material
+ *     without requesting another paid derivation on reads or reconnects.
  */
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 async function deriveWrapKey(principal: string, actor: any): Promise<Uint8Array> {
   if (isProdVetkd()) {
-    const transport = await loadOrCreateTransportKey();
-    const masterPubKey = await actor.vetkd_public_key();
-    const encVetKey = await actor.vetkd_wrap_consumer_key(Array.from(transport.publicKey));
-    return deriveConsumerWrapKeyProd(
-      principal,
-      transport,
-      new Uint8Array(masterPubKey),
-      new Uint8Array(encVetKey),
-    );
+    // The vault preserves the existing K_wrap bytes, so pending inbox entries
+    // and the consumer public key do not change. Reads/reconnects never pay.
+    return requireAccountRoot(actor, principal);
   }
   return deriveUserKey(principal);
 }

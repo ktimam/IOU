@@ -17,6 +17,7 @@ import { localConnectionLabel, localConnectionLabels } from "./localConnectionLa
 import { createDurableInboxGrant, type DurableInboxActor, type DurableInboxRoute } from "./durableInboxService";
 import { LocalSetupV2Panel } from "./LocalSetupV2Panel";
 import { LocalSetupTypesPreview } from "./LocalSetupTypesPreview";
+import { AccountVaultGate } from "../crypto/AccountVaultControls";
 
 type Consent = ReturnType<typeof createLocalAppSetupConsent>;
 type SheetChoice = { pairId: string; sheetId: string; accountName: string; sheetName: string };
@@ -98,11 +99,11 @@ function ConnectSession({ opener }: { opener: Window }) {
     {auth.kind === "authenticated" && <>
       <p>Signed in to IOU.</p>
       <button className="secondary" onClick={() => { close("Signed out. Start a fresh Connect request before sharing setup."); void signOut(); }}>Sign out</button>
-      {state.kind === "pending" && consent && <SheetKeyProvider key={auth.principal}>
+      {state.kind === "pending" && consent && <AccountVaultGate><SheetKeyProvider key={auth.principal}>
         {state.binding.setupContext ? <LocalSetupV2Panel key={auth.principal} principal={auth.principal} opener={opener} consent={consent} state={state}
           close={close} onShared={() => setState(consent.state())} /> : <ConnectAccount key={auth.principal} principal={auth.principal} opener={opener} consent={consent} state={state}
           close={close} onShared={() => setState(consent.state())} />}
-      </SheetKeyProvider>}
+      </SheetKeyProvider></AccountVaultGate>}
     </>}
     {notice && <p role="status">{notice}</p>}
   </main>;

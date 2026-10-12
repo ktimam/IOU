@@ -4,6 +4,37 @@ import { describe, expect, it } from "vitest";
 import { idlFactory } from "./declarations";
 
 describe("security-sensitive Candid bindings", () => {
+  it("round-trips vault CAS, explicit paid recovery, and immutable random-sheet key coordinates", () => {
+    const service = idlFactory({ IDL }) as any;
+    const method = (name: string) => service._fields.find(([n]: [string]) => n === name)[1];
+    const round = (name: string, args: unknown[]) => IDL.decode(method(name).argTypes, IDL.encode(method(name).argTypes, args)) as any[];
+    expect(round("set_account_vault", [0n, new Uint8Array([1, 2])])[0]).toBe(0n);
+    const root = round("acquire_account_root", ["1720000000000_request-id", new Uint8Array(48), false]);
+    expect(root[0]).toBe("1720000000000_request-id"); expect(root[1]).toHaveLength(48); expect(root[2]).toBe(false);
+    const [create] = round("create_sheet_v2", [{ pair_id: "pair", key_id: "random-key-id",
+      closing_window_days: 30, wrapped_key_a: new Uint8Array([1]), wrapped_key_b: new Uint8Array(), name_enc: [], name_iv: [] }]);
+    expect(create.key_id).toBe("random-key-id"); expect(create.wrapped_key_b).toHaveLength(0);
+    const recipient = Principal.selfAuthenticating(new Uint8Array(32).fill(5));
+    const repair = round("set_sheet_recipient_wrapped_key", ["sheet", "random-key-id", recipient, new Uint8Array([2])]);
+    expect(repair[2].toText()).toBe(recipient.toText());
+    const registry = method("get_account_wrapping_key");
+    const [keys] = IDL.decode(registry.retTypes, IDL.encode(registry.retTypes, [[{ key_id: "fingerprint", public_key: new Uint8Array(65), vault_revision: 9n }]])) as any[];
+    expect(keys[0].vault_revision).toBe(9n);
+    const info = method("get_sheet_key_info");
+    expect(IDL.decode(info.retTypes, IDL.encode(info.retTypes, [{ Ok: { scheme: "random-v2", key_id: "key" } }]))[0]).toEqual({ Ok: { scheme: "random-v2", key_id: "key" } });
+  });
+
+  it("exposes authenticated encrypted invitation handoff without a plaintext key field", () => {
+    const service = idlFactory({ IDL }) as any;
+    const put = service._fields.find(([name]: [string]) => name === "set_sheet_invite_envelope")[1];
+    const get = service._fields.find(([name]: [string]) => name === "get_sheet_invite_envelope")[1];
+    const decoded = IDL.decode(put.argTypes, IDL.encode(put.argTypes, ["code", "sheet", new Uint8Array([1,2,3])])) as any[];
+    expect(decoded[0]).toBe("code"); expect(decoded[1]).toBe("sheet"); expect(decoded[2]).toHaveLength(3);
+    const [reply] = IDL.decode(get.retTypes, IDL.encode(get.retTypes, [{ Ok: { pair_id: "pair", key_id: "key", envelope: new Uint8Array([4,5]) } }])) as any[];
+    expect(reply.Ok).not.toHaveProperty("secret"); expect(reply.Ok).not.toHaveProperty("sheet_key");
+    expect(reply.Ok.pair_id).toBe("pair"); expect(reply.Ok.envelope).toHaveLength(2);
+  });
+
   it("exposes only the encrypted close method and round-trips its bounded envelope", () => {
     const service = idlFactory({ IDL }) as any;
     const names = service._fields.map(([name]: [string]) => name);

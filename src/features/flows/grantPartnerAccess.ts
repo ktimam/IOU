@@ -1,8 +1,7 @@
 // Grant a joined partner access to the pair's current (solo-created) sheet.
 //
-// Prod (vetkd IBE): nothing to re-wrap — the IC re-derives the same K_sheet
-// for any sheet member once the canister records member_b. We pass an empty
-// blob; the backend flips member_b so the per-sheet vetkd gate passes.
+// Production wraps the existing key to the partner's published account-vault
+// key. Missing legacy keys require explicit migration, never paid fallback.
 //
 // Dev (P-256 ECDH): the partner needs K_sheet sealed to *their* key. We
 // unwrap K_sheet locally (the creator self-wrapped it), fetch the partner's
@@ -16,6 +15,8 @@ import {
   importPublicKeyB64Wrap,
   wrapSheetKey,
 } from "../crypto/devVetkd";
+import { sheetKeyInfo, wrapSheetKeyForMember } from "../crypto/vaultSheets";
+import { assertAccountVaultSessionGeneration, readAccountVaultSessionGeneration } from "../crypto/accountVault";
 
 function optUnwrap<T>(opt: T | T[] | null | undefined): T | null {
   if (opt == null) return null;
@@ -34,9 +35,15 @@ export async function grantPartnerAccess(opts: {
   const partner = Principal.fromText(opts.partnerPrincipalText);
 
   if (isProdVetkd()) {
+    const generation = readAccountVaultSessionGeneration();
+    const info = await sheetKeyInfo(opts.actor, opts.activeSheetId);
+    const K_sheet = await opts.getKSheet(opts.activeSheetId);
+    const wrapped = await wrapSheetKeyForMember(opts.actor, K_sheet, opts.pairId, info.key_id, opts.partnerPrincipalText);
+    assertAccountVaultSessionGeneration(generation);
     const n = await opts.actor.grant_partner_access(opts.pairId, partner, [
-      { sheet_id: opts.activeSheetId, wrapped_key_for_partner: [] },
+      { sheet_id: opts.activeSheetId, wrapped_key_for_partner: wrapped },
     ]);
+    assertAccountVaultSessionGeneration(generation);
     return Number(n);
   }
 

@@ -33,7 +33,7 @@ describe("private import route wiring", () => {
   it("separates persisted acknowledgement from pending-review and reuses the PR sheet review UI", () => {
     expect(page.indexOf("buildLocalImportCommittedReceipt(binding.sessionNonce")).toBeGreaterThan(page.indexOf("await addEntryBatch("));
     expect(page).toContain("<SheetPage localImport={localImport} />");
-    expect(sheet).toContain("onClick={reviewLocalImport}>Review &amp; add");
+    expect(sheet).toContain("onClick={() => reviewLocalImport(handoffImport)}>Review &amp; add");
     expect(sheet).toContain("<EntryForm");
     expect(sheet).toContain("<BatchConfirmModal");
     expect(page).not.toMatch(/JSON.stringify\(review|Choose an encrypted draft|Signed-in IOU principal|Load this sheet’s private Types|Prepare setup files/);

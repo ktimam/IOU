@@ -230,6 +230,7 @@ export function SettingsPage() {
       {/* The OpenChat card: the claim-token Connect flow is the only default-visible integration
           surface. Admin/debug surfaces AND the legacy off-chain relay cards (passed as children)
           sit behind its "Advanced" disclosure — auto-expanded when a relay is already configured. */}
+      <AccountVaultSettings />
       <ActionInboxSettings>
         <p className="muted small" style={{ marginTop: 12 }}>
           Legacy off-chain path — superseded by the on-chain OpenChat connection above.
@@ -246,3 +247,4 @@ export function SettingsPage() {
     </div>
   );
 }
+import { AccountVaultSettings } from "../crypto/AccountVaultControls";

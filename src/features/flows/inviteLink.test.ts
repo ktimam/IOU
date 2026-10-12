@@ -46,7 +46,7 @@ describe("inviteLink build/parse", () => {
     expect(Array.from(b64uDecode(p!.keyB64u!))).toEqual(Array.from(k));
   });
 
-  it("omits the key for prod-style links; parse tolerates its absence", () => {
+  it("parses old keyless links for a useful production migration error", () => {
     const link = buildInviteLink("http://x", { code: "C", sheetId: "S" });
     expect(link).not.toContain("k=");
     expect(parseInviteFragment(link.slice(link.indexOf("#")))).toEqual({
@@ -54,6 +54,17 @@ describe("inviteLink build/parse", () => {
       sheetId: "S",
       keyB64u: undefined,
     });
+  });
+  it("keeps the production unlock secret in the fragment without a raw sheet key", () => {
+    const secret = b64uEncode(new Uint8Array(32).fill(9));
+    const link = buildInviteLink("https://iou.example", { code: "c", sheetId: "s", inviteSecretB64u: secret });
+    const url = new URL(link);
+    expect(url.search).toBe(""); expect(url.hash).not.toContain("k=");
+    expect(parseInviteFragment(url.hash)).toEqual({ code: "c", sheetId: "s", inviteSecretB64u: secret });
+    expect(parseInviteFragment(url.hash + "&k=raw")).toBeNull();
+    expect(parseInviteFragment("#c=c&s=s&v=2&u=" + secret)).toBeNull();
+    expect(parseInviteFragment("#c=c&s=s&v=1&u=short")).toBeNull();
+    expect(() => buildInviteLink("https://iou.example", { code: "c", sheetId: "s", inviteSecretB64u: secret, kSheet: new Uint8Array(32) })).toThrow(/Ambiguous/);
   });
 
   it("rejects a fragment missing the code or the sheet id", () => {

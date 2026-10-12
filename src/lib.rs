@@ -31,7 +31,10 @@ use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 
+mod account_vault;
 mod durable_inbox;
+use account_vault::{AccountVault, AccountVaultStore, AccountWrappingKey, RootAdmission};
+use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine};
 use durable_inbox::{
     AcknowledgeRequest, CreateGrantRequest, DeliveryReceipt, DepositRequest, DurableInbox,
     GrantPage, InboxGrant, InboxPage, InboxResult, ListInboxRequest,
@@ -474,7 +477,11 @@ impl Storable for RecoveryKey {
 //
 //   DO NOT re-use these orphaned MemoryIds for a new structure
 //   with a different key/value type — see issue #7. If you need
-//   a new region, use the next free number (currently 38+).
+//   a new region, use the next free number (currently 45+).
+//   MemoryIds 38..42: account vaults, versioned wrapping keys, root request receipts,
+//     global paid-key budget and per-principal paid-key budgets (account_vault.rs).
+//   MemoryId 43: immutable random-sheet key metadata and creation receipt/tombstone.
+//   MemoryId 44: bounded encrypted invitation envelopes, removed with consumed/reissued codes.
 
 // v1.5.0 (schema v3 -> v4): added optional encrypted name fields to Pair,
 // Sheet, PairSummary, CreateSheetReq.
@@ -526,11 +533,25 @@ impl Storable for RecoveryKey {
 // batch endpoint and survive state-preserving upgrades.
 // v1.21.0 (schema v18 -> v19): additive encryption-blind durable inbox at
 // MemoryIds 30..37. Existing application records and keys remain byte-compatible.
-const SCHEMA_VERSION: u32 = 19;
+// v1.22.0 (schema v19 -> v20): additive encrypted account vault and random-sheet metadata.
+const SCHEMA_VERSION: u32 = 20;
 
 thread_local! {
     static MEMORY_MANAGER: RefCell<MemoryManager<DefaultMemoryImpl>> =
         RefCell::new(MemoryManager::init(DefaultMemoryImpl::default()));
+    static ACCOUNT_VAULTS: RefCell<AccountVaultStore<Memory>> = RefCell::new(
+        AccountVaultStore::init(std::array::from_fn(|index| {
+            MEMORY_MANAGER.with(|manager| manager.borrow().get(MemoryId::new(38 + index as u8)))
+        }))
+    );
+    static SHEET_KEY_METADATA: RefCell<StableBTreeMap<String, RandomSheetMetadata, Memory>> =
+        RefCell::new(StableBTreeMap::init(
+            MEMORY_MANAGER.with(|manager| manager.borrow().get(MemoryId::new(43)))
+        ));
+    static SHEET_INVITE_ENVELOPES: RefCell<StableBTreeMap<String, Vec<u8>, Memory>> =
+        RefCell::new(StableBTreeMap::init(
+            MEMORY_MANAGER.with(|manager| manager.borrow().get(MemoryId::new(44)))
+        ));
     static DURABLE_INBOX: RefCell<DurableInbox<Memory>> = RefCell::new(
         DurableInbox::init(std::array::from_fn(|index| {
             MEMORY_MANAGER.with(|manager| manager.borrow().get(MemoryId::new(30 + index as u8)))
@@ -1175,6 +1196,17 @@ fn inspect_message() {
     let caller = ic_cdk::api::msg_caller();
 
     let allowed: &[&str] = &[
+        "get_account_vault",
+        "set_account_vault",
+        "get_account_wrapping_key",
+        "register_account_wrapping_key",
+        "acquire_account_root",
+        "create_sheet_v2",
+        "get_sheet_key_info",
+        "set_sheet_wrapped_key",
+        "set_sheet_recipient_wrapped_key",
+        "set_sheet_invite_envelope",
+        "get_sheet_invite_envelope",
         "init",
         "post_upgrade",
         // Phase 1: auth + config
@@ -1281,6 +1313,17 @@ fn inspect_message() {
     // Public-by-design methods (vetkd_public_key) are NOT in
     // this list and remain callable by anonymous callers.
     let require_auth_methods: &[&str] = &[
+        "get_account_vault",
+        "set_account_vault",
+        "get_account_wrapping_key",
+        "register_account_wrapping_key",
+        "acquire_account_root",
+        "create_sheet_v2",
+        "get_sheet_key_info",
+        "set_sheet_wrapped_key",
+        "set_sheet_recipient_wrapped_key",
+        "set_sheet_invite_envelope",
+        "get_sheet_invite_envelope",
         "set_display_name",
         "set_user_templates",
         "set_default_currency",
@@ -1343,6 +1386,113 @@ fn inspect_message() {
 }
 
 // ───────────────────────── Phase 1 endpoints (auth + config) ─────────────────────────
+
+#[ic_cdk::query]
+fn get_account_vault() -> Option<AccountVault> {
+    require_authed();
+    ACCOUNT_VAULTS.with(|store| store.borrow().vault(ic_cdk::api::msg_caller()))
+}
+
+#[ic_cdk::update]
+fn set_account_vault(expected_revision: u64, payload: Vec<u8>) -> Result<u64, String> {
+    require_authed();
+    ACCOUNT_VAULTS.with(|store| {
+        store
+            .borrow_mut()
+            .set_vault(ic_cdk::api::msg_caller(), expected_revision, payload)
+    })
+}
+
+#[ic_cdk::query]
+fn get_account_wrapping_key(principal: Principal) -> Option<AccountWrappingKey> {
+    require_authed();
+    ACCOUNT_VAULTS.with(|store| store.borrow().wrapping_key(principal))
+}
+
+#[ic_cdk::update]
+fn register_account_wrapping_key(
+    vault_revision: u64,
+    key_id: String,
+    public_key: Vec<u8>,
+) -> Result<(), String> {
+    require_authed();
+    ACCOUNT_VAULTS.with(|store| {
+        store.borrow_mut().register_key(
+            ic_cdk::api::msg_caller(),
+            vault_revision,
+            key_id,
+            public_key,
+        )
+    })
+}
+
+fn admit_paid_key(caller: Principal) -> Result<(), String> {
+    ACCOUNT_VAULTS.with(|store| store.borrow_mut().admit_paid(caller, now_nanos()))
+}
+
+fn root_failure_is_ambiguous(error: &ic_cdk_management_canister::SignCallError) -> bool {
+    use ic_cdk::call::CallErrorExt;
+    use ic_cdk_management_canister::SignCallError;
+    match error {
+        SignCallError::SignCostError(_) => false,
+        SignCallError::CallFailed(failure) => !failure.is_clean_reject(),
+        SignCallError::CandidDecodeFailed(_) => true,
+    }
+}
+
+/// Explicit provisioning/emergency operation. The derivation domain and frontend HKDF remain
+/// EXACTLY the legacy consumer domain, so profile and inbox ciphertext do not need re-encryption.
+#[ic_cdk::update]
+async fn acquire_account_root(
+    request_id: String,
+    transport_public_key: Vec<u8>,
+    emergency: bool,
+) -> Result<Vec<u8>, String> {
+    require_authed();
+    let caller = ic_cdk::api::msg_caller();
+    let admission = ACCOUNT_VAULTS.with(|store| {
+        store.borrow_mut().begin_root(
+            caller,
+            request_id.clone(),
+            transport_public_key.clone(),
+            emergency,
+            now_nanos(),
+        )
+    })?;
+    if let RootAdmission::Cached(reply) = admission {
+        return Ok(reply);
+    }
+    // The stable Pending reservation commits at the await. A trapped callback leaves it pending;
+    // neither a retry nor another request may silently dispatch a second paid derivation.
+    let request = VetKDDeriveKeyArgs {
+        input: format!("iou-consumer:{}", caller.to_text()).into_bytes(),
+        context: b"iou-vetkd-symmetric-v1".to_vec(),
+        key_id: vetkd_key_id(),
+        transport_public_key,
+    };
+    match ic_cdk_management_canister::vetkd_derive_key(&request).await {
+        Ok(reply) => {
+            ACCOUNT_VAULTS.with(|store| {
+                store.borrow_mut().finish_root(
+                    caller,
+                    &request_id,
+                    Some(reply.encrypted_key.clone()),
+                )
+            })?;
+            Ok(reply.encrypted_key)
+        }
+        Err(error) if root_failure_is_ambiguous(&error) => {
+            ACCOUNT_VAULTS
+                .with(|store| store.borrow_mut().mark_root_unknown(caller, &request_id))?;
+            Err("account root result is uncertain and may already have been paid; this request will not dispatch again".into())
+        }
+        Err(_) => {
+            ACCOUNT_VAULTS
+                .with(|store| store.borrow_mut().finish_root(caller, &request_id, None))?;
+            Err("account root derivation failed; this request will not dispatch again".into())
+        }
+    }
+}
 
 // Owner-scoped replicated reads are deliberate: pending membership and exact acknowledgement
 // receipts come from consensus. The backend stores ciphertext only and never saves IOU entries
@@ -2020,7 +2170,9 @@ fn bounded_card_image_heading(value: &str) -> bool {
     !value.is_empty()
         && value.trim_matches(|ch: char| ch.is_whitespace() || ch == '\u{feff}') == value
         && value.chars().count() <= MAX_CARD_IMAGE_HEADING_CHARS
-        && !value.chars().any(|ch| ch.is_control() || matches!(ch, '\u{2028}' | '\u{2029}'))
+        && !value
+            .chars()
+            .any(|ch| ch.is_control() || matches!(ch, '\u{2028}' | '\u{2029}'))
 }
 
 fn validate_attested_entry_draft(draft: &AttestedEntryDraft, allow_template_ref: bool) -> bool {
@@ -2672,6 +2824,7 @@ fn join_pair(invite_code: String) -> String {
     });
     // consume invite
     INVITES.with(|i| i.borrow_mut().remove(&invite_code));
+    clear_sheet_invite_envelopes(&invite_code);
     pair_id
 }
 
@@ -2779,6 +2932,328 @@ pub struct CreateSheetReq {
     pub name_iv: Option<Vec<u8>>,
 }
 
+#[derive(Clone, CandidType, Deserialize)]
+pub struct CreateSheetV2Req {
+    pub pair_id: String,
+    pub closing_window_days: u32,
+    pub wrapped_key_a: Vec<u8>,
+    pub wrapped_key_b: Vec<u8>,
+    pub name_enc: Option<Vec<u8>>,
+    pub name_iv: Option<Vec<u8>>,
+    pub key_id: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, CandidType, Deserialize)]
+pub struct SheetKeyInfo {
+    pub scheme: String,
+    pub key_id: String,
+}
+
+#[derive(Clone, CandidType, Deserialize)]
+struct RandomSheetMetadata {
+    key_id: String,
+    creator: Principal,
+    request_hash: Vec<u8>,
+    original_members: Vec<Principal>,
+}
+impl Storable for RandomSheetMetadata {
+    fn to_bytes(&self) -> Cow<'_, [u8]> {
+        Cow::Owned(Encode!(self).expect("encode random sheet metadata"))
+    }
+    fn from_bytes(bytes: Cow<[u8]>) -> Self {
+        Decode!(bytes.as_ref(), Self).expect("decode random sheet metadata")
+    }
+    const BOUND: Bound = Bound::Unbounded;
+}
+
+const SHEET_ENVELOPE_PREFIX: &str = "iou-sheet-envelope-v1:";
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct SheetEnvelopeHeader {
+    version: u8,
+    pair_id: String,
+    key_id: String,
+    recipient_principal: String,
+    recipient_key_id: String,
+    #[serde(rename = "ephemeralB64")]
+    ephemeral_b64: String,
+    iv: String,
+    ciphertext: String,
+}
+
+fn validate_sheet_envelope_binding(
+    blob: &[u8],
+    pair_id: &str,
+    key_id: &str,
+    recipient: Principal,
+    recipient_key_id: &str,
+) -> Result<(), String> {
+    if blob.len() > MAX_WRAPPED_KEY_BYTES {
+        return Err("sheet key envelope too large".into());
+    }
+    let encoded = std::str::from_utf8(blob)
+        .map_err(|_| "invalid sheet key envelope")?
+        .strip_prefix(SHEET_ENVELOPE_PREFIX)
+        .ok_or("versioned sheet key envelope required")?;
+    let decoded = BASE64_STANDARD
+        .decode(encoded)
+        .map_err(|_| "invalid sheet key envelope encoding")?;
+    let header: SheetEnvelopeHeader =
+        serde_json::from_slice(&decoded).map_err(|_| "invalid sheet key envelope header")?;
+    if header.version != 1
+        || header.pair_id != pair_id
+        || header.key_id != key_id
+        || header.recipient_principal != recipient.to_text()
+        || header.recipient_key_id != recipient_key_id
+    {
+        return Err("sheet key envelope recipient or context mismatch".into());
+    }
+    let ephemeral = BASE64_STANDARD
+        .decode(header.ephemeral_b64)
+        .map_err(|_| "invalid envelope ephemeral key")?;
+    let iv = BASE64_STANDARD
+        .decode(header.iv)
+        .map_err(|_| "invalid envelope nonce")?;
+    let ciphertext = BASE64_STANDARD
+        .decode(header.ciphertext)
+        .map_err(|_| "invalid envelope ciphertext")?;
+    if ephemeral.len() != 65 || ephemeral[0] != 4 || iv.len() != 12 || ciphertext.len() != 48 {
+        return Err("invalid sheet key envelope component length".into());
+    }
+    Ok(())
+}
+
+fn validate_sheet_envelope(
+    blob: &[u8],
+    pair_id: &str,
+    key_id: &str,
+    recipient: Principal,
+) -> Result<(), String> {
+    let recipient_key = ACCOUNT_VAULTS
+        .with(|store| store.borrow().wrapping_key(recipient))
+        .ok_or("recipient has not provisioned an account wrapping key")?;
+    validate_sheet_envelope_binding(blob, pair_id, key_id, recipient, &recipient_key.key_id)
+}
+
+fn sheet_key_info_unchecked(sheet_id: &str) -> SheetKeyInfo {
+    SHEET_KEY_METADATA.with(
+        |metadata| match metadata.borrow().get(&sheet_id.to_string()) {
+            Some(record) => SheetKeyInfo {
+                scheme: "random-v2".into(),
+                key_id: record.key_id,
+            },
+            None => SheetKeyInfo {
+                scheme: "vetkd-v1".into(),
+                key_id: sheet_id.into(),
+            },
+        },
+    )
+}
+
+fn require_legacy_sheet_key(sheet_id: &str) -> Result<(), String> {
+    if sheet_key_info_unchecked(sheet_id).scheme != "vetkd-v1" {
+        return Err("random-key sheets cannot derive a legacy VetKD sheet key".into());
+    }
+    Ok(())
+}
+
+#[ic_cdk::query]
+fn get_sheet_key_info(sheet_id: String) -> Result<SheetKeyInfo, String> {
+    require_authed();
+    if !caller_owns_sheet(&sheet_id) {
+        return Err("not a member of this sheet".into());
+    }
+    Ok(sheet_key_info_unchecked(&sheet_id))
+}
+
+/// A member may update only their own envelope, and only for this sheet's immutable key identity.
+/// Caching a legacy key does not change its scheme or any existing encrypted application data.
+#[ic_cdk::update]
+fn set_sheet_wrapped_key(
+    sheet_id: String,
+    key_id: String,
+    wrapped_key: Vec<u8>,
+) -> Result<(), String> {
+    require_authed();
+    let caller = ic_cdk::api::msg_caller();
+    set_sheet_envelope_for(caller, sheet_id, key_id, caller, wrapped_key, true)
+}
+
+/// Repair a current recipient's missing envelope after principal replacement. Existing ciphertext
+/// cannot be overwritten through this sharing endpoint, and no principal outside the sheet is added.
+#[ic_cdk::update]
+fn set_sheet_recipient_wrapped_key(
+    sheet_id: String,
+    key_id: String,
+    recipient: Principal,
+    wrapped_key: Vec<u8>,
+) -> Result<(), String> {
+    require_authed();
+    set_sheet_envelope_for(
+        ic_cdk::api::msg_caller(),
+        sheet_id,
+        key_id,
+        recipient,
+        wrapped_key,
+        false,
+    )
+}
+
+fn set_sheet_envelope_for(
+    caller: Principal,
+    sheet_id: String,
+    key_id: String,
+    recipient: Principal,
+    wrapped_key: Vec<u8>,
+    replace_own: bool,
+) -> Result<(), String> {
+    let mut sheet = SHEETS
+        .with(|s| s.borrow().get(&sheet_id))
+        .ok_or("sheet not found")?;
+    if !principal_can_read_sheet(&sheet, caller) {
+        return Err("not a member of this sheet".into());
+    }
+    if !principal_can_read_sheet(&sheet, recipient) {
+        return Err("recipient is not a current member of this sheet".into());
+    }
+    if sheet_key_info_unchecked(&sheet_id).key_id != key_id {
+        return Err("sheet key id mismatch".into());
+    }
+    validate_sheet_envelope(&wrapped_key, &sheet.pair_id, &key_id, recipient)?;
+    let slot = if sheet.member_a == recipient {
+        &mut sheet.wrapped_key_a
+    } else {
+        &mut sheet.wrapped_key_b
+    };
+    if !(replace_own && caller == recipient) && !slot.is_empty() && *slot != wrapped_key {
+        return Err("recipient already has an envelope; refusing to replace it".into());
+    }
+    *slot = wrapped_key;
+    SHEETS.with(|s| s.borrow_mut().insert(sheet_id, sheet));
+    Ok(())
+}
+
+#[ic_cdk::update]
+fn create_sheet_v2(req: CreateSheetV2Req) -> Result<Sheet, String> {
+    require_authed();
+    create_sheet_v2_for(ic_cdk::api::msg_caller(), req, now_nanos())
+}
+
+fn create_sheet_v2_for(
+    caller: Principal,
+    req: CreateSheetV2Req,
+    now: u64,
+) -> Result<Sheet, String> {
+    if caller == Principal::anonymous() {
+        return Err("authentication required".into());
+    }
+    if !account_vault::valid_identifier(&req.key_id, 32) {
+        return Err("invalid client-generated sheet key id".into());
+    }
+    if !(30..=730).contains(&req.closing_window_days) {
+        return Err("closing_window_days must be 30..=730".into());
+    }
+    validate_optional_name(&req.name_enc, &req.name_iv).map_err(str::to_string)?;
+    let pair = PAIRS
+        .with(|pairs| pairs.borrow().get(&req.pair_id))
+        .ok_or("pair not found")?;
+    if !is_member_of(&pair, caller) || pair.archived_at.is_some() {
+        return Err("pair is unavailable to this caller".into());
+    }
+    let member_a = pair.members[0];
+    let member_b = pair.members[1];
+    validate_sheet_envelope(&req.wrapped_key_a, &req.pair_id, &req.key_id, member_a)?;
+    if member_b == Principal::anonymous() {
+        if !req.wrapped_key_b.is_empty() {
+            return Err("solo sheets must not include a partner envelope".into());
+        }
+    } else {
+        validate_sheet_envelope(&req.wrapped_key_b, &req.pair_id, &req.key_id, member_b)?;
+    }
+    // Preserve the existing 16-hex sheet ID format. The full key ID and body hash in the receipt
+    // detect collisions/reuse. No await: the sheet, immutable key scheme, and receipt commit atomically.
+    let id_digest = Sha256::digest(
+        Encode!(&"iou-random-sheet-v2", &caller, &req.key_id).expect("encode sheet identity"),
+    );
+    let id = lowercase_hex(&id_digest[..8]);
+    let request_hash =
+        Sha256::digest(Encode!(&req, &pair.members).expect("encode create request")).to_vec();
+    if let Some(receipt) = SHEET_KEY_METADATA.with(|m| m.borrow().get(&id)) {
+        if receipt.creator != caller
+            || receipt.key_id != req.key_id
+            || receipt.request_hash != request_hash
+            || receipt.original_members != pair.members
+        {
+            return Err("sheet creation key id was already used with different arguments".into());
+        }
+        let existing = SHEETS
+            .with(|s| s.borrow().get(&id))
+            .ok_or("sheet was deleted; creation key id cannot be reused")?;
+        if existing.member_a != member_a
+            || existing.member_b != member_b
+            || existing.wrapped_key_a != req.wrapped_key_a
+            || existing.wrapped_key_b != req.wrapped_key_b
+        {
+            return Err("sheet membership or envelopes changed since creation".into());
+        }
+        return Ok(existing);
+    }
+    if SHEETS.with(|s| s.borrow().contains_key(&id)) {
+        return Err("sheet id collision; choose a new key id".into());
+    }
+    if SHEET_KEY_METADATA.with(|m| m.borrow().len()) >= account_vault::MAX_ACCOUNTS {
+        return Err("random-sheet receipt capacity reached".into());
+    }
+    let mut sheet_count = 0;
+    let mut scanned = 0;
+    SHEETS.with(|s| -> Result<(), String> {
+        for (_, existing) in s.borrow().iter() {
+            require_legacy_scan_capacity(&mut scanned, "sheet");
+            if existing.pair_id == req.pair_id {
+                sheet_count += 1;
+                if matches!(existing.state, SheetState::Active) {
+                    return Err("pair already has an active sheet".into());
+                }
+            }
+        }
+        Ok(())
+    })?;
+    if sheet_count >= MAX_SHEETS_PER_PAIR {
+        return Err("sheet quota reached for this account".into());
+    }
+    let sheet = Sheet {
+        id: id.clone(),
+        pair_id: req.pair_id,
+        state: SheetState::Active,
+        closing_window_days: req.closing_window_days,
+        last_entry_at: None,
+        wrapped_key_a: req.wrapped_key_a,
+        wrapped_key_b: req.wrapped_key_b,
+        member_a,
+        member_b,
+        created_at: now,
+        closed_at: None,
+        closing_balances_key: None,
+        closing_balances_enc: None,
+        closing_balances_iv: None,
+        name_enc: req.name_enc,
+        name_iv: req.name_iv,
+    };
+    SHEET_KEY_METADATA.with(|m| {
+        m.borrow_mut().insert(
+            id.clone(),
+            RandomSheetMetadata {
+                key_id: req.key_id,
+                creator: caller,
+                request_hash,
+                original_members: pair.members.to_vec(),
+            },
+        )
+    });
+    SHEETS.with(|s| s.borrow_mut().insert(id, sheet.clone()));
+    Ok(sheet)
+}
+
 /// create_sheet: starts a new active sheet inside a pair. Caller must be
 /// a member of the pair. `wrapped_key_a` / `wrapped_key_b` are the
 /// per-sheet symmetric key sealed to each member's vetkd-derived public
@@ -2814,7 +3289,8 @@ async fn create_sheet(req: CreateSheetReq) -> Sheet {
     let now = now_nanos();
     let sheet = SHEETS.with(|s| {
         // V5 fix: pre-insert existence check (see create_pair).
-        if s.borrow().contains_key(&id) {
+        if s.borrow().contains_key(&id) || SHEET_KEY_METADATA.with(|m| m.borrow().contains_key(&id))
+        {
             ic_cdk::trap("sheet id collision; please retry");
         }
         // Resolve the parent pair and check membership in the
@@ -3867,6 +4343,12 @@ async fn vetkd_wrap_sheet_key(sheet_id: String, transport_public_key: Vec<u8>) -
     if !caller_owns_sheet(&sheet_id) {
         ic_cdk::trap("not a member of this sheet (or partner access not yet granted)");
     }
+    if let Err(message) = require_legacy_sheet_key(&sheet_id) {
+        ic_cdk::trap(message);
+    }
+    if let Err(message) = admit_paid_key(ic_cdk::api::msg_caller()) {
+        ic_cdk::trap(message);
+    }
     let mut input = Vec::with_capacity(10 + sheet_id.len());
     input.extend_from_slice(b"iou-sheet:");
     input.extend_from_slice(sheet_id.as_bytes());
@@ -3903,6 +4385,12 @@ async fn vetkd_wrap_sheet_key(sheet_id: String, transport_public_key: Vec<u8>) -
 #[ic_cdk::update]
 async fn vetkd_wrap_consumer_key(transport_public_key: Vec<u8>) -> Vec<u8> {
     require_authed();
+    let caller = ic_cdk::api::msg_caller();
+    if ACCOUNT_VAULTS.with(|store| {
+        store.borrow().has_root_history(caller) || store.borrow().vault(caller).is_some()
+    }) {
+        ic_cdk::trap("vault accounts must use explicit idempotent account-root recovery");
+    }
     if transport_public_key.is_empty() {
         ic_cdk::trap("transport_public_key must not be empty");
     }
@@ -3911,6 +4399,9 @@ async fn vetkd_wrap_consumer_key(transport_public_key: Vec<u8>) -> Vec<u8> {
         ic_cdk::trap("transport_public_key must be 48 bytes (BLS12-381 G1, compressed)");
     }
     let caller_text = ic_cdk::api::msg_caller().to_text();
+    if let Err(message) = admit_paid_key(caller) {
+        ic_cdk::trap(message);
+    }
     let mut input = Vec::with_capacity(13 + caller_text.len());
     input.extend_from_slice(b"iou-consumer:");
     input.extend_from_slice(caller_text.as_bytes());
@@ -5624,6 +6115,11 @@ async fn openchat_card_context(
         key_id: vetkd_key_id(),
         transport_public_key,
     };
+    if require_legacy_sheet_key(&sheet_id).is_err()
+        || admit_paid_key(binding.iou_principal).is_err()
+    {
+        return OpenChatCardContextResult::KeyUnavailable;
+    }
     let Ok(derived) = ic_cdk_management_canister::vetkd_derive_key(&request).await else {
         return OpenChatCardContextResult::KeyUnavailable;
     };
@@ -5775,6 +6271,11 @@ async fn openchat_private_match_context(
         key_id: vetkd_key_id(),
         transport_public_key,
     };
+    if require_legacy_sheet_key(&sheet_id).is_err()
+        || admit_paid_key(binding.iou_principal).is_err()
+    {
+        return OpenChatPrivateMatchContextResult::KeyUnavailable;
+    }
     let Ok(derived) = ic_cdk_management_canister::vetkd_derive_key(&request).await else {
         return OpenChatPrivateMatchContextResult::KeyUnavailable;
     };
@@ -6656,6 +7157,21 @@ fn grant_partner_access(
             if sheet.member_a != caller {
                 ic_cdk::trap("caller does not own this sheet");
             }
+            let key_info = sheet_key_info_unchecked(&rw.sheet_id);
+            if key_info.scheme == "random-v2"
+                || rw
+                    .wrapped_key_for_partner
+                    .starts_with(SHEET_ENVELOPE_PREFIX.as_bytes())
+            {
+                if let Err(message) = validate_sheet_envelope(
+                    &rw.wrapped_key_for_partner,
+                    &pair_id,
+                    &key_info.key_id,
+                    expected_partner,
+                ) {
+                    ic_cdk::trap(message);
+                }
+            }
             if sheet.member_b != Principal::anonymous() {
                 ic_cdk::trap("sheet already has a partner (not a solo sheet)");
             }
@@ -6695,6 +7211,112 @@ fn grant_partner_access(
 /// partner) or already filled (re-share the key to the EXISTING, ungranted partner —
 /// see accept_invite's re-seal path); a stranger with the code still can't take a
 /// filled slot (accept_invite rejects that).
+#[derive(Clone, CandidType, Deserialize)]
+pub struct SheetInviteEnvelope {
+    pub pair_id: String,
+    pub key_id: String,
+    pub envelope: Vec<u8>,
+}
+
+fn invite_envelope_key(invite_code: &str, sheet_id: &str) -> String {
+    format!("{invite_code}\0{sheet_id}")
+}
+
+fn clear_sheet_invite_envelopes(invite_code: &str) {
+    SHEET_INVITE_ENVELOPES.with(|store| {
+        let mut map = store.borrow_mut();
+        let keys: Vec<String> = map
+            .range(format!("{invite_code}\0")..format!("{invite_code}\u{1}"))
+            .take(MAX_SHEETS_PER_PAIR)
+            .map(|(key, _)| key)
+            .collect();
+        for key in keys {
+            map.remove(&key);
+        }
+    });
+}
+
+fn live_invite_sheet(invite_code: &str, sheet_id: &str) -> Result<(Pair, Sheet), String> {
+    if invite_code.len() > 128 || sheet_id.len() > 128 {
+        return Err("invalid invitation".into());
+    }
+    let pair_id = INVITES
+        .with(|invites| invites.borrow().get(&invite_code.to_string()))
+        .ok_or("invalid or consumed invitation")?;
+    let pair = PAIRS
+        .with(|pairs| pairs.borrow().get(&pair_id))
+        .ok_or("invitation account not found")?;
+    if pair.archived_at.is_some() {
+        return Err("invitation account is archived".into());
+    }
+    let sheet = SHEETS
+        .with(|sheets| sheets.borrow().get(&sheet_id.to_string()))
+        .ok_or("invitation sheet not found")?;
+    if sheet.pair_id != pair.id || !matches!(sheet.state, SheetState::Active) {
+        return Err("invitation sheet unavailable".into());
+    }
+    Ok((pair, sheet))
+}
+
+/// Opaque key ciphertext only. The independent 256-bit invite secret never reaches the canister.
+#[ic_cdk::update]
+fn set_sheet_invite_envelope(
+    invite_code: String,
+    sheet_id: String,
+    envelope: Vec<u8>,
+) -> Result<(), String> {
+    require_authed();
+    if envelope.is_empty() || envelope.len() > 4096 {
+        return Err("invitation envelope must be 1..=4096 bytes".into());
+    }
+    let (pair, sheet) = live_invite_sheet(&invite_code, &sheet_id)?;
+    let caller = ic_cdk::api::msg_caller();
+    if !is_member_of(&pair, caller) || !principal_can_read_sheet(&sheet, caller) {
+        return Err("not a member of the invitation sheet".into());
+    }
+    let key = invite_envelope_key(&invite_code, &sheet_id);
+    SHEET_INVITE_ENVELOPES.with(|store| {
+        let mut map = store.borrow_mut();
+        if let Some(existing) = map.get(&key) {
+            return if existing == envelope {
+                Ok(())
+            } else {
+                Err("invitation envelope is immutable; issue a new invitation".into())
+            };
+        }
+        if map.len() >= 4096 {
+            return Err("invitation envelope capacity reached".into());
+        }
+        map.insert(key, envelope);
+        Ok(())
+    })
+}
+
+#[ic_cdk::query]
+fn get_sheet_invite_envelope(
+    invite_code: String,
+    sheet_id: String,
+) -> Result<SheetInviteEnvelope, String> {
+    require_authed();
+    let (pair, _) = live_invite_sheet(&invite_code, &sheet_id)?;
+    let caller = ic_cdk::api::msg_caller();
+    if pair.members[1] != Principal::anonymous() && !is_member_of(&pair, caller) {
+        return Err("invitation is reserved for the existing partner".into());
+    }
+    let envelope = SHEET_INVITE_ENVELOPES
+        .with(|store| {
+            store
+                .borrow()
+                .get(&invite_envelope_key(&invite_code, &sheet_id))
+        })
+        .ok_or("invitation envelope not found")?;
+    Ok(SheetInviteEnvelope {
+        pair_id: pair.id,
+        key_id: sheet_key_info_unchecked(&sheet_id).key_id,
+        envelope,
+    })
+}
+
 #[ic_cdk::update]
 async fn issue_invite(pair_id: String) -> String {
     require_authed();
@@ -6734,6 +7356,7 @@ async fn issue_invite(pair_id: String) -> String {
             let mut inv = i.borrow_mut();
             if !old.is_empty() {
                 inv.remove(&old);
+                clear_sheet_invite_envelopes(&old);
             }
             inv.insert(code.clone(), pair_id.clone());
         });
@@ -6821,6 +7444,21 @@ fn accept_invite(invite_code: String, rewraps: Vec<SheetRewrap>, pubkey: Vec<u8>
                 ic_cdk::trap("sheet does not belong to this pair");
             }
             // Solo (anonymous) for a new join, or already ours for an idempotent re-seal.
+            let key_info = sheet_key_info_unchecked(&rw.sheet_id);
+            if key_info.scheme == "random-v2"
+                || rw
+                    .wrapped_key_for_partner
+                    .starts_with(SHEET_ENVELOPE_PREFIX.as_bytes())
+            {
+                if let Err(message) = validate_sheet_envelope(
+                    &rw.wrapped_key_for_partner,
+                    &pair_id,
+                    &key_info.key_id,
+                    caller,
+                ) {
+                    ic_cdk::trap(message);
+                }
+            }
             // Never overwrite a key sealed to a different partner.
             if sheet.member_b != Principal::anonymous() && sheet.member_b != caller {
                 ic_cdk::trap("sheet already has a different partner");
@@ -6857,6 +7495,7 @@ fn accept_invite(invite_code: String, rewraps: Vec<SheetRewrap>, pubkey: Vec<u8>
         });
     }
     INVITES.with(|i| i.borrow_mut().remove(&invite_code));
+    clear_sheet_invite_envelopes(&invite_code);
     updated
 }
 
@@ -6908,6 +7547,9 @@ fn leave_pair(pair_id: String) -> Pair {
         map.insert(pair_id.clone(), pair.clone());
         (pair, staying)
     });
+    // Membership changes revoke outstanding invitation capabilities and their encrypted key copies.
+    INVITES.with(|invites| invites.borrow_mut().remove(&updated.invite_code));
+    clear_sheet_invite_envelopes(&updated.invite_code);
     // Rewrite every sheet: clear the leaver, promote the staying member if needed.
     let sheet_ids = pair_sheet_ids(&pair_id);
     for sid in sheet_ids {
@@ -6995,6 +7637,7 @@ fn delete_pair(pair_id: String) {
         SHEETS.with(|s| s.borrow_mut().remove(sid));
     }
     INVITES.with(|i| i.borrow_mut().remove(&pair.invite_code));
+    clear_sheet_invite_envelopes(&pair.invite_code);
     PAIRS.with(|p| p.borrow_mut().remove(&pair_id));
 }
 
@@ -7122,13 +7765,17 @@ fn submit_replace_member(signed: SignedReplaceRequest) -> Pair {
     // 5. Update all sheets: replace the leaving member's slot with
     // the new member. The leaving member loses read access; the
     // new member inherits the slot.
+    INVITES.with(|invites| invites.borrow_mut().remove(&pair.invite_code));
+    clear_sheet_invite_envelopes(&pair.invite_code);
     let sheet_ids = pair_sheet_ids(&req.pair_id);
     for sid in sheet_ids {
         update_sheet_field(&sid, |sh| {
             if sh.member_a == req.leaving_principal {
                 sh.member_a = req.new_principal;
+                sh.wrapped_key_a.clear();
             } else if sh.member_b == req.leaving_principal {
                 sh.member_b = req.new_principal;
+                sh.wrapped_key_b.clear();
             }
             // If the sheet is still Active, close it — the new
             // member inherits it as Closed with the same
@@ -7211,6 +7858,308 @@ mod tests {
     use super::*;
 
     #[test]
+    fn paid_root_failures_are_only_definite_when_the_sdk_confirms_no_execution() {
+        use ic_cdk::call::{CallFailed, CallRejected};
+        use ic_cdk_management_canister::SignCallError;
+        for code in [1, 2, 3] {
+            assert!(!root_failure_is_ambiguous(&SignCallError::CallFailed(
+                CallFailed::CallRejected(CallRejected::with_rejection(code, "test".into()))
+            )));
+        }
+        for code in [4, 5, 6, 99] {
+            assert!(root_failure_is_ambiguous(&SignCallError::CallFailed(
+                CallFailed::CallRejected(CallRejected::with_rejection(code, "test".into()))
+            )));
+        }
+    }
+
+    fn test_vault_key(owner: Principal) -> String {
+        let mut public_key = vec![7; 65];
+        public_key[0] = 4;
+        let key_id = account_vault::wrapping_key_id(&public_key);
+        ACCOUNT_VAULTS.with(|store| {
+            let mut store = store.borrow_mut();
+            let revision = store.vault(owner).map_or(0, |v| v.revision);
+            let revision = store.set_vault(owner, revision, vec![1]).unwrap();
+            store
+                .register_key(owner, revision, key_id.clone(), public_key)
+                .unwrap();
+        });
+        key_id
+    }
+
+    fn test_vault_envelope(
+        pair_id: &str,
+        key_id: &str,
+        owner: Principal,
+        recipient_key_id: &str,
+    ) -> Vec<u8> {
+        let mut ephemeral = vec![5; 65];
+        ephemeral[0] = 4;
+        let header = serde_json::json!({ "version": 1, "pairId": pair_id, "keyId": key_id,
+            "recipientPrincipal": owner.to_text(), "recipientKeyId": recipient_key_id,
+            "ephemeralB64": BASE64_STANDARD.encode(ephemeral), "iv": BASE64_STANDARD.encode([6;12]),
+            "ciphertext": BASE64_STANDARD.encode([7;48]) });
+        format!(
+            "{}{}",
+            SHEET_ENVELOPE_PREFIX,
+            BASE64_STANDARD.encode(serde_json::to_vec(&header).unwrap())
+        )
+        .into_bytes()
+    }
+
+    #[test]
+    fn random_sheet_envelopes_bind_every_recipient_coordinate_and_reject_placeholders() {
+        let owner = p(41);
+        let key_id = "random-key-id";
+        let recipient_key_id = "recipient-key-id";
+        let envelope = test_vault_envelope("pair-vault", key_id, owner, recipient_key_id);
+        assert!(validate_sheet_envelope_binding(
+            &envelope,
+            "pair-vault",
+            key_id,
+            owner,
+            recipient_key_id
+        )
+        .is_ok());
+        assert!(validate_sheet_envelope_binding(
+            &envelope,
+            "wrong-pair",
+            key_id,
+            owner,
+            recipient_key_id
+        )
+        .is_err());
+        assert!(validate_sheet_envelope_binding(
+            &envelope,
+            "pair-vault",
+            "wrong-key",
+            owner,
+            recipient_key_id
+        )
+        .is_err());
+        assert!(validate_sheet_envelope_binding(
+            &envelope,
+            "pair-vault",
+            key_id,
+            p(42),
+            recipient_key_id
+        )
+        .is_err());
+        assert!(validate_sheet_envelope_binding(
+            &envelope,
+            "pair-vault",
+            key_id,
+            owner,
+            "wrong-recipient-key"
+        )
+        .is_err());
+        for invalid in [vec![], vec![4; 48], vec![4; MAX_WRAPPED_KEY_BYTES + 1]] {
+            assert!(validate_sheet_envelope_binding(
+                &invalid,
+                "pair-vault",
+                key_id,
+                owner,
+                recipient_key_id
+            )
+            .is_err());
+        }
+    }
+
+    #[test]
+    fn random_sheet_creation_is_atomic_idempotent_and_never_a_legacy_derive() {
+        let mut fixture = test_sheet(SheetState::Active);
+        fixture.pair_id = "vault-create-pair".into();
+        fixture.member_a = p(43);
+        fixture.member_b = Principal::anonymous();
+        let pair = test_recipient_pair(&fixture);
+        PAIRS.with(|pairs| pairs.borrow_mut().insert(pair.id.clone(), pair.clone()));
+        let recipient_key_id = test_vault_key(fixture.member_a);
+        let key_id = "random_01234567890123456789012345678901";
+        let request = CreateSheetV2Req {
+            pair_id: pair.id.clone(),
+            closing_window_days: 30,
+            wrapped_key_a: test_vault_envelope(
+                &pair.id,
+                key_id,
+                fixture.member_a,
+                &recipient_key_id,
+            ),
+            wrapped_key_b: vec![],
+            name_enc: None,
+            name_iv: None,
+            key_id: key_id.into(),
+        };
+        assert!(create_sheet_v2_for(p(44), request.clone(), 1).is_err());
+        assert!(create_sheet_v2_for(Principal::anonymous(), request.clone(), 1).is_err());
+        let sheet = create_sheet_v2_for(fixture.member_a, request.clone(), 1).unwrap();
+        let retry = create_sheet_v2_for(fixture.member_a, request.clone(), 2).unwrap();
+        assert_eq!(sheet.id, retry.id);
+        assert_eq!(retry.created_at, 1);
+        assert_eq!(
+            sheet_key_info_unchecked(&sheet.id),
+            SheetKeyInfo {
+                scheme: "random-v2".into(),
+                key_id: key_id.into()
+            }
+        );
+        assert!(require_legacy_sheet_key(&sheet.id).is_err());
+        assert!(require_legacy_sheet_key("legacy-key-info-test").is_ok());
+        let mut changed = request.clone();
+        changed.closing_window_days = 31;
+        assert!(create_sheet_v2_for(fixture.member_a, changed, 3).is_err());
+        let receipt = SHEET_KEY_METADATA
+            .with(|m| m.borrow().get(&sheet.id))
+            .unwrap();
+        let restored = RandomSheetMetadata::from_bytes(receipt.to_bytes());
+        assert_eq!(restored.key_id, key_id);
+        SHEETS.with(|s| s.borrow_mut().remove(&sheet.id));
+        assert!(
+            create_sheet_v2_for(fixture.member_a, request, 4).is_err(),
+            "deleted IDs remain tombstoned"
+        );
+        PAIRS.with(|pairs| pairs.borrow_mut().remove(&pair.id));
+    }
+
+    #[test]
+    fn encrypted_invitation_cleanup_is_exactly_code_scoped() {
+        SHEET_INVITE_ENVELOPES.with(|store| {
+            let mut map = store.borrow_mut();
+            map.insert(invite_envelope_key("code-a", "sheet-a"), vec![1]);
+            map.insert(invite_envelope_key("code-a", "sheet-b"), vec![2]);
+            map.insert(invite_envelope_key("code-ab", "sheet-a"), vec![3]);
+        });
+        clear_sheet_invite_envelopes("code-a");
+        SHEET_INVITE_ENVELOPES.with(|store| {
+            let map = store.borrow();
+            assert!(map.get(&invite_envelope_key("code-a", "sheet-a")).is_none());
+            assert!(map.get(&invite_envelope_key("code-a", "sheet-b")).is_none());
+            assert_eq!(
+                map.get(&invite_envelope_key("code-ab", "sheet-a")),
+                Some(vec![3])
+            );
+        });
+    }
+
+    #[test]
+    fn recipient_envelope_repair_requires_current_members_and_an_empty_or_identical_slot() {
+        let mut sheet = test_sheet(SheetState::Closed);
+        sheet.id = "repair-envelope-sheet".into();
+        sheet.pair_id = "repair-envelope-pair".into();
+        sheet.member_a = p(45);
+        sheet.member_b = p(46);
+        sheet.wrapped_key_b.clear();
+        let recipient_key_id = test_vault_key(sheet.member_b);
+        let envelope =
+            test_vault_envelope(&sheet.pair_id, &sheet.id, sheet.member_b, &recipient_key_id);
+        SHEETS.with(|s| s.borrow_mut().insert(sheet.id.clone(), sheet.clone()));
+        assert!(set_sheet_envelope_for(
+            p(47),
+            sheet.id.clone(),
+            sheet.id.clone(),
+            sheet.member_b,
+            envelope.clone(),
+            false
+        )
+        .is_err());
+        assert!(set_sheet_envelope_for(
+            sheet.member_a,
+            sheet.id.clone(),
+            sheet.id.clone(),
+            p(47),
+            envelope.clone(),
+            false
+        )
+        .is_err());
+        set_sheet_envelope_for(
+            sheet.member_a,
+            sheet.id.clone(),
+            sheet.id.clone(),
+            sheet.member_b,
+            envelope.clone(),
+            false,
+        )
+        .unwrap();
+        set_sheet_envelope_for(
+            sheet.member_a,
+            sheet.id.clone(),
+            sheet.id.clone(),
+            sheet.member_b,
+            envelope.clone(),
+            false,
+        )
+        .unwrap();
+        let mut header: serde_json::Value = serde_json::from_slice(
+            &BASE64_STANDARD
+                .decode(
+                    std::str::from_utf8(&envelope)
+                        .unwrap()
+                        .strip_prefix(SHEET_ENVELOPE_PREFIX)
+                        .unwrap(),
+                )
+                .unwrap(),
+        )
+        .unwrap();
+        header["iv"] = BASE64_STANDARD.encode([8; 12]).into();
+        let replacement = format!(
+            "{}{}",
+            SHEET_ENVELOPE_PREFIX,
+            BASE64_STANDARD.encode(serde_json::to_vec(&header).unwrap())
+        )
+        .into_bytes();
+        assert!(set_sheet_envelope_for(
+            sheet.member_a,
+            sheet.id.clone(),
+            sheet.id.clone(),
+            sheet.member_b,
+            replacement.clone(),
+            false
+        )
+        .is_err());
+        set_sheet_envelope_for(
+            sheet.member_b,
+            sheet.id.clone(),
+            sheet.id.clone(),
+            sheet.member_b,
+            replacement,
+            true,
+        )
+        .unwrap();
+        SHEETS.with(|s| s.borrow_mut().remove(&sheet.id));
+    }
+
+    #[test]
+    fn new_vault_endpoints_are_inspect_allowed_and_auth_required() {
+        let source = include_str!("lib.rs");
+        let inspect = source
+            .split("fn inspect_message() {")
+            .nth(1)
+            .unwrap()
+            .split("// ───────────────────────── Phase 1 endpoints")
+            .next()
+            .unwrap();
+        let (allowed, authenticated) =
+            inspect.split_at(inspect.find("let require_auth_methods").unwrap());
+        for method in [
+            "get_account_vault",
+            "set_account_vault",
+            "get_account_wrapping_key",
+            "register_account_wrapping_key",
+            "acquire_account_root",
+            "create_sheet_v2",
+            "get_sheet_key_info",
+            "set_sheet_wrapped_key",
+            "set_sheet_recipient_wrapped_key",
+            "set_sheet_invite_envelope",
+            "get_sheet_invite_envelope",
+        ] {
+            assert!(allowed.contains(&format!("\"{method}\"")));
+            assert!(authenticated.contains(&format!("\"{method}\"")));
+        }
+        assert!(SCHEMA_VERSION >= 20);
+    }
+
+    #[test]
     fn private_match_fixed_source_binding_candid_decodes_as_blob() {
         // OpenChat's frozen producer uses `[u8; 32]`; IOU intentionally accepts `Vec<u8>` and then
         // enforces length 32. Both are Candid `vec nat8`, so the cross-repo wire remains exact.
@@ -7236,7 +8185,12 @@ mod tests {
 
     #[test]
     fn vetkd_key_name_reopens_existing_value_without_mutation() {
-        for existing in ["dfx_test_key", "key_1", "test_key_1", "legacy-configured-key"] {
+        for existing in [
+            "dfx_test_key",
+            "key_1",
+            "test_key_1",
+            "legacy-configured-key",
+        ] {
             let memory = VectorMemory::default();
             let cell = StableCell::init(memory.clone(), existing.to_string()).unwrap();
             let original_bytes = memory.borrow().clone();
@@ -8166,7 +9120,8 @@ mod tests {
     fn configured_model_cards_pass_backend_attestation() {
         let fixture: serde_json::Value = serde_json::from_str(include_str!(
             "../test/fixtures/openchat/model-acceptance/configured-model-attestation-cards.json"
-        )).unwrap();
+        ))
+        .unwrap();
         let cases = fixture["cases"].as_array().unwrap();
         assert_eq!(cases.len(), 16);
         let mut rejected = Vec::new();
@@ -8180,20 +9135,39 @@ mod tests {
                 action_id: card["action_id"].as_str().unwrap().into(),
                 disclosure: None,
                 expires_at: None,
-                confirm_payload: Some(card["confirm_payload_json"].as_str().unwrap().as_bytes().to_vec()),
+                confirm_payload: Some(
+                    card["confirm_payload_json"]
+                        .as_str()
+                        .unwrap()
+                        .as_bytes()
+                        .to_vec(),
+                ),
             };
             let mut binding = test_card_attestation_binding();
             binding.commitment.content = content;
             if !attests_exact_iou_card(
-                &binding, Some(&test_ai_app_v2_binding()), Some(&test_card_link()), p(3), p(1),
+                &binding,
+                Some(&test_ai_app_v2_binding()),
+                Some(&test_card_link()),
+                p(3),
+                p(1),
             ) {
                 rejected.push(format!("{} / {}", case["modelId"], case["imageId"]));
             }
-            assert!(parse_attested_entry_drafts(
-                case["confirmation_json"].as_str().unwrap().as_bytes(), true,
-            ).is_some(), "invalid final payload: {}", case["imageId"]);
+            assert!(
+                parse_attested_entry_drafts(
+                    case["confirmation_json"].as_str().unwrap().as_bytes(),
+                    true,
+                )
+                .is_some(),
+                "invalid final payload: {}",
+                case["imageId"]
+            );
         }
-        assert!(rejected.is_empty(), "current host/app cards rejected by backend: {rejected:?}");
+        assert!(
+            rejected.is_empty(),
+            "current host/app cards rejected by backend: {rejected:?}"
+        );
     }
 
     #[test]
@@ -8204,36 +9178,57 @@ mod tests {
         payload["image_heading"] = serde_json::json!("تمت العملية بنجاح");
         content.confirm_payload = Some(serde_json::to_vec(&payload).unwrap());
         assert!(exact_iou_card_content_is_valid(&content));
-        assert!(parse_attested_entry_drafts(content.confirm_payload.as_ref().unwrap(), true).is_none());
+        assert!(
+            parse_attested_entry_drafts(content.confirm_payload.as_ref().unwrap(), true).is_none()
+        );
 
         let mut binding = test_card_attestation_binding();
         binding.commitment.content = content.clone();
         assert!(attests_exact_iou_card(
-            &binding, Some(&test_ai_app_v2_binding()), Some(&test_card_link()), p(3), p(1),
+            &binding,
+            Some(&test_ai_app_v2_binding()),
+            Some(&test_card_link()),
+            p(3),
+            p(1),
         ));
         // Evidence is committed, but is not a public row or authority to change one.
-        content.rows.push(AttestedActionCardRow { label: "Image heading".into(), value: "تمت العملية بنجاح".into() });
+        content.rows.push(AttestedActionCardRow {
+            label: "Image heading".into(),
+            value: "تمت العملية بنجاح".into(),
+        });
         assert!(!exact_iou_card_content_is_valid(&content));
     }
 
     #[test]
     fn image_heading_card_attestation_keeps_strict_bounds_and_field_validation() {
         let original = test_card_content();
-        let base: serde_json::Value = serde_json::from_slice(original.confirm_payload.as_ref().unwrap()).unwrap();
+        let base: serde_json::Value =
+            serde_json::from_slice(original.confirm_payload.as_ref().unwrap()).unwrap();
         for value in [
-            serde_json::Value::Null, serde_json::json!(1), serde_json::json!(true),
-            serde_json::json!([]), serde_json::json!({}), serde_json::json!(""),
-            serde_json::json!(" "), serde_json::json!(" untrimmed"),
-            serde_json::json!("trailing "), serde_json::json!("line\nfeed"),
-            serde_json::json!("nul\0byte"), serde_json::json!("c1\u{0085}control"),
-            serde_json::json!("line\u{2028}separator"), serde_json::json!("paragraph\u{2029}separator"),
+            serde_json::Value::Null,
+            serde_json::json!(1),
+            serde_json::json!(true),
+            serde_json::json!([]),
+            serde_json::json!({}),
+            serde_json::json!(""),
+            serde_json::json!(" "),
+            serde_json::json!(" untrimmed"),
+            serde_json::json!("trailing "),
+            serde_json::json!("line\nfeed"),
+            serde_json::json!("nul\0byte"),
+            serde_json::json!("c1\u{0085}control"),
+            serde_json::json!("line\u{2028}separator"),
+            serde_json::json!("paragraph\u{2029}separator"),
             serde_json::json!("🟢".repeat(201)),
         ] {
             let mut payload = base.clone();
             payload["image_heading"] = value.clone();
             let mut content = original.clone();
             content.confirm_payload = Some(serde_json::to_vec(&payload).unwrap());
-            assert!(!exact_iou_card_content_is_valid(&content), "accepted {value}");
+            assert!(
+                !exact_iou_card_content_is_valid(&content),
+                "accepted {value}"
+            );
         }
         let mut payload = base;
         payload["image_heading"] = serde_json::json!("🟢".repeat(200));

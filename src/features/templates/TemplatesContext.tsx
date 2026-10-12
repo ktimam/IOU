@@ -22,7 +22,7 @@ import {
 import { useAuth, buildAgent } from "../auth/AuthProvider";
 import { createActor } from "../../backend/declarations";
 import {
-  deriveUserKey,
+  loadLegacyUserKey,
   encryptWithSheetKey,
   decryptWithSheetKey,
 } from "../crypto/devVetkd";
@@ -105,10 +105,12 @@ export function TemplatesProvider({ children }: { children: ReactNode }) {
         const enc = optBytes(user?.templates_enc);
         const iv = optBytes(user?.templates_iv);
         if (user && enc && iv) {
-          const K = await deriveUserKey(principal);
-          const bytes = await decryptWithSheetKey(K, iv, enc);
-          const parsed = JSON.parse(new TextDecoder().decode(bytes));
-          if (Array.isArray(parsed)) loaded = parsed;
+          const K = await loadLegacyUserKey(principal);
+          try {
+            const bytes = await decryptWithSheetKey(K, iv, enc);
+            const parsed = JSON.parse(new TextDecoder().decode(bytes));
+            if (Array.isArray(parsed)) loaded = parsed;
+          } finally { K.fill(0); }
         }
         if (!cancelled) setTemplates(loaded);
       } catch (e) {
@@ -128,10 +130,12 @@ export function TemplatesProvider({ children }: { children: ReactNode }) {
       const principal = identity.getPrincipal().toText();
       const agent = await buildAgent(identity);
       const actor = createActor(agent) as any;
-      const K = await deriveUserKey(principal);
-      const json = new TextEncoder().encode(JSON.stringify(next));
-      const { iv, ciphertext } = await encryptWithSheetKey(K, json);
-      await actor.set_user_templates(Array.from(ciphertext), Array.from(iv));
+      const K = await loadLegacyUserKey(principal);
+      try {
+        const json = new TextEncoder().encode(JSON.stringify(next));
+        const { iv, ciphertext } = await encryptWithSheetKey(K, json);
+        await actor.set_user_templates(Array.from(ciphertext), Array.from(iv));
+      } finally { K.fill(0); }
     },
     [identity],
   );

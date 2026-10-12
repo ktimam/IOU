@@ -32,6 +32,7 @@ import { DurableInboxRedirect } from "../features/openchat/DurableInboxRedirect"
 import { LocalConnectPage } from "../features/openchat/LocalConnectPage";
 import { AcceptInvitePage } from "../features/invite/AcceptInvitePage";
 import { useDeepLinks } from "../features/deeplinks/deepLink";
+import { AccountVaultGate } from "../features/crypto/AccountVaultControls";
 
 // Registers the native deep-link listener (no-op on web). Lives inside the
 // router so it can navigate; renders nothing.
@@ -76,7 +77,7 @@ function AuthenticatedSession() {
     state.kind,
     state.kind === "authenticated" ? state.principal : undefined,
   );
-  return <SessionProviders key={scope} />;
+  return <AccountVaultGate key={scope}><SessionProviders /></AccountVaultGate>;
 }
 
 function SessionProviders() {

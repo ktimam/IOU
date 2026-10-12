@@ -38,7 +38,8 @@ describe("prospective independent inactive Qwen five-field ablations", () => {
     expect(readIouModelImageProfiles(profile).processorOptions).toEqual(protocol.processorOptions);
     expect(profile.processorOptions).not.toHaveProperty("rawImageValuesRowFormat");
     expect(iouImageProcessorOptions).toEqual({ rawImageMoneyFormat: "total-row" });
-    expect(sha(readFileSync(new URL("./modelImageProfiles.json", import.meta.url)))).toBe("e8291225e81419a051cb9c48934211e15c012c29a5d3680e2ef7976d035667a3");
+    // The active, qualified four-field prompt advanced independently of these inactive ablations.
+    expect(sha(readFileSync(new URL("./modelImageProfiles.json", import.meta.url)))).toBe("37919f9a48d1dac9c395200c4ebc04ff7659d56ec4e8052c6f0b5404b6d931c5");
   });
   it("contains no literal fixture answers in either changed instruction", () => {
     for (const text of [newFormat, newDirection]) for (const forbidden of ["You owe", "Owed to you", "Reservation", "Invoice", "12900", "123.45", "42.75", "October", "USD", "EUR", "EGP"])

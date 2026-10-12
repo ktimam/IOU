@@ -20,8 +20,10 @@
 //       G1 compressed, 48 bytes.
 //   - Master public key (returned by vetkd_public_key()):
 //       G2, 96 bytes.
-//   - Transport secret key (ephemeral; session memory only):
-//       32-byte scalar (G1). It is never an account-recovery key.
+//   - Transport secret key:
+//       32-byte scalar (G1). Legacy sheet migration keeps it in session
+//       memory. Only an unfinished account-root request persists an encrypted
+//       copy so the same cached response can be opened after a reload.
 //
 // These were verified empirically: `TransportSecretKey.random()
 // .publicKeyBytes().length === 48` for the transport pubkey, and the
@@ -99,6 +101,24 @@ let transportKeyLoad: Promise<VetkdTransportKey> | null = null;
 export function newTransportKey(): VetkdTransportKey {
   const tsk = TransportSecretKey.random();
   return tskToVetkd(tsk);
+}
+
+/** Restore only an authenticated pending request; never trust a stored public
+ * key without checking that it matches the stored transport secret. */
+export function restorePendingTransportKey(secretKey: Uint8Array, publicKey: Uint8Array): VetkdTransportKey {
+  // The SDK's serialize() can alias its deserialize() input. The caller wipes
+  // its pending-record copy immediately, so this handle must own another copy.
+  const restored = tskToVetkd(tskFromBytes(secretKey.slice()));
+  if (publicKey.length !== restored.publicKey.length || !publicKey.every((byte, index) => byte === restored.publicKey[index])) {
+    restored.secretKey.fill(0);
+    throw new Error("Stored recovery transport does not match its public key. No paid request was sent.");
+  }
+  return restored;
+}
+
+export function validateVetkdMasterPublicKey(publicKey: Uint8Array): void {
+  if (publicKey.length !== 96) throw new Error("invalid vetKD master public key");
+  DerivedPublicKey.deserialize(publicKey);
 }
 
 function tskToVetkd(tsk: TransportSecretKey): VetkdTransportKey {
@@ -182,12 +202,9 @@ export async function prepareProdSheetKey(
   tskFromBytes(transport.secretKey);
 
   const masterPubKey = new Uint8Array(await actor.vetkd_public_key());
-  if (masterPubKey.length !== 96) {
-    throw new Error("invalid vetKD master public key");
-  }
   // Validate the management-canister response while the operation is still
   // safe to abort rather than discovering corruption after create_sheet.
-  DerivedPublicKey.deserialize(masterPubKey);
+  validateVetkdMasterPublicKey(masterPubKey);
   return { transport, masterPubKey };
 }
 

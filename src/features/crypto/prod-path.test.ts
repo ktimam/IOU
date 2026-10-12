@@ -11,6 +11,7 @@ import { isDevVetkd, isProdVetkd } from "./devVetkd";
 import {
   isProdVetkd as isProdVetkdFromProd,
   newTransportKey,
+  restorePendingTransportKey,
   deriveConsumerWrapKeyProd,
   deriveSheetKey,
   type VetkdTransportKey,
@@ -76,6 +77,20 @@ describe("prod-path guard", () => {
     expect(t.secretKey.length).toBe(32);
     expect(t.publicKey.length).toBe(48);
   });
+  it("restores a real pending transport into independent copies and rejects mismatched public keys", () => {
+    const original = newTransportKey();
+    const other = newTransportKey();
+    const restored = restorePendingTransportKey(original.secretKey, original.publicKey);
+    expect(restored).toEqual(original);
+    expect(restored.secretKey).not.toBe(original.secretKey);
+    expect(restored.publicKey).not.toBe(original.publicKey);
+    restored.secretKey.fill(0); restored.publicKey.fill(0);
+    expect(restorePendingTransportKey(original.secretKey, original.publicKey)).toEqual(original);
+    expect(() => restorePendingTransportKey(original.secretKey, other.publicKey)).toThrow(/does not match/);
+    expect(() => restorePendingTransportKey(original.secretKey, new Uint8Array(47))).toThrow(/does not match/);
+    expect(() => restorePendingTransportKey(new Uint8Array(31), original.publicKey)).toThrow();
+    expect(() => restorePendingTransportKey(new Uint8Array(32).fill(255), original.publicKey)).toThrow();
+  });
 
   it("derives the same production user key through two fresh device transport keys", async () => {
     const principal = "rrkah-fqaaa-aaaaa-aaaaq-cai";
@@ -119,6 +134,8 @@ describe("prod-path guard", () => {
     );
     expect(firstKey).toHaveLength(32);
     expect(secondKey).toEqual(firstKey);
+    const restoredTransport = restorePendingTransportKey(firstTransport.secretKey, firstTransport.publicKey);
+    expect(await deriveConsumerWrapKeyProd(principal, restoredTransport, derivedPublicKeyBytes, firstEncrypted)).toEqual(firstKey);
   });
 
   it("deriveSheetKey signature is the 5-arg form (canisterId is now a no-op)", () => {

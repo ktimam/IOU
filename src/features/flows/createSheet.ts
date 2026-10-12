@@ -1,10 +1,10 @@
 // Shared sheet-creation + name-publishing helpers.
 //
 // Used by: NewPair (auto-create the first sheet), NewSheet (manual new
-// sheet), and CloseSheetButton (rotate to a fresh sheet on archive). Each
-// In dev it generates and wraps a fresh K_sheet before creation. In production
-// it creates the sheet first, derives the authoritative id-bound vetKD key,
-// then stores any encrypted name. Both paths return the same public result so
+// sheet), and CloseSheetButton (rotate to a fresh sheet on archive).
+// Both paths generate and wrap a fresh K_sheet before creation. Production
+// uses the account vault's durable member wrapping keys, without VetKD.
+// Both paths return the same public result so
 // callers can cache K_sheet and publish account/member names.
 
 import type { Identity } from "@dfinity/agent";
@@ -16,13 +16,9 @@ import {
   encryptName,
   importPublicKeyB64Wrap,
 } from "../crypto/devVetkd";
-import {
-  isProdVetkd,
-  prepareProdSheetKey,
-  deriveProdSheetKeyWithRetry,
-  type ProdSheetKeyContext,
-} from "../crypto/prodVetkd";
+import { isProdVetkd } from "../crypto/prodVetkd";
 import { unwrap } from "./useActor";
+import { createRandomSheet } from "../crypto/vaultSheets";
 
 const ANON = "2vxsx-fae";
 
@@ -58,23 +54,17 @@ export type CreateSheetOpts = {
 
 type CreateSheetRuntime = {
   isProdVetkd: () => boolean;
-  prepareProdSheetKey: (actor: any) => Promise<ProdSheetKeyContext>;
-  deriveProdSheetKeyWithRetry: (
-    actor: any,
-    sheetId: string,
-    prepared: ProdSheetKeyContext,
-  ) => Promise<Uint8Array>;
+  createRandomSheet: typeof createRandomSheet;
 };
 
 const DEFAULT_CREATE_SHEET_RUNTIME: CreateSheetRuntime = {
   isProdVetkd,
-  prepareProdSheetKey,
-  deriveProdSheetKeyWithRetry,
+  createRandomSheet,
 };
 
 /**
- * create_sheet succeeded, so callers must open the returned sheet instead of
- * issuing another create. SheetKeyContext will retry derivation on that page.
+ * Kept for legacy callers handling a partially completed sheet operation.
+ * New production creation stores encrypted keys and name atomically.
  */
 export class SheetCreatedSetupError extends Error {
   constructor(
@@ -100,6 +90,9 @@ export async function createSheetForPair(
   opts: CreateSheetOpts,
   runtime: CreateSheetRuntime = DEFAULT_CREATE_SHEET_RUNTIME,
 ): Promise<{ sheet: any; K_sheet: Uint8Array }> {
+  if (runtime.isProdVetkd()) {
+    return runtime.createRandomSheet(actor, identity.getPrincipal().toText(), opts);
+  }
   const pair = unwrap(await actor.get_pair(opts.pairId)) as any;
   if (!pair) throw new Error("Pair not found or not a member.");
   const asText = (p: any) =>
@@ -110,12 +103,11 @@ export async function createSheetForPair(
   const memberBText = asText(memberB);
   const isSolo = memberBText === "" || memberBText === ANON;
 
-  const prod = runtime.isProdVetkd();
-  // Validate this session's ephemeral transport key and the canister's master
-  // key before create_sheet. The returned sheet id is the only input unavailable
-  // here.
-  const prepared = prod ? await runtime.prepareProdSheetKey(actor) : undefined;
-  let K_sheet: Uint8Array | undefined;
+  const myPrincipal = identity.getPrincipal().toText();
+  const myKp = await deriveUserKeypair(myPrincipal);
+  const K_sheet = newSheetKey();
+  await registerMyWrapPubkey(actor, myKp.publicKeyB64);
+  const selfWrap = await wrapSheetKey(K_sheet, myKp.publicKey, myKp.privateKey);
 
   // Wrap K_sheet for both member slots so each member can unwrap THEIR slot.
   //
@@ -127,55 +119,34 @@ export async function createSheetForPair(
   // is anonymized. We also (re)register our own pubkey so we can be a cross-wrap
   // RECIPIENT when the partner creates a sheet. Solo ⇒ empty placeholder for
   // member_b (filled by accept_invite when a partner joins).
-  //
-  // Prod (vetkd): the wrapped blobs are unused (the IC re-derives K_sheet per
-  // member); use validated public transport material as the non-empty
-  // wrapped_key_a placeholder.
   let wrapA: Uint8Array;
   let wrapB: Uint8Array;
-  if (prod) {
-    // These blobs are a legacy/dev storage field. Production authorization is
-    // sheet membership and K_sheet is derived from the sheet id. Reuse the
-    // validated public transport material as a non-secret placeholder rather
-    // than wrapping a disposable random key.
-    const placeholder = prepared!.transport.publicKey;
-    wrapA = placeholder;
-    wrapB = isSolo ? new Uint8Array(0) : placeholder;
+  if (isSolo) {
+    wrapA = selfWrap;
+    wrapB = new Uint8Array(0);
   } else {
-    const myPrincipal = identity.getPrincipal().toText();
-    const myKp = await deriveUserKeypair(myPrincipal);
-    K_sheet = newSheetKey();
-    await registerMyWrapPubkey(actor, myKp.publicKeyB64);
-    const selfWrap = await wrapSheetKey(K_sheet, myKp.publicKey, myKp.privateKey);
-    if (isSolo) {
-      wrapA = selfWrap;
-      wrapB = new Uint8Array(0);
-    } else {
-      const iAmMemberA = myPrincipal === memberAText;
-      const otherMember = iAmMemberA ? memberB : memberA;
-      const otherPub = await fetchWrapPubkey(actor, otherMember);
-      if (!otherPub) {
-        throw new Error(
-          "Your partner hasn't published their key yet — ask them to open this account once, then try again.",
-        );
-      }
-      const crossWrap = await wrapSheetKeyTagged(
-        K_sheet,
-        otherPub,
-        myKp.privateKey,
-        myKp.publicKeyB64,
+    const iAmMemberA = myPrincipal === memberAText;
+    const otherMember = iAmMemberA ? memberB : memberA;
+    const otherPub = await fetchWrapPubkey(actor, otherMember);
+    if (!otherPub) {
+      throw new Error(
+        "Your partner hasn't published their key yet — ask them to open this account once, then try again.",
       );
-      wrapA = iAmMemberA ? selfWrap : crossWrap;
-      wrapB = iAmMemberA ? crossWrap : selfWrap;
     }
+    const crossWrap = await wrapSheetKeyTagged(
+      K_sheet,
+      otherPub,
+      myKp.privateKey,
+      myKp.publicKeyB64,
+    );
+    wrapA = iAmMemberA ? selfWrap : crossWrap;
+    wrapB = iAmMemberA ? crossWrap : selfWrap;
   }
 
   let encBytes: number[] | null = null;
   let ivBytes: number[] | null = null;
-  // The authoritative production key contains the new sheet id, so production
-  // names are encrypted only after create_sheet returns. Dev remains atomic.
-  if (!prod && opts.name && opts.name.trim()) {
-    const r = await encryptName(K_sheet!, opts.name.trim());
+  if (opts.name && opts.name.trim()) {
+    const r = await encryptName(K_sheet, opts.name.trim());
     encBytes = r.enc;
     ivBytes = r.iv;
   }
@@ -189,24 +160,7 @@ export async function createSheetForPair(
     name_iv: ivBytes ? [ivBytes] : [],
   });
 
-  if (prod) {
-    try {
-      K_sheet = await runtime.deriveProdSheetKeyWithRetry(actor, sheet.id, prepared!);
-    } catch (error) {
-      // create_sheet is never retried after success. Callers open this exact
-      // sheet and the shared read path retries its key derivation there.
-      throw new SheetCreatedSetupError(sheet, undefined, "key-derivation", error);
-    }
-    if (opts.name && opts.name.trim()) {
-      try {
-        const name = await encryptName(K_sheet, opts.name.trim());
-        await actor.set_sheet_name(sheet.id, name.enc, name.iv);
-      } catch (error) {
-        throw new SheetCreatedSetupError(sheet, K_sheet, "name", error);
-      }
-    }
-  }
-  return { sheet, K_sheet: K_sheet! };
+  return { sheet, K_sheet };
 }
 
 /**

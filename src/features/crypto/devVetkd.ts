@@ -186,6 +186,16 @@ export async function deriveUserKey(principal: string): Promise<Uint8Array> {
   return new Uint8Array(bits);
 }
 
+/** Read-only access to pre-vault personal templates. Never invent a key when
+ * the original device key is unavailable, especially on a production device. */
+export async function loadLegacyUserKey(principal: string): Promise<Uint8Array> {
+  const keypair = await loadStoredKeypair(principal);
+  if (!keypair) throw new Error("Older personal Types can only be migrated from a device holding their original key. No replacement key was created.");
+  return new Uint8Array(await getSubtle().deriveBits(
+    { name: "ECDH", public: keypair.publicKey }, keypair.privateKey, 256,
+  ));
+}
+
 export function newSheetKey(): Uint8Array {
   return randomBytes(32);
 }

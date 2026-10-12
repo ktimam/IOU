@@ -1,5 +1,7 @@
 # IOU — Security & Privacy (v2)
 
+**Current key and session protocol:** [Account keys and recovery](account-vault.md) supersedes the historical per-sheet VetKD/recovery sketches below. It defines protected device storage, free backup unlock, explicit paid emergency recovery, session expiry and the limitations of a compromised client.
+
 > Threat model, encryption architecture, authorization, and the
 > guarantees we make to users. The product is small, so the security
 > model is small — but **explicit**, because shipping to mainnet means
@@ -30,14 +32,16 @@
 |-----------|------|------------|
 | **Canister node operator** | Read other people's entries | Full read access to stable memory; we defend by storing only ciphertext |
 | **Curious network observer** | Identify users, infer amount of activity | Sees encrypted traffic to boundary nodes only; metadata leakage limited by II's session model |
-| **Compromised browser** | Read entries of an active session | Limited to the current principal's sessions; cannot decrypt other sheets |
+| **Compromised browser** | Read entries and keys available to that browser | Can access data authorized to its signed-in identity and use available nonextractable key handles; not prevented by the device vault |
 | **Partner gone rogue** | Falsify entries, deny the other party | Can call canister endpoints as themselves; cannot impersonate the other principal; can mark entries for the other party's POV |
 | **Stolen device, unlocked** | Read entries, create entries | Same as "compromised browser" |
-| **Stolen device, locked** | None — II requires WebAuthn unlock | None |
+| **Stolen device, locked** | Recover device-local data or sessions | Depends on OS/browser protection; persistent login and cached keys are not a hardware-isolation guarantee |
 
 ### 1.4 What we explicitly accept
-- **Both members losing access = data loss.** This is a property of the
-  threat model. v1.1 adds an opt-in printable recovery key.
+- **Loss of all free key backups is not necessarily data loss.** The same
+  Internet Identity can explicitly recover the deterministic account root
+  using paid VetKD while the backend and encrypted backups remain intact.
+  Losing that identity as well still requires its independent II recovery.
 - **A determined nation-state with subpoena access to the canister's
   storage** would get ciphertext and metadata (entry counts, principal
   IDs, sheet IDs, when entries were created). They cannot read content.
@@ -62,10 +66,11 @@
   every canister call.
 - **Principal derivation:** the canister extracts `msg.caller` and
   uses it as the user id.
-- **Session length:** 30 days (we ask II for a 30-day delegation). The
-  user can sign out per-device or everywhere at any time.
-- **Sign out:** clears the local `authClient` storage and calls II to
-  revoke the specific delegation.
+- **Session length:** request up to 30 days; honor the actual returned
+  delegation expiry. Inactivity does not log the user out.
+- **Sign out:** clears local `authClient` storage, account-root storage and
+  pending request secrets, and signals matching same-origin tabs. It does
+  not claim server-wide revocation of already-issued delegations.
 
 ---
 

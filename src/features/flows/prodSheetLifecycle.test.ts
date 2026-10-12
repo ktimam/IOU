@@ -1,230 +1,142 @@
-import { webcrypto } from "node:crypto";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import {
-  createSheetForPair,
-  SheetCreatedSetupError,
-} from "./createSheet";
-import {
-  decryptName,
-  newSheetKey,
-} from "../crypto/devVetkd";
-import {
-  retryProdSheetKeyDerivation,
-  type ProdSheetKeyContext,
-} from "../crypto/prodVetkd";
+import { Principal } from "@dfinity/principal";
+import { createSheetForPair } from "./createSheet";
+import { decryptName } from "../crypto/devVetkd";
+import { createRandomSheet, readVaultSheetKey, LegacySheetRecoveryRequiredError, migrateLegacySheetKey } from "../crypto/vaultSheets";
+import { accountWrappingKeyId, openSheetKeyEnvelope, vaultB64 } from "../crypto/accountVaultCrypto";
 
-if (!(globalThis as { crypto?: Crypto }).crypto) {
-  (globalThis as { crypto: Crypto }).crypto = webcrypto as unknown as Crypto;
+const local = vi.hoisted(() => ({ keypairs: new Map<string, any>(), paid: vi.fn() }));
+vi.mock("../crypto/accountVault", async (original) => ({
+  ...await original<typeof import("../crypto/accountVault")>(),
+  getAccountVaultSheetKeypair: async (_actor: unknown, scope: { principal: string }) => {
+    if (!local.keypairs.has(scope.principal)) throw new Error("Account vault locked");
+    return local.keypairs.get(scope.principal);
+  },
+  loadAccountVaultSheetKeypair: async (_actor: unknown, scope: { principal: string }) => {
+    if (!local.keypairs.has(scope.principal)) throw new Error("Account vault locked");
+    return local.keypairs.get(scope.principal);
+  },
+}));
+vi.mock("../crypto/prodVetkd", async (original) => ({
+  ...await original<typeof import("../crypto/prodVetkd")>(),
+  prepareProdSheetKey: vi.fn(async () => ({})),
+  deriveProdSheetKey: (...args: unknown[]) => local.paid(...args),
+}));
+const A = "aaaaa-aa", B = "rrkah-fqaaa-aaaaa-aaaaq-cai", ANON = "2vxsx-fae";
+const principal = (text: string) => Principal.fromText(text);
+const identity = { getPrincipal: () => principal(A) } as any;
+const runtime = { isProdVetkd: () => true, createRandomSheet };
+const opts = { pairId: "pair-one", closingDays: 60, name: "  August  " };
+async function keypair() {
+  const kp = await crypto.subtle.generateKey({ name: "ECDH", namedCurve: "P-256" }, true, ["deriveBits"]);
+  const publicBytes = new Uint8Array(await crypto.subtle.exportKey("raw", kp.publicKey));
+  const publicKeyB64 = vaultB64(publicBytes);
+  return { ...kp, publicKeyB64, keyId: await accountWrappingKeyId(publicBytes) };
 }
-
-const A = "aaaaa-aa";
-const ANON = "2vxsx-fae";
-
-function principalLike(text: string) {
-  return { toText: () => text };
-}
-
-function preparedContext(): ProdSheetKeyContext {
-  return {
-    transport: {
-      secretKey: new Uint8Array(32).fill(3),
-      publicKey: new Uint8Array(48).fill(7),
-      publicKeyB64: "unused-in-test",
-    },
-    masterPubKey: new Uint8Array(96).fill(9),
-  };
-}
-
-function prodActor(events: string[]) {
-  const captured: { create?: any; name?: [string, number[], number[]] } = {};
+function server(shared = true) {
+  const pair: any = { id: opts.pairId, members: [principal(A), principal(shared ? B : ANON)], active_sheet_id: [] };
+  const sheets = new Map<string, any>();
+  let viewer = A;
   const actor = {
-    get_pair: vi.fn(async (id: string) => {
-      events.push("get-pair");
-      return [{ id, members: [principalLike(A), principalLike(ANON)] }];
+    // Pair and PairSummary are different Candid types: only the summary has
+    // active_sheet_id. Keep mocks faithful so lost-response recovery is real.
+    get_pair: vi.fn(async () => [{ id: pair.id, members: pair.members }]),
+    get_my_pairs: vi.fn(async () => [pair]),
+    get_account_wrapping_key: vi.fn(async (p: Principal) => {
+      const kp = local.keypairs.get(p.toText());
+      return kp ? [{ key_id: kp.keyId, public_key: Array.from(new Uint8Array(await crypto.subtle.exportKey("raw", kp.publicKey))) }] : [];
     }),
-    create_sheet: vi.fn(async (req: any) => {
-      events.push("create");
-      captured.create = req;
-      return { id: "sheet-prod-1", pair_id: req.pair_id, ...req };
+    create_sheet_v2: vi.fn(async (req: any) => {
+      const sheet = { ...req, id: "sheet-" + sheets.size, member_a: principal(A), member_b: principal(shared ? B : ANON) };
+      sheets.set(sheet.id, sheet); pair.active_sheet_id = [sheet.id]; return { Ok: sheet };
     }),
-    set_sheet_name: vi.fn(async (id: string, enc: number[], iv: number[]) => {
-      events.push("set-name");
-      captured.name = [id, enc, iv];
-    }),
+    get_sheet_key_info: vi.fn(async (id: string) => ({ Ok: { scheme: sheets.get(id)?.scheme ?? "random-v2", key_id: sheets.get(id)?.key_id } })),
+    get_sheet: vi.fn(async (id: string) => sheets.has(id) ? [sheets.get(id)] : []),
+    get_sheet_wrapped_key: vi.fn(async (id: string) => [sheets.get(id)?.[viewer === A ? "wrapped_key_a" : "wrapped_key_b"]]),
+    set_sheet_wrapped_key: vi.fn(async (id: string, _keyId: string, wrapped: number[]) => { sheets.get(id).wrapped_key_a = wrapped; return { Ok: null }; }),
+    create_sheet: vi.fn(),
+    vetkd_wrap_sheet_key: vi.fn(),
+    vetkd_wrap_consumer_key: vi.fn(),
   };
-  return { actor, captured };
+  return { actor, pair, sheets, viewAs: (p: string) => { viewer = p; } };
 }
-
-describe("production sheet lifecycle", () => {
-  beforeEach(() => {
-    vi.restoreAllMocks();
-  });
-
-  it("preflights before create, then encrypts the name under the authoritative id-derived key", async () => {
-    const events: string[] = [];
-    const prepared = preparedContext();
-    const authoritative = newSheetKey();
-    const { actor, captured } = prodActor(events);
-    const runtime = {
-      isProdVetkd: () => true,
-      prepareProdSheetKey: vi.fn(async () => {
-        events.push("preflight");
-        return prepared;
-      }),
-      deriveProdSheetKeyWithRetry: vi.fn(async (
-        _actor,
-        sheetId: string,
-        _prepared: ProdSheetKeyContext,
-      ) => {
-        events.push("derive:" + sheetId);
-        return authoritative;
-      }),
-    };
-
-    const result = await createSheetForPair(
-      actor as any,
-      { getPrincipal: () => principalLike(A) } as any,
-      { pairId: "pair-prod", closingDays: 60, name: "  August  " },
-      runtime,
-    );
-
-    expect(events).toEqual([
-      "get-pair",
-      "preflight",
-      "create",
-      "derive:sheet-prod-1",
-      "set-name",
-    ]);
-    expect(actor.create_sheet).toHaveBeenCalledTimes(1);
-    expect(captured.create.name_enc).toEqual([]);
-    expect(captured.create.name_iv).toEqual([]);
-    expect(captured.create.wrapped_key_a).toEqual(
-      Array.from(prepared.transport.publicKey),
-    );
-    expect(captured.create.wrapped_key_b).toEqual([]);
-    expect(result.K_sheet).toBe(authoritative);
-
-    const [sheetId, enc, iv] = captured.name!;
-    expect(sheetId).toBe("sheet-prod-1");
-    expect(
-      await decryptName(authoritative, new Uint8Array(iv), new Uint8Array(enc)),
-    ).toBe("August");
-    expect(
-      await decryptName(newSheetKey(), new Uint8Array(iv), new Uint8Array(enc)),
-    ).toBe("");
-
-    // A creator refresh goes through the same authoritative derivation seam,
-    // not through the create-time placeholder.
-    const refreshed = await runtime.deriveProdSheetKeyWithRetry(
-      actor,
-      result.sheet.id,
-      prepared,
-    );
-    expect(refreshed).toBe(authoritative);
-  });
-
-  it("does not create anything when transport/master preflight fails", async () => {
-    const events: string[] = [];
-    const { actor } = prodActor(events);
-    const runtime = {
-      isProdVetkd: () => true,
-      prepareProdSheetKey: vi.fn(async () => {
-        throw new Error("vetKD unavailable");
-      }),
-      deriveProdSheetKeyWithRetry: vi.fn(async () => newSheetKey()),
-    };
-
-    await expect(
-      createSheetForPair(
-        actor as any,
-        { getPrincipal: () => principalLike(A) } as any,
-        { pairId: "pair-prod", closingDays: 30 },
-        runtime,
-      ),
-    ).rejects.toThrow("vetKD unavailable");
+beforeEach(async () => { local.keypairs.clear(); local.paid.mockReset(); local.keypairs.set(A, await keypair()); local.keypairs.set(B, await keypair()); });
+describe("production sheets use locally generated, online-encrypted keys", () => {
+  it("creates name and both member envelopes atomically without any VetKD call", async () => {
+    const { actor, viewAs } = server();
+    const result = await createSheetForPair(actor, identity, opts, runtime);
     expect(actor.create_sheet).not.toHaveBeenCalled();
-    expect(runtime.deriveProdSheetKeyWithRetry).not.toHaveBeenCalled();
+    expect(actor.create_sheet_v2).toHaveBeenCalledOnce();
+    const req = actor.create_sheet_v2.mock.calls[0][0];
+    expect(req.name_enc[0].length).toBeGreaterThan(16);
+    expect(await decryptName(result.K_sheet, new Uint8Array(req.name_iv[0]), new Uint8Array(req.name_enc[0]))).toBe("August");
+    expect(await readVaultSheetKey(actor, A, result.sheet.id)).toEqual(result.K_sheet);
+    viewAs(B);
+    expect(await readVaultSheetKey(actor, B, result.sheet.id)).toEqual(result.K_sheet);
+    expect(actor.vetkd_wrap_sheet_key).not.toHaveBeenCalled();
+    expect(actor.vetkd_wrap_consumer_key).not.toHaveBeenCalled();
+    expect(local.paid).not.toHaveBeenCalled();
   });
-
-  it("never retries create after a post-create derivation failure", async () => {
-    const events: string[] = [];
-    const { actor } = prodActor(events);
-    const runtime = {
-      isProdVetkd: () => true,
-      prepareProdSheetKey: vi.fn(async () => preparedContext()),
-      deriveProdSheetKeyWithRetry: vi.fn(async () => {
-        throw new Error("replica temporarily unavailable");
-      }),
-    };
-
-    let thrown: unknown;
-    try {
-      await createSheetForPair(
-        actor as any,
-        { getPrincipal: () => principalLike(A) } as any,
-        { pairId: "pair-prod", closingDays: 30 },
-        runtime,
-      );
-    } catch (error) {
-      thrown = error;
-    }
-
-    expect(thrown).toBeInstanceOf(SheetCreatedSetupError);
-    expect((thrown as SheetCreatedSetupError).sheet.id).toBe("sheet-prod-1");
-    expect((thrown as SheetCreatedSetupError).stage).toBe("key-derivation");
-    expect(actor.create_sheet).toHaveBeenCalledTimes(1);
+  it("uses independent fresh random sheet keys while retaining the same account wrapping key", async () => {
+    const { actor } = server(false);
+    const one = await createRandomSheet(actor, A, opts), two = await createRandomSheet(actor, A, { ...opts, name: "Next" });
+    expect(one.K_sheet).not.toEqual(two.K_sheet);
+    expect(one.sheet.key_id).not.toBe(two.sheet.key_id);
+    expect(two.sheet.wrapped_key_b).toEqual([]);
+    expect(local.paid).not.toHaveBeenCalled();
   });
-
-  it("preserves the derived key and existing sheet when the follow-up name write fails", async () => {
-    const events: string[] = [];
-    const { actor } = prodActor(events);
-    actor.set_sheet_name.mockRejectedValue(new Error("name update rejected"));
-    const authoritative = newSheetKey();
-    const runtime = {
-      isProdVetkd: () => true,
-      prepareProdSheetKey: vi.fn(async () => preparedContext()),
-      deriveProdSheetKeyWithRetry: vi.fn(async () => authoritative),
-    };
-
-    let thrown: unknown;
-    try {
-      await createSheetForPair(
-        actor as any,
-        { getPrincipal: () => principalLike(A) } as any,
-        { pairId: "pair-prod", closingDays: 30, name: "August" },
-        runtime,
-      );
-    } catch (error) {
-      thrown = error;
-    }
-
-    expect(thrown).toBeInstanceOf(SheetCreatedSetupError);
-    expect((thrown as SheetCreatedSetupError).stage).toBe("name");
-    expect((thrown as SheetCreatedSetupError).K_sheet).toBe(authoritative);
-    expect(actor.create_sheet).toHaveBeenCalledTimes(1);
+  it("fails before creation if a real partner has not set up an account vault", async () => {
+    const { actor } = server(); local.keypairs.delete(B);
+    await expect(createRandomSheet(actor, A, opts)).rejects.toThrow(/partner.*setup/);
+    expect(actor.create_sheet_v2).not.toHaveBeenCalled();
   });
-
-  it("retries transient derivation failures and returns the eventual key", async () => {
-    const key = newSheetKey();
-    const derive = vi
-      .fn<() => Promise<Uint8Array>>()
-      .mockRejectedValueOnce(new Error("temporary reject"))
-      .mockRejectedValueOnce(new Error("network reset"))
-      .mockResolvedValue(key);
-
-    await expect(
-      retryProdSheetKeyDerivation(derive, { attempts: 4, delayMs: 0 }),
-    ).resolves.toBe(key);
-    expect(derive).toHaveBeenCalledTimes(3);
+  it("rejects a moved or corrupt envelope instead of paying or inventing a new key", async () => {
+    const { actor, sheets } = server();
+    const { sheet } = await createRandomSheet(actor, A, opts);
+    const encoded = new TextDecoder().decode(new Uint8Array(sheet.wrapped_key_a));
+    const kp = local.keypairs.get(A);
+    await expect(openSheetKeyEnvelope(encoded, kp.privateKey, {
+      version: 1, pairId: "another-pair", keyId: sheet.key_id, recipientPrincipal: A, recipientKeyId: kp.keyId,
+    })).rejects.toThrow();
+    sheets.get(sheet.id).wrapped_key_a = [1, 2, 3];
+    await expect(readVaultSheetKey(actor, A, sheet.id)).rejects.toThrow(/missing or damaged/);
+    expect(local.paid).not.toHaveBeenCalled();
   });
-
-  it("does not retry a non-member key request", async () => {
-    const denied = new Error("not a member of this sheet");
-    const derive = vi.fn<() => Promise<Uint8Array>>().mockRejectedValue(denied);
-
-    await expect(
-      retryProdSheetKeyDerivation(derive, { attempts: 4, delayMs: 0 }),
-    ).rejects.toBe(denied);
-    expect(derive).toHaveBeenCalledTimes(1);
+  it("reconciles a committed create whose response was lost, never issues another create", async () => {
+    const { actor } = server(false);
+    const create = actor.create_sheet_v2.getMockImplementation()!;
+    actor.create_sheet_v2.mockImplementationOnce(async (req) => { await create(req); throw new Error("response lost"); });
+    const result = await createRandomSheet(actor, A, opts);
+    expect(result.sheet.id).toBe("sheet-0");
+    expect(actor.create_sheet_v2).toHaveBeenCalledOnce();
+    expect(await readVaultSheetKey(actor, A, result.sheet.id)).toEqual(result.K_sheet);
+  });
+  it("does not interpret an unrelated active sheet as a successful ambiguous create", async () => {
+    const { actor, pair, sheets } = server(false);
+    pair.active_sheet_id = ["old"]; sheets.set("old", { key_id: "unrelated" });
+    actor.create_sheet_v2.mockRejectedValueOnce(new Error("network failure"));
+    await expect(createRandomSheet(actor, A, opts)).rejects.toThrow("network failure");
+    expect(actor.create_sheet_v2).toHaveBeenCalledOnce();
+  });
+  it("requires explicit legacy migration, preserves the old key, and never pays again once wrapped", async () => {
+    const { actor, sheets } = server(false);
+    const oldKey = new Uint8Array(32).fill(77);
+    sheets.set("legacy", { id: "legacy", pair_id: opts.pairId, key_id: "legacy", scheme: "vetkd-v1", wrapped_key_a: [5] });
+    await expect(readVaultSheetKey(actor, A, "legacy")).rejects.toBeInstanceOf(LegacySheetRecoveryRequiredError);
+    expect(local.paid).not.toHaveBeenCalled();
+    local.paid.mockImplementation(async () => oldKey.slice());
+    await migrateLegacySheetKey(actor, A, "legacy");
+    expect(local.paid).toHaveBeenCalledOnce();
+    expect(await readVaultSheetKey(actor, A, "legacy")).toEqual(oldKey);
+    await migrateLegacySheetKey(actor, A, "legacy");
+    expect(local.paid).toHaveBeenCalledOnce();
+  });
+  it("never automatically retries an ambiguous legacy derivation", async () => {
+    const { actor, sheets } = server(false);
+    sheets.set("legacy", { id: "legacy", pair_id: opts.pairId, key_id: "legacy", scheme: "vetkd-v1", wrapped_key_a: [5] });
+    local.paid.mockRejectedValue(new Error("unknown outcome"));
+    await expect(migrateLegacySheetKey(actor, A, "legacy")).rejects.toThrow("unknown outcome");
+    expect(local.paid).toHaveBeenCalledOnce();
+    expect(actor.set_sheet_wrapped_key).not.toHaveBeenCalled();
   });
 });

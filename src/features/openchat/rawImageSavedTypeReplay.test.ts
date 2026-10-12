@@ -107,7 +107,7 @@ describe("captured image -> IOU processor -> saved-Type card direction", () => {
     expect(unmatched).not.toHaveProperty("typeId");
     expect(unmatched).not.toHaveProperty("typeName");
     expect(matched.direction).toBe("debt");
-    expect(choice.noneLabel).toBe("None — use reviewed fields only");
+    expect(choice.noneLabel).toBe("None");
     for (const candidate of result.candidates) for (const key of ["image_heading", "image_type_texts", "direction_text", "type_texts"])
       expect(candidate).not.toHaveProperty(key);
   });

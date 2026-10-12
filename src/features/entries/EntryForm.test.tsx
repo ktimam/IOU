@@ -32,10 +32,11 @@ describe("entry conversion UI", () => {
     expect(html).toContain('class="conversion-toggle"');
     expect(html).toContain("including offline");
   });
-  it("allows the FX endpoint in both deployed CSPs without allowing arbitrary HTTPS connections", () => {
+  it("allows the FX endpoint in all three deployed CSPs without allowing arbitrary HTTPS connections", () => {
     const assets = readFileSync(new URL("../../../public/.ic-assets.json5", import.meta.url), "utf8");
     const policies = [...assets.matchAll(/"Content-Security-Policy": "([^"]+)"/g)];
-    expect(policies).toHaveLength(2);
+    // The connection-only physical document adds a third policy; it must be checked too.
+    expect(policies).toHaveLength(3);
     for (const [, policy] of policies) {
       const connect = policy.match(/connect-src ([^;]+);/)![1].split(" ");
       expect(connect).toContain("https://api.frankfurter.dev");

@@ -74,6 +74,11 @@ export const idlFactory = ({ IDL: idl }: { IDL: IDL }) => {
     // get_my_user returns it.
     default_currency: idl.Opt(idl.Text),
   });
+  const AccountVault = idl.Record({ revision: idl.Nat64, payload: idl.Vec(idl.Nat8) });
+  const AccountWrappingKey = idl.Record({ key_id: idl.Text, public_key: idl.Vec(idl.Nat8), vault_revision: idl.Nat64 });
+  const SheetKeyInfo = idl.Record({ scheme: idl.Text, key_id: idl.Text });
+  const SheetInviteEnvelope = idl.Record({ pair_id: idl.Text, key_id: idl.Text, envelope: idl.Vec(idl.Nat8) });
+  const KeyResult = (value: IDL) => idl.Variant({ Ok: value, Err: idl.Text });
   const AiAppVerificationBinding = idl.Record({
     user_index_canister_id: idl.Principal,
     app_id: idl.Nat32,
@@ -253,6 +258,11 @@ export const idlFactory = ({ IDL: idl }: { IDL: IDL }) => {
     entry_key: idl.Vec(idl.Nat8),
     ciphertext: idl.Vec(idl.Nat8),
     iv: idl.Vec(idl.Nat8),
+  });
+  const CreateSheetV2Req = idl.Record({
+    pair_id: idl.Text, closing_window_days: idl.Nat32,
+    wrapped_key_a: idl.Vec(idl.Nat8), wrapped_key_b: idl.Vec(idl.Nat8),
+    name_enc: idl.Opt(idl.Vec(idl.Nat8)), name_iv: idl.Opt(idl.Vec(idl.Nat8)), key_id: idl.Text,
   });
   const EntryVersion = idl.Record({
     entry_key: idl.Vec(idl.Nat8),
@@ -481,6 +491,17 @@ export const idlFactory = ({ IDL: idl }: { IDL: IDL }) => {
     get_my_pairs: idl.Func([], [idl.Vec(PairSummary)], ["query"]),
     get_pair: idl.Func([idl.Text], [idl.Opt(Pair)], ["query"]),
     create_sheet: idl.Func([CreateSheetReq], [Sheet], []),
+    create_sheet_v2: idl.Func([CreateSheetV2Req], [KeyResult(Sheet)], []),
+    get_sheet_key_info: idl.Func([idl.Text], [KeyResult(SheetKeyInfo)], ["query"]),
+    set_sheet_wrapped_key: idl.Func([idl.Text, idl.Text, idl.Vec(idl.Nat8)], [KeyResult(idl.Null)], []),
+    set_sheet_recipient_wrapped_key: idl.Func([idl.Text, idl.Text, idl.Principal, idl.Vec(idl.Nat8)], [KeyResult(idl.Null)], []),
+    get_account_vault: idl.Func([], [idl.Opt(AccountVault)], ["query"]),
+    set_account_vault: idl.Func([idl.Nat64, idl.Vec(idl.Nat8)], [KeyResult(idl.Nat64)], []),
+    get_account_wrapping_key: idl.Func([idl.Principal], [idl.Opt(AccountWrappingKey)], ["query"]),
+    register_account_wrapping_key: idl.Func([idl.Nat64, idl.Text, idl.Vec(idl.Nat8)], [KeyResult(idl.Null)], []),
+    acquire_account_root: idl.Func([idl.Text, idl.Vec(idl.Nat8), idl.Bool], [KeyResult(idl.Vec(idl.Nat8))], []),
+    set_sheet_invite_envelope: idl.Func([idl.Text, idl.Text, idl.Vec(idl.Nat8)], [KeyResult(idl.Null)], []),
+    get_sheet_invite_envelope: idl.Func([idl.Text, idl.Text], [KeyResult(SheetInviteEnvelope)], ["query"]),
     get_sheet: idl.Func([idl.Text], [idl.Opt(Sheet)], ["query"]),
     get_sheet_wrapped_key: idl.Func(
       [idl.Text],
