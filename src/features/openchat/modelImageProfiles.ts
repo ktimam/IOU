@@ -17,10 +17,16 @@ export function readIouModelImageProfiles(value: unknown): Profiles {
   const fail = (): never => { throw new Error("Invalid IOU model image profile configuration"); };
   if (!record(value) || Object.keys(value).sort().join(",") !== "processorOptions,schemaVersion,templates" ||
     value.schemaVersion !== 1 || !record(value.processorOptions) ||
-    Object.keys(value.processorOptions).join(",") !== "rawImageMoneyFormat" ||
+    !["rawImageMoneyFormat", "rawImageDetailsFormat,rawImageMoneyFormat", "rawImageDetailsFormat,rawImageMoneyFormat,rawImageValuesRowFormat"].includes(Object.keys(value.processorOptions).sort().join(",")) ||
     !record(value.templates)) return fail();
   const format = value.processorOptions.rawImageMoneyFormat;
   if (format !== "strict" && format !== "total-row") return fail();
+  const details = value.processorOptions.rawImageDetailsFormat;
+  if (Object.hasOwn(value.processorOptions, "rawImageDetailsFormat") &&
+    details !== "none" && details !== "source-v1" && details !== "labels-v1" && details !== "labels-v2" && details !== "direction-v1") return fail();
+  const valuesRow = value.processorOptions.rawImageValuesRowFormat;
+  if (Object.hasOwn(value.processorOptions, "rawImageValuesRowFormat") &&
+    ((valuesRow !== "split-six-v1" && valuesRow !== "split-six-v2") || details !== "direction-v1")) return fail();
   const entries = Object.entries(value.templates);
   if (entries.length > 8) return fail();
   const templates: Record<string, PromptProfile> = {};
@@ -41,7 +47,11 @@ export function readIouModelImageProfiles(value: unknown): Profiles {
   if (promptExtension && new TextEncoder().encode(JSON.stringify(promptExtension)).byteLength > 16384) return fail();
   return Object.freeze({
     ...(promptExtension ? { promptExtension: Object.freeze(promptExtension) } : {}),
-    processorOptions: Object.freeze({ rawImageMoneyFormat: format }),
+    processorOptions: Object.freeze({ rawImageMoneyFormat: format,
+      ...((details === "none" || details === "source-v1" || details === "labels-v1" || details === "labels-v2" || details === "direction-v1")
+        ? { rawImageDetailsFormat: details } : {}),
+      ...(valuesRow === "split-six-v1" || valuesRow === "split-six-v2" ? { rawImageValuesRowFormat: valuesRow } : {}),
+    }),
   });
 }
 

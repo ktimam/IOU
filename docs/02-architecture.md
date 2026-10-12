@@ -597,4 +597,6 @@ automatic consequence of building source. The default exporter without
 `--catalog-only` still rebuilds the processor and needs its separate code review.
 
 Source/unit/parser and in-memory artifact-loader checks do not establish live
-UI, model inference, persisted-card or encrypted-delivery acceptance.
+UI, model inference, persisted-card or encrypted-delivery acceptance. The
+private Type prompt helper and all diagnostic image profiles remain governed by
+their separate explicit configuration/qualification gates.

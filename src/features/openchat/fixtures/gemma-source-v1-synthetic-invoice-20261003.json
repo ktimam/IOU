@@ -1,0 +1,31 @@
+{
+  "version": 1,
+  "scope": "Synthetic-only actual Gemma worker capture. Tests replay IOU normalization offline, not new inference, normal-UI, native/phone, or release acceptance. No image pixels, model weights, private roster or account data are retained.",
+  "provenance": {
+    "captureKind": "actual-worker-output",
+    "observation": "Root-observed image-source-details-025 r3 diagnostic completion",
+    "localEvidenceRoot": "F:/Temp/OpenChat-IOU",
+    "harnessReceipt": {
+      "relativePath": "image-source-details-025/r3/receipt-v2.json",
+      "sha256": "412fb25d0fe41fd49ad0b3d2aea9cc8ac6d17595cdc66ab0c593e0fb44dc81d9"
+    },
+    "captureScreenshot": {
+      "relativePath": "image-source-details-025/r3/gemma-completed.png",
+      "sha256": "76151983ef1c0348be1a96cff1bb4de61c12b50f0c4b0c2b925e103b9a125376"
+    },
+    "captureEvidenceLimit": "The screenshot confirms run metadata and visible output but horizontally clips the raw output tail. rawText retains the complete root-observed output without rewriting; the harness receipt binds preparation, not execution.",
+    "modelId": "gemma-4-e2b-it-q4",
+    "modelRevision": "9f4bef82ea6e296bc69f8a2f5939f73af81b07a6",
+    "workerSha256": "04ebc7bcb6a5385745a095ace2ba87e3e474775775dbae31f74d165433b39bd8",
+    "promptSha256": "1fa0db4d25e626629733aad8fef129e941b799f7c574a5cf8bb3f1ab9bcf1126",
+    "imageSha256": "418c2c5c8689cd4ca54174e0408aa336c2484eeae56900280ba8f85fd979ef37",
+    "maxTokens": 96,
+    "elapsedMs": 52279,
+    "cacheVerified": { "files": 13, "bytes": 3229930094 },
+    "cleanupConfirmed": true,
+    "qwenAtThisCheckpoint": "output-token-limit-blocked",
+    "activeConfigurationChanged": false
+  },
+  "sourceTimestamp": "2026-09-27T12:00:00Z",
+  "rawText": "{\"note\": \"SYNTHETIC TEST INVOICE\", \"currency_text\": \"USD\", \"amount_text\": \"123.45\", \"date_text\": \"27 September 2026\", \"kind\": \"iou\", \"direction_text\": \"You owe\", \"description_text\": \"Test stationery\", \"type_texts\": [\"TEST ONLY - no real financial obligation\", \"Unofficial client acceptance fixture\"]}"
+}

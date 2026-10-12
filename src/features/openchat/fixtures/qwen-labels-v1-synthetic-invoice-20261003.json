@@ -1,0 +1,32 @@
+{
+  "version": 1,
+  "scope": "Synthetic-only actual Qwen worker capture. Tests replay IOU normalization offline, not new inference, broader image qualification, normal-UI, native/phone, delivery or release acceptance. No image pixels, model weights, private roster or account data are retained.",
+  "provenance": {
+    "captureKind": "actual-worker-output",
+    "observation": "Root-observed image-source-details-025 r10-labels diagnostic completion",
+    "localEvidenceRoot": "F:/Temp/OpenChat-IOU",
+    "harnessReceipt": {
+      "relativePath": "image-source-details-025/r10-labels/receipt-v2.json",
+      "sha256": "913dba38ed7436da02a52c5d231221699fc1147aa4a947ff9cf6b20b5dad7632"
+    },
+    "captureScreenshot": {
+      "relativePath": "image-source-details-025/r10-labels/qwen-synthetic-completed.png",
+      "sha256": "2b0403826faa596e38c67ec556594f5b2468896f6f0549658f950d94aaddda6a"
+    },
+    "captureEvidenceLimit": "The screenshot confirms run metadata and visibly begins the output but horizontally clips its tail. rawText stores a JSON serialization of the complete root-observed parsed synthetic values; byte-for-byte output serialization and whitespace identity are not claimed. The harness receipt binds preparation, not execution.",
+    "modelId": "qwen3-vl-2b-instruct-q4",
+    "modelRevision": "3e4136ea66ae6e07c110e64fe07da2e029517ab5",
+    "workerSha256": "04ebc7bcb6a5385745a095ace2ba87e3e474775775dbae31f74d165433b39bd8",
+    "promptSha256": "6fe9d696fd14b1f68ddb04a01c7ba5def315700ea6f6955ffc04a5088bfdfaf4",
+    "imageSha256": "418c2c5c8689cd4ca54174e0408aa336c2484eeae56900280ba8f85fd979ef37",
+    "maxTokens": 96,
+    "elapsedMs": 32477,
+    "cacheVerified": { "files": 14, "bytes": 1836691582 },
+    "cleanupConfirmed": true,
+    "candidateActivated": false,
+    "activeConfigurationChanged": false,
+    "broaderQualification": "failed: separate retained real-image checks did not preserve every required field; this fixture qualifies only the exact synthetic replay"
+  },
+  "sourceTimestamp": "2026-09-27T12:00:00Z",
+  "rawText": "[{\"heading\":\"SYNTHETIC TEST INVOICE\",\"total_text\":\"123.45 USD\",\"dates\":[\"27 September 2026\"],\"kind\":\"iou\",\"direction_text\":\"You owe\",\"type_texts\":[\"TEST ONLY - no real financial obligation\",\"Unofficial client acceptance fixture\"]}]"
+}

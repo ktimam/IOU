@@ -300,3 +300,296 @@ describe("unwired IOU raw image evidence adapter", () => {
       .toBe("settlement");
   });
 });
+
+describe("opt-in raw image source details", () => {
+  const details = {
+    direction_text: " You owe ",
+    description_text: "  Test stationery  ",
+    type_texts: ["TEST ONLY", "  "],
+  };
+
+  it("maps only complete app display labels and keeps description and Type evidence separate", () => {
+    const raw = { ...arrayEvidence(), ...details };
+    const before = JSON.stringify(raw);
+    expect(normalizeRawImageEvidence(raw, "strict", "source-v1")).toEqual({
+      amount: 12.5,
+      currency: "USD",
+      kind: "iou",
+      printed_date: "14 Aug 2026",
+      printed_end_date: "",
+      note: "  Test stationery  ",
+      image_heading: "Visible heading",
+      direction: "debt",
+      image_type_texts: ["TEST ONLY", "  "],
+    });
+    expect(JSON.stringify(raw)).toBe(before);
+
+    expect(
+      normalizeRawImageEvidence(
+        {
+          ...scalarEvidence(),
+          ...details,
+          direction_text: "oWeD To YoU",
+          description_text: "Description",
+          type_texts: [],
+        },
+        "strict",
+        "source-v1",
+      ),
+    ).toMatchObject({
+      direction: "credit",
+      note: "Description",
+      image_heading: "Visible heading",
+      image_type_texts: [],
+    });
+
+    for (const raw of [
+      {
+        heading: "Visible heading",
+        currency_text: "USD",
+        amount_text: "12.50",
+        dates: ["14 Aug 2026"],
+        kind: "iou",
+        ...details,
+      },
+      {
+        note: "Visible heading",
+        currency_text: "USD",
+        amount_text: "12.50",
+        date_text: "14 Aug 2026",
+        kind: "iou",
+        ...details,
+      },
+    ]) {
+      expect(
+        normalizeRawImageEvidence(raw, "strict", "source-v1"),
+      ).toMatchObject({
+        amount: 12.5,
+        currency: "USD",
+        direction: "debt",
+        note: "  Test stationery  ",
+        image_type_texts: ["TEST ONLY", "  "],
+      });
+    }
+  });
+
+  it("treats blank detail strings as absent while preserving the heading fallback", () => {
+    expect(
+      normalizeRawImageEvidence(
+        {
+          ...arrayEvidence({ heading: "Heading" }),
+          direction_text: "   ",
+          description_text: "  ",
+          type_texts: [],
+        },
+        "strict",
+        "source-v1",
+      ),
+    ).toEqual({
+      amount: 12.5,
+      currency: "USD",
+      kind: "iou",
+      printed_date: "14 Aug 2026",
+      printed_end_date: "",
+      note: "Heading",
+      image_heading: "Heading",
+      image_type_texts: [],
+    });
+  });
+
+  it("accepts the exact source-detail boundaries without trimming retained text", () => {
+    expect(
+      normalizeRawImageEvidence(
+        {
+          ...arrayEvidence(),
+          ...details,
+          direction_text: `You owe${" ".repeat(57)}`,
+          description_text: "d".repeat(800),
+        },
+        "strict",
+        "source-v1",
+      ),
+    ).toMatchObject({
+      direction: "debt",
+      note: "d".repeat(800),
+    });
+    expect(
+      normalizeRawImageEvidence(
+        {
+          ...arrayEvidence(),
+          ...details,
+          direction_text: `You owe${" ".repeat(58)}`,
+        },
+        "strict",
+        "source-v1",
+      ),
+    ).toBeUndefined();
+  });
+
+  it("keeps legacy shapes exact and requires every source-v1 field", () => {
+    expect(
+      normalizeRawImageEvidence({ ...arrayEvidence(), ...details }),
+    ).toBeUndefined();
+    expect(
+      normalizeRawImageEvidence(arrayEvidence(), "strict", "source-v1"),
+    ).toBeUndefined();
+    for (const key of [
+      "direction_text",
+      "description_text",
+      "type_texts",
+    ] as const) {
+      const partial: Record<string, unknown> = {
+        ...arrayEvidence(),
+        ...details,
+      };
+      delete partial[key];
+      expect(
+        normalizeRawImageEvidence(partial, "strict", "source-v1"),
+      ).toBeUndefined();
+    }
+    expect(
+      normalizeRawImageEvidence(
+        { ...arrayEvidence(), ...details, extra: true },
+        "strict",
+        "source-v1",
+      ),
+    ).toBeUndefined();
+    expect(
+      normalizeRawImageEvidence(
+        { ...arrayEvidence(), ...details },
+        "strict",
+        "invalid" as "source-v1",
+      ),
+    ).toBeUndefined();
+  });
+
+  it.each([
+    "credit",
+    "debt",
+    "you owe me",
+    "Owed to you.",
+    "x".repeat(65),
+    "You\nowe",
+    "You\u202e owe",
+    1,
+    null,
+  ])(
+    "rejects unknown, partial or unsafe direction text: %j",
+    (direction_text) => {
+      expect(
+        normalizeRawImageEvidence(
+          { ...arrayEvidence(), ...details, direction_text },
+          "strict",
+          "source-v1",
+        ),
+      ).toBeUndefined();
+    },
+  );
+
+  it.each(["line\nbreak", "bidi\u202edescription", "x".repeat(801), null, 1])(
+    "rejects malformed description text: %j",
+    (description_text) => {
+      expect(
+        normalizeRawImageEvidence(
+          { ...arrayEvidence(), ...details, description_text },
+          "strict",
+          "source-v1",
+        ),
+      ).toBeUndefined();
+    },
+  );
+
+  it("rejects detail accessors and malformed Type arrays without invoking getters", () => {
+    let reads = 0;
+    for (const key of [
+      "direction_text",
+      "description_text",
+      "type_texts",
+    ] as const) {
+      const raw = { ...arrayEvidence(), ...details };
+      Object.defineProperty(raw, key, {
+        get() {
+          reads++;
+          throw new Error("not data");
+        },
+      });
+      expect(
+        normalizeRawImageEvidence(raw, "strict", "source-v1"),
+      ).toBeUndefined();
+    }
+    expect(
+      normalizeRawImageEvidence(
+        { ...arrayEvidence(), ...details, type_texts: new Array(1) },
+        "strict",
+        "source-v1",
+      ),
+    ).toBeUndefined();
+    expect(reads).toBe(0);
+  });
+
+  describe("dormant labels-v1 contract", () => {
+    const labels = { direction_text: " You owe ", type_texts: ["TEST ONLY", "  "] };
+
+    it("preserves the accepted heading note, printed range, direction and separate Type labels", () => {
+      const raw = { ...arrayEvidence({ heading: "Reservation", dates: ["Sun, Jul 19", "Thu, Aug 6"] }), ...labels };
+      const before = JSON.stringify(raw);
+      expect(normalizeRawImageEvidence(raw, "strict", "labels-v1")).toEqual({
+        amount: 12.5,
+        currency: "USD",
+        kind: "iou",
+        printed_date: "Sun, Jul 19",
+        printed_end_date: "Thu, Aug 6",
+        note: "Reservation",
+        image_heading: "Reservation",
+        direction: "debt",
+        image_type_texts: ["TEST ONLY", "  "],
+      });
+      expect(JSON.stringify(raw)).toBe(before);
+    });
+
+    it("is an exact two-field opt-in distinct from legacy and source-v1", () => {
+      const complete = { ...arrayEvidence(), ...labels };
+      expect(normalizeRawImageEvidence(complete)).toBeUndefined();
+      expect(normalizeRawImageEvidence(complete, "strict", "source-v1")).toBeUndefined();
+      expect(normalizeRawImageEvidence(arrayEvidence(), "strict", "labels-v1")).toBeUndefined();
+      for (const key of ["direction_text", "type_texts"] as const) {
+        const partial: Record<string, unknown> = { ...complete };
+        delete partial[key];
+        expect(normalizeRawImageEvidence(partial, "strict", "labels-v1")).toBeUndefined();
+      }
+      expect(normalizeRawImageEvidence({ ...complete, description_text: "Not in labels-v1" }, "strict", "labels-v1"))
+        .toBeUndefined();
+      expect(normalizeRawImageEvidence({ ...complete, extra: true }, "strict", "labels-v1")).toBeUndefined();
+    });
+
+    it("allows an explicitly blank direction but rejects unknown or unsafe labels", () => {
+      expect(normalizeRawImageEvidence({ ...arrayEvidence(), ...labels, direction_text: "  " }, "strict", "labels-v1"))
+        .toEqual({ amount: 12.5, currency: "USD", kind: "iou", printed_date: "14 Aug 2026", printed_end_date: "",
+          note: "Visible heading", image_heading: "Visible heading", image_type_texts: ["TEST ONLY", "  "] });
+      for (const direction_text of ["credit", "you owe me", "Owed to you.", "You\nowe", null])
+        expect(normalizeRawImageEvidence({ ...arrayEvidence(), ...labels, direction_text }, "strict", "labels-v1"))
+          .toBeUndefined();
+    });
+
+    it("reuses dense-array and own-data-property protections without reading accessors", () => {
+      let reads = 0;
+      const accessor = Object.defineProperty({ ...arrayEvidence(), ...labels }, "direction_text", {
+        get() { reads++; return "You owe"; },
+      });
+      const itemAccessor = Object.defineProperty(["TEST ONLY"], "0", {
+        get() { reads++; return "TEST ONLY"; },
+      });
+      const safe = Object.assign(Object.create(null), { ...arrayEvidence(), ...labels });
+      expect(normalizeRawImageEvidence(safe, "strict", "labels-v1"))
+        .toEqual(normalizeRawImageEvidence({ ...arrayEvidence(), ...labels }, "strict", "labels-v1"));
+      expect(normalizeRawImageEvidence(Object.assign(Object.create({}), { ...arrayEvidence(), ...labels }), "strict", "labels-v1"))
+        .toBeUndefined();
+      expect(normalizeRawImageEvidence(accessor, "strict", "labels-v1")).toBeUndefined();
+      expect(normalizeRawImageEvidence({ ...arrayEvidence(), ...labels, type_texts: itemAccessor }, "strict", "labels-v1"))
+        .toBeUndefined();
+      expect(normalizeRawImageEvidence({ ...arrayEvidence(), ...labels, type_texts: new Array(1) }, "strict", "labels-v1"))
+        .toBeUndefined();
+      expect(reads).toBe(0);
+    });
+  });
+});

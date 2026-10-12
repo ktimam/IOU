@@ -1,0 +1,111 @@
+{
+  "schemaVersion": 1,
+  "status": "Prospective inactive diagnostic only; no model runs or activation",
+  "modelId": "qwen3-vl-2b-instruct-q4",
+  "baseline": {
+    "file": "direction-v1-grouping-candidate.json",
+    "sha256": "54ba56d6e6889b9570dcbab7310f436f41a3d1e0516380358a37050e14e503e1",
+    "promptSha256": "23e98634fb3943174f22ebcafc936f8a5b31e1861161d956772d3c0c5ad5dce1"
+  },
+  "runtime": {
+    "workerSha256": "04ebc7bcb6a5385745a095ace2ba87e3e474775775dbae31f74d165433b39bd8",
+    "modelSpecSha256": "1adbf5bb99d573db320ae382c0a1d7dd002ab9a25d4ecd0588e0dbb3583a65e5",
+    "maxOutputTokens": 96,
+    "qwenContextGuard": 1024,
+    "artifactCount": 14,
+    "artifactBytes": 1836691582,
+    "requirements": ["Existing fully hash-verified cache only", "Production-exact worker and parser, no observer patch", "Existing admission, timeout and cleanup guards", "No host prompt, weight, cache, decoding budget or source-image edit"]
+  },
+  "processorOptions": { "rawImageMoneyFormat": "total-row", "rawImageDetailsFormat": "direction-v1" },
+  "ablations": [
+    {
+      "id": "A-format-only",
+      "file": "qwen-five-field-ablation-a-compact-candidate.json",
+      "sha256": "6306a63f4cbeaee3d7bfbde3d1874348dcad4aea9b4536f09e8b8b335353d48a",
+      "promptSha256": "ea6d91a265beb2b2c9bc81c5c446b6477a2ff8e4c31f11c8bef046fae78fab4b",
+      "onlyChange": "Replace final formatting sentence with explicit compact single-line JSON, no whitespace outside strings and no markdown/fence",
+      "directionRule": "Exactly baseline bytes, including absence-first policy",
+      "order": ["two-invoices-both-directions", "absent-direction-no-date-unmatched", "printed-debt", "original-arabic-transfer", "original-payout-period"],
+      "formatMeasure": "Whole bare JSON array, no whitespace outside strings. Separately record generic host parsing and source facts even when this formatting measure fails."
+    },
+    {
+      "id": "B-direction-only",
+      "file": "qwen-five-field-ablation-b-direction-candidate.json",
+      "sha256": "5a34b4f2621b0da5306766d9f366e637538dc518dfbb858beba76d8b0c362510",
+      "promptSha256": "c9e935f2c6a49a72b4b7b6a94476200671d2f32e207726629666d0093ee6f03c",
+      "onlyChange": "Replace only direction_text paragraph with per-entry verbatim printed-relationship copying before absent fallback",
+      "formatRule": "Exactly baseline bytes; A is not applied",
+      "order": ["printed-debt", "absent-direction-no-date-unmatched", "two-invoices-both-directions", "original-arabic-transfer", "original-payout-period"],
+      "formatMeasure": "Record actual format/size; no new formatting acceptance restriction. Complete existing host-approved JSON fence is allowed."
+    }
+  ],
+  "grammar": {
+    "outer": "One JSON array, one object per visibly separate transaction, or [] when none",
+    "keys": ["heading", "total_text", "dates", "kind", "direction_text"],
+    "strings": ["heading", "total_text", "kind", "direction_text"],
+    "dates": "Dense array length 0..2 of complete source date strings; preserve printed year/weekday and own-row association",
+    "directionUnknownSentinel": "Empty string; explicit null remains the separately approved direction-v1 absence sentinel only, recorded as format deviation rather than printed evidence",
+    "framing": "Generic parser remains unchanged: whole valid JSON or one complete accepted fence; no partial salvage/concatenation/wrapper expansion",
+    "sourceIndexes": "One raw object per normalized candidate, exact identity indexes, no filtered/repaired rows",
+    "sourceGradeFirst": true
+  },
+  "matrix": [
+    {
+      "id": "two-invoices-both-directions",
+      "imageSha256": "72bc884d5a20d66a8aaec29b96404635f193d865e172c9719db6eda26718aa38",
+      "privacy": "synthetic",
+      "sourceTimestamp": "2026-10-05T12:00:00Z",
+      "expected": [
+        { "heading": "Invoice A", "total_text": "Total 12.34 USD", "dates": ["1 October 2026"], "kind": "iou", "direction_text": "You owe" },
+        { "heading": "Invoice B", "total_text": "Total 56.78 EUR", "dates": ["2 October 2026"], "kind": "iou", "direction_text": "Owed to you" }
+      ],
+      "mustNot": ["omit or duplicate either row", "merge dates or totals across rows", "substitute empty direction for either printed direction"]
+    },
+    {
+      "id": "printed-debt",
+      "imageSha256": "418c2c5c8689cd4ca54174e0408aa336c2484eeae56900280ba8f85fd979ef37",
+      "privacy": "synthetic",
+      "sourceTimestamp": "2026-09-27T12:00:00Z",
+      "expected": [{ "heading": "SYNTHETIC TEST INVOICE", "total_text": "123.45 USD", "dates": ["27 September 2026"], "kind": "iou", "direction_text": "You owe" }],
+      "mustNot": ["invent or change numeric digits", "replace printed direction with default", "select a private Type without independent private matching"]
+    },
+    {
+      "id": "absent-direction-no-date-unmatched",
+      "imageSha256": "2d9835952b241eaf6d15673802935b6c6ceb22b9f057e85fe2ce604d68c5e001",
+      "privacy": "synthetic",
+      "sourceTimestamp": "2026-09-27T12:00:00Z",
+      "expected": [{ "heading": "Service invoice", "total_text": "Total 42.75 EUR", "dates": [], "kind": "iou", "direction_text": "" }],
+      "mustNot": ["invent date, direction or Saved type", "count the app credit default as source evidence"]
+    },
+    {
+      "id": "original-arabic-transfer",
+      "existingCorpusId": "dev-real-arabic-transfer",
+      "imageSha256": "b93fbf4cb198c70f5da865e98d1b17ac5c2da465c09e8ff60b4ec01d8cc0f68f",
+      "privacy": "existing private image; local path only in temporary manifest, never add image/raw capture to repository",
+      "sourceTimestamp": "2026-09-27T12:00:00Z",
+      "expected": [{ "heading": "تمت العملية بنجاح", "total_text": "12,900 EGP", "dates": ["14 Aug 2026 09:47 PM"], "kind": "settlement", "direction_text": "" }],
+      "mustNot": ["treat bank panels as separate transactions", "infer direction from names/accounts/status", "change the monetary magnitude or calendar date"]
+    },
+    {
+      "id": "original-payout-period",
+      "existingCorpusId": "dev-real-payout-range",
+      "imageSha256": "b7acf1d1c8b54aa54d48af29ff9cb022a9a36c59f6144e623519d86e7531e6f1",
+      "privacy": "existing private image; local path only in temporary manifest, never add image/raw capture to repository",
+      "sourceTimestamp": "2026-07-03T12:00:00Z",
+      "expected": [{ "heading": "Reservation", "total_text": "Total Payout $1,912.15", "dates": ["Sun, Jul 19", "Thu, Aug 6"], "kind": "iou", "direction_text": "" }],
+      "expectedAppNote": "Reservation | From Sun, Jul 19 to Thu, Aug 6",
+      "mustNot": ["drop an endpoint", "invent a printed year", "classify expected payout as completed payment", "invent direction or memo text"]
+    }
+  ],
+  "boundedRunPolicy": [
+    "At most one fresh run per case per ablation; no automatic retries, mid-matrix edits or oracle changes",
+    "A and B start from the same R3 baseline; do not combine them or switch baseline from A to B",
+    "Record formatting, completion, exact source facts, schema/normalization and final-host projection separately",
+    "A fitting budget does not waive missing direction; B copying direction does not waive absent-case hallucination or incomplete output",
+    "Stop the affected qualification on source failure/truncation/unsafe cleanup and retain exact evidence; the independent other ablation may be evaluated separately",
+    "Any combined candidate or separate five-slot adapter requires a declared next comparison; it is not authorized by these results"
+  ],
+  "remainingReleaseGates": ["Fresh full original eight-image corpus for the retained small Qwen", "Type ambiguity/default/manual controls", "Captions and row-local ranges", "Repeated use and cached model switching", "Normal web/APK, encrypted saved cards and encrypted delivery"],
+  "noInferenceRun": true,
+  "noActivation": true
+}

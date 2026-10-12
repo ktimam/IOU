@@ -1,6 +1,13 @@
 import { IOU_MAX_MAJOR_AMOUNT, IOU_MIN_MAJOR_AMOUNT } from "./actionManifest";
 import { normalizeImageCurrencyToken } from "./currencyEvidencePolicy";
 import { validateImageHeading } from "./imageHeading";
+import {
+  parseRawImageSourceDetails,
+  RAW_IMAGE_DIRECTION_DETAIL_KEYS,
+  RAW_IMAGE_LABEL_DETAIL_KEYS,
+  RAW_IMAGE_SOURCE_DETAIL_KEYS,
+  type RawImageDetailsFormat,
+} from "./rawImageSourceDetails";
 import { dateFromPrintedDate, validatedSourceInterval } from "./sourceInterval";
 
 /** Validated public image evidence, not a complete/private IOU draft or card. */
@@ -12,6 +19,8 @@ export type RawImageEvidenceCandidate = {
   printed_end_date?: string;
   note?: string;
   image_heading?: string;
+  direction?: "credit" | "debt";
+  image_type_texts?: string[];
 };
 
 const ARRAY_KEYS = ["heading", "total_text", "dates", "kind"];
@@ -24,14 +33,23 @@ export type RawImageDateTextFormat = "strict" | "labeled-values";
 
 // Read only own data properties: callers must pass an already whole-parsed JSON object.
 // Duplicate JSON keys cannot be diagnosed after parsing and remain the parser's duty.
-function fields(value: unknown): Record<string, unknown> | undefined {
+function fields(
+  value: unknown,
+  detailsFormat: RawImageDetailsFormat,
+): Record<string, unknown> | undefined {
   if (value === null || typeof value !== "object" || Array.isArray(value)) return undefined;
   const prototype = Object.getPrototypeOf(value);
   if (prototype !== null && prototype !== Object.prototype) return undefined;
   const descriptors = Object.getOwnPropertyDescriptors(value);
   const keys = Reflect.ownKeys(descriptors);
-  const expected = [ARRAY_KEYS, SCALAR_KEYS, SPLIT_ARRAY_KEYS, SPLIT_SCALAR_KEYS].find((shape) =>
-    keys.length === shape.length && shape.every((key) => Object.hasOwn(descriptors, key)));
+  const detailKeys = detailsFormat === "source-v1"
+    ? RAW_IMAGE_SOURCE_DETAIL_KEYS
+    : detailsFormat === "labels-v1" || detailsFormat === "labels-v2"
+      ? RAW_IMAGE_LABEL_DETAIL_KEYS
+      : detailsFormat === "direction-v1" ? RAW_IMAGE_DIRECTION_DETAIL_KEYS : [];
+  const expected = [ARRAY_KEYS, SCALAR_KEYS, SPLIT_ARRAY_KEYS, SPLIT_SCALAR_KEYS]
+    .map((shape) => [...shape, ...detailKeys])
+    .find((shape) => keys.length === shape.length && shape.every((key) => Object.hasOwn(descriptors, key)));
   if (expected === undefined) return undefined;
   const out: Record<string, unknown> = Object.create(null);
   for (const key of expected) {
@@ -112,19 +130,34 @@ function dateValues(value: unknown, scalar: boolean, format: RawImageDateTextFor
 }
 
 /**
- * Unwired IOU-owned adapter for exact four-field or split-money five-field formats. It does not
- * identify models, inspect pixels/OCR, prove faithful transcription, select private types,
- * infer direction, attach message text, hydrate a card, or activate a new manifest schema.
+ * IOU-owned adapter for exact four-field or split-money five-field formats. The legacy default
+ * carries no source details. The source-v1 opt-in maps complete app display labels, description
+ * and bounded Type evidence; labels-v1/v2 preserve the accepted heading note while carrying only
+ * direction and Type labels. The private artifact adapter adds v2's vocabulary gate.
+ * direction-v1 carries only printed direction and leaves heading Type matching unchanged.
+ * No mode proves faithful transcription or selects a Type.
  * Any unsupported/malformed field rejects the whole candidate; no valid-field salvage.
  */
 export function normalizeRawImageEvidence(
   value: unknown,
   dateTextFormat: RawImageDateTextFormat = "strict",
+  detailsFormat: RawImageDetailsFormat = "none",
 ): RawImageEvidenceCandidate | undefined {
   try {
     if (dateTextFormat !== "strict" && dateTextFormat !== "labeled-values") return undefined;
-    const raw = fields(value);
+    if (detailsFormat !== "none" && detailsFormat !== "source-v1" && detailsFormat !== "labels-v1" && detailsFormat !== "labels-v2" && detailsFormat !== "direction-v1") return undefined;
+    const raw = fields(value, detailsFormat);
     if (raw === undefined || (raw.kind !== "iou" && raw.kind !== "settlement")) return undefined;
+    const details = detailsFormat === "source-v1"
+      ? parseRawImageSourceDetails(raw.direction_text, raw.description_text, raw.type_texts)
+      : detailsFormat === "labels-v1" || detailsFormat === "labels-v2"
+        ? parseRawImageSourceDetails(raw.direction_text, "", raw.type_texts)
+        : detailsFormat === "direction-v1"
+          // Explicit unknown sentinel in this opt-in contract only. Null carries no
+          // direction evidence; other values/fields and older formats stay strict.
+          ? parseRawImageSourceDetails(raw.direction_text === null ? "" : raw.direction_text, "", [])
+          : undefined;
+    if (detailsFormat !== "none" && details === undefined) return undefined;
     const total = Object.hasOwn(raw, "total_text") ? money(raw.total_text) : splitMoney(raw.currency_text, raw.amount_text);
     if (total === undefined) return undefined;
     const scalar = Object.hasOwn(raw, "date_text");
@@ -144,7 +177,12 @@ export function normalizeRawImageEvidence(
       ...total,
       kind: raw.kind,
       ...(dates.length === 0 ? {} : { printed_date: dates[0], printed_end_date: dates[1] ?? "" }),
-      ...(heading === undefined ? {} : { note: heading, image_heading: heading }),
+      ...(detailsFormat === "source-v1" && details?.description !== undefined
+        ? { note: details.description }
+        : heading === undefined ? {} : { note: heading }),
+      ...(heading === undefined ? {} : { image_heading: heading }),
+      ...(details?.direction === undefined ? {} : { direction: details.direction }),
+      ...(detailsFormat === "none" || detailsFormat === "direction-v1" ? {} : { image_type_texts: details!.imageTypeTexts }),
     };
   } catch {
     // Throwing proxy traps or malformed object descriptors must not escape this pure boundary.

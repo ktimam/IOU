@@ -1,0 +1,32 @@
+{
+  "version": 1,
+  "scope": "Synthetic-only actual Gemma worker capture. Tests replay IOU normalization offline, not new inference, broader image qualification, normal-UI, native/phone, delivery or release acceptance. No image pixels, model weights, private roster or account data are retained.",
+  "provenance": {
+    "captureKind": "actual-worker-output",
+    "observation": "Root-observed image-source-details-025 r10-labels diagnostic completion",
+    "localEvidenceRoot": "F:/Temp/OpenChat-IOU",
+    "harnessReceipt": {
+      "relativePath": "image-source-details-025/r10-labels/receipt-v2.json",
+      "sha256": "913dba38ed7436da02a52c5d231221699fc1147aa4a947ff9cf6b20b5dad7632"
+    },
+    "captureScreenshot": {
+      "relativePath": "image-source-details-025/r10-labels/gemma-synthetic-completed.png",
+      "sha256": "2da812a6ce6b68908798c5505f64eac3762eae2432f15b66131a61d0ab60833e"
+    },
+    "captureEvidenceLimit": "The screenshot confirms run metadata and visibly begins the output but horizontally clips its tail. rawText stores a JSON serialization of the complete root-observed parsed synthetic values; byte-for-byte output serialization and whitespace identity are not claimed. The harness receipt binds preparation, not execution.",
+    "modelId": "gemma-4-e2b-it-q4",
+    "modelRevision": "9f4bef82ea6e296bc69f8a2f5939f73af81b07a6",
+    "workerSha256": "04ebc7bcb6a5385745a095ace2ba87e3e474775775dbae31f74d165433b39bd8",
+    "promptSha256": "098506be621a315a4b565eaf73f739869c798fd079d2227d62d1b3441e633b29",
+    "imageSha256": "418c2c5c8689cd4ca54174e0408aa336c2484eeae56900280ba8f85fd979ef37",
+    "maxTokens": 96,
+    "elapsedMs": 52637,
+    "cacheVerified": { "files": 13, "bytes": 3229930094 },
+    "cleanupConfirmed": true,
+    "candidateActivated": false,
+    "activeConfigurationChanged": false,
+    "broaderQualification": "not established: this fixture qualifies only the exact synthetic replay"
+  },
+  "sourceTimestamp": "2026-09-27T12:00:00Z",
+  "rawText": "{\"note\":\"SYNTHETIC TEST INVOICE\",\"currency_text\":\"USD\",\"amount_text\":\"123.45\",\"date_text\":\"27 September 2026\",\"kind\":\"iou\",\"direction_text\":\"You owe\",\"type_texts\":[\"TEST ONLY - no real financial obligation\",\"Unofficial client acceptance fixture\"]}"
+}

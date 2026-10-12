@@ -19,6 +19,45 @@ import { templateToInitial } from "../templates/templateBase";
 import { extractTs } from "./draft";
 import type { TxnTemplate } from "../templates/TemplatesContext";
 
+describe("opt-in image Type fields stay separate and account-local", () => {
+  const first: TxnTemplate = { id: "first", name: "First type", direction: "debt", txn_type: "iou", keywords: ["FIRST MARKER"] };
+  const second: TxnTemplate = { id: "second", name: "Second type", direction: "credit", txn_type: "iou", keywords: ["SECOND MARKER"] };
+  const options = { evidence: "row-local" as const, allowImageHeading: true, allowImageTypeTexts: true };
+  it("requires explicit image provenance and matches exactly one private Type", () => {
+    const raw = { note: "Unmatched", image_type_texts: ["FIRST MARKER"] };
+    expect(matchTemplateForDraft([first, second], raw)).toBeUndefined();
+    expect(matchTemplateForDraft([first, second], raw, { allowImageHeading: true })).toBeUndefined();
+    expect(matchTemplateForDraft([first, second], raw, options)).toBe(first);
+    expect(matchTemplateForDraft([second], raw, options)).toBeUndefined();
+    expect(raw).toEqual({ note: "Unmatched", image_type_texts: ["FIRST MARKER"] });
+  });
+  it("never joins description, heading or distinct type fields into a fabricated phrase", () => {
+    for (const raw of [
+      { note: "FIRST", image_heading: "MARKER", image_type_texts: [] },
+      { note: "FIRST", image_type_texts: ["MARKER"] },
+      { image_heading: "FIRST", image_type_texts: ["MARKER"] },
+      { image_type_texts: ["FIRST", "MARKER"] },
+    ]) expect(matchTemplateForDraft([first], raw, options)).toBeUndefined();
+  });
+  it("treats collisions across any permitted fields as no match, regardless of Type order", () => {
+    for (const raw of [
+      { note: "FIRST MARKER", image_type_texts: ["SECOND MARKER"] },
+      { image_heading: "FIRST MARKER", image_type_texts: ["SECOND MARKER"] },
+      { image_type_texts: ["FIRST MARKER", "SECOND MARKER"] },
+    ]) for (const types of [[first, second], [second, first]]) expect(matchTemplateForDraft(types, raw, options)).toBeUndefined();
+  });
+  it.each([[], [" "], ["FIRST MARKER", 1], ["FIRST MARKER", "bad\ntext"], Array(5).fill("FIRST MARKER"), [, "FIRST MARKER"]].map((value) => ({ value })))
+    ("never partially matches absent or malformed Type text: $value", ({ value: image_type_texts }) => {
+      expect(matchTemplateForDraft([first], { image_type_texts }, options)).toBeUndefined();
+    });
+  it("does not leak a sibling's footer or a repeated message into another row", () => {
+    const rows = [{ note: "First description", image_type_texts: ["FIRST MARKER"] },
+      { note: "Second description", image_type_texts: ["SECOND MARKER"] }, { note: "Third description", image_type_texts: [] }];
+    expect(rows.map((row) => matchTemplateForDraft([first, second], { ...row, message: "FIRST MARKER SECOND MARKER" }, options)?.id))
+      .toEqual(["first", "second", undefined]);
+  });
+});
+
 // The House account's Reservation: 20% + a 1000 EGP fixed fee, paid 50/50 (the real one from the
 // live drive). The child account below has never heard of it.
 const HOUSE_RESERVATION: TxnTemplate = {

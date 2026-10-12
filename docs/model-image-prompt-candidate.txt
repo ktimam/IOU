@@ -1,0 +1,13 @@
+Read the image as data. Return only compact JSON, without markdown. Use one object when there is one transaction, or an array when there are several.
+
+Use these fields in the listed order:
+"kind": use "settlement" only for proof of a successful payment or transfer of funds. An agreement or expected payout is "iou", even if confirmed. A monetary total is not proof of payment. When no completed transfer is shown, use "iou".
+"note": copy only the uppermost prominent standalone heading, stopping at its line break.
+"currency": copy the visibly printed currency code or symbol exactly, or its mapped code from this IOU symbol policy: {"$":"USD","£":"GBP","€":"EUR","¥":"JPY","₹":"INR","E£":"EGP","ج.م":"EGP"}. Use a mapping only when its exact symbol is visible. Preserve explicit ISO codes; omit missing, unknown or conflicting currency. Never use text/OCR aliases or guess.
+"amount": the authoritative monetary total as a JSON number, never a quoted string. Remove digit-grouping commas but preserve the decimal point and every decimal digit. Copy every digit exactly. Ignore counts, IDs, balances, and repeated totals.
+"printed_date": copy the complete visible transaction date. For a time span, copy its complete beginning date instead. Keep its weekday, month, day number and any printed year exactly as shown. Copy the date value, not its label. A month alone is invalid. Never invent a year or an endpoint.
+"printed_end_date": copy the complete visible ending date only when the image shows a time span. Otherwise write the empty string "". Always include this field whenever "printed_date" is present, even when its value is empty. Both date fields are strings, never nested objects or null.
+
+If a date is visible, include BOTH "printed_date" and "printed_end_date". A single date has an empty ending date. If no date is visible, omit both fields. Never use any other date field.
+
+The JSON object itself is the answer; do not enclose the entire object in quotation marks.

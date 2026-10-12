@@ -23,6 +23,7 @@ import type { TxnTemplate } from "../templates/TemplatesContext";
 import { templateToInitial } from "../templates/templateBase";
 import { extractTs, messageEvidence } from "./draft";
 import { validateImageHeading } from "../openchat/imageHeading";
+import { validateImageTypeTexts } from "../openchat/rawImageSourceDetails";
 
 export type TemplateResolution = {
   /** Entry defaults to merge under the extracted draft. Absent ⇒ nothing matched, nothing applied. */
@@ -34,7 +35,7 @@ export type TemplateResolution = {
 export type TemplateMatchOptions = {
   /**
    * A multi-entry extraction repeats the full source `message` on every row.
-   * In that mode only the row-local `note` and validated `image_heading` may select a saved Type;
+   * In that mode only the row-local `note` and opted-in validated image fields may select a saved Type;
    * otherwise one transaction's keyword can apply money defaults to a sibling.
    */
   evidence?: "full" | "row-local";
@@ -43,6 +44,8 @@ export type TemplateMatchOptions = {
    * paste/connector imports have no image-modality provenance and leave this disabled.
    */
   allowImageHeading?: boolean;
+  /** Only an app-owned image-detail contract enables these separate public source fields. */
+  allowImageTypeTexts?: boolean;
 };
 
 /**
@@ -93,7 +96,7 @@ export function templateMatchTerms(
 }
 
 /**
- * Select exactly one account-local type from the draft's message/note and image heading evidence.
+ * Select exactly one account-local type from the draft's message/note and opted-in image evidence.
  *
  * This is shared by the signed-in import page and the credentialless OpenChat
  * card after the card has decrypted the viewer-authorized account roster. A
@@ -106,15 +109,16 @@ export function matchTemplateForDraft(
   options: TemplateMatchOptions = {},
 ): TxnTemplate | undefined {
   if (raw == null || typeof raw !== "object") return undefined;
-  const draft = raw as { message?: unknown; note?: unknown; image_heading?: unknown };
+  const draft = raw as { message?: unknown; note?: unknown; image_heading?: unknown; image_type_texts?: unknown };
   const evidence = options.evidence === "row-local"
     ? (typeof draft.note === "string" ? draft.note : "")
     : messageEvidence(draft);
   const heading = options.allowImageHeading === true ? validateImageHeading(draft.image_heading) : undefined;
+  const typeTexts = options.allowImageTypeTexts === true ? validateImageTypeTexts(draft.image_type_texts) : undefined;
   // Keep fields separate: joining them could fabricate a keyword phrase across a memo/heading
   // boundary. A heading supplements the existing evidence mode; it never takes precedence over a
   // conflicting match, replaces the reviewed note, or supplies any private roster to the model.
-  const fields = heading === undefined ? [evidence] : [evidence, heading];
+  const fields = [...(heading === undefined ? [evidence] : [evidence, heading]), ...(typeTexts ?? [])];
   if (!fields.some((field) => field.trim() !== "")) return undefined;
   const matches = allTemplates.filter((template) =>
     templateMatchTerms(template).some((term) => fields.some((field) => keywordMatches(field, term))),

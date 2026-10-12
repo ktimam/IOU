@@ -12,9 +12,11 @@ const read = (file: string) => readFileSync(new URL(`../../../${file}`, import.m
 const activePrompt = read("docs/model-prompts/qwen3-vl-2b-total-row-image.txt");
 const candidate = read("docs/model-prompts/qwen3-vl-2b-upper-heading-v21-image.txt");
 const extension = "x-openchat-image-prompt-by-model";
-const definition = () => ({ rules: [{ instruction: "unchanged app rule" }], responseSchema: {
+// Frozen v20/v21 helper tests use their historical profile, never today's active prompt.
+const historicalProfile = { template: activePrompt, includeRuleGuidance: false, output: "app" };
+const historicalDefinition = () => ({ rules: [{ instruction: "unchanged app rule" }], responseSchema: {
   required: ["amount", "kind", "direction"],
-  [extension]: { version: 2, templates: structuredClone(config.templates) },
+  [extension]: { version: 2, templates: { ...structuredClone(config.templates), [SMALL_QWEN_ID]: structuredClone(historicalProfile) } },
 } });
 const policy = () => ({ cases: fixture.cases.slice(0, 8).map(row => ({
   id: row.imageId, sourceTimestamp: row.sourceTimestamp,
@@ -29,7 +31,7 @@ const passingReport = (candidateId = "v21") => ({ candidateId, promptSha256: sma
   runtimePassed: true, cardPassed: true,
 })), errors: [], sourceUnchanged: true, cleanup: { browserClosed: true, serverClosed: true } });
 
-describe("unselected small-Qwen upper-heading candidate", () => {
+describe("historical unselected small-Qwen upper-heading candidate", () => {
   afterEach(() => vi.useRealTimers());
   it("bounds a renderer evaluate that never resolves and aborts late evidence writes", async () => {
     vi.useFakeTimers();
@@ -113,18 +115,18 @@ describe("unselected small-Qwen upper-heading candidate", () => {
     expect(heading(candidate)).toContain("Never join vertically stacked lines");
     expect(candidate).not.toMatch(/RIVER|MARKET|SERVICE RECEIPT|12900|1,912|Reservation|Workshop/u);
     expect(Buffer.byteLength(candidate)).toBeLessThanOrEqual(4096);
-    expect(config.templates[SMALL_QWEN_ID].template).toBe(activePrompt);
+    expect(historicalProfile.template).toBe(activePrompt);
     expect(config.processorOptions).toEqual({ rawImageMoneyFormat: "total-row" });
   });
   it("stages one candidate only in memory, preserving every registered rule and all other model profiles", () => {
-    const original = definition(); const before = JSON.stringify(original);
-    const staged = stageUpperHeadingCandidate(original, config.templates[SMALL_QWEN_ID], candidate, activePrompt);
+    const original = historicalDefinition(); const before = JSON.stringify(original);
+    const staged = stageUpperHeadingCandidate(original, historicalProfile, candidate, activePrompt);
     expect(staged.responseSchema[extension].templates[SMALL_QWEN_ID]).toEqual({ template: candidate, includeRuleGuidance: false, output: "app" });
     staged.responseSchema[extension].templates[SMALL_QWEN_ID].template = activePrompt;
     expect(staged).toEqual(original);
     expect(JSON.stringify(original)).toBe(before);
   });
-  it("selects the byte-identical active v20 baseline only by explicit bounded selector", () => {
+  it("selects the byte-identical historical v20 baseline only by explicit bounded selector", () => {
     const paths = [resolve("host"), resolve("evidence"), resolve("worker.js")];
     for (const mode of ["--plan", "--run"]) {
       expect(parseSmallQwenQualificationArgs([mode, ...paths]).candidateId).toBe("v21");
@@ -137,17 +139,28 @@ describe("unselected small-Qwen upper-heading candidate", () => {
     expect(baselineProfile.promptSha256).toBe(QUALIFICATION_PINS.activePrompt);
     expect(baselineProfile.outputPrefix).toBe("small-qwen-v20-baseline");
     expect(smallQwenQualificationProfile("v21").outputPrefix).toBe("small-qwen-upper-heading-v21");
-    const original = definition(); const before = JSON.stringify(original);
-    const baseline = stageSmallQwenQualification(original, config.templates[SMALL_QWEN_ID], activePrompt, activePrompt, "v20-baseline");
+    const original = historicalDefinition(); const before = JSON.stringify(original);
+    const baseline = stageSmallQwenQualification(original, historicalProfile, activePrompt, activePrompt, "v20-baseline");
     expect(baseline).toEqual(original); expect(baseline).not.toBe(original);
     expect(baseline.responseSchema[extension].templates[SMALL_QWEN_ID].template).toBe(activePrompt);
     baseline.responseSchema[extension].templates[SMALL_QWEN_ID].template += "clone-only mutation";
     expect(JSON.stringify(original)).toBe(before);
-    expect(stageSmallQwenQualification(original, config.templates[SMALL_QWEN_ID], candidate, activePrompt, "v21"))
-      .toEqual(stageUpperHeadingCandidate(original, config.templates[SMALL_QWEN_ID], candidate, activePrompt));
+    expect(stageSmallQwenQualification(original, historicalProfile, candidate, activePrompt, "v21"))
+      .toEqual(stageUpperHeadingCandidate(original, historicalProfile, candidate, activePrompt));
+  });
+  it("rejects today's active profile rather than relabeling it as historical v20", () => {
+    const current = historicalDefinition();
+    const currentProfile = structuredClone(config.templates[SMALL_QWEN_ID]);
+    expect(qualificationHash(currentProfile.template)).not.toBe(QUALIFICATION_PINS.activePrompt);
+    current.responseSchema[extension].templates[SMALL_QWEN_ID] = currentProfile;
+    expect(() => stageSmallQwenQualification(current, currentProfile, activePrompt, activePrompt, "v20-baseline"))
+      .toThrow("Actual small-Qwen registered profile must remain v20");
+    expect(() => stageUpperHeadingCandidate(current, currentProfile, candidate, activePrompt))
+      .toThrow("Actual small-Qwen registered profile must remain v20");
   });
   it.each(["prompt", "active", "profile", "schema", "identity"])("rejects %s drift for the unchanged v20 baseline", changed => {
-    const original = definition(); const profile = structuredClone(config.templates[SMALL_QWEN_ID]);
+    const original = historicalDefinition(); const profile = structuredClone(historicalProfile);
+    expect(() => stageSmallQwenQualification(original, profile, activePrompt, activePrompt, "v20-baseline")).not.toThrow();
     if (changed === "profile") profile.includeRuleGuidance = true;
     if (changed === "schema") original.responseSchema[extension].templates[SMALL_QWEN_ID].template = candidate;
     expect(() => stageSmallQwenQualification(original, profile, changed === "prompt" ? candidate : activePrompt,
@@ -167,9 +180,10 @@ describe("unselected small-Qwen upper-heading candidate", () => {
     }
   });
   it.each(["candidate", "active", "profile", "schema"])("rejects changed %s binding before inference", changed => {
-    const original = definition();
+    const original = historicalDefinition();
+    const profile = structuredClone(historicalProfile);
+    expect(() => stageUpperHeadingCandidate(original, profile, candidate, activePrompt)).not.toThrow();
     if (changed === "schema") original.responseSchema[extension].templates[SMALL_QWEN_ID].template += "changed";
-    const profile = structuredClone(config.templates[SMALL_QWEN_ID]);
     if (changed === "profile") profile.includeRuleGuidance = true;
     expect(() => stageUpperHeadingCandidate(original, profile,
       candidate + (changed === "candidate" ? "changed" : ""), activePrompt + (changed === "active" ? "changed" : ""))).toThrow();

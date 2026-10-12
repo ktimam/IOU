@@ -7,6 +7,25 @@ import { sourceIntervalFromText } from "./localExtractionSemantics";
 
 const anchor = new Date("2026-08-16T12:00:00Z");
 
+describe("image-only Type evidence normalization", () => {
+    it("retains a validated fresh array only for images without trimming or joining its fields", () => {
+        const image_type_texts = ["TEST ONLY", "  ", "Separate field"];
+        const candidate = { amount: 20, note: "Description", image_type_texts };
+        const result = postProcessIouCandidate(candidate, { modality: "image", now: anchor });
+        expect(result).toEqual(candidate);
+        expect(result.image_type_texts).not.toBe(image_type_texts);
+        expect(postProcessIouCandidate({ image_type_texts: [] }, { modality: "image", now: anchor })).toEqual({ image_type_texts: [] });
+        for (const modality of ["text", "audio"] as const) {
+            expect(postProcessIouCandidate(candidate, { modality, now: anchor })).toEqual({ amount: 20, note: "Description" });
+        }
+        expect(candidate.image_type_texts).toBe(image_type_texts);
+    });
+    it.each([undefined, "TEST ONLY", ["TEST ONLY", 1], ["TEST ONLY", "bad\ntext"], ["x".repeat(161)], Array(5).fill("TEST ONLY"), [, "TEST ONLY"]].map((value) => ({ value })))
+        ("drops invalid Type evidence as a whole, never retaining a matching prefix: $value", ({ value: image_type_texts }) => {
+            expect(postProcessIouCandidate({ amount: 20, image_type_texts }, { modality: "image", now: anchor })).toEqual({ amount: 20 });
+        });
+});
+
 describe("IOU-owned local extraction", () => {
     it("extracts a transaction from text through IOU's own schema and rules", () => {
         expect(extractIouLocalCandidates({

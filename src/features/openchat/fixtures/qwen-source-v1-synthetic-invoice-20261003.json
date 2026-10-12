@@ -1,0 +1,38 @@
+{
+  "version": 1,
+  "scope": "Synthetic-only actual Qwen worker capture. Tests replay IOU normalization offline, not new inference, normal-UI, native/phone, delivery or release acceptance. No image pixels, model weights, private roster or account data are retained.",
+  "provenance": {
+    "captureKind": "actual-worker-output",
+    "observation": "Root-observed image-source-details-025 r8 diagnostic completion",
+    "localEvidenceRoot": "F:/Temp/OpenChat-IOU",
+    "observedResult": {
+      "relativePath": "image-source-details-025/r8/observed-qwen-synthetic.json",
+      "sha256": "6ba1d83930bb1db1ece2bd71f48c701a8664b3ad8348d18207632ca371593c4b"
+    },
+    "harnessReceipt": {
+      "relativePath": "image-source-details-025/r8/receipt-v2.json",
+      "sha256": "6c6426a77e6822a839c25c5470e36be685eb9efc1b2a64f73bed6d1da4923702"
+    },
+    "captureScreenshot": {
+      "relativePath": "image-source-details-025/r8/qwen-synthetic-completed.png",
+      "sha256": "fd82a81cab2193d52564235e40a29c11980a676f02c3bd877e747dd4d15f9a3f"
+    },
+    "captureEvidenceLimit": "The retained rawText is the exact synthetic result recorded by observedResult. The screenshot is corroborating public run evidence; the harness receipt binds preparation, not execution.",
+    "modelId": "qwen3-vl-2b-instruct-q4",
+    "modelRevision": "3e4136ea66ae6e07c110e64fe07da2e029517ab5",
+    "workerSha256": "04ebc7bcb6a5385745a095ace2ba87e3e474775775dbae31f74d165433b39bd8",
+    "promptSha256": "d29d58f492529b8640d51338d1f7904784a3001fa10cdd6273637fdc49d7ebc0",
+    "imageSha256": "418c2c5c8689cd4ca54174e0408aa336c2484eeae56900280ba8f85fd979ef37",
+    "maxTokens": 96,
+    "elapsedMs": 32513,
+    "cacheVerified": { "files": 14, "bytes": 1836691582 },
+    "cleanupConfirmed": true,
+    "jsonSyntaxValid": true,
+    "printedDateCorrect": true,
+    "candidateActivated": false,
+    "activeConfigurationChanged": false,
+    "broaderQualification": "failed: separate retained 12900 and reservation image checks did not preserve all required kind, direction and description fields; this fixture qualifies only the exact synthetic replay"
+  },
+  "sourceTimestamp": "2026-09-27T12:00:00Z",
+  "rawText": "[{\"heading\":\"SYNTHETIC TEST INVOICE\",\"total_text\":\"123.45 USD\",\"dates\":[\"27 September 2026\"],\"kind\":\"iou\",\"direction_text\":\"You owe\",\"description_text\":\"Test stationery\",\"type_texts\":[ \"TEST ONLY\", \"no real financial obligation\", \"Unofficial client acceptance fixture\"]}]"
+}

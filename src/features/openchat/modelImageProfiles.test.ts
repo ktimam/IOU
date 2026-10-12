@@ -8,6 +8,7 @@ import { processIouRequest } from "./localProcessorBridge";
 import { buildConfirmPayload, initToFormState } from "./cardBridge";
 import attestationFixture from "../../../test/fixtures/openchat/model-acceptance/configured-model-attestation-cards.json";
 import smallerQwenFixture from "../../../test/fixtures/openchat/model-acceptance/qwen-q4-v20-app-replay.json";
+import scopedQwenFixture from "../../../test/fixtures/openchat/model-acceptance/qwen-document-scoped-app-replay.json";
 
 const cases = [
   ["qwen3-vl-2b-q4-head-f16-diagnostic", "qwen3-vl-2b-total-row-image.txt", "qwen-v20-total-row-app-replay.json",
@@ -67,18 +68,48 @@ describe("IOU configured model image profiles", () => {
       });
     }
   }
-  it("maps the smaller all-q4 Qwen to the exact tested complete-row profile", () => {
-    const selected = iouImagePromptByModel!.templates[smallerQwenFixture.modelId];
+  it("retains the smaller all-q4 Qwen's historical complete-row prompt and captures", () => {
     const prompt = readFileSync(new URL("../../../docs/model-prompts/qwen3-vl-2b-total-row-image.txt", import.meta.url), "utf8");
-    expect(selected).toEqual({ template: prompt, includeRuleGuidance: false, output: "app" });
-    expect(createHash("sha256").update(selected.template).digest("hex")).toBe(smallerQwenFixture.promptSha256);
-    expect(selected.output).toBe("app");
-    expect(selected.includeRuleGuidance).toBe(false);
+    expect(createHash("sha256").update(prompt).digest("hex")).toBe(smallerQwenFixture.promptSha256);
     expect(iouImageProcessorOptions).toEqual({ rawImageMoneyFormat: "total-row" });
     expect(smallerQwenFixture.cases.filter((row) => !row.repeated)).toHaveLength(8);
     expect(smallerQwenFixture.cases.filter((row) => row.repeated)).toHaveLength(2);
     expect(smallerQwenFixture.cases.filter((row) => row.knownMismatch)).toHaveLength(1);
   });
+  it("maps small Qwen to the document-scoped absence-first four-key prompt", () => {
+    const prompt = readFileSync(new URL("../../../docs/model-prompts/qwen3-vl-2b-document-scoped-image.txt", import.meta.url), "utf8");
+    expect(createHash("sha256").update(prompt).digest("hex")).toBe(scopedQwenFixture.promptSha256);
+    expect(iouImagePromptByModel!.templates[scopedQwenFixture.modelId])
+      .toEqual({ template: prompt, includeRuleGuidance: false, output: "app" });
+    expect(iouImageProcessorOptions).toEqual({ rawImageMoneyFormat: "total-row" });
+    expect(scopedQwenFixture.maxOutputTokens).toBe(96);
+    expect(scopedQwenFixture.printedDirectionAcceptance).toBe(false);
+    expect(scopedQwenFixture.cases.map(row => row.imageId))
+      .toEqual(["absence", "two-invoices", "arabic", "payout", "arabic-repeat"]);
+  });
+  for (const row of scopedQwenFixture.cases) {
+    it(`replays document-scoped smaller-Qwen capture: ${row.imageId}`, () => {
+      // Actual complete model output and unchanged source expectations; no repair/salvage.
+      expect(createHash("sha256").update(row.raw).digest("hex")).toBe(row.rawSha256);
+      const candidates = JSON.parse(row.raw);
+      expect(candidates).toEqual(row.expectedRaw);
+      expect(row.cleanupConfirmed).toBe(true);
+      expect(row.hiddenEvents).toBe(0);
+      const before = JSON.stringify(candidates);
+      const result = processIouRequest({ type: "oc:app-process:request", version: 1, ...binding,
+        actionId: iouActionManifest.id, input: { operation: "normalize_raw", modality: "image",
+          sourceTimestamp: Date.parse(row.sourceTimestamp), candidates } }, binding, iouImageProcessorOptions);
+      expect(result.kind).toBe("candidates");
+      if (result.kind !== "candidates") throw new Error("Document-scoped Qwen normalization failed");
+      expect(result.sourceIndexes).toEqual(row.expectedRaw.map((_, index) => index));
+      expect(result.candidates).toHaveLength(row.expectedAppForms.length);
+      expect(result.candidates.map(candidate => initToFormState(candidate, new Date(row.sourceTimestamp))))
+        .toMatchObject(row.expectedAppForms);
+      // No printed-direction inference is claimed; these forms retain the existing default.
+      expect(result.candidates.every(candidate => !Object.hasOwn(candidate, "direction"))).toBe(true);
+      expect(JSON.stringify(candidates)).toBe(before);
+    });
+  }
   for (const [index, row] of smallerQwenFixture.cases.entries()) {
     it(`replays actual smaller-Qwen capture ${index}: ${row.imageId}, preserving known misses`, () => {
       const candidates = [JSON.parse(row.raw.replace(/^\x60\x60\x60json\n([\s\S]+)\n\x60\x60\x60$/u, "$1"))];
@@ -124,6 +155,18 @@ describe("IOU configured model image profiles", () => {
     const changed = { ...config, templates: { "operator/canonical-model": profile } };
     expect(readIouModelImageProfiles(changed).promptExtension!.templates["operator/canonical-model"]).toEqual(profile);
   });
+  it("opts into source details only through app-owned configuration without activating it", () => {
+    for (const rawImageDetailsFormat of ["none", "source-v1", "labels-v1", "labels-v2"] as const) {
+      const changed = { ...config, processorOptions: { ...config.processorOptions, rawImageDetailsFormat } };
+      const before = JSON.stringify(changed);
+      const parsed = readIouModelImageProfiles(changed);
+      expect(parsed.processorOptions).toEqual(changed.processorOptions);
+      expect(Object.isFrozen(parsed.processorOptions)).toBe(true);
+      expect(JSON.stringify(changed)).toBe(before);
+    }
+    expect(iouImageProcessorOptions).toEqual({ rawImageMoneyFormat: "total-row" });
+    expect(readIouModelImageProfiles(config).promptExtension).toEqual(iouImagePromptByModel);
+  });
   it("adds, changes and removes opaque IDs using data only without mutating its input", () => {
     const changed = structuredClone(config) as { schemaVersion: number; processorOptions: { rawImageMoneyFormat: string }; templates: Record<string, unknown> };
     changed.templates = { "operator/compatible-model@revision": {
@@ -138,6 +181,9 @@ describe("IOU configured model image profiles", () => {
   for (const [label, change] of [
     ["schema version", (x: any) => { x.schemaVersion = 2; }],
     ["format", (x: any) => { x.processorOptions.rawImageMoneyFormat = "guess"; }],
+    ["details format", (x: any) => { x.processorOptions.rawImageDetailsFormat = "guess"; }],
+    ["undefined details format", (x: any) => { x.processorOptions.rawImageDetailsFormat = undefined; }],
+    ["extra processor option", (x: any) => { x.processorOptions.guessDirection = true; }],
     ["extra script", (x: any) => { x.script = "run.js"; }],
     ["too many models", (x: any) => { x.templates = Object.fromEntries(Array.from({ length: 9 }, (_, i) => [`m${i}`, Object.values(config.templates)[0]])); }],
     ["bad ID", (x: any) => { x.templates = { "bad id": Object.values(config.templates)[0] }; }],

@@ -1,0 +1,39 @@
+{
+  "schemaVersion": 1,
+  "source": "Exact rendered diagnostic output from synthetic fixtures only; no personal image or captured account content.",
+  "modelId": "gemma-4-e2b-it-q4",
+  "promptSha256": "bdfca3297c574893ed10d714b583d51a722e4c68db0eae985216c2fcb6ad4ede",
+  "profileSha256": "26a1299c1217b4bf3769ef15612d7431c2d4cf74c8c76b327c845a9558847a42",
+  "oracleSha256": "f9ff71fa8bec48f1175cda379add6911e857147df03b911b611502faec5356bd",
+  "workerSha256": "04ebc7bcb6a5385745a095ace2ba87e3e474775775dbae31f74d165433b39bd8",
+  "productionExactWorker": true,
+  "maxTokens": 96,
+  "cleanupConfirmed": true,
+  "fullCacheShaReverified": true,
+  "candidateActivated": false,
+  "captures": [
+    {
+      "id": "two-invoices-both-directions",
+      "imageSha256": "72bc884d5a20d66a8aaec29b96404635f193d865e172c9719db6eda26718aa38",
+      "elapsedMs": 73249,
+      "rawBytes": 149,
+      "rawSha256": "12b2de14b68aeec4df96ed810e7bde98a738fb479eb68ccab6f7ed8db5618a6c",
+      "rawText": "[{\"values\":[\"Invoice A\",\"USD\",\"12.34\",\"1 October 2026\",\"iou\",\"You owe\"]},{\"values\":[\"Invoice B\",\"EUR\",\"56.78\",\"2 October 2026\",\"iou\",\"Owed to you\"]}]"
+    },
+    {
+      "id": "absent-direction-no-date-unmatched",
+      "imageSha256": "2d9835952b241eaf6d15673802935b6c6ceb22b9f057e85fe2ce604d68c5e001",
+      "elapsedMs": 70626,
+      "rawBytes": 58,
+      "rawSha256": "befb4d543e3f348c95fd836f6bd11e3ff9fbf80f39f3418b700dee6ab8451e08",
+      "rawText": "[{\"values\":[\"Service invoice\",\"EUR\",\"42.75\",\"\",\"iou\",\"\"]}]"
+    },
+    {
+      "id": "printed-debt-format-failure",
+      "imageSha256": "418c2c5c8689cd4ca54174e0408aa336c2484eeae56900280ba8f85fd979ef37",
+      "rawBytes": 94,
+      "rawSha256": "2b2b8762b0a6114d86da81f8d23a110f95ae420dcf57a9697a480e4eb85a458e",
+      "rawText": "[{\"values\":[\"SYNTHETIC TEST INVOICE\",\"USD\",\"123.45 USD\",\"27 September 2026\",\"iou\",\"You owe\"]}]"
+    }
+  ]
+}

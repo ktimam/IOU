@@ -158,14 +158,14 @@ describe("IOU-owned draft presentation", () => {
       expect(JSON.stringify(payload)).toBe(before);
     }
   });
-  it("retains the exact original model prompt bytes in the exported extraction contract", () => {
+  it("retains the exact active model prompt bytes in the exported extraction contract", () => {
     const action = createIouLocalAppPackage(destination, processor).apps[0].actions[0];
     const profiles = action.definition.responseSchema["x-openchat-image-prompt-by-model"] as {
       version: number; templates: Record<string, { template: string; includeRuleGuidance: boolean; output: string }>;
     };
     expect(profiles.version).toBe(2);
     const expected = {
-      "qwen3-vl-2b-instruct-q4": "2d73ebab0701a7adb4256072ef4625c30964b46766172bae05602bc72e045cc8",
+      "qwen3-vl-2b-instruct-q4": "fad89619a93d3d759f087fbdd50162a23a8d5fde17d9122e3475c1ca1498504f",
       "gemma-4-e2b-it-q4": "a84d35c89fb8f3c91979a1954051769417109bb4f6785fea4fea3a3ad72048d8",
     };
     expect(Object.keys(profiles.templates).sort()).toEqual(Object.keys(expected).sort());

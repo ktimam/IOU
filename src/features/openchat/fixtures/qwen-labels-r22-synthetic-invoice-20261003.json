@@ -1,0 +1,24 @@
+{
+  "version": 1,
+  "scope": "Exact synthetic-only worker output; offline IOU regression, not fresh inference, UI/native/delivery or release acceptance. No real image or account data.",
+  "provenance": {
+    "captureKind": "actual-worker-output-exact-bytes",
+    "captureRelativePath": "image-source-details-025/r22-format-instruction/qwen-synthetic-r1-visible.txt",
+    "captureSha256": "0b3e746162cd27a0aa44a914dc934b6debe5480effff7e4052f2e44edf0bdf8b",
+    "rawSha256": "33b0dd46c29095e3742877e1bc8b63d048021348ec2eb948d5d7e921333ec5c3",
+    "rawBytes": 170,
+    "modelId": "qwen3-vl-2b-instruct-q4",
+    "modelRevision": "3e4136ea66ae6e07c110e64fe07da2e029517ab5",
+    "workerSha256": "04ebc7bcb6a5385745a095ace2ba87e3e474775775dbae31f74d165433b39bd8",
+    "promptSha256": "1f29c334017d94db3619e383fcc1bd106ad646300437a605af2c61214ba96ba3",
+    "imageSha256": "418c2c5c8689cd4ca54174e0408aa336c2484eeae56900280ba8f85fd979ef37",
+    "maxTokens": 96,
+    "elapsedMs": 32484,
+    "cacheVerified": { "files": 14, "bytes": 1836691582 },
+    "cleanupConfirmed": true,
+    "candidateActivated": false,
+    "privateExporterQualification": "Pending: diagnostic roster formatting differs from IOU's JSON-encoded private roster."
+  },
+  "sourceTimestamp": "2026-09-27T12:00:00Z",
+  "rawText": "{\"heading\": \"SYNTHETIC TEST INVOICE\", \"total_text\": \"123.45 USD\", \"dates\": [\"27 September 2026\"], \"kind\": \"iou\", \"direction_text\": \"You owe\", \"type_texts\": [\"TEST ONLY\"]}"
+}

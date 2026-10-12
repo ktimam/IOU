@@ -228,6 +228,107 @@ suppression or security policy was changed. This does not approve a public or
 production release. Model/browser acceptance and the existing phone, optional
 voice and public-release deferrals remain separate.
 
+### October 10 mainnet extension
+
+On 2026-10-10 the user explicitly approved extending the recorded advisory
+deferrals to the OpenChat Private mainnet release. This supersedes the local-only
+release restriction above for those recorded findings, including the existing
+OpenChat deferrals; it does not cover future findings or versions. The findings
+remain open. Reachability and exploitability have not been established, and
+failed or skipped hosted checks are not reported as passed. No new audit,
+dependency upgrade, CI suppression or security-policy change is authorized by
+this decision. Mainnet functional and signed-APK acceptance remain separate gates.
+
+## October 10 production deployment status
+
+The initial independent mainnet services are recorded in
+[`deployments/mainnet-20261010.json`](../deployments/mainnet-20261010.json).
+The IOU site and its exact reviewed app listing have been published:
+
+- IOU: <https://ouvuc-3iaaa-aaaag-azekq-cai.icp0.io>.
+- App discovery: <https://o5w76-naaaa-aaaag-azela-cai.icp0.io/apps-v2.json>.
+- IOU backend and encrypted inbox: `otusw-wqaaa-aaaag-azeka-cai`.
+- Android passkey RP: `o2xzk-ayaaa-aaaag-azelq-cai.icp0.io`; its separate
+  canister serves only the public Android association file. The shared ICP gateway
+  still exposes its infrastructure-owned `/api/v2/status` endpoint; the association
+  canister itself returns 404 for that path and does not proxy app/API traffic.
+
+The approved APK identity is **OpenChat Private**,
+`io.github.ktimam.openchatprivate`, version `0.1.0`. It is distinct from both the
+official app and the local-test APK. The protected release signing key has been
+created; only its public certificate is used for the Android association. Its
+password is entered locally, never stored in source or build arguments. Keep a
+secure user-controlled backup of the keystore and retain its password separately:
+the same signing key is needed for future updates. Backup verification is pending.
+
+Official OpenChat canisters are unchanged. Existing local accounts, sheets,
+passkeys and APK data have not been migrated or replaced. A different IOU origin
+is a different Internet Identity application scope; local development sheets do
+not automatically appear on mainnet. The final RP also requires the existing
+normal OpenChat account-linking flow for a new passkey; this does not introduce
+a separate authentication UI or browser-auth bridge.
+
+Live public package verification and the real client's directory/catalog/processor
+validation passed. These checks do not establish mainnet sign-in, key recovery,
+encrypted delivery, model inference or final signed-APK acceptance. Those remain
+explicit release gates; public services being reachable is not a completed APK
+release. No model weights, prompts or card UI were changed for publication.
+
+### October 11 signed candidate check
+
+The ARM64 `0.1.0` / `10000` candidate compiled and signed successfully. Its
+post-build source checker initially rejected Tauri's expected removal of the
+official site's generated HTTP(S) link-registration block. The checker now
+accepts only that exact transformation derived from the pinned Git manifest;
+14 regressions cover valid and tampered manifests and sanitized failure reporting.
+The original failed receipt is preserved. The existing APK passed full artifact
+re-verification without recompilation or re-signing, including package/version,
+release certificate, native ABI/JNI, RP/resources, embedded frontend and WebGPU
+runtime files. The APK SHA-256 is recorded in the deployment record.
+
+The x86_64 candidate also built and passed full artifact verification using the
+same source inventory, production profile and release signer. It was installed
+separately on the persistent emulator; the local-test app remains untouched.
+The normal welcome and existing-account restore screens rendered. Native Android
+Credential Manager returned no matching passkey for the new production RP, so
+the normal one-time account-linking step is pending. No special authentication
+page or browser-auth bridge was used. The initial activity launch wait timed out,
+but the process remained alive and rendered those screens; this observation does
+not establish startup performance or full runtime acceptance.
+
+This is artifact verification and a signed-out emulator smoke check, not complete
+device acceptance. Final-RP account restore, fresh passkey sign-in, session restore,
+mainnet IOU authentication/encrypted delivery, and physical-phone Google Password
+Manager/model checks remain pending. No app logic, model configuration, signing
+key or deployed service changed to fix the checker.
+
+The first normal emulator account-link submission then returned a generic
+authentication error before a native passkey-save prompt. The emulator could not
+resolve `icp-api.io`, while the host received HTTP 200: its launch still pinned
+Tailscale DNS from local testing. Restarting the same saved AVD with the active
+host resolver restored DNS and Android's validated internet state, without wiping
+data or changing app code. The code was submitted only once; its consumption was
+not confirmed and it will not be replayed. A fresh account-linking attempt remains
+pending at that checkpoint, so that attempt was not an authentication pass.
+
+### October 12 emulator account and restart acceptance
+
+A fresh code was submitted once through the normal existing-account screen.
+Android's native credential UI verified the existing account and saved a separate
+production-RP passkey in the emulator's existing KeePassDX vault; the old official
+passkey was not replaced. The normal account profile loaded. Force-stopping only
+the production package and relaunching it restored the same visible user ID,
+without another code or passkey prompt. Optional notifications remained disabled.
+The normal Apps screen also refreshed successfully and listed IOU without a file
+import or APK update.
+
+This verifies code-based native account restore, persisted-session continuity and
+the live discovery UI on the emulator. It does not establish fresh reuse of the
+saved passkey after logout/expiry, Google Password Manager on a physical phone,
+model inference, or mainnet IOU connection/encrypted pending-entry delivery.
+The October 11 failure receipt is preserved separately; no code value or private
+credential is included in the new acceptance receipt.
+
 ## Acceptance gates
 
 1. **Backend compatibility:** requests use only supported official APIs; no `ai_apps`,

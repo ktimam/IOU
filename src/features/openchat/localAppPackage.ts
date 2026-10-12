@@ -3,6 +3,8 @@ import { parseLocalProcessorContext, type LocalProcessorContext } from "./localP
 import { DIRECTION_LABELS } from "../entries/directionLabels";
 import { orderedCurrencies } from "../settings/currencies";
 import { IOU_LOCAL_APP_REVISION, parseLocalDeliveryEncryption, type LocalDeliveryEncryption } from "./localImportEncryption";
+import { iouImageProcessorOptions, iouImagePromptByModel } from "./modelImageProfiles";
+import { withPrivateTypeImageEvidenceGuidance } from "./imageTypePrompt";
 import { createIouLocalCardView } from "./localCardView";
 import { localDeliveryDecode } from "./localImportEncryption";
 import type { ConnectedDurableInbox, DurableInboxRoute } from "./durableInboxService";
@@ -69,6 +71,15 @@ export function createIouLocalAppPackage(destination: string, processor: { sha25
   // Preserve its reviewed private defaults and optional Type through the host's final conformance
   // pass. Raw source echo is not a field in this private handoff contract.
   const responseSchema = JSON.parse(JSON.stringify(iouActionManifest.outputSchema)) as Record<string, unknown> & { properties: Record<string, Record<string, unknown>> };
+  // Only an explicitly configured labels-v1/v2 profile opts into account-specific image
+  // evidence guidance. OpenChat receives opaque app-owned prompt text; private Type
+  // resolution remains in IOU's local processor. Existing profiles stay unchanged.
+  const privateImagePrompts = withPrivateTypeImageEvidenceGuidance({
+    promptExtension: iouImagePromptByModel,
+    rawImageDetailsFormat: iouImageProcessorOptions.rawImageDetailsFormat,
+    processorContext: parsedContext ?? { version: 1, types: [] },
+  });
+  if (privateImagePrompts) responseSchema["x-openchat-image-prompt-by-model"] = privateImagePrompts;
   delete responseSchema.properties.message;
   delete responseSchema.properties.currency["x-openchat-require-text-evidence"];
   responseSchema.properties.typeId = { type: "string", minLength: 1, maxLength: 128 };

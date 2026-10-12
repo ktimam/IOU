@@ -1,0 +1,185 @@
+{
+  "version": 1,
+  "scope": "Actual desktop WebGPU source captures plus offline frozen IOU normalization. Not fresh APK or delivery qualification. Existing default direction is not printed-image direction extraction.",
+  "modelId": "qwen3-vl-2b-instruct-q4",
+  "promptSha256": "fad89619a93d3d759f087fbdd50162a23a8d5fde17d9122e3475c1ca1498504f",
+  "workerSha256": "04ebc7bcb6a5385745a095ace2ba87e3e474775775dbae31f74d165433b39bd8",
+  "maxOutputTokens": 96,
+  "verifiedArtifacts": 14,
+  "verifiedBytes": 1836691582,
+  "frozenProcessorSha256": "196703fb408946978cb079203ee693996a19e949745a783e0e8222b4c39f9ae3",
+  "printedDirectionAcceptance": false,
+  "priorCandidateRejected": "Scoped-array-only candidate invented 01/01/2024 on absent-date image; active prompt control returned []. This candidate changes only its dates paragraph to absence-first branching.",
+  "cases": [
+    {
+      "imageId": "absence",
+      "repeated": false,
+      "imageSha256": "2d9835952b241eaf6d15673802935b6c6ceb22b9f057e85fe2ce604d68c5e001",
+      "sourceTimestamp": "2026-09-27T12:00:00Z",
+      "raw": "[{\"heading\": \"Service invoice\", \"total_text\": \"Total 42.75 EUR\", \"dates\": [], \"kind\": \"iou\"}]",
+      "rawSha256": "6910f677a3abdaa3d3b2f47ff72f0c1bc6446338b31f129e64ad6d5006d4124a",
+      "elapsedMs": 43040,
+      "cleanupConfirmed": true,
+      "hiddenEvents": 0,
+      "expectedRaw": [
+        {
+          "heading": "Service invoice",
+          "total_text": "Total 42.75 EUR",
+          "dates": [],
+          "kind": "iou"
+        }
+      ],
+      "expectedAppForms": [
+        {
+          "amount": "42.75",
+          "currency": "EUR",
+          "kind": "iou",
+          "direction": "credit",
+          "date": "",
+          "note": "Service invoice"
+        }
+      ]
+    },
+    {
+      "imageId": "two-invoices",
+      "repeated": false,
+      "imageSha256": "72bc884d5a20d66a8aaec29b96404635f193d865e172c9719db6eda26718aa38",
+      "sourceTimestamp": "2026-10-05T12:00:00Z",
+      "raw": "[{\"heading\": \"Invoice A\", \"total_text\": \"Total 12.34 USD\", \"dates\": [\"1 October 2026\"], \"kind\": \"iou\"}, {\"heading\": \"Invoice B\", \"total_text\": \"Total 56.78 EUR\", \"dates\": [\"2 October 2026\"], \"kind\": \"iou\"}]",
+      "rawSha256": "3336ec2b28e798ff3b7b8b3c997a158ee9325c52cc091ff5215423942044657a",
+      "elapsedMs": 45168,
+      "cleanupConfirmed": true,
+      "hiddenEvents": 0,
+      "expectedRaw": [
+        {
+          "heading": "Invoice A",
+          "total_text": "Total 12.34 USD",
+          "dates": [
+            "1 October 2026"
+          ],
+          "kind": "iou"
+        },
+        {
+          "heading": "Invoice B",
+          "total_text": "Total 56.78 EUR",
+          "dates": [
+            "2 October 2026"
+          ],
+          "kind": "iou"
+        }
+      ],
+      "expectedAppForms": [
+        {
+          "amount": "12.34",
+          "currency": "USD",
+          "kind": "iou",
+          "direction": "credit",
+          "date": "2026-10-01",
+          "note": "Invoice A"
+        },
+        {
+          "amount": "56.78",
+          "currency": "EUR",
+          "kind": "iou",
+          "direction": "credit",
+          "date": "2026-10-02",
+          "note": "Invoice B"
+        }
+      ]
+    },
+    {
+      "imageId": "arabic",
+      "repeated": false,
+      "imageSha256": "b93fbf4cb198c70f5da865e98d1b17ac5c2da465c09e8ff60b4ec01d8cc0f68f",
+      "sourceTimestamp": "2026-09-27T12:00:00Z",
+      "raw": "[{\"heading\": \"تمت العملية بنجاح\", \"total_text\": \"12,900 EGP\", \"dates\": [\"14 Aug 2026 09:47 PM\"], \"kind\": \"settlement\"}]",
+      "rawSha256": "4ab1800435f7ac9a2383d250deee5060ebd13804066bd345b0407ccdf860a277",
+      "elapsedMs": 45225,
+      "cleanupConfirmed": true,
+      "hiddenEvents": 0,
+      "expectedRaw": [
+        {
+          "heading": "تمت العملية بنجاح",
+          "total_text": "12,900 EGP",
+          "dates": [
+            "14 Aug 2026 09:47 PM"
+          ],
+          "kind": "settlement"
+        }
+      ],
+      "expectedAppForms": [
+        {
+          "amount": "12900",
+          "currency": "EGP",
+          "kind": "settlement",
+          "direction": "credit",
+          "date": "2026-08-14",
+          "note": "تمت العملية بنجاح"
+        }
+      ]
+    },
+    {
+      "imageId": "payout",
+      "repeated": false,
+      "imageSha256": "b7acf1d1c8b54aa54d48af29ff9cb022a9a36c59f6144e623519d86e7531e6f1",
+      "sourceTimestamp": "2026-07-03T12:00:00Z",
+      "raw": "[{\"heading\": \"Reservation\", \"total_text\": \"Total Payout $1,912.15\", \"dates\": [\"Sun, Jul 19\", \"Thu, Aug 6\"], \"kind\": \"iou\"}]",
+      "rawSha256": "6e75a2fbb2d8add9d379f5c42c74eb000cddc8367b47708758bf7cf14d9d3903",
+      "elapsedMs": 45000,
+      "cleanupConfirmed": true,
+      "hiddenEvents": 0,
+      "expectedRaw": [
+        {
+          "heading": "Reservation",
+          "total_text": "Total Payout $1,912.15",
+          "dates": [
+            "Sun, Jul 19",
+            "Thu, Aug 6"
+          ],
+          "kind": "iou"
+        }
+      ],
+      "expectedAppForms": [
+        {
+          "amount": "1912.15",
+          "currency": "USD",
+          "kind": "iou",
+          "direction": "credit",
+          "date": "2026-07-19",
+          "note": "Reservation | From Sun, Jul 19 to Thu, Aug 6"
+        }
+      ]
+    },
+    {
+      "imageId": "arabic-repeat",
+      "repeated": true,
+      "imageSha256": "b93fbf4cb198c70f5da865e98d1b17ac5c2da465c09e8ff60b4ec01d8cc0f68f",
+      "sourceTimestamp": "2026-09-27T12:00:00Z",
+      "raw": "[{\"heading\": \"تمت العملية بنجاح\", \"total_text\": \"12,900 EGP\", \"dates\": [\"14 Aug 2026 09:47 PM\"], \"kind\": \"settlement\"}]",
+      "rawSha256": "4ab1800435f7ac9a2383d250deee5060ebd13804066bd345b0407ccdf860a277",
+      "elapsedMs": 44814,
+      "cleanupConfirmed": true,
+      "hiddenEvents": 0,
+      "expectedRaw": [
+        {
+          "heading": "تمت العملية بنجاح",
+          "total_text": "12,900 EGP",
+          "dates": [
+            "14 Aug 2026 09:47 PM"
+          ],
+          "kind": "settlement"
+        }
+      ],
+      "expectedAppForms": [
+        {
+          "amount": "12900",
+          "currency": "EGP",
+          "kind": "settlement",
+          "direction": "credit",
+          "date": "2026-08-14",
+          "note": "تمت العملية بنجاح"
+        }
+      ]
+    }
+  ]
+}

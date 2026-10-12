@@ -2,12 +2,18 @@ import { iouActionManifest } from "./actionManifest";
 import { extractIouLocalCandidates, postProcessIouCandidate } from "./localExtraction";
 import { normalizeRawImageEvidence } from "./rawImageEvidence";
 import { normalizeRawImageTotalRow, normalizeRawImageTotalRowText } from "./rawImageTotalRow";
+import { normalizeRawImageValuesRow, type RawImageValuesRowFormat } from "./rawImageValuesRow";
+import type { RawImageDetailsFormat } from "./rawImageSourceDetails";
 
 const PREFIX = "oc:app-process:";
 const MAX_BYTES = 64 * 1024;
 type Binding = { frameNonce: string; requestNonce: string };
 /** App-owned profile selection, never a field supplied by OpenChat/model output. */
-export type IouProcessorOptions = { rawImageMoneyFormat?: "strict" | "total-row" };
+export type IouProcessorOptions = {
+  rawImageMoneyFormat?: "strict" | "total-row";
+  rawImageDetailsFormat?: RawImageDetailsFormat;
+  rawImageValuesRowFormat?: RawImageValuesRowFormat;
+};
 type Result = { kind: "candidates"; candidates: Record<string, unknown>[]; sourceIndexes?: number[] } | { kind: "none" | "ambiguous" | "error" };
 
 function record(value: unknown): value is Record<string, unknown> {
@@ -18,13 +24,24 @@ function bounded(value: unknown): boolean {
   catch { return false; }
 }
 function safeJson(value: unknown, depth = 0): boolean {
-  if (depth > 8) return false;
-  if (value === null || typeof value === "boolean" || typeof value === "string") return true;
-  if (typeof value === "number") return Number.isFinite(value);
-  if (Array.isArray(value)) return value.length <= 256 && value.every((item) => safeJson(item, depth + 1));
-  return record(value) && Object.keys(value).length <= 128 && Object.entries(value).every(
-    ([key, item]) => !["__proto__", "constructor", "prototype"].includes(key) && safeJson(item, depth + 1),
-  );
+  try {
+    if (depth > 8) return false;
+    if (value === null || typeof value === "boolean" || typeof value === "string") return true;
+    if (typeof value === "number") return Number.isFinite(value);
+    if (!record(value) && !Array.isArray(value)) return false;
+    const descriptors = Object.getOwnPropertyDescriptors(value as object);
+    const keys = Reflect.ownKeys(descriptors);
+    if (Array.isArray(value)) {
+      const length: unknown = descriptors.length?.value;
+      if (Object.getPrototypeOf(value) !== Array.prototype || typeof length !== "number" ||
+        !Number.isInteger(length) || length < 0 || length > 256 || keys.length !== length + 1) return false;
+      return Array.from({ length }, (_, index) => descriptors[String(index)]).every(descriptor =>
+        descriptor !== undefined && descriptor.enumerable && Object.hasOwn(descriptor, "value") && safeJson(descriptor.value, depth + 1));
+    }
+    return [Object.prototype, null].includes(Object.getPrototypeOf(value)) && keys.length <= 128 && keys.every(key =>
+      typeof key === "string" && !["__proto__", "constructor", "prototype"].includes(key) &&
+      descriptors[key].enumerable && Object.hasOwn(descriptors[key], "value") && safeJson(descriptors[key].value, depth + 1));
+  } catch { return false; }
 }
 export function parseProcessorBootstrap(value: unknown): Binding | undefined {
   if (!record(value) || value.type !== PREFIX + "bootstrap" || value.version !== 1 ||
@@ -35,8 +52,14 @@ export function parseProcessorBootstrap(value: unknown): Binding | undefined {
 }
 
 export function processIouRequest(value: unknown, binding: Binding, options: IouProcessorOptions = {}): Result {
+  if (options.rawImageValuesRowFormat !== undefined &&
+    ((options.rawImageValuesRowFormat !== "split-six-v1" && options.rawImageValuesRowFormat !== "split-six-v2") ||
+      options.rawImageDetailsFormat !== "direction-v1")) return { kind: "error" };
   if (options.rawImageMoneyFormat !== undefined && options.rawImageMoneyFormat !== "strict" &&
     options.rawImageMoneyFormat !== "total-row") return { kind: "error" };
+  if (options.rawImageDetailsFormat !== undefined && options.rawImageDetailsFormat !== "none" &&
+    options.rawImageDetailsFormat !== "source-v1" && options.rawImageDetailsFormat !== "labels-v1" &&
+    options.rawImageDetailsFormat !== "labels-v2" && options.rawImageDetailsFormat !== "direction-v1") return { kind: "error" };
   if (!record(value) || value.type !== PREFIX + "request" || value.version !== 1 ||
     value.frameNonce !== binding.frameNonce || value.requestNonce !== binding.requestNonce ||
     value.actionId !== iouActionManifest.id || Object.keys(value).length !== 6 ||
@@ -54,11 +77,13 @@ export function processIouRequest(value: unknown, binding: Binding, options: Iou
         input.candidates.length === 0 || input.candidates.length > 16 || !input.candidates.every(record)) return { kind: "error" };
       const candidates: Record<string, unknown>[] = [];
       for (const candidate of input.candidates) {
-        const evidence = Object.hasOwn(candidate, "total_row")
-          ? normalizeRawImageTotalRow(candidate)
+        const evidence = options.rawImageValuesRowFormat !== undefined && Object.hasOwn(candidate, "values")
+          ? normalizeRawImageValuesRow(candidate, options.rawImageValuesRowFormat)
+          : Object.hasOwn(candidate, "total_row")
+          ? normalizeRawImageTotalRow(candidate, options.rawImageDetailsFormat)
           : options.rawImageMoneyFormat === "total-row" && Object.hasOwn(candidate, "total_text")
-          ? normalizeRawImageTotalRowText(candidate)
-          : normalizeRawImageEvidence(candidate, "labeled-values");
+          ? normalizeRawImageTotalRowText(candidate, options.rawImageDetailsFormat)
+          : normalizeRawImageEvidence(candidate, "labeled-values", options.rawImageDetailsFormat);
         if (evidence === undefined) return { kind: "error" };
         candidates.push(postProcessIouCandidate(evidence, {
           text, sourceTimestamp, modality: "image", candidateCount: input.candidates.length,

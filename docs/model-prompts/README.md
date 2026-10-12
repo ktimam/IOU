@@ -1,5 +1,390 @@
 # Model-specific IOU image prompts
 
+## October 5: small-Qwen document scoping and absence-first dates
+
+The active small-Qwen prompt is `qwen3-vl-2b-document-scoped-image.txt`
+(SHA-256 `fad89619a93d3d759f087fbdd50162a23a8d5fde17d9122e3475c1ca1498504f`).
+It retains the same four raw fields, model weights, all-WebGPU runtime and
+96-token ceiling. Each field is scoped to its own document block; output is a
+complete array, including a one-row array. Dates use an absence-first check.
+There is no OpenChat app-specific logic, OCR fallback or new processor behavior.
+
+Five sequential desktop observations passed exact source facts and offline
+replay through the unchanged published IOU processor: no-date invoice, two
+invoices with their own dates/currencies, original Arabic transfer, original
+payout period, then the same Arabic transfer again. All acknowledged cleanup.
+Their exact outputs, image hashes and source expectations are retained in
+`test/fixtures/openchat/model-acceptance/qwen-document-scoped-app-replay.json`;
+private image files are not included. Replay tests are not fresh APK or delivery
+qualification, nor a universal accuracy or crash-free guarantee.
+
+The earlier scoped-array-only candidate is rejected: it invented a date on the
+no-date fixture, while the unchanged active-prompt control correctly returned
+an empty date array. IOU rejected that specific slash-formatted date because its
+date grammar does not accept it; this is not a general fabricated-date detector.
+The new candidate changes only that candidate's dates paragraph to absence-first.
+
+The PR-era four-key image profile does not carry printed direction. Saved-Type
+defaults and manual direction editing remain separate parity requirements;
+the two-row source's opposite printed directions are not claimed to pass.
+Historical total-row prompt bytes, v20 captures and known subtitle-note mismatch
+remain unchanged and explicitly historical. Gemma and inactive experiments are
+unchanged. The headings below retain earlier diagnostic history.
+
+
+Static card presentation is separate from model extraction. The app-owned
+`draftView` catalog metadata does not change any prompt, raw-output option,
+private Type evidence rule or model artifact. In particular,
+`withPrivateTypeImageEvidenceGuidance` in `imageTypePrompt.ts` remains inactive
+for the current public/private package: it requires explicitly selected
+`labels-v1`/`labels-v2` profiles and their configured markers. The active
+total-row profile does not enable it, and the inactive direction/six-slot
+candidates do not implicitly enable it either. Restoring the original card
+layout is not evidence that candidate model accuracy, private footer-Type
+recognition, or complete web/APK delivery has passed. See architecture section9
+for catalog-only visual publication without rebuilding the processor.
+
+## October 5: next independent Qwen ablations (prepared, not run)
+
+Two bounded candidates start independently from the same frozen R3 grouping
+prompt, not from one another. Both retain the five named fields, complete total
+row, zero-to-two own-row dates, kind and direction, existing app parser/options,
+small Qwen weights, original production worker and96-token ceiling:
+
+- `qwen-five-field-ablation-a-compact-candidate.json` changes only the final
+  formatting sentence: one compact line, no whitespace outside strings, no
+  markdown/fence. The direction paragraph remains byte-identical to R3.
+- `qwen-five-field-ablation-b-direction-candidate.json` changes only the
+  direction paragraph: copy the printed relationship verbatim within each
+  entry, use the empty sentinel only when absent, and do not erase a printed
+  statement. It contains no literal answer labels, fixture names, dates or
+  amounts. R3's formatting instruction remains byte-identical; A is not applied.
+
+`qwen-five-field-ablations-20261005.json` freezes the matrix, expected source
+grammar, hashes, case order, source-first grading and bounded stop policy before
+any new inference. The five cases are two invoices with different directions,
+single printed debt, no-date/no-direction negative, the original Arabic transfer
+and the original payout period. Existing private images stay outside the repo;
+their local bindings are only in the temporary preparation manifest. The three
+synthetic image pixels and all five image hashes were rechecked before freezing.
+
+Offline counts of authored compact expected outputs, including one EOS, are
+80 /47 /31 /51 /46 respectively. The two-invoice pretty fenced form needs129,
+so compliance with A's formatting instruction must be measured, not assumed.
+Plain prompt counts are385 for A and383 for B versus370 for R3; these omit image
+and chat-template tokens, and the unchanged runtime1024 context guard remains
+authoritative. Config/delta/source-grammar tests and parser replay do not prove
+either model candidate works.
+
+Record format, completion, exact source facts, app normalization and host
+projection separately. A complete compact answer with a missing direction still
+fails; a B positive does not waive an invented direction on the negative image.
+Do not silently combine A+B after independent results. The earlier five-slot
+proposal remains separate and unimplemented; it would require a new opt-in
+adapter, and its pretty fenced representation still needs109 tokens. No new
+adapter, altered output allowance or semantic relaxation is bundled here.
+
+Prepared local bindings and offline verification:
+`F:/Temp/OpenChat-IOU/qwen-five-field-ablations-20261005/preparation.json`.
+No server, model run, profile activation or public model configuration change
+was performed while preparing these candidates. The full retained eight-image
+corpus, Type controls, repeated use and normal web/APK/encrypted delivery gates
+remain beyond this diagnostic matrix.
+
+## October 5: R3 source results and inactive repeated-unit adapter
+
+The fresh R3 diagnostic used the unchanged production worker
+`04ebc7bcb6a5385745a095ace2ba87e3e474775775dbae31f74d165433b39bd8`,
+existing fully hash-verified model caches, and the real 96-token ceiling. It did
+not run app normalization in the browser. The later offline reports separately
+grade exact source facts and replay the generic host parser, IOU processor and
+host draft projection; those are not rendered UI or delivery acceptance.
+
+| Inactive candidate | Fixture | Original prospective outcome |
+| --- | --- | --- |
+| Gemma six-slot v1 | Two invoices with opposite directions | Exact two rows, amounts, currencies, own dates and directions passed; source indexes `[0,1]` preserved. |
+| Gemma six-slot v1 | No-date/no-direction invoice | Exact source passed; absent direction remained absent evidence before IOU's editable credit default. |
+| Gemma six-slot v1 | Original Arabic transfer | Exact 12,900 EGP / 14 Aug 2026 / settlement / no printed direction passed. Private capture remains outside the repository. |
+| Gemma six-slot v1 | Printed-debt invoice | **Failed original grammar:** amount slot `123.45 USD` instead of numeric `123.45`; strict v1 decoder rejects. The financial value itself matches the image. |
+| Qwen grouping | Original Arabic and no-date invoice | Exact source facts passed inside prospectively permitted complete JSON fences. Pretty formatting is retained, not rewritten. |
+| Qwen grouping | Two invoices | **Failed at the unchanged 96-token cap.** No complete result was accepted; partial content cannot be graded from this capture. |
+
+Exact synthetic Gemma outputs and hashes are retained in
+`src/features/openchat/fixtures/gemma-values-r3-synthetic-20261005.json` with
+regression tests that preserve both the passing source cases and strict failure.
+The earlier Qwen omission/date-merging captures and all previous failures remain.
+
+Separately approved `direction-v1-values-row-v2-candidate.json` changes only the
+inactive processor option to `split-six-v2`; it copies both prompt bytes from v1.
+Its Gemma prompt SHA remains
+`bdfca3297c574893ed10d714b583d51a722e4c68db0eae985216c2fcb6ad4ede`.
+V2 accepts either the existing numeric amount grammar or that grammar with one
+literal repeated currency token and one ASCII space at exactly one end. The
+token must byte-match the nonempty `currency_text` slot, which still passes the
+existing currency validator. No whitespace trimming, equivalent-symbol mapping,
+labels, scanning, digit repair, extra amount or two-sided units are accepted.
+The existing numeric/minor-unit bounds validate the unchanged numeric part.
+Named forms, absent configuration and `split-six-v1` retain their strict rules.
+
+The v2 grammar was frozen before implementation and negative tests. Its offline
+replay of the unchanged printed-debt capture now produces 123.45 USD / You owe /
+27 September 2026 with exact `[0]` provenance; Type defaults, clearing and manual
+direction edits pass pure host projection. Other three Gemma outputs have
+identical v1/v2 canonical results. This is **new adapter acceptance of an old
+capture**, not a new inference pass or a retroactive pass of the original oracle.
+The v2 candidate is not active or packaged, and no model/worker budget changed.
+
+### Qwen completion observation: formatting and direction are separate failures
+
+A later synthetic-only **instrumented observation**, worker SHA
+`9bfb9681def3290732fd183e4557cdc184181e156f307ae6d68dd491e7b4795f`,
+uses the same pinned original production worker above as its source, but is not
+byte-identical production execution. It recorded an exact match for all 524
+production-mapped input-prefix tokens, 96 generated tokens, no EOS, and confirmed
+cleanup. The unchanged completion guard rejected the unfinished output. No raw
+result, app normalization or card was accepted from this observation.
+
+The prefix contains pretty fenced JSON: a complete Invoice A and the beginning
+of Invoice B, stopping inside B's date after `2 October `. A's already-complete
+`direction_text` is empty despite the source printing `You owe`. Thus truncation
+does not explain every failure, and raising a token allowance alone would not
+establish source correctness. B's unobserved suffix remains unknown. Offline
+re-encoding reproduced all 96 captured token IDs exactly with the unchanged,
+hash-verified Qwen tokenizer.
+
+The following lengths include one EOS and are **authored sizing samples**, never
+model-completed output. The first preserves A's observed wrong empty direction
+and adds only the unobserved tail from the prior source oracle. Other samples
+use the entire source-correct oracle, including an authored correction of A.
+
+| Authored completion/representation | Tokens including EOS | Fits 96 |
+| --- | ---: | --- |
+| Observed pretty prefix plus authored tail; A still wrong | 126 | No |
+| Source-correct five-key pretty fenced JSON | 129 | No |
+| Source-correct five-key compact fenced / bare JSON | 84 / 80 | Yes |
+| Proposed five-value object, pretty fenced JSON | 109 | No |
+| Proposed five-value object, compact fenced / bare JSON | 67 / 63 | Yes |
+
+The read-only next-protocol proposal keeps one raw object per source transaction,
+with `values: [heading, total_text, dates, kind, direction_text]`. In particular,
+`total_text` remains the complete original total-row evidence and `dates` remains
+the original dense array of zero to two complete source dates. It does not merge
+rows, remove fields, expand wrappers or relax source indexes. Its proposed
+`total-five-v1` decoder does **not** exist and is not currently an accepted option.
+Only the shape instruction changes in the preview prompt; all five field rules,
+including the current direction rule, are byte-identical. This is a declared
+representation-only comparison, not a bundled direction-prompt change.
+
+The 109-token pretty estimate means that shape change is not a guaranteed budget
+fix. Any controlled comparison must independently grade row count, own dates and
+printed direction, retain the no-direction negative, and keep the same 96 cap.
+If direction still fails after representation is isolated, it needs its own
+separately declared comparison, not an implicit oracle waiver. No further model
+run, decoder implementation or profile activation is justified by sizing alone.
+Observation, exact pins, authored texts and proposal are retained locally under
+`F:/Temp/OpenChat-IOU/qwen-grouping-completion-diagnostic-20261005/`.
+
+Evidence roots (local, not distribution artifacts):
+`F:/Temp/OpenChat-IOU/image-candidates-r3-20261005/` and
+`F:/Temp/OpenChat-IOU/gemma-values-row-v2-20261005/`.
+At this point the scoped IOU OpenChat suite passes 88 files / 2,272 tests, both
+TypeScript projects pass, and active `modelImageProfiles.json` remains SHA
+`e8291225e81419a051cb9c48934211e15c012c29a5d3680e2ef7976d035667a3`.
+The complete original eight-image corpus, date ranges, repeated use and normal
+web/APK persistence/encrypted delivery remain qualification gates; these small
+diagnostics do not waive them or establish footer-only Saved-type recognition.
+
+## October 5: isolated printed-direction contract candidate (inactive)
+
+The normal-UI synthetic invoice revealed the existing contract gap again: the
+image prints `You owe`, but the active four/five-field profiles have no direction
+field and IOU applies its established image default, `Owed to you`. Correct
+amount, currency, date and kind do not make that complete card correct. This is
+not waived by the accepted printed-subtitle note limitation.
+
+`direction-v1-candidate.json` is a narrow, **inactive** diagnostic profile. It
+adds only a required `direction_text` to each currently selected model's raw
+format. The Qwen prompt is byte-identical to the earlier r20 direction-only
+control (SHA-256
+`cb62b24d295c497531fd76c646f143b5a4f0927def5eaae94399215d52d24c94`);
+the analogous Gemma prompt has SHA-256
+`b75532105908b81d7aad1e7eb9a7b091a544f953474574b737291907cb98bb4d`.
+Only the key counts and literal-direction instruction differ from the active
+prompts. Model weights, generation settings, active profile JSON and public
+processor selection are unchanged.
+
+The IOU-owned opt-in `rawImageDetailsFormat: "direction-v1"` accepts only the
+complete existing display labels `You owe` / `Owed to you` (case-insensitive,
+with surrounding whitespace tolerated), or an empty string for absent evidence.
+The separately reviewed revision below also permits explicit `null` as unknown,
+only in `direction-v1`; earlier formats remain unchanged.
+An absent direction retains IOU's existing default; it is not evidence that
+the image says credit. Unsupported, ambiguous or unsafe text rejects the whole
+candidate. The adapter does not look for monetary/date fragments or repair
+output, and neither the model nor request can enable this option themselves.
+Raw direction and other extraction intermediates do not leave the local adapter.
+
+This candidate retains existing heading-based saved-Type matching, collision
+handling and row isolation. A selected saved Type still supplies its configured
+direction through the existing host-v1 default declaration; the extracted
+direction remains the baseline restored when that Type is cleared. Legacy
+contexts retain their app-owned Type override. Transaction kind is independent.
+No IOU logic or schema is added to OpenChat.
+
+Authored contract tests cover both wire shapes, both directions, absent and
+invalid direction, exact-key/own-property validation, missing dates, multiple
+rows, Type collisions, extracted baseline versus Type default, metadata removal
+and unchanged active profiles. They are not new model captures. The candidate
+must still pass fresh Qwen **and** Gemma image tests (both printed directions,
+neither label, the Arabic transfer and reservation, missing-date/no-Type,
+ambiguous and multi-entry cases) and the normal web/APK flows before activation.
+The historical single r20 Qwen control does not establish those passes.
+Footer-only Type extraction remains a separate unresolved requirement; this
+isolated candidate does not replace or qualify the rejected broader experiments.
+
+### Fresh diagnostic result and bounded revision2 (still inactive)
+
+The first synthetic invoice copied `You owe` correctly with both models. Those
+two initial captures were accessibility snapshots, so they establish visible
+field values, not exact original output framing. Pure IOU/host projection replay
+preserved the extracted debt baseline, applied a matching Type's configured
+credit default, restored debt on clearing the Type and retained a manual edit.
+That is not a normal web/APK UI, persistence or delivery pass.
+
+On the no-date/unmatched invoice, exact rendered output shows Qwen inventing
+`Owed to you` although neither label is printed. Gemma correctly returned empty
+date and direction. IOU's canonical credit default would hide Qwen's source error
+in a final-card-only comparison, so factual checks must run before normalization.
+The original candidate is not qualified. Its retained initial replay report is
+`F:/Temp/OpenChat-IOU/iou-direction-contract-20261005/initial-results-replay.json`
+(SHA-256 `ce6748da9044d4bcb1860fc48633a2f1e024d4447e9c679973b670c06a04746b`).
+
+The Arabic Gemma output preserved amount, currency, date, kind and heading but
+used `direction_text: null`. The original strict-string adapter rejection was
+recorded before changing it. A separately approved semantic extension now treats
+**only explicit null in direction-v1's direction_text** as unknown/absent. It
+does not invent a direction, widen older source formats or accept missing fields,
+arbitrary invalid values, null money/date/heading, unknown labels or malformed
+framing. The raw object remains unchanged. IOU's normal absent-direction default
+and independent saved-Type direction policy are applied later as before.
+
+The two-entry Gemma run hit the real production 96-token ceiling; the worker
+withheld partial output and acknowledged cleanup. Offline sizing with both
+catalog-verified tokenizers shows that complete compact direction-v1 outputs
+need **80 Qwen tokens / 94 Gemma tokens including one EOS**; indentation needs
+125 / 154. Gemma therefore has only two tokens of compact headroom. These are
+canonical encodings of authored correct output, not a generation trace or proof
+that whitespace caused the observed failure. No runtime budget was raised.
+
+`direction-v1-revision2-candidate.json` changes only two independent prompt parts:
+Qwen's direction instruction becomes absence-first and omits the answer-label
+examples; Gemma gains one compact single-line serialization instruction. Core
+money/date/heading/kind instructions and selected model weights are unchanged.
+Answer-label copying is a hypothesis, not a proven mechanism. An earlier
+example-free semantic prompt copied an account identifier from the Arabic image,
+so revision2 must pass both absent-direction and original-Arabic negatives plus
+printed positives before it can be considered. Null acceptance is a separately
+recorded adapter decision, not a retroactive pass of the original schema oracle.
+Both active profiles remain unchanged and the full activation gates above remain.
+
+### Revision2 and exact-active two-invoice control results
+
+Fresh exact rendered revision2 Qwen output passed the no-date/no-direction invoice,
+the Arabic 12,900 EGP transfer and the printed `You owe` invoice. Whole host parsing,
+IOU normalization and pure host projection also passed those records. The printed
+and Arabic replays retained the source/default direction baseline, matching Type
+defaults, clearing behavior and manual edits. These remain diagnostic/pure-replay
+results, not normal web/APK UI or delivery qualification.
+
+Revision2 still fails the synthetic two-invoice source oracle. Qwen returns one
+complete Invoice A object, omits Invoice B, and puts both invoices' separate dates
+into A's `dates` array as an apparent period. This is valid JSON but wrong source
+cardinality and date association; no invented second row or redistributed dates
+are accepted. Gemma again reaches the real 96-token ceiling despite the compact
+instruction. Its partial output is withheld, so the result does not show whether
+it used compact formatting or which values it had generated.
+
+An exact-byte control using the **unchanged active** Qwen four-key and Gemma
+five-key profiles on the same image, worker, models and 96-token budget also fails:
+active Qwen omits Invoice B but correctly keeps only A's own date, while active
+Gemma reaches the output-token limit. The missing-row/budget problems therefore
+already exist in the active configuration; revision2 additionally shows the
+cross-row date merge. The control cannot return printed direction by design, and
+does not waive that known contract gap. No candidate was activated.
+
+`fixtures/qwen-direction-r2-two-invoices-20261005.json` retains only the synthetic
+negative capture, including its complete original fence and line endings
+(172 bytes, SHA-256
+`a19e923cd44eb449ebca6c70f71d717998a93f010130e563ade8d34f057aeddc`).
+`rawImageFactualGrade.test.ts` compares independently authored two-row/date-local
+facts before normalization and proves that accepting schema-valid processor input
+does not establish image accuracy. It does not change the parser to reject valid
+but wrong JSON, or add private images/personal captures to the repository.
+
+Offline sizing of an equivalent six-field Gemma payload found 94 tokens including
+EOS for current compact keys, 99 with a complete JSON fence, and 78 with descriptive
+aliases `note,currency,amount,date,kind,direction` (83 with a fence). A lossless
+app-owned key expansion can preserve every value and row without OpenChat business
+logic; one-letter keys save nothing further on this sample. This is only a measured
+possible experiment, not a configured or qualified format. No finite 96-token
+encoding guarantees all supported 1–16 rows or long valid headings/date periods.
+The original source expectations and all failures remain in force.
+
+### Bounded completion observation and inactive follow-up representations
+
+A synthetic-only Gemma diagnostic observed generation immediately before the
+unchanged completion guard. This used an **instrumented**, not production-identical,
+worker: SHA-256 `3c34352fa4aa0d255b5a3a208c4cc0cb86160f575a4cf6f0fdb7ec0aa8df1c55`.
+Removing its one 2,515-byte observation insertion restores the production worker
+byte-for-byte (`04ebc7bcb6a5385745a095ace2ba87e3e474775775dbae31f74d165433b39bd8`).
+The same model, revision2 prompt, 96-token allowance and completion guard remained;
+the failed partial output was never accepted as a result.
+
+The trace contains 648 input tokens and exactly 96 generated tokens, with no EOS.
+Gemma used spaces after JSON separators despite the compact instruction. Invoice A
+is complete and correct; B's heading, currency and amount are correct before the
+trace stops inside its date at `2 October 202`. No extra or repeated fields occur
+in the retained prefix. Its exact generated token IDs equal the canonical encoding
+of that prefix. Completing it **from the predeclared oracle, not the model**, in
+the observed format requires 117 tokens including EOS: 21 beyond the allowance.
+Descriptive or one-letter key aliases in the same spacing still require 101, so
+aliases alone are not a sufficient fix. This observation cannot establish what
+the model would have generated after the cut-off or prove a completed factual pass.
+
+Two further candidates are isolated and inactive:
+
+- `direction-v1-grouping-candidate.json` changes only Qwen's opening paragraph:
+  one array object per visually separate transaction/document block, with its
+  heading, total and dates from the same block. All subsequent field instructions,
+  Gemma's prompt, model weights and 96-token budget remain unchanged. Prospective
+  two-invoice, single Arabic and no-date compact oracle outputs require 80, 51 and
+  31 Qwen tokens including EOS. Those are authored encodings, not model results.
+- `direction-v1-values-row-candidate.json` changes only Gemma's wire representation
+  to an array of per-entry objects, each containing exactly one `values` array in
+  the order note, printed currency, printed amount, printed date/period, kind,
+  printed direction. The six field instructions retain their exact prior bytes.
+  Qwen's revision2 prompt is unchanged in this separate candidate. The app-owned
+  opt-in `rawImageValuesRowFormat: "split-six-v1"` requires `direction-v1` and
+  unpacks only syntax before invoking the same field validators. Source strings,
+  date periods, row order, Type behavior and final card schema are not shortened.
+
+The values-row format uses one raw object per normalized row, with unchanged
+`sourceIndexes` `[0,1,...]`. A single object wrapping several transactions is
+rejected; OpenChat's existing one-to-one checks are not relaxed. Exact keys/slots,
+own data properties, types, unsafe values, date ranges and whole-batch failure are
+covered by `rawImageValuesRow.test.ts`. Only the direction slot may use the already
+approved explicit-null absence sentinel. IOU's JSON preflight now reads descriptors
+without executing getters before serialization; ordinary JSON defaults are unchanged.
+The active profiles do not enable this format.
+
+The two-entry values-row oracle costs 58 Gemma tokens compact or 71 with the
+observed separator spacing, including EOS, while retaining all six values per
+row. Pure generic-host parsing and IOU replay preserve two rows and indexes `[0,1]`;
+single, absent-direction and printed-debt controls preserve one row and `[0]`.
+This demonstrates representability and adapter bounds only. Both candidates still
+need fresh inference and the remaining source/normal-UI qualification; no prompt,
+representation or token count guarantees arbitrary 1–16-row model accuracy.
+
 Created 10 September 2026 at the user's request for separate model prompts. These are
 **not release-qualified prompts**. The original candidates
 and the latest raw-evidence candidates are retained separately; experimental revisions and
@@ -26,6 +411,175 @@ keep the phone-tested prompt and document the printed subtitle being included in
 It is no longer a release blocker for this selected profile. The retained 9/10 result and
 first-line expectation remain unchanged; this is not a 10/10 accuracy claim or an exception
 for wrong amounts, currencies, dates, kinds, private Types/directions or other image outputs.
+
+## October 3: source-details candidate remains inactive
+
+### What is working versus what is still being qualified
+
+The earlier basic-extraction passes are not being revoked: the active Qwen v20
+and Gemma v15 profiles remain unchanged. They cover their tested amount,
+currency, date/range and transaction-kind cases, subject to the accepted printed
+subtitle note limitation. They do not establish footer-only private Type matching,
+printed direction extraction or reliable multi-transaction output.
+
+The later expanded-profile diagnostics are separate, inactive candidates. The
+negative invoice exposed a false-Type problem even with the earlier, unchanged
+Type-only candidate: a configured label absent from the image was returned while
+the core transaction fields were correct. That is an accuracy failure, not the
+previous WebGPU device-loss failure. A vocabulary-valid label is not proof that
+the image contains it. No candidate may pass solely because known positive
+receipts or processor unit tests pass.
+
+Completion still requires the final candidate to pass independently authored
+positive, no-match, ambiguous and multi-transaction expectations; preserve the
+public app recipe while accepting bounded private setup; and pass the normal web
+and APK proposal/delivery paths. Diagnostic-only binary visibility tests, if used,
+cannot replace those gates or silently change the active profile.
+
+The active heading/total/date/kind profiles cannot carry a printed debt direction
+or footer-only private Type evidence. This is an IOU contract gap; the previous
+amount/date passes do not cover those requirements. The source-v1 experiment also
+tried literal descriptions, which the later scope review below distinguishes from
+the accepted heading-note policy.
+
+An app-owned, opt-in `rawImageDetailsFormat: "source-v1"` adapter now accepts three
+additional required raw fields: `direction_text`, `description_text`, and
+`type_texts`. The default format and active JSON configuration are unchanged.
+Direction accepts only a complete existing IOU direction label (or an empty
+value), not an inferred relationship. A printed description supplies the note;
+heading remains separate evidence and a fallback. Bounded footer/category
+strings are matched separately against private Types inside IOU, with collisions
+and row isolation preserved. These matching strings are not forwarded in the
+final confirmation payload. No OpenChat-specific IOU logic was added.
+
+The related parser/integration suite passed 466 tests and both IOU typechecks.
+Those are validation tests, not model-accuracy or release acceptance. Candidate
+prompt/schema size was also checked without changing the registered app.
+
+Actual cache-only inference used the unchanged build025 worker
+`04ebc7bcb6a5385745a095ace2ba87e3e474775775dbae31f74d165433b39bd8`, the
+synthetic 123.45 USD invoice, and the existing 96-token ceiling:
+
+- Both initial expanded prompts reached the output-token limit. The worker
+  withheld incomplete results and acknowledged GPU cleanup.
+- Adding only a one-line serialization instruction allowed Gemma to complete
+  with the correct amount, currency, date, kind, `You owe`, `Test stationery`,
+  and both printed footer phrases. Spaces outside strings remained, so exact
+  serialization-instruction compliance is not claimed.
+- At that checkpoint Qwen still reached the output-token limit; the production
+  worker returned no assessable partial result.
+
+The Gemma candidate prompt SHA-256 is
+`1fa0db4d25e626629733aad8fef129e941b799f7c574a5cf8bb3f1ab9bcf1126`;
+the unfinished Qwen candidate is
+`55ba8a453353e34f3d70b87023281187c874a235f74d0a809182a1d80288090d`.
+This single synthetic Gemma result does not qualify broader images, the normal
+card UI, native inference, or delivery. Active v20/v15 prompts, public processor,
+model weights, runtime guards, and APK025 were not replaced. The normal web025
+preview was restored after testing. Evidence is retained locally under
+`F:/Temp/OpenChat-IOU/image-source-details-025/`, including separate original,
+classified-error, and compact-format observations. Real user images were not
+copied into these new fixtures or sent to a chat.
+
+### Follow-up: formatting diagnosed; broader source fidelity still fails
+
+The next local experiments did not change the active v20/v15 profiles. An offline
+count with the catalog-pinned Qwen tokenizer showed that the complete required
+values fit within 96 tokens; increasing the ceiling is not justified by these
+failures. A **synthetic-only instrumented diagnostic copy**, not a release worker,
+then showed Qwen spending its budget on fenced, indented, named-field output
+instead of the requested positional format. The original completion guard still
+rejected that unfinished response. The positional parser was never implemented.
+
+An explicit named-record example restored compact complete output. Giving the
+example one empty date slot (`"dates":[""]`) instead of an empty array fixed the
+synthetic invoice's omitted date in the next run. That candidate, SHA-256
+`d29d58f492529b8640d51338d1f7904784a3001fa10cdd6273637fdc49d7ebc0`,
+returned the correct synthetic money, date, kind, printed direction, description,
+and footer Type evidence on the **unchanged** production025 worker.
+
+However, the broader check rejected the candidate set:
+
+- Both models preserved the Arabic receipt's money and date, but returned
+  unprinted or incorrect direction/description/category text.
+- Qwen preserved the reservation's total and date range, but changed its kind
+  to settlement and used a person's name as its description.
+- Gemma preserved that total, range and IOU kind, but inferred a direction and
+  returned a null description where this candidate contract requires a string.
+
+All five follow-up runs completed with full cache integrity checks and confirmed
+GPU cleanup. These are **not** five accuracy passes. The source-details profile
+remains inactive; neither an unsupported direction nor a wrong kind is waived.
+The scoped root regression sweep passed 469 tests and both IOU typechecks before
+the additional retained Qwen-capture tests. Unit/parser success is kept separate
+from this failed model-fidelity gate. The pending normal UI/card/delivery matrix
+must use any eventual newly bound artifact; these diagnostics cannot replace it.
+
+Local evidence: `F:/Temp/OpenChat-IOU/image-source-details-025/r8/source-fidelity-matrix.json`.
+Only synthetic captures are retained as repository fixtures. The real images
+were processed locally without posting to chat or sending to an app backend, and their raw private
+text was not added to repository fixtures. No models were downloaded, no backend
+was changed, and the normal web025 preview was restored after these tests.
+
+### Grounding follow-up and preservation of the existing note policy
+
+The next source-v1 diagnostic (r9) tightened only the printed direction,
+description, and completed-payment instructions. All six requests completed with
+full cache verification and GPU cleanup. Both models now left unprinted direction
+blank on the two real images, and Qwen restored the reservation's IOU kind.
+However, Qwen still selected a person's name as the description and invented
+`settlement` as Type evidence, including on the synthetic control. Both models
+still failed exact Arabic memo extraction. Gemma's reservation fields were
+otherwise faithful, but its `thru` date separator is not accepted by the current
+raw-date grammar. Only Gemma's synthetic source-fields check passed. No r9 prompt
+was activated. The retained failures are in
+`F:/Temp/OpenChat-IOU/image-source-details-025/r9/source-fidelity-matrix.json`.
+
+The root regression sweep now passes **471 tests**, including both retained actual
+synthetic captures. This remains offline parser/integration evidence, not six
+successful inference results.
+
+Review also confirmed that **heading-based notes are the existing accepted
+policy**. Literal memo extraction and memo-over-heading precedence were a
+prospective expansion, not a user-confirmed replacement for that behavior.
+The old memo-only probes remain failed and will not be repeated or relabeled as
+passing. Printed direction and private saved-Type correctness remain required;
+they are not covered by the accepted receipt-subtitle limitation.
+
+A separate, inactive `labels-v1` candidate therefore keeps heading notes and
+adds only printed direction and bounded Type/footer source evidence. It is not a
+rescore of source-v1 or a waiver for wrong amounts, dates, kinds, directions, or
+Types. Any activation still requires source-faithful inference, app normalization,
+private Type matching, normal UI/card tests, and the artifact-bound delivery checks.
+
+The r10 `labels-v1` diagnostic completed six cache-only runs on the unchanged
+build025 worker. Both models copied the synthetic invoice's heading, total, date,
+kind, explicit `You owe` label and two complete footer lines correctly. This is
+evidence for that synthetic input only. The real-image checks still prevent
+activation: Qwen misread Arabic Type evidence and selected personal/navigation
+text from the reservation despite the exclusions; Gemma selected the Arabic
+amount caption instead of footer/category evidence. The last Gemma reservation
+result was observed but its screenshot was not retained, so it does not add a
+retained source-fidelity pass. Both models kept the real images' core fields and
+left unprinted direction blank. No active profile, public processor, model weight,
+or APK was replaced.
+
+The eight affected IOU parser, bridge, private-Type matching, and artifact suites
+passed an independent **487-test** sweep after the dormant labels-v1 implementation;
+both IOU TypeScript configurations also passed. The synthetic response fixtures
+exercise parsed values, not byte-exact model serialization. This does not change
+the failed real-image activation decision above.
+
+The normal build025 v2 Apps screen was also checked separately: the connected app
+and three saved cards survived a reload. A locally reviewed synthetic card returned
+to draft with the same fields and required a new review; sending approval was not
+restored. No send or IOU save was performed. This is a persistence/review-invalidation
+check, not model accuracy, a fresh-card delivery test, or evidence for a later build.
+
+Retained screenshots and candidate receipts are under
+`F:/Temp/OpenChat-IOU/image-source-details-025/r10-labels/`; the normal-UI screenshots
+are the `web025-*-reload.png` and `web025-restored-card-unapproved.png` files in its
+parent directory. Failed Type evidence is not an accepted release limitation.
 
 ## September 15: fresh smaller-Qwen phone sequence — three passes
 
@@ -1893,3 +2447,523 @@ seven-field repository candidates was 12,297 Unicode scalar characters / 12,315 
 That fits the existing 16,384-character registration envelope; no backend limit needs to be
 raised for this pair. This in-memory check neither registered those failed candidates nor
 qualifies their outputs. Recheck the complete schema when qualified templates are finalized.
+
+## October 3 local-only Type-evidence investigation (not activated)
+
+The current private-app investigation keeps the accepted heading-based note policy.
+Its `labels-v1` candidate adds only copied direction and Type-evidence fields;
+IOU still owns Type matching and the host's declared direction defaults. The active
+profile JSON and published processor have not changed.
+
+For this candidate, IOU's private package export can insert its account's Type names
+and keywords into the app-owned prompt. Public export has an empty roster. IDs,
+direction defaults, account/sheet routing, and keys are not prompt data. The
+`[[IOU_PRIVATE_TYPE_EVIDENCE_TERMS_V1]]` placeholder inserts only a JSON array, so
+each configured model template owns its instruction wording and placement without
+OpenChat changes or model-ID branches in the export helper. The earlier full-guidance
+placeholder remains supported for the isolated candidates. Each template must have
+exactly one of these placeholders; mixed/repeated markers, unsafe expanded text and
+byte-limit overflow fail export without silently dropping terms. JSON encoding is
+not a claim that a model cannot follow malicious text.
+
+Actual cached WebGPU runs used the unchanged build025 worker and 96-token output
+limit. A synthetic Type roster included matching and deliberately absent keywords.
+Gemma's r11/r12 prompt passed the synthetic invoice, Arabic transfer and reservation
+images, including their Type evidence. The exact r12 output captures also passed
+IOU's local processor with and without the synthetic Type context: monetary fields,
+calendar dates/range, heading note and literal direction were preserved, and
+internal evidence was stripped from the resulting DTO. These are model-extraction
+and offline-normalization checks, not normal card UI, native, delivery, or broader
+image acceptance. See the local
+[capture replay](F:/Temp/OpenChat-IOU/image-source-details-025/r12-context-labels-order-qwen/actual-capture-replay.json).
+
+Qwen r11 copied the vocabulary, including the absent control, and produced malformed
+JSON. Moving the same guidance before its output schema (r12) stopped that copying
+but omitted the printed Type keyword. Shortening that guidance (r13) still omitted
+it. Correct amount/date/direction fields do not make those candidates passing Type
+tests. None was activated. Further instruction-placement work must retain the same
+positive and absent-keyword controls and then qualify the other images.
+
+Any future activation must version the prompt/schema and pinned processor bytes as
+one coherent app recipe. Existing connections keep their old complete recipe until
+explicit reconnect verifies and installs the new one atomically; never replace only
+the processor behind an old catalog or treat restored cards as approved.
+
+The r14 location experiment separated the vocabulary before Qwen's schema from the
+Type-field instruction after it. Actual runs found the visible matching Type term
+on all three images, but the synthetic/reservation outputs also copied neighboring
+nonmatching text. The Arabic output had an extra trailing quotation mark and was
+invalid JSON. No output was repaired, no candidate was activated, and these results
+are not a passing qualification. The next isolated experiment changes only the
+Type-field instruction from complete-line copying to exact visible candidate-term
+copying. JSON validity, absent-term exclusion and complete field accuracy remain
+required. Local raw captures stay outside the repository.
+
+The r15 exact-term instruction did not qualify either: its synthetic output copied
+four absent roster terms in addition to the visible keyword and exceeded the
+four-item contract limit. That failed the synthetic gate, so real images were not
+rerun with r15. An offline replay of all four exact r14/r15 captures parses the
+whole raw string without repair and records all four as model failures. Some r14
+outputs can still normalize into plausible cards; that does not establish correct
+model evidence. The rejection report contains no raw private image text or names:
+`F:/Temp/OpenChat-IOU/image-source-details-025/r14-r15-exact-rejection-replay/rejection-report.json`
+(SHA-256 `6538f765a9fc156c904f71e1f90fa624d04162178881e8ade517351404988941`).
+The extra Arabic quotation mark is already in the worker's decoded text; the
+host and diagnostic display pass it through unchanged. Captures alone do not
+distinguish a generated token from a tokenizer decoding issue. Neither prompts,
+model weights, output budget nor production processor were changed by this replay.
+
+The r16 experiment defined its prospective evidence rule before inference: a
+genuinely printed candidate-bearing line is required, and up to four adjacent
+verbatim lines from the same visible Type-evidence area may be included. This is
+not a retroactive change to r14/r15 outcomes. The prompt also explicitly requires
+the complete JSON value to end with its closing delimiter. The production worker,
+weights, 96-token cap and strict whole-string JSON acceptance remain unchanged.
+
+Fresh local runs produced complete synthetic-invoice and reservation answers with
+the expected core values and visible candidate-bearing evidence. The Arabic run
+failed with `output-token-limit`; the worker returned no partial proposal. All
+three completed full model-cache SHA verification and acknowledged GPU cleanup.
+The exact visible captures remain local in
+`F:/Temp/OpenChat-IOU/image-source-details-025/r16-context-labels-visible-lines-qwen/`.
+The earlier interrupted/closed diagnostic tab has no retained terminal result and
+is not counted. These observations do not qualify the candidate or activate it.
+
+The 96-token ceiling is enforced in the host, model settings, catalog validator,
+generation-option clamp and Qwen decoder call limit, not just the requested test
+value. A request labelled 128 against that unchanged runtime would not establish
+128-token execution. Qwen separately enforces its 1,024-position complete
+prompt-plus-output context and 640-raw-patch image bound. Any isolated higher-output
+experiment must explicitly bind its changed runtime, retain those context/image
+bounds, native EOS completion and disposal checks, and remain distinct from
+production/phone qualification. No budget or production prompt change has yet
+been activated.
+
+The isolated r16 128-token experiment also failed the Arabic fixture with
+`output-token-limit`. It measured 772 input tokens, a 128-token output allowance,
+899 required context positions and exactly 128 generated tokens. The worker
+returned no partial proposal and acknowledged cleanup after 35,445 ms; all 14
+cached model artifacts (1,836,691,582 bytes) passed full SHA verification. Thus
+this failure is not explained by silently retaining the 96-token ceiling or by
+exceeding the 1,024-position context bound. It does not establish that a larger
+allowance will produce accurate or valid output.
+
+The prompt stayed byte-identical to r16. The isolated worker changed only its
+output allowance limits and count-only diagnostics; reverse verification recovers
+the exact frozen025 worker. This is neither a production configuration change nor
+APK/phone acceptance. Evidence remains local under
+`F:/Temp/OpenChat-IOU/image-source-details-025/r16-context-labels-visible-lines-qwen-128/`
+(receipt SHA-256 `63bca0fd03b3982645769b90e2e367c5ef5622bd928e7589474f781dc0bf64d5`).
+
+The follow-up 192-token experiment completed after 139 generated tokens with the
+same 772-token input (963 required positions). It still failed the prospective
+contract: the exact decoded string ends with an extra quote and contains six
+Type-evidence strings instead of at most four, including unrelated details.
+Correct visible money/date fields do not override either failure. No truncation,
+quote removal, evidence filtering or other repair was performed. Full cache SHA
+verification and GPU cleanup passed; elapsed time was 35,738 ms. Evidence is under
+`F:/Temp/OpenChat-IOU/image-source-details-025/r16-context-labels-visible-lines-qwen-192/`
+(receipt SHA-256 `cac661271278afac77de0065081b0a6042758084edcb2387396955bd37777010`).
+Therefore r16 is not qualified, and increasing the token allowance alone is not
+a fix. The ordinary web026 preview was restored after the isolated tests.
+
+An exact-string offline integration replay now spans the actual fork-main
+`parseCompleteAppActionOutput`, IOU's `processLocalArtifactRequest`, and the host's
+`projectLocalAppPayload` / `initializeLocalAppDraftChoices`. The synthetic and
+reservation r16 captures preserve money/date/kind/note and match their controlled
+private Types. Initial selection applies the app-declared Type direction default;
+clearing the Type restores the extracted baseline, and a manual direction edit
+survives subsequent Type changes. Separately labelled synthetic absent-date
+controls remain undated through final host projection. Intermediate evidence and
+private setup fields are absent from the final card payload. The exact Arabic
+192-token string is rejected by the real host parser before the app processor or
+card projection runs. The report contains hashes and outcomes, not private text:
+`F:/Temp/OpenChat-IOU/image-source-details-025/r16-exact-host-card-replay.json`
+(SHA-256 `e02b27ba1fef2c69a041a325c6a876c37d397bdf2fb10e74268cfb46fde4a328`).
+This closes an offline parser-to-card-function coverage gap, not rendered UI,
+native model, persistence, encryption or delivery acceptance.
+
+A source audit against fork main `8ac17d9e...` and frozen APK026 confirms that the
+normal TransformersWebGPU Qwen route also enforces 96 tokens through settings,
+catalog validation, host inference, generation clamping and staged decoder calls.
+Earlier 512/1024 default observations came from an obsolete checkout and do not
+describe this route. Neither an app-only labels-v1 configuration switch nor a
+larger diagnostic request bypasses the normal client's 96-token runtime guard.
+
+### October 3: r17/r18 prompt isolation and a fail-closed evidence guard
+
+Two further Qwen candidates remain local-only and unqualified. r17 shortened the
+prompt to 1,755 UTF-8 bytes and required every Type-evidence string to contain a
+supplied candidate term. r18 retained r16's detailed money/date/direction and
+serialization wording, changing only the candidate-data wording, empty-date
+example, and Type rule to prohibit adjacent noncandidate lines (2,933 bytes).
+Both used the same model weights. Each unchanged-worker preparation passed 65
+cache, integrity, entry-graph and cleanup-boundary assertions before inference.
+
+On the Arabic fixture, both candidates exhausted the normal 96-token allowance.
+Diagnostic-only 192-token trials kept the fixed 1,024-position context and
+640-patch bounds. r17 completed 116 generated tokens from 524 input tokens
+(715 required positions), but returned fenced, expanded JSON with a direction
+not printed in the image and duplicate/unlisted Type evidence. It failed its
+prospective source/format oracle despite correct money and date. r18 exhausted
+all 192 tokens from 766 input tokens (957 required positions), returning no
+partial proposal. All four runs completed full SHA verification of the same 14
+cached artifacts and acknowledged GPU cleanup. No failed output was repaired,
+truncated or filtered into a passing proposal.
+
+Offline sizing with the exact pinned Qwen tokenizer shows that a constructed
+correct compact six-field answer for this fixture needs 58 text tokens plus one
+EOS, versus 45 plus EOS for the original four fields. This is a sizing example,
+not generated-model acceptance; it establishes that the six-field answer is not
+inherently too large for 96 tokens. Simply increasing the output limit is not a
+demonstrated fix. The reproducible tokenizer-only helper is retained locally at
+`F:/Temp/OpenChat-IOU/image-source-details-025/count-r17-arabic-offline.mjs`.
+
+The new opt-in `labels-v2` IOU adapter rejects the entire raw-image result if
+any Type-evidence string is duplicated or contains no configured Type name or
+keyword. It reuses IOU's existing matching rules, keeps source strings unchanged,
+and performs no filtering or repair. Empty evidence is permitted; nonempty
+evidence without a configured vocabulary is rejected. Individually listed but
+conflicting evidence remains unmatched, rather than guessing a Type. Default
+four-field, `source-v1` and `labels-v1` behavior are unchanged. Applying this rule
+to `labels-v1` initially broke an exact replay containing legitimate adjacent
+footer lines. That regression was caught and corrected by versioning the stricter
+contract, not by rewriting the historical fixtures or their pass assertions.
+The original r16 assertions now pass unchanged (report
+`F:/Temp/OpenChat-IOU/image-source-details-025/r16-exact-host-card-after-evidence-guard.json`,
+SHA-256 `486c6456b34fa6fb5466c624d2daaa63ec55c0161b12daf23ac91272eafc47c2`).
+
+The actual host accepts r17's complete fenced JSON envelope, which is distinct
+from the diagnostic's stricter raw-JSON requirement. Exact captured bytes now
+pass through that real host parser. The original `labels-v1` adapter accepts the
+structural shape; explicit `labels-v2` rejects it before card projection.
+Vocabulary compliance cannot prove that a model copied
+the image faithfully, so the guard does not qualify either model prompt. The
+original four-trial report is retained, but its guard interpretation is superseded
+by `F:/Temp/OpenChat-IOU/image-source-details-025/labels-v2-compatibility-replay.json`
+(SHA-256 `133fc3dea466e8658b5ff13814e6982dfa3140e5a091a198c830f6acf3bc4585`).
+No model has been qualified with `labels-v2`; replaying old bytes is not a new
+model run. All 483 tests across nine focused image adapter, processor, prompt and
+matching suites pass together, and the app no-emit typecheck passes. An initial
+combined run reported missing mocked exports; subsequent combined repeats passed
+without test/config changes. The transient cause is not established and has not
+been presented as a fixed isolation bug.
+The active profiles, public processor bundle, normal worker and APK remain
+unchanged; this is not normal-UI, native-model or delivery acceptance.
+
+### October 3: controlled field ablation (r19/r20)
+
+The next comparisons started from the byte-exact active four-field Qwen prompt
+(`2d73ebab0701a7adb4256072ef4625c30964b46766172bae05602bc72e045cc8`),
+not another rewrite of the longer candidate. On the same Arabic fixture and
+unchanged 96-token worker:
+
+- The active four-field control completed with correct money, date, heading and
+  completed-payment kind.
+- Adding only a semantic `direction_text` request also completed, but copied a
+  sender identifier instead of returning an empty value. This is an extraction
+  failure, not a GPU or token-limit failure.
+- Adding only `type_texts` completed with the exact printed Arabic Type keyword
+  and unchanged core values. Type extraction alone is therefore not established
+  as the cause of the longer candidate's failure.
+
+All three r19 results were complete fenced JSON accepted by the real host. They
+did not satisfy r19's stricter raw-JSON-only format oracle; that criterion is not
+retroactively changed. The two five-field shapes are diagnostic ablations, not
+activated IOU contracts. The result comparison must keep these distinctions.
+
+r20 replaced the semantic direction instruction with a literal search for IOU's
+existing displayed direction labels. With direction alone, it completed at 96
+tokens with the correct empty direction and unchanged core values. Recombining
+that rule with the successful Type-evidence rule still exhausted 96 tokens.
+An unchanged-prompt diagnostic at 192 tokens completed after 110 generated tokens
+(574 input, 765 required context positions), but included an unprinted decoy Type
+and an unauthorized extra field. Its direction was correct, but the complete
+output remains invalid and unqualified. No trimming, key removal or filtering was
+used to salvage it. Raising the budget is not a demonstrated solution.
+
+The r20 prospective oracle explicitly permits the complete fenced envelope that
+the real host accepts; this does not relax exact-key or image-grounding checks.
+All six runs reverified the same 14 cached model artifacts and acknowledged GPU
+cleanup. No model download, active prompt, public processor, normal worker, APK,
+account or saved-card change was made. The normal web026 Apps screen was restored
+and still showed IOU connected and three saved cards. Further work must retain
+both direction and user-defined Type behavior; dropping either requirement is
+not a release fix.
+
+The exact r19 offline replay additionally proves that the active four-field
+control reaches the real IOU default adapter and generic host card projection
+with the correct core fields. Both partial five-field ablations are rejected by
+the existing app contracts without adding or deleting any fields. The report
+contains hashes and scoped outcomes, not private raw text:
+`F:/Temp/OpenChat-IOU/image-source-details-025/r19-controlled-ablation-offline-report.json`
+(SHA-256 `e819b3d455d3d1a13c7637f82197f0c361fabad4ec893a631427de41b2f5c45b`).
+
+The r20 exact-output replay confirms that both `labels-v1` and `labels-v2` reject
+the unchanged seven-key 192-token result before card projection. The correct
+five-key direction-only diagnostic is also intentionally incompatible with
+these six-key contracts; its isolated model result is not an accepted app card.
+Sanitized report:
+`F:/Temp/OpenChat-IOU/image-source-details-025/r20-outcome-replay/outcome-report.json`
+(SHA-256 `a3785aae64b0200f934b8dc7525e087727c3dbbb1b7c4cf921891b955031931b`).
+
+### October 3: exact exported Qwen prompt passes three fixtures (r22/r23)
+
+The successful r22 candidate retains both literal direction and private Type
+evidence. Its additional compact, single-line JSON instruction is a formatting
+change, not a model-weight, worker, token-budget or OpenChat backend change.
+At the unchanged 96-token limit it returned complete, unfenced, exact-six-key
+JSON for the Arabic transfer, reservation and synthetic invoice. Money, dates,
+kind, heading, printed direction and configured Type evidence met the existing
+fixture expectations. Every retained run completed full cached-artifact SHA
+verification and acknowledged GPU cleanup. A previous Arabic attempt whose
+output was not retained is unverified, not counted as a pass.
+
+r22 used a hand-assembled Type roster. r23 therefore reran all three fixtures
+using the actual IOU private-profile exporter and its JSON-encoded roster.
+No other prompt bytes changed. All three r23 runs passed at 96 tokens with the
+same cached small Qwen model and unchanged production worker. The exact exported
+prompt SHA-256 is
+`317c418c257c97d5922d30bc6c0f79c70a2a6c42494eb2a93b088791f32ffbeb`.
+The export proof remains local at
+`F:/Temp/OpenChat-IOU/image-source-details-025/r23-exported-roster/export-proof.json`
+(SHA-256 `111d6a157d05cd945e7ec294e39e0f23a619e6daee0ebf5a55a244e693cb0794`).
+
+The exact captured r23 strings also pass the authoritative host JSON parser,
+IOU `labels-v1` and `labels-v2` adapters, payload projection and generic host
+draft-choice initialization. Tests check the selected Type's direction default,
+clearing the Type to restore the extracted baseline, preserving a manual
+direction edit across Type changes, and leaving transaction kind unchanged.
+Extraction intermediates and private processor context do not enter the final
+card payload. Negative checks separately cover malformed and duplicate-key JSON,
+extra fields, and the versioned duplicate/unlisted Type-evidence rule. No captured
+output is repaired. The active legacy adapter still rejects the six-field
+candidate, confirming that this is opt-in rather than silently activated.
+
+Offline report:
+`F:/Temp/OpenChat-IOU/image-source-details-025/r23-exact-host-card-replay.json`
+(SHA-256 `028e24461d048c6eefc6afadcaaca5c1c42f9b1af2cb0c1c621b0d99a93a3b8f`).
+The preceding r22 host/card replay is retained independently with SHA-256
+`3cde7b504db1f2aba32cb4315041432bdffaa6fc29048ca78b97789fdd7451aa`.
+Only the synthetic invoice's captured output is added to repository regression
+fixtures; private images and private raw captures remain outside the repository.
+
+The ten focused suites pass together (491 tests), and both IOU no-emit app and
+Node typechecks pass. These results do not establish broader image accuracy,
+rendered normal-UI behavior, native inference, persistence, encryption or
+delivery. Missing-date, unmatched-Type and multi-entry image qualification,
+Gemma's exact prompt under the final shared contract, safe recipe versioning and
+normal web/APK acceptance remain separate gates. Active profiles, public app
+bundle, model weights, worker, APK, accounts and saved cards remain unchanged.
+
+### October 3: broader image matrix catches unqualified cases (r24/r25)
+
+Two privacy-safe synthetic images were rendered from a retained script after
+their expected values were declared: a service invoice with no date and no
+matching Type, and two separately boxed invoices with different dates,
+currencies and printed directions. These are new model runs, not fabricated
+processor outputs. The local prospective oracle is
+`F:/Temp/OpenChat-IOU/image-source-details-025/r24-combined-edge-matrix/prospective-oracle.json`
+(SHA-256 `64c9835c4abe892cc17691717ba123cc28a9b7f82fb690d9928589e7542fcd9d`).
+
+| Exact prompt at 96 tokens | No date / no matching Type | Two separate invoices |
+| --- | --- | --- |
+| Qwen r23 | Core fields and empty date correct, but four unprinted roster labels returned: failed source evidence | Output-token-limit error; no partial proposal returned |
+| Gemma r12 | Correct amount, currency, empty date, empty direction and empty Type evidence | Invalid JSON and the second invoice omitted: failed |
+
+All four runs verified every cached model artifact and acknowledged cleanup.
+The Qwen negative case demonstrates that checking whether evidence belongs to
+the configured vocabulary cannot establish that it was actually printed.
+The previously passing three-image replay is retained, but is not a broader
+qualification claim. Neither candidate has been activated.
+
+r25 changed only Qwen's Type-evidence instruction to Gemma's exact longer
+instruction, keeping the other prompt bytes, six keys, model and 96-token
+worker unchanged. It also failed the negative image, echoing all eight roster
+terms despite none being printed. This exceeds the four-string contract as
+well as failing source evidence. Stronger wording alone is not a demonstrated
+fix; no repeated positive-image tests are counted for this rejected candidate.
+
+A separately isolated r24 Qwen 192-token diagnostic completed both invoice
+descriptions after 175 generated tokens (592 input tokens, 783 required context
+positions). It still failed: output was two concatenated objects instead of one
+JSON array, with eight unprinted roster terms in each. No framing repair or
+evidence filtering was performed. The worker reverse-proof recovers the exact
+normal worker after removing only the output-cap changes and count diagnostics;
+the 1,024-position context, 640-patch image bound and cleanup rules stayed fixed.
+This is not a production budget change or a multi-entry acceptance pass.
+
+The activation review also identified a separate connection gate: the current
+generic host binds a connected app to its public action definition byte-for-byte
+(except declared rules). Expanding private Type terms inside a response-schema
+prompt would change that pinned definition and fail connection verification.
+Any eventual dynamic binding must retain public template integrity and accept
+only bounded app-supplied data through an explicit generic contract. Exempting
+prompt fields from verification or adding IOU-specific host logic is not a fix.
+
+### October 3: negative-case replay and roster-free control (r26/r27)
+
+The r26 semicolon-roster control returned one unprinted Type name on the
+unmatched invoice. Unlike the earlier four-way collision, this single name
+passes the configured-vocabulary check and selects the wrong saved Type,
+including its direction default. The exact-output replay preserves this as a
+failure, not a successful card. It also confirms r25's eight terms are rejected
+and the 192-token two-invoice result is rejected as concatenated JSON.
+Report: `F:/Temp/OpenChat-IOU/image-source-details-025/r25-r26-r24-192-supplemental-replay.json`
+(SHA-256 `6f51eec67bea433221b4808d45c6120d225fe16bdac1401f68509f1687c423ea`).
+
+r27 changes only Qwen's Type-evidence instruction to request complete printed
+memo, description, category or short footer lines, without supplying private
+Type terms. Its new prospective `source-lines-v1` semantics use the existing
+`labels-v1` wire adapter only for this isolated diagnostic; this is not a new
+active processor format. The Qwen prompt SHA-256 is
+`552d831a09fdbeb3a642936952e7e521f0b632f79435a33935f6e09e680c5329`.
+
+- Unmatched invoice: correct core fields, absent date/direction and the actual
+  printed description, without invented Type names (32.1 seconds).
+- Arabic transfer: correct heading, amount, currency, complete printed date and
+  transaction kind, but an incorrect Arabic memo (33.2 seconds). This fails the
+  predeclared source-evidence expectation and does not qualify the candidate.
+
+Both runs used the same cached small Qwen weights, 96-token worker and verified
+cleanup. Removing the private roster avoids its observed echo on this negative
+case, but does not establish reliable reading of smaller source text. No further
+positive runs are counted for this rejected candidate. Existing focused-region
+diagnostics are documented in `memo-region-diagnostic.md`; repeating those
+wording tests is not evidence of a fix.
+
+Offline tokenizer sizing also separates capacity from correctness: canonical
+compact two-invoice JSON needs 66 tokens including EOS for the original four
+fields, or 89 for six fields with both directions and empty Type arrays. Both
+fit 96 in that exact representation, but the six-field form has only seven
+tokens of headroom. These are constructed sizing inputs, not model outputs or
+inference passes. Raising the budget alone did not fix the captured 192-token
+framing/evidence failures.
+
+Active profiles, public processor, model cache, OpenChat worker, APK, account
+and saved-card state remain unchanged. The 640-patch mobile safety ceiling is
+not relaxed by this experiment.
+
+A subsequent bounded aspect control (r28) added only white side padding to a
+decoded copy of the original image, producing a 1000-by-1600 PNG. The same
+worker then uses its existing 320-by-512 frame without stretching the image's
+contents. The same r27 prompt still returned an incorrect Arabic memo and now
+also misread the heading; amount, currency, date and kind remained correct.
+The 33.8-second run verified the cache and acknowledged cleanup. Padding is not
+a demonstrated fix, and this comparison is not proof that resolution is
+irrelevant: encoding, position and geometry changed together. No production
+preprocessing changed. The private control image and captured output remain
+only under `F:/Temp/OpenChat-IOU/image-source-details-025/`.
+
+Two authored synthetic unit regressions additionally check unmatched evidence
+stays untyped, two-row order/range preservation, row-local Type selection,
+stripping extraction-only fields, and the exported Type-direction declaration.
+The five focused processor/card/acceptance suites pass 125 tests together.
+Those unit inputs are not model captures and their pass does not override the
+r27/r28 image failures. The ordinary web client also restored its connected
+IOU setup and three cards after reload; opening the saved synthetic card
+preserved its amount/date/note and required a fresh review, without sending it.
+
+### October 3: categorical Type selection control (r29)
+
+r29 changes only r27's sixth-field instruction: instead of copying printed
+Type evidence, Qwen selects an app-supplied Type ID or the empty string for
+None. Its five core-field instructions, small cached weights, exact WebGPU
+worker and 96-token limit remain unchanged. The expected no-match and Arabic
+classifications were recorded before inference. This diagnostic shape is not
+compatible with the active processor and was never activated or passed through
+the public app-definition binding.
+
+The first, unmatched synthetic invoice failed. Qwen returned the correct
+heading, amount/currency, absent date, kind and absent direction, but selected
+`synthetic-gamma` even though no configured Type name or keyword is printed.
+The 32.4-second run verified all 14 cached artifacts (1,836,691,582 bytes) and
+acknowledged GPU cleanup. Direct categorical output therefore does not fix the
+observed false-positive problem. The Arabic case was not run for this rejected
+candidate; this is not a memo-extraction or source-grounding pass.
+
+The prospective oracle and exact visible output are retained under
+`F:/Temp/OpenChat-IOU/image-source-details-025/r29-categorical-type-id-qwen/`.
+Prompt SHA-256:
+`c4f32d8c437b6eae851f32b9384a0a20023c115159a1e89b976afa448040f160`.
+Active profiles, public processor, model cache and APK remain unchanged; the
+ordinary local preview was restored after the diagnostic.
+
+The retained synthetic r26/r29 false-Type outputs now have durable offline
+factual regressions in `rawImageFactualGrade.test.ts`. Their raw bytes were
+independently compared with the original visible captures. The pure grader
+checks exact fields, values and array order/cardinality before normalization;
+it rejects duplicate keys, including escaped nested duplicates, and does not
+include unexpected model-controlled keys or values in diagnostics. The existing
+r22 processor replay now checks independently authored source facts before
+normalization too. This strict-JSON grader does not claim the host rejects its
+otherwise accepted complete Markdown fences, and it is not a production image
+verifier or a substitute for fresh inference.
+
+The six focused factual/processor/card/acceptance suites pass 133 tests. Both
+TypeScript configurations also pass. These are offline test outcomes, not an
+image-accuracy, emulator-delivery or release pass.
+
+### October 3: unchanged Type-only negative control (r30)
+
+r30 closes a missing comparison from r19: it runs the exact earlier Type-only
+prompt, which passed the Arabic positive, on the unmatched synthetic invoice.
+The complete r19 profile file is byte-identical, with no direction request,
+wording change, added example, roster change or generation change. The negative
+expectation was recorded before inference. Bare JSON and one exact whole JSON
+fence are separately identified; neither framing repair nor partial parsing is
+allowed for the factual comparison.
+
+Qwen returned correct core fields but `type_texts: ["Delta"]`, although that
+term is not printed. The response used a complete JSON fence. Both the separate
+strict-JSON format check and the factual check failed; removing only the
+predeclared whole fence still leaves the false Type. The new exact factual
+grader independently reproduced that failure before any normalization. All 14
+cached artifacts were verified and GPU cleanup was acknowledged (31.7 seconds).
+No ambiguous-image test followed this failed negative gate.
+
+This rules out direction/Type competition as the sole explanation of the
+observed false positives. The simpler Type-only prompt also copies an absent
+roster term; splitting the tasks is not a demonstrated remedy. The earlier
+Arabic positive remains a positive for that image, not broad qualification.
+The active model configuration is unchanged, and the ordinary preview was
+restored. Evidence is retained under
+`F:/Temp/OpenChat-IOU/image-source-details-025/r30-type-only-negative-control/`;
+the exact r19/r30 Qwen prompt SHA-256 is
+`ff1d59c42d39f6d6515213b2736164ddf9deb5906482e594aa6ce3e1c8a18e49`.
+
+### October 3: single-candidate visibility still produces a false positive (r31/r32)
+
+The next diagnostic removed the shared roster and all extraction fields. One
+fixed app-owned template asked only whether a single candidate name or keyword
+was literally printed, returning one boolean. Two profiles differed only in
+their JSON candidate data. Four crossed expectations were declared: both
+candidates absent from the synthetic invoice; only the Arabic memo candidate
+present in the Arabic receipt. The worker, cached small Qwen weights and
+96-token ceiling were unchanged.
+
+r31 stopped after its first result: the absent control correctly returned false,
+but inside a complete JSON fence, failing that diagnostic's strict bare-JSON
+rule. The product's existing `parseCompleteAppActionOutput` already accepts one
+complete JSON fence, with completion and duplicate-key checks. A separate r32
+protocol therefore repeated the matrix under that existing product framing,
+without editing the prompt, parser or r31 expectations or reusing its result.
+
+| Fresh r32 case | Expected | Actual | Result |
+| --- | --- | --- | --- |
+| Absent control on synthetic invoice | false | false | Factual pass; 29.6 seconds |
+| Arabic candidate on the same synthetic invoice | false | true | False positive; 34.3 seconds |
+
+The run stopped at the second case. Neither Arabic-image case ran. Both completed
+with all 14 cached artifacts verified and GPU cleanup acknowledged. Binary
+selection is not a demonstrated remedy: the false positive survives removal of
+the shared roster, other output fields and multi-class selection. No production
+prompt, app package, model weights, worker or APK changed, and normal web026 was
+restored. This does not authorize switching model-only processing to OCR.
+
+The exact synthetic false-positive output is retained as a regression alongside
+the earlier captures. Its factual check fails independently of its accepted
+whole-fence framing. The frozen prospective protocol and observed results are
+under `F:/Temp/OpenChat-IOU/image-source-details-025/r32-binary-visual-product-framing/`;
+the result record SHA-256 is
+`f5d173c1eace51aeae2ea7e9aa617b9b18672112fd70918d254497b8164ff276`.

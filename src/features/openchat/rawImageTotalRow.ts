@@ -1,5 +1,11 @@
 import { normalizeImageCurrencyToken } from "./currencyEvidencePolicy";
 import { normalizeRawImageEvidence, type RawImageEvidenceCandidate } from "./rawImageEvidence";
+import {
+  RAW_IMAGE_DIRECTION_DETAIL_KEYS,
+  RAW_IMAGE_LABEL_DETAIL_KEYS,
+  RAW_IMAGE_SOURCE_DETAIL_KEYS,
+  type RawImageDetailsFormat,
+} from "./rawImageSourceDetails";
 
 const UNSAFE = /[\p{Cc}\p{Cf}\p{Cs}\u2028\u2029]/u;
 
@@ -41,40 +47,68 @@ function monetaryValue(value: unknown): string | undefined {
 }
 
 /** Explicit IOU-owned total_row wire format. Does not accept/relax total_text.
- * Transcription accuracy is a model acceptance requirement, not established by
- * parsing. Private types, direction, canonical dates and cards remain downstream.
+ * The default carries no source details; explicit detail formats only forward their
+ * exact validated fields for downstream app handling. Parsing does not prove source accuracy.
  */
-function normalizeTotalRowFields(value: unknown, field: "total_row" | "total_text"): RawImageEvidenceCandidate | undefined {
+function normalizeTotalRowFields(
+  value: unknown,
+  field: "total_row" | "total_text",
+  detailsFormat: RawImageDetailsFormat,
+): RawImageEvidenceCandidate | undefined {
   try {
+    if (detailsFormat !== "none" && detailsFormat !== "source-v1" && detailsFormat !== "labels-v1" && detailsFormat !== "labels-v2" && detailsFormat !== "direction-v1") return undefined;
     if (value === null || typeof value !== "object" || Array.isArray(value)) return undefined;
     const prototype = Object.getPrototypeOf(value);
     if (prototype !== null && prototype !== Object.prototype) return undefined;
     const descriptors = Object.getOwnPropertyDescriptors(value);
-    const keys = ["heading", field, "dates", "kind"];
+    const detailKeys = detailsFormat === "source-v1"
+      ? RAW_IMAGE_SOURCE_DETAIL_KEYS
+      : detailsFormat === "labels-v1" || detailsFormat === "labels-v2"
+        ? RAW_IMAGE_LABEL_DETAIL_KEYS
+        : detailsFormat === "direction-v1" ? RAW_IMAGE_DIRECTION_DETAIL_KEYS : [];
+    const keys = ["heading", field, "dates", "kind", ...detailKeys];
     if (Reflect.ownKeys(descriptors).length !== keys.length || keys.some((key) =>
       !Object.hasOwn(descriptors, key) || !descriptors[key].enumerable ||
       !Object.hasOwn(descriptors[key], "value"))) return undefined;
     const total = monetaryValue(descriptors[field].value);
     if (total === undefined) return undefined;
-    return normalizeRawImageEvidence({
-      heading: descriptors.heading.value,
-      total_text: total,
-      dates: descriptors.dates.value,
-      kind: descriptors.kind.value,
-    });
+    return normalizeRawImageEvidence(
+      {
+        heading: descriptors.heading.value,
+        total_text: total,
+        dates: descriptors.dates.value,
+        kind: descriptors.kind.value,
+        ...(detailsFormat === "source-v1" ? {
+          direction_text: descriptors.direction_text.value,
+          description_text: descriptors.description_text.value,
+          type_texts: descriptors.type_texts.value,
+        } : detailsFormat === "labels-v1" || detailsFormat === "labels-v2" ? {
+          direction_text: descriptors.direction_text.value,
+          type_texts: descriptors.type_texts.value,
+        } : detailsFormat === "direction-v1" ? { direction_text: descriptors.direction_text.value } : {}),
+      },
+      "strict",
+      detailsFormat,
+    );
   } catch {
     return undefined;
   }
 }
 
-export function normalizeRawImageTotalRow(value: unknown): RawImageEvidenceCandidate | undefined {
-  return normalizeTotalRowFields(value, "total_row");
+export function normalizeRawImageTotalRow(
+  value: unknown,
+  detailsFormat: RawImageDetailsFormat = "none",
+): RawImageEvidenceCandidate | undefined {
+  return normalizeTotalRowFields(value, "total_row", detailsFormat);
 }
 
 /** Same row grammar using the existing wire key, only for explicitly configured
  * app profiles. Keeping this separate avoids silently widening total_text's strict
  * default contract or forcing a key rename into a sensitive model prompt.
  */
-export function normalizeRawImageTotalRowText(value: unknown): RawImageEvidenceCandidate | undefined {
-  return normalizeTotalRowFields(value, "total_text");
+export function normalizeRawImageTotalRowText(
+  value: unknown,
+  detailsFormat: RawImageDetailsFormat = "none",
+): RawImageEvidenceCandidate | undefined {
+  return normalizeTotalRowFields(value, "total_text", detailsFormat);
 }

@@ -1,9 +1,41 @@
 import { describe, expect, it } from "vitest";
 import { normalizeRawImageEvidence } from "./rawImageEvidence";
-import { normalizeRawImageTotalRow } from "./rawImageTotalRow";
+import { normalizeRawImageTotalRow, normalizeRawImageTotalRowText } from "./rawImageTotalRow";
 
 const evidence = (total_row: unknown, overrides: Record<string, unknown> = {}) => ({
   heading: "Visible heading", total_row, dates: ["14 Aug 2026"], kind: "iou", ...overrides,
+});
+
+describe.each([
+  { field: "total_row", normalize: normalizeRawImageTotalRow },
+  { field: "total_text", normalize: normalizeRawImageTotalRowText },
+])("whole $field sign preservation", ({ field, normalize }) => {
+  const raw = (total: string) => ({ heading: "Visible heading", [field]: total, dates: [], kind: "iou" });
+
+  // Independently discovered total-row bug: the prior label grammar consumed the
+  // minus in `Total -12.34 USD`, incorrectly making its amount positive.
+  it.each([
+    "Total -12.34 USD", "Total-12.34 USD", "Total - 12.34 USD",
+    "Total -:12.34 USD", "Total - : 12.34 USD", "Total: -12.34 USD",
+    "Total -$12.34", "Total - $12.34", "Total- $12.34", "Total -: $12.34",
+    "Total - : USD 12.34", "Total - USD12.34", "Total - USD 12.34", "Total USD -12.34",
+    "Total: $-12.34", "Total -:12.34", "Total - : 12.34", "Total:\u00a0-12.34 USD",
+    "Total\u00a0-\u00a012.34 USD", "Total −12.34 USD", "Total +12.34 USD", "Total + $12.34",
+  ])("rejects negative/sign-ambiguous row %j without stripping its sign", total => {
+    const value = raw(total), before = JSON.stringify(value);
+    expect(normalize(value)).toBeUndefined();
+    expect(normalize({ ...value, direction_text: "You owe" }, "direction-v1")).toBeUndefined();
+    expect(JSON.stringify(value)).toBe(before);
+  });
+
+  it.each([
+    ["Total 12.34 USD", "USD"], ["Total $12.34", "USD"], ["Total: $12.34", "USD"],
+    ["Net-total 12.34 USD", "USD"], ["Net-total $12.34", "USD"], ["Net-total:$12.34", "USD"],
+    ["Net-total-amount: USD 12.34", "USD"], ["Net-total: 12.34", undefined],
+  ])("preserves positive/internal-hyphenated labels: %s", (total, currency) => {
+    expect(normalize(raw(total!))).toEqual({ amount: 12.34, ...(currency === undefined ? {} : { currency }),
+      kind: "iou", note: "Visible heading", image_heading: "Visible heading" });
+  });
 });
 
 describe("explicit whole total_row evidence", () => {
@@ -79,5 +111,116 @@ describe("explicit whole total_row evidence", () => {
     const hidden = evidence("Total: 12.50"); Object.defineProperty(hidden, "kind", { enumerable: false });
     expect(normalizeRawImageTotalRow(hidden)).toBeUndefined();
     expect(normalizeRawImageTotalRow(Object.assign(Object.create(null), evidence("Total: 12.50"))))?.toBeDefined();
+  });
+
+  it("supports source details only through the explicit opt-in on both row key variants", () => {
+    const details = {
+      direction_text: "you OWE",
+      description_text: "Test stationery",
+      type_texts: ["TEST ONLY"],
+    };
+    const cases = [
+      {
+        normalize: normalizeRawImageTotalRow,
+        raw: evidence("Total Payout $1,912.15", details),
+      },
+      {
+        normalize: normalizeRawImageTotalRowText,
+        raw: {
+          heading: "Visible heading",
+          total_text: "Total Payout $1,912.15",
+          dates: ["14 Aug 2026"],
+          kind: "iou",
+          ...details,
+        },
+      },
+    ];
+    for (const { normalize, raw } of cases) {
+      expect(normalize(raw)).toBeUndefined();
+      expect(normalize(raw, "source-v1")).toEqual({
+        amount: 1912.15,
+        currency: "USD",
+        kind: "iou",
+        printed_date: "14 Aug 2026",
+        printed_end_date: "",
+        note: "Test stationery",
+        image_heading: "Visible heading",
+        direction: "debt",
+        image_type_texts: ["TEST ONLY"],
+      });
+    }
+  });
+
+  it("requires all source-v1 fields and rejects extras without widening legacy mode", () => {
+    const complete = evidence("Total: 12.50", {
+      direction_text: "",
+      description_text: "",
+      type_texts: [],
+    });
+    expect(normalizeRawImageTotalRow(complete, "source-v1")).toMatchObject({
+      note: "Visible heading",
+      image_heading: "Visible heading",
+      image_type_texts: [],
+    });
+    for (const key of [
+      "direction_text",
+      "description_text",
+      "type_texts",
+    ] as const) {
+      const partial: Record<string, unknown> = { ...complete };
+      delete partial[key];
+      expect(normalizeRawImageTotalRow(partial, "source-v1")).toBeUndefined();
+    }
+    expect(
+      normalizeRawImageTotalRow(evidence("Total: 12.50"), "source-v1"),
+    ).toBeUndefined();
+    expect(
+      normalizeRawImageTotalRow({ ...complete, extra: true }, "source-v1"),
+    ).toBeUndefined();
+    expect(
+      normalizeRawImageTotalRow(complete, "invalid" as "source-v1"),
+    ).toBeUndefined();
+    expect(
+      normalizeRawImageTotalRowText(
+        {
+          heading: "Visible heading",
+          total_text: "Total: 12.50",
+          dates: ["14 Aug 2026"],
+          kind: "iou",
+          direction_text: "",
+          description_text: "",
+          type_texts: [],
+        },
+        "invalid" as "source-v1",
+      ),
+    ).toBeUndefined();
+  });
+
+  it("supports exact labels-v1 fields on both row-key variants without changing the heading note", () => {
+    const details = { direction_text: "Owed to you", type_texts: ["TEST ONLY"] };
+    const cases = [
+      { normalize: normalizeRawImageTotalRow, raw: evidence("Total Payout $1,912.15", details) },
+      { normalize: normalizeRawImageTotalRowText, raw: {
+        heading: "Visible heading", total_text: "Total Payout $1,912.15", dates: ["14 Aug 2026"], kind: "iou", ...details,
+      } },
+    ];
+    for (const { normalize, raw } of cases) {
+      expect(normalize(raw)).toBeUndefined();
+      expect(normalize(raw, "labels-v1")).toEqual({
+        amount: 1912.15,
+        currency: "USD",
+        kind: "iou",
+        printed_date: "14 Aug 2026",
+        printed_end_date: "",
+        note: "Visible heading",
+        image_heading: "Visible heading",
+        direction: "credit",
+        image_type_texts: ["TEST ONLY"],
+      });
+      expect(normalize({ ...raw, description_text: "Not allowed" }, "labels-v1")).toBeUndefined();
+      expect(normalize(raw, "source-v1")).toBeUndefined();
+    }
+    expect(normalizeRawImageTotalRow(evidence("Total: 12.50", { direction_text: "", type_texts: [] }), "labels-v1"))
+      .toMatchObject({ note: "Visible heading", image_heading: "Visible heading", image_type_texts: [] });
   });
 });

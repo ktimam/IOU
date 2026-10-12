@@ -3,6 +3,7 @@ import { IOU_LOCAL_EXTRACTION_SCHEMA } from "./localExtractionConfig";
 import { dateFromPrintedDate, validatedSourceInterval } from "./sourceInterval";
 import { normalizeImageCurrencyToken } from "./imageCurrency";
 import { validateImageHeading } from "./imageHeading";
+import { validateImageTypeTexts } from "./rawImageSourceDetails";
 import {
     applyTextDateSchemaProperties,
     matchesKeyword,
@@ -43,6 +44,9 @@ export function postProcessIouCandidate(
     const imageHeading = source.modality === "image" ? validateImageHeading(candidate.image_heading) : undefined;
     if (imageHeading === undefined) delete normalized.image_heading;
     else normalized.image_heading = imageHeading;
+    const imageTypeTexts = source.modality === "image" ? validateImageTypeTexts(candidate.image_type_texts) : undefined;
+    if (imageTypeTexts === undefined) delete normalized.image_type_texts;
+    else normalized.image_type_texts = imageTypeTexts;
     if (source.modality === "image" && Object.hasOwn(candidate, "currency")) {
         const currency = normalizeImageCurrencyToken(candidate.currency);
         if (currency === undefined) delete normalized.currency;

@@ -1,0 +1,23 @@
+{
+  "version": 1,
+  "scope": "Exact retained rendered Qwen r2 output for a synthetic two-invoice image only. No private image, personal account or user capture is included. Source expectations are authored separately in rawImageFactualGrade.test.ts. This is a known factual failure, not a passing extraction.",
+  "id": "direction-r2-two-invoices-merged-and-dropped",
+  "rawText": "```json\n{\n  \"heading\": \"Invoice A\",\n  \"total_text\": \"Total 12.34 USD\",\n  \"dates\": [\"1 October 2026\", \"2 October 2026\"],\n  \"kind\": \"iou\",\n  \"direction_text\": \"You owe\"\n}\n```",
+  "rawBytes": 172,
+  "rawSha256": "a19e923cd44eb449ebca6c70f71d717998a93f010130e563ade8d34f057aeddc",
+  "visibleCaptureSha256": "8c8cf94badae2b4fe7540f4f796230e38d3342ff48b960f1d3c3ebc557aca0ff",
+  "modelId": "qwen3-vl-2b-instruct-q4",
+  "workerSha256": "04ebc7bcb6a5385745a095ace2ba87e3e474775775dbae31f74d165433b39bd8",
+  "promptSha256": "ba37d96a627c8bf763b2a753d453d8456fb4a2c054a24d4711cbe42ed056b045",
+  "imageSha256": "72bc884d5a20d66a8aaec29b96404635f193d865e172c9719db6eda26718aa38",
+  "prospectiveOracleSha256": "4e43e7689dd0540e4964469d0d65b3b160004f6fa6cddb1a42fcc5474dd151a3",
+  "maxTokens": 96,
+  "elapsedMs": 43022,
+  "resultKind": "result",
+  "cleanupConfirmed": true,
+  "hiddenEvents": 2,
+  "fullCacheShaReverified": true,
+  "verifiedArtifacts": 14,
+  "verifiedBytes": 1836691582,
+  "candidateActivated": false
+}

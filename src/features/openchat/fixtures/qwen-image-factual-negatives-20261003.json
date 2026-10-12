@@ -1,0 +1,51 @@
+{
+  "version": 1,
+  "scope": "Retained actual Qwen worker outputs from the synthetic no-date invoice. This fixture records model captures only; independent authored factual expectations live in rawImageFactualGrade.test.ts. No inference, normalization, UI, delivery, activation or private data is included.",
+  "captures": [
+    {
+      "id": "r26-false-delta-source-evidence",
+      "rawText": "{\"heading\": \"Service invoice\", \"total_text\": \"Total 42.75 EUR\", \"dates\": [], \"kind\": \"iou\", \"direction_text\": \"\", \"type_texts\": [\"Delta\"]}",
+      "rawBytes": 138,
+      "rawSha256": "02a294d46ee21656253ee3ef738e53a5f76400c19adf18c02c4af8e399e793fe",
+      "visibleCaptureSha256": "ba3bb5b0463b7e0f43b78042e1ae33e4342564c37a45bd26a6349559d257375a",
+      "modelId": "qwen3-vl-2b-instruct-q4",
+      "workerSha256": "04ebc7bcb6a5385745a095ace2ba87e3e474775775dbae31f74d165433b39bd8",
+      "promptSha256": "1f29c334017d94db3619e383fcc1bd106ad646300437a605af2c61214ba96ba3",
+      "imageSha256": "2d9835952b241eaf6d15673802935b6c6ceb22b9f057e85fe2ce604d68c5e001",
+      "maxTokens": 96,
+      "elapsedMs": 31704,
+      "cleanupConfirmed": true,
+      "candidateActivated": false
+    },
+    {
+      "id": "r29-false-gamma-categorical-id",
+      "rawText": "{\"heading\": \"Service invoice\", \"total_text\": \"Total 42.75 EUR\", \"dates\": [], \"kind\": \"iou\", \"direction_text\": \"\", \"type_id\": \"synthetic-gamma\"}",
+      "rawBytes": 143,
+      "rawSha256": "fd6f99237414fb90404b4f79f79520b36e9df91379cafd1797f92ab8dc0bfdff",
+      "visibleCaptureSha256": "5994bb3e7ffd7465c146ffc72565ebe04711b823cb6e371bfef091b58c44ea97",
+      "modelId": "qwen3-vl-2b-instruct-q4",
+      "workerSha256": "04ebc7bcb6a5385745a095ace2ba87e3e474775775dbae31f74d165433b39bd8",
+      "promptSha256": "c4f32d8c437b6eae851f32b9384a0a20023c115159a1e89b976afa448040f160",
+      "imageSha256": "2d9835952b241eaf6d15673802935b6c6ceb22b9f057e85fe2ce604d68c5e001",
+      "maxTokens": 96,
+      "elapsedMs": 32433,
+      "cleanupConfirmed": true,
+      "candidateActivated": false
+    },
+    {
+      "id": "r32-false-gamma-binary-visibility",
+      "rawText": "```json\n{\"visible\":true}\n```",
+      "rawBytes": 28,
+      "rawSha256": "425cb29267e396b1a5f904aafbc439786e2bc1604c6f75e7c510a5fca7024848",
+      "visibleCaptureSha256": "5e04e32058838765fe1ec9e850ee81fb45933e3459d1a4df8dfcc0bdae3d7894",
+      "modelId": "qwen3-vl-2b-instruct-q4",
+      "workerSha256": "04ebc7bcb6a5385745a095ace2ba87e3e474775775dbae31f74d165433b39bd8",
+      "promptSha256": "2a30e1d77caee27a6be8bf62c9362482099f94e0e53e2078c4aa8ebbc9bd1763",
+      "imageSha256": "2d9835952b241eaf6d15673802935b6c6ceb22b9f057e85fe2ce604d68c5e001",
+      "maxTokens": 96,
+      "elapsedMs": 34256,
+      "cleanupConfirmed": true,
+      "candidateActivated": false
+    }
+  ]
+}
