@@ -8,7 +8,8 @@
 //    P-256 public key to be registered first (Pair page).
 //
 // 2. Production: read the member's encrypted key envelope and open it with
-//    the account vault. Missing legacy keys require explicit migration.
+//    the account vault. Available original legacy keys migrate automatically;
+//    missing legacy keys require explicit paid recovery on the sheet.
 //    Reads never call VetKD or invent a replacement key.
 //
 // Either way, K_sheet is held in memory only — never on disk.
@@ -45,13 +46,16 @@ const SheetKeyContext = createContext<SheetKeyContextValue | null>(null);
 export function SheetKeyProvider({ children }: { children: React.ReactNode }) {
   const [keys, setKeys] = useState<SheetKeyMap>({});
   const keysRef = useRef(keys);
-  keysRef.current = keys;
+  const verified = useRef(new Set<string>());
+  const pending = useRef(new Map<string, Promise<Uint8Array>>());
   const session = useRef(new SessionGeneration());
   useEffect(
     () => {
       session.current.activate();
       return () => {
         session.current.invalidate(Object.values(keysRef.current));
+        verified.current.clear();
+        pending.current.clear();
       };
     },
     [],
@@ -67,8 +71,8 @@ export function SheetKeyProvider({ children }: { children: React.ReactNode }) {
   }, []);
 
   const get = useCallback(
-    (sheetId: string) => keys[sheetId],
-    [keys],
+    (sheetId: string) => keysRef.current[sheetId],
+    [],
   );
 
   const cache = useCallback((sheetId: string, key: Uint8Array) => {
@@ -78,12 +82,24 @@ export function SheetKeyProvider({ children }: { children: React.ReactNode }) {
       key.fill(0);
       throw cause;
     }
-    setKeys((prev) => ({ ...prev, [sheetId]: key }));
+    verified.current.delete(sheetId);
+    keysRef.current = { ...keysRef.current, [sheetId]: key };
+    setKeys(keysRef.current);
   }, []);
 
   async function unwrapFor(sheetId: string): Promise<Uint8Array> {
+    const existing = pending.current.get(sheetId);
+    if (existing) return existing;
+    const work = loadFor(sheetId);
+    pending.current.set(sheetId, work);
+    try { return await work; }
+    finally { if (pending.current.get(sheetId) === work) pending.current.delete(sheetId); }
+  }
+
+  async function loadFor(sheetId: string): Promise<Uint8Array> {
     const ticket = session.current.capture();
-    if (keys[sheetId]) return keys[sheetId];
+    const cached = keysRef.current[sheetId];
+    if (cached && (!isProdVetkd() || verified.current.has(sheetId))) return cached;
     if (!identity) throw new Error("not signed in");
     // Build the actor via buildAgent so it targets the configured replica
     // host (config.ts, :40436 locally) and *awaits* fetchRootKey. Passing
@@ -96,9 +112,11 @@ export function SheetKeyProvider({ children }: { children: React.ReactNode }) {
 
     if (isProdVetkd()) {
       // The account vault is already unlocked by the authenticated gate.
-      const K_sheet = await readVaultSheetKey(actor, identity.getPrincipal().toText(), sheetId);
+      const K_sheet = await readVaultSheetKey(actor, identity.getPrincipal().toText(), sheetId, cached);
       session.current.assertCurrent(ticket, K_sheet);
-      setKeys((prev) => ({ ...prev, [sheetId]: K_sheet }));
+      verified.current.add(sheetId);
+      keysRef.current = { ...keysRef.current, [sheetId]: K_sheet };
+      setKeys(keysRef.current);
       return K_sheet;
     }
 
@@ -115,17 +133,18 @@ export function SheetKeyProvider({ children }: { children: React.ReactNode }) {
     // fallback, and the empty/undecryptable errors. Unit-tested in recoverSheetKey.test.ts.
     const K_sheet = await recoverSheetKey(new Uint8Array(wrapped ?? []), myKp);
     session.current.assertCurrent(ticket, K_sheet);
-    setKeys((prev) => ({ ...prev, [sheetId]: K_sheet }));
+    keysRef.current = { ...keysRef.current, [sheetId]: K_sheet };
+    setKeys(keysRef.current);
     return K_sheet;
   }
 
   function forget(sheetId: string) {
-    setKeys((prev) => {
-      const next = { ...prev };
-      next[sheetId]?.fill(0);
-      delete next[sheetId];
-      return next;
-    });
+    verified.current.delete(sheetId);
+    const next = { ...keysRef.current };
+    next[sheetId]?.fill(0);
+    delete next[sheetId];
+    keysRef.current = next;
+    setKeys(next);
   }
 
   return (

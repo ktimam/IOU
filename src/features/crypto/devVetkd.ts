@@ -381,6 +381,28 @@ export async function recoverSheetKey(
   }
 }
 
+/** Read-only migration of an already-readable legacy sheet. Never use
+ * deriveUserKeypair here: it creates a replacement when the original is absent.
+ * Unrecognized/undecryptable blobs can be production VetKD ciphertexts and are
+ * not permission to derive a paid key. Corrupt local key records fail closed. */
+export async function loadExistingLegacySheetKey(principal: string, wrapped: Uint8Array): Promise<Uint8Array | null> {
+  let keypair: Awaited<ReturnType<typeof loadStoredKeypair>>;
+  try { keypair = await loadStoredKeypair(principal); }
+  catch {
+    // A JSON parse/provider error can include private-key material. Do not
+    // forward that error or silently replace the existing durable key record.
+    throw new Error("The existing local sheet-key material could not be read. No replacement key was created.");
+  }
+  if (!keypair) return null;
+  let key: Uint8Array;
+  try { key = await recoverSheetKey(wrapped, keypair); }
+  catch { return null; }
+  try {
+    if (key.length !== 32) throw new Error("The existing legacy sheet key has an invalid length. No replacement key was created.");
+    return key.slice();
+  } finally { key.fill(0); }
+}
+
 // ─────────────── entry-level encryption ───────────────
 //
 // Each entry is encrypted with a per-entry AES key, derived as

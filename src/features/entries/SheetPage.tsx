@@ -10,6 +10,8 @@ import { unwrap, isActive, useActor } from "../flows/useActor";
 import { useSheetKey } from "../flows/SheetKeyContext";
 import { useAuth } from "../auth/AuthProvider";
 import { SignInButtons } from "../auth/SignInButtons";
+import { LegacySheetRecovery } from "./LegacySheetRecovery";
+import { LegacySheetRecoveryRequiredError, LegacySheetBackupPendingError, migrateLegacySheetKey } from "../crypto/vaultSheets";
 import {
   encryptEntryPayload,
   decryptName,
@@ -55,7 +57,7 @@ import {
   type DraftBaseResolverContext,
 } from "./draft";
 import { BatchConfirmModal } from "./BatchConfirmModal";
-import type { LocalSheetImport } from "../openchat/localImportSheet";
+import { setLocalImportReviewDate, type LocalSheetImport } from "../openchat/localImportSheet";
 import { useLocalImportNavigation } from "../openchat/LocalImportNavigation";
 import { useDurableInbox } from "../openchat/useDurableInbox";
 import {
@@ -261,6 +263,18 @@ export function SheetPage({ localImport: handoffImport }: { localImport?: LocalS
   const [entries, setEntries] = useState<DecryptedEntry[]>([]);
   const [loading, setLoading] = useState(true);
   const [err, setErr] = useState<string | null>(null);
+  const recoveryScope = useRef({ principal, sheetId, actor });
+  if (recoveryScope.current.principal !== principal || recoveryScope.current.sheetId !== sheetId || recoveryScope.current.actor !== actor) {
+    recoveryScope.current = { principal, sheetId, actor };
+  }
+  const scope = recoveryScope.current;
+  const loadGeneration = useRef(0);
+  const mounted = useRef(false);
+  useEffect(() => { mounted.current = true; return () => { mounted.current = false; loadGeneration.current++; }; }, []);
+  const [legacyRecovery, setLegacyRecovery] = useState<{
+    scope: typeof scope;
+    backupPending: boolean;
+  } | null>(null);
 
   const [modal, setModal] = useState<null | {
     initial: Partial<EntryPayload> | null;
@@ -269,6 +283,7 @@ export function SheetPage({ localImport: handoffImport }: { localImport?: LocalS
     // viewer's frame; on save we orient back to the author's frame so storage stays author-relative.
     createdByMe?: boolean;
     localImportId?: string;
+    reviewDate?: ParsedDraft["reviewDate"];
   }>(null);
   const [sortKey, setSortKey] = useState<SortKey>("newest");
   // Types are ACCOUNT-SCOPED: everything templates feed on this page
@@ -481,7 +496,8 @@ export function SheetPage({ localImport: handoffImport }: { localImport?: LocalS
           relayId: "", chatKey: null, context: { sheetId, principal }, localImportId: target.importId });
       } else {
         closeEntryModal();
-        setModal({ initial: target.drafts[0].initial, entryId: null, localImportId: target.importId });
+        setModal({ initial: target.drafts[0].initial, entryId: null, localImportId: target.importId,
+          reviewDate: target.drafts[0].reviewDate });
       }
     } catch (cause) { toasts.show({ kind: "error", text: (cause as Error).message }); }
   };
@@ -746,17 +762,29 @@ export function SheetPage({ localImport: handoffImport }: { localImport?: LocalS
 
   async function reload() {
     if (!actor || !sheetId) return;
+    const generation = ++loadGeneration.current;
+    const current = () => mounted.current && recoveryScope.current === scope && loadGeneration.current === generation;
     setLoading(true);
     setErr(null);
     try {
       const sh = unwrap(await (actor as any).get_sheet(sheetId));
+      if (!current()) return;
       if (!sh) {
         setErr("sheet not found");
         setSheet(null);
         return;
       }
+      if (handoffImport && (sh.pair_id !== handoffImport.pairId || !isActive(sh.state))) {
+        setLegacyRecovery(null);
+        setErr("The connected sheet changed. Reconnect IOU in OpenChat before sending this draft.");
+        return;
+      }
       setSheet(sh);
-      const K_sheet = get(sheetId) ?? (await unwrapFor(sheetId));
+      // Even a live cached key must have its free encrypted migration checked
+      // once. unwrapFor coalesces concurrent reads and caches verified backups.
+      const K_sheet = await unwrapFor(sheetId);
+      if (!current()) return;
+      setLegacyRecovery(null);
       // Decrypt names (best-effort) and cache the plaintext locally so the
       // accounts list / headers render instantly. Names are E2E-encrypted
       // under K_sheet; failures are non-fatal (fall back to principals).
@@ -765,14 +793,17 @@ export function SheetPage({ localImport: handoffImport }: { localImport?: LocalS
         const siv = optBytes(sh.name_iv);
         if (senc && siv) {
           const nm = await decryptName(K_sheet, siv, senc);
+          if (!current()) return;
           if (nm) cacheSheetName(sheetId, nm);
         }
         const pr = unwrap(await (actor as any).get_pair(sh.pair_id));
+        if (!current()) return;
         if (pr) {
           const aenc = optBytes(pr.name_enc);
           const aiv = optBytes(pr.name_iv);
           if (aenc && aiv) {
             const an = await decryptName(K_sheet, aiv, aenc);
+            if (!current()) return;
             if (an) cacheAccountName(sh.pair_id, an);
           }
           const meIsA = principalText(pr.members[0]) === myPrincipal;
@@ -780,6 +811,7 @@ export function SheetPage({ localImport: handoffImport }: { localImport?: LocalS
           const piv = optBytes(meIsA ? pr.member_b_name_iv : pr.member_a_name_iv);
           if (penc && piv) {
             const pn = await decryptName(K_sheet, piv, penc);
+            if (!current()) return;
             if (pn) cachePartnerName(sh.pair_id, pn);
           }
           // Publish my profile name on this account if it isn't set yet, so
@@ -787,6 +819,7 @@ export function SheetPage({ localImport: handoffImport }: { localImport?: LocalS
           const myEnc = optBytes(meIsA ? pr.member_a_name_enc : pr.member_b_name_enc);
           if (!myEnc && prefs.profileName.trim()) {
             const { enc, iv } = await encryptName(K_sheet, prefs.profileName.trim());
+            if (!current()) return;
             await (actor as any).set_member_name(sh.pair_id, enc, iv);
           }
         }
@@ -795,6 +828,7 @@ export function SheetPage({ localImport: handoffImport }: { localImport?: LocalS
       }
       const res = await (actor as any).list_entries(sheetId, [], 200);
       const decoded = await decryptEntryRecords(res.entries, K_sheet);
+      if (!current()) return;
       if (decoded.failures.length > 0) {
         const entryFailures = decoded.failures.filter((failure) => failure.stage === "entry").length;
         const historyFailures = decoded.failures.length - entryFailures;
@@ -812,13 +846,19 @@ export function SheetPage({ localImport: handoffImport }: { localImport?: LocalS
           ms: 8000,
         });
       }
-      setEntries(decoded.entries);
+      if (current()) setEntries(decoded.entries);
     } catch (e) {
+      if (!current()) return;
+      if (e instanceof LegacySheetRecoveryRequiredError || e instanceof LegacySheetBackupPendingError) {
+        setLegacyRecovery({ scope, backupPending: e instanceof LegacySheetBackupPendingError });
+        return;
+      }
+      setLegacyRecovery(null);
       const message = isLocalImport ? "IOU could not load the connected sheet. Try again when it is available." : (e as Error).message;
       setErr(message);
       toasts.show({ kind: "error", text: message });
     } finally {
-      setLoading(false);
+      if (current()) setLoading(false);
     }
   }
 
@@ -1039,6 +1079,9 @@ export function SheetPage({ localImport: handoffImport }: { localImport?: LocalS
     }
     setBatchBusy(true);
     try {
+      if (batch.drafts.some(draft => draft.reviewDate && draft.initial.ts === undefined)) {
+        throw new Error("Choose a date for every entry before saving; nothing was added.");
+      }
       const payloads = batch.drafts.map((draft) =>
         parsedToPayload({
           ...draft.initial,
@@ -1187,6 +1230,23 @@ export function SheetPage({ localImport: handoffImport }: { localImport?: LocalS
     );
   }
   if (loading && !sheet) return <p>Loading…</p>;
+  if (legacyRecovery?.scope === scope) return <LegacySheetRecovery
+    key={`${principal}:${sheetId}:${legacyRecovery.backupPending}`}
+    backupPending={legacyRecovery.backupPending}
+    retryRead={async () => { if (mounted.current && recoveryScope.current === scope) await reload(); }}
+    recover={async () => {
+      if (!mounted.current || recoveryScope.current !== scope || !actor || !principal) throw new Error("Sheet changed");
+      try { await migrateLegacySheetKey(actor, principal, sheetId, get(sheetId)); }
+      catch (cause) {
+        if (cause instanceof LegacySheetBackupPendingError && mounted.current && recoveryScope.current === scope) {
+          setLegacyRecovery({ scope, backupPending: true });
+          return;
+        }
+        throw cause;
+      }
+      if (mounted.current && recoveryScope.current === scope) await reload();
+    }}
+  />;
   if (err) return <p className="err">{err}</p>;
   if (!sheet) return <p>Not found.</p>;
   if (localImport && (sheet.pair_id !== localImport.pairId || !isActive(sheet.state))) {
@@ -1817,6 +1877,7 @@ export function SheetPage({ localImport: handoffImport }: { localImport?: LocalS
               myPrincipal={me}
               partnerPrincipal={them}
               initial={modal.initial ?? undefined}
+              reviewDate={modal.reviewDate}
               isEdit={modal.entryId != null}
               onCancel={closeEntryModal}
               onSubmit={onSubmit}
@@ -1831,6 +1892,12 @@ export function SheetPage({ localImport: handoffImport }: { localImport?: LocalS
           busy={batchBusy}
           onCancel={() => (batchBusy ? undefined : setBatch(null))}
           onConfirm={() => void confirmBatch()}
+          onDateChange={(index, date) => {
+            try {
+              const drafts = batch.drafts.map((draft, i) => i === index ? setLocalImportReviewDate(draft, date) : draft);
+              setBatch({ ...batch, drafts });
+            } catch (cause) { toasts.show({ kind: "error", text: (cause as Error).message }); }
+          }}
           showRemember={!!batch.chatKey && !chatLinks[batch.chatKey]}
           remember={rememberChat}
           onRememberChange={setRememberChat}

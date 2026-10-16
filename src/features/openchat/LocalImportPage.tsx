@@ -125,7 +125,9 @@ function LocalImportSession() {
     return () => { clearTimeout(timeout); clearInterval(timeout); pageClosed(); window.removeEventListener("message", receive); window.removeEventListener("pagehide", navigationClosed); };
   }, [launch]);
 
-  return <PreferencesProvider key={principal ?? state.kind}><TemplatesProvider><SheetKeyProvider><ToastProvider>
+  // Continue receiving only ciphertext while recovery is shown; do not remount the transport.
+  // Gate authentication itself, including the empty/waiting handoff states.
+  return <AccountVaultGate><PreferencesProvider key={principal ?? state.kind}><TemplatesProvider><SheetKeyProvider><ToastProvider>
     <LocalDeliveryKeyProvider><LocalImportNavigationProvider enabled={launch.framed}><Layout>
     {state.kind === "loading" && <p className="muted">Restoring your IOU sign-in…</p>}
     {state.kind === "anonymous" && <div className="card"><h1>Sign in to IOU</h1><p>Sign in to the account connected in OpenChat to review this draft.</p><SignInButtons /></div>}
@@ -137,13 +139,13 @@ function LocalImportSession() {
       <button className="secondary" onClick={() => closeConnection("Connection cancelled. Nothing was saved.")}>Cancel</button>
     </section>}
     {notice && <p role="status">{notice}</p>}
-    {principal && binding && drafts.length === 1 && <AccountVaultGate><ImportAccount key={principal} principal={principal} draft={drafts[0]} binding={binding}
-      isCurrent={() => !transport.current.closed && transport.current.binding === binding && accountUnchanged()} /></AccountVaultGate>}
+    {principal && binding && drafts.length === 1 && <ImportAccount key={principal} principal={principal} draft={drafts[0]} binding={binding}
+      isCurrent={() => !transport.current.closed && transport.current.binding === binding && accountUnchanged()} />}
     {principal && binding && drafts.length === 0 && <p className="muted">Opening your draft…</p>}
     {drafts.length > 1 && <p role="alert">More than one handoff arrived. Return to OpenChat and reopen one card at a time; nothing was saved.</p>}
     {!binding && !notice && consentState?.kind !== "pending" && <p className="muted">Open the card with Add to IOU in OpenChat.</p>}
     </Layout></LocalImportNavigationProvider></LocalDeliveryKeyProvider>
-  </ToastProvider></SheetKeyProvider></TemplatesProvider></PreferencesProvider>;
+  </ToastProvider></SheetKeyProvider></TemplatesProvider></PreferencesProvider></AccountVaultGate>;
 }
 
 function ImportAccount({ principal, draft, binding, isCurrent }: {

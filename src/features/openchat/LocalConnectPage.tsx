@@ -79,7 +79,9 @@ function ConnectSession({ opener }: { opener: Window }) {
   }, [opener, close]);
   const consent = consentRef.current;
 
-  return <main style={{ maxWidth: 880, margin: "24px auto", padding: 16, overflowWrap: "anywhere" }}>
+  // Keep the transport above this gate so recovery cannot discard a pending request.
+  // Authenticated waiting states require the same recovery setup as the main app.
+  return <AccountVaultGate><main style={{ maxWidth: 880, margin: "24px auto", padding: 16, overflowWrap: "anywhere" }}>
     <h1>Connect IOU</h1>
     <p>{state.kind !== "pending"
       ? "Connect IOU to OpenChat without sharing entries, sign-in or private keys."
@@ -99,14 +101,14 @@ function ConnectSession({ opener }: { opener: Window }) {
     {auth.kind === "authenticated" && <>
       <p>Signed in to IOU.</p>
       <button className="secondary" onClick={() => { close("Signed out. Start a fresh Connect request before sharing setup."); void signOut(); }}>Sign out</button>
-      {state.kind === "pending" && consent && <AccountVaultGate><SheetKeyProvider key={auth.principal}>
+      {state.kind === "pending" && consent && <SheetKeyProvider key={auth.principal}>
         {state.binding.setupContext ? <LocalSetupV2Panel key={auth.principal} principal={auth.principal} opener={opener} consent={consent} state={state}
           close={close} onShared={() => setState(consent.state())} /> : <ConnectAccount key={auth.principal} principal={auth.principal} opener={opener} consent={consent} state={state}
           close={close} onShared={() => setState(consent.state())} />}
-      </SheetKeyProvider></AccountVaultGate>}
+      </SheetKeyProvider>}
     </>}
     {notice && <p role="status">{notice}</p>}
-  </main>;
+  </main></AccountVaultGate>;
 }
 
 function ConnectAccount({ principal, ...connection }: {

@@ -19,6 +19,8 @@ import { netAfterFee, formatMinor } from "./balance";
 import { buildEntryPayload } from "./entryMath";
 import { usePreferences } from "../settings/usePreferences";
 import { orderedCurrencies } from "../settings/currencies";
+import type { ParsedDraft } from "./draft";
+import { resolveTemplateSchedule } from "../templates/templateBase";
 
 type SchedRow = { date: string; percent: number };
 
@@ -27,6 +29,7 @@ interface EntryFormProps {
   partnerPrincipal: string;
   // A full entry (edit) or a partial set of defaults (e.g. from a template).
   initial?: Partial<EntryPayload>;
+  reviewDate?: ParsedDraft["reviewDate"];
   // True only when editing an existing entry (controls the submit label) —
   // a template also passes `initial` but is still an "add".
   isEdit?: boolean;
@@ -38,13 +41,14 @@ export function EntryForm({
   myPrincipal,
   partnerPrincipal,
   initial,
+  reviewDate,
   isEdit = false,
   onCancel,
   onSubmit,
 }: EntryFormProps) {
   const { prefs } = usePreferences();
   const [date, setDate] = useState(
-    new Date(initial?.ts ?? Date.now()).toISOString().slice(0, 10),
+    initial?.ts === undefined && reviewDate ? "" : new Date(initial?.ts ?? Date.now()).toISOString().slice(0, 10),
   );
   // A sheet has no currency of its own, so the only default is the user's single
   // default currency (Settings -> Default currency). An entry being EDITED keeps its own.
@@ -81,7 +85,7 @@ export function EntryForm({
   const [feeFixedCurrency, setFeeFixedCurrency] = useState(
     initial?.fee?.fixed_currency ?? initial?.currency ?? "",
   );
-  const initialDate = new Date(initial?.ts ?? Date.now()).toISOString().slice(0, 10);
+  const initialDate = initial?.ts === undefined && reviewDate ? "" : new Date(initial?.ts ?? Date.now()).toISOString().slice(0, 10);
   const [schedule, setSchedule] = useState<SchedRow[]>(
     initial?.schedule && initial.schedule.length
       ? initial.schedule.map((p) => ({
@@ -98,6 +102,16 @@ export function EntryForm({
   const removeRow = (i: number) => setSchedule((s) => s.filter((_, j) => j !== i));
   const percentTotal = schedule.reduce((t, r) => t + (Number(r.percent) || 0), 0);
   const scheduleValid = schedule.length === 1 || percentTotal === 100;
+  const [scheduleEdited, setScheduleEdited] = useState(false);
+  const changeDate = (value: string) => {
+    setDate(value);
+    if (reviewDate && !scheduleEdited) {
+      const ts = Date.parse(`${value}T00:00:00Z`);
+      setSchedule(value && Number.isFinite(ts) && reviewDate.schedule?.length
+        ? resolveTemplateSchedule(reviewDate.schedule, ts).map(p => ({ date: new Date(p.due_ts).toISOString().slice(0, 10), percent: p.percent }))
+        : [{ date: value, percent: 100 }]);
+    }
+  };
 
   // Convert state
   const [convertEnabled, setConvertEnabled] = useState(!!initial?.convert);
@@ -126,6 +140,10 @@ export function EntryForm({
   async function submit(e: React.FormEvent) {
     e.preventDefault();
     setErr(null);
+    if (reviewDate && !date) {
+      setErr("Choose a date before saving; nothing was added.");
+      return;
+    }
     // The net/convert/fee/schedule math lives in the pure buildEntryPayload helper (entryMath.ts)
     // so it can be unit-tested; the form only wires state in and handles the async submit.
     const result = buildEntryPayload({
@@ -173,11 +191,13 @@ export function EntryForm({
           <input
             type="date"
             value={date}
-            onChange={(e) => setDate(e.target.value)}
+            onChange={(e) => changeDate(e.target.value)}
             required
           />
         </label>
       </div>
+
+      {reviewDate && !date && <p className="muted small" role="status">A date was not supplied. Choose the date here before saving; nothing has been added yet.</p>}
 
       <div className="row">
         <label>
@@ -320,7 +340,7 @@ export function EntryForm({
           </div>
           <div className="row" style={{ justifyContent: "space-between" }}>
             <strong>Due {schedule.length > 1 ? "dates" : "date"}</strong>
-            <button type="button" className="secondary small" onClick={addRow}>
+            <button type="button" className="secondary small" onClick={() => { setScheduleEdited(true); addRow(); }}>
               + Split
             </button>
           </div>
@@ -329,7 +349,7 @@ export function EntryForm({
               <input
                 type="date"
                 value={r.date}
-                onChange={(e) => setRowDate(i, e.target.value)}
+                onChange={(e) => { setScheduleEdited(true); setRowDate(i, e.target.value); }}
                 required
               />
               {schedule.length > 1 && (
@@ -339,7 +359,7 @@ export function EntryForm({
                     min={0}
                     max={100}
                     value={r.percent}
-                    onChange={(e) => setRowPercent(i, Number(e.target.value))}
+                    onChange={(e) => { setScheduleEdited(true); setRowPercent(i, Number(e.target.value)); }}
                     style={{ width: 70 }}
                     aria-label="percent"
                   />
@@ -347,7 +367,7 @@ export function EntryForm({
                   <button
                     type="button"
                     className="secondary small"
-                    onClick={() => removeRow(i)}
+                    onClick={() => { setScheduleEdited(true); removeRow(i); }}
                     aria-label="remove due date"
                   >
                     ✕

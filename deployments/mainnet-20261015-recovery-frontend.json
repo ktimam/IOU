@@ -1,0 +1,78 @@
+{
+  "schemaVersion": 1,
+  "recordedAt": "2026-10-15T13:49:15Z",
+  "network": "ic",
+  "stage": "frontend-published-and-public-bytes-verified",
+  "scope": "IOU recovery frontend only",
+  "origin": "https://ouvuc-3iaaa-aaaag-azekq-cai.icp0.io",
+  "identityName": "iou-production",
+  "controller": "hlbtw-4xas5-ur54k-qa75k-dno5v-kuvnm-f7wak-y3gbp-howx2-kodes-hqe",
+  "source": {
+    "previousPublishedSnapshot": "9e8a73c7f55bde82f028be9e33cd420b42d44859",
+    "frontendSnapshot": "5f86395a603ea5f775956dd51872eb5f06a63229",
+    "approvedOverlayFiles": 30,
+    "standaloneSnapshotOnly": true,
+    "canonicalBranchCommittedOrPushed": false,
+    "assetInventorySha256": "06cf4c11956b3b8d6c9f93c8683ed87c5257cd5dff47eba88c958ba8ce0fa2d1",
+    "productionModelProfileSha256": "e8291225e81419a051cb9c48934211e15c012c29a5d3680e2ef7976d035667a3"
+  },
+  "changes": [
+    "Verified password-manager recovery of the existing account root without PRF",
+    "PRF compatibility fallback preserving existing passkey backups",
+    "Automatic authenticated legacy-sheet key migration when the original key is available",
+    "Explicit paid fallback on the affected sheet only when its original key is unavailable",
+    "Historical placeholder-key validation and free encrypted-backup retry"
+  ],
+  "canisters": {
+    "iou_assets": {
+      "id": "ouvuc-3iaaa-aaaag-azekq-cai",
+      "moduleHash": "04e565b3425fe7510ee16b02adcfe3f01abc9a2725c82a21cb08969241debd62",
+      "moduleUnchanged": true,
+      "assetsSynced": 28,
+      "publicFilesHashVerified": 28,
+      "cyclesAfterPublication": "379729558362"
+    },
+    "iou_backend": {
+      "id": "otusw-wqaaa-aaaag-azeka-cai",
+      "moduleHash": "8dcd4f887ffc5c37ac30927173b6b35e6449fcf3362a1e59b01a3d28e33cd5ce",
+      "moduleUnchanged": true,
+      "publicConfigurationUnchanged": true,
+      "vetkdKey": "key_1",
+      "cyclesAfterPublication": "596917126332"
+    }
+  },
+  "preservedPublicHashes": {
+    "openchat/apps-v1.json": "58a17a91fe0658232c0f8722b2f004d76d25e245c06af36791ced512437497c6",
+    "openchat/local-app-v1.json": "6af2c45c74ba80853da7772a6e15d545a4f4a3cab5722ebbfadefb6a640b7e54",
+    "openchat/local-processor-v1.js": "196703fb408946978cb079203ee693996a19e949745a783e0e8222b4c39f9ae3"
+  },
+  "checks": {
+    "focusedRecoveryTestsPassed": 293,
+    "deploymentGuardTestsPassed": 27,
+    "fullUnitTestsPassed": 4115,
+    "inheritedModelProfileFailures": 3,
+    "inheritedFailuresReproducedOnUntouchedPublishedBase": true,
+    "typecheckPassed": true,
+    "nodeTypecheckPassed": true,
+    "productionBuildPassed": true,
+    "isolatedEdgeLandingPagePassed": true,
+    "directConnectionRouteGuardPassed": true,
+    "uncaughtPageErrors": 0,
+    "consoleErrors": 0,
+    "failedBrowserRequests": 0,
+    "localEnvironmentBrowserRequests": 0
+  },
+  "notPerformed": [
+    "Backend install or upgrade",
+    "Funding or new canister creation",
+    "OpenChat, app registry, model or APK update",
+    "Mainnet user recovery, paid derivation or entry mutation",
+    "Physical-device or real Microsoft synchronization acceptance"
+  ],
+  "evidenceDirectory": "F:/Temp/OpenChat-IOU/account-vault-mainnet-20261015/receipts",
+  "caveats": [
+    "Publication checks establish live bytes and signed-out rendering, not a live user-account recovery test.",
+    "Local manager recovery and inbox reconnect/save passed separately; the combined real-manager-to-inbox journey is not claimed.",
+    "Normal execution/storage cycles still apply. No per-interaction VetKD derivation is expected after vault setup; missing legacy keys require separate explicit recovery."
+  ]
+}

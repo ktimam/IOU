@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { createLocalImportSaveLock, localImportRecipient, localImportSheetDrafts } from "./localImportSheet";
+import { createLocalImportSaveLock, localImportRecipient, localImportSheetDrafts, setLocalImportReviewDate } from "./localImportSheet";
 import { encodeIouDeliveryContext, localDeliveryBase64Url } from "./localImportEncryption";
 import type { EntryPayload } from "../entries/types";
 
@@ -45,8 +45,44 @@ describe("normal PR review defaults", () => {
     expect(drafts.map(draft => draft.draftId)).toEqual([`local:${importId}:0`, `local:${importId}:1`]);
   });
   it("does not guess a missing date or silently apply an unknown Type", () => {
-    expect(() => localImportSheetDrafts([{ ...row, date: undefined }], [], importId)).toThrow(/date/);
+    const { date: _date, ...missing } = row;
+    const [draft] = localImportSheetDrafts([missing], [], importId);
+    expect(draft.initial).not.toHaveProperty("ts");
+    expect(draft.initial).not.toHaveProperty("schedule");
+    expect(draft.reviewDate).toEqual({});
+    expect(draft.initial).toMatchObject({ amount_minor: 4445, currency: "USD", note: row.note });
     expect(() => localImportSheetDrafts([{ ...row, typeId: "missing", typeName: "Missing" }], [], importId)).toThrow(/Reconnect IOU/);
+  });
+  it("keeps incomplete rows in a mixed batch and only resolves Type dates after explicit correction", () => {
+    const type = { id: "own", name: "My Type", direction: "credit" as const, txn_type: "iou" as const,
+      fee_percent: 10, schedule: [{ offset_days: 2, percent: 40 }, { offset_days: 0, percent: 60, anchor: "start_of_next_month" as const }] };
+    const { date: _date, ...missing } = row;
+    const drafts = localImportSheetDrafts([row, { ...missing, amount: 100, typeId: type.id, typeName: type.name }], [type], importId);
+    expect(drafts).toHaveLength(2);
+    expect(drafts[1].initial).toMatchObject({ amount_minor: 9000, fee: { gross_amount_minor: 10000 }, draft_id: `local:${importId}:1` });
+    expect(drafts[1].initial).not.toHaveProperty("ts");
+    const corrected = setLocalImportReviewDate(drafts[1], "2026-12-30");
+    expect(corrected.initial).toMatchObject({ ts: Date.UTC(2026, 11, 30), schedule: [
+      { due_ts: Date.UTC(2027, 0, 1), percent: 40 }, { due_ts: Date.UTC(2027, 0, 1), percent: 60 }],
+      amount_minor: 9000, direction: "debt", draft_id: `local:${importId}:1` });
+    expect(setLocalImportReviewDate(corrected, "").initial).not.toHaveProperty("ts");
+    expect(drafts[1].initial).not.toHaveProperty("ts");
+    expect(() => setLocalImportReviewDate(drafts[1], "2026-02-30")).toThrow(/valid date/);
+    expect(() => setLocalImportReviewDate(drafts[1], "0000-01-01")).toThrow(/valid date/);
+  });
+  it("rejects invalid amount, currency, date or context rather than dropping a row", () => {
+    for (const change of [{ amount: -1 }, { currency: "" }, { date: "2026-02-30" }]) {
+      expect(() => localImportSheetDrafts([row, { ...row, ...change }], [], importId)).toThrow();
+    }
+    expect(() => localImportSheetDrafts([row], [], "invalid")).toThrow();
+  });
+  it("rejects ambiguous Type IDs equally for dated and undated review", () => {
+    const selected = { id: "same", name: "Matched", direction: "credit" as const, txn_type: "iou" as const, fee_percent: 10 };
+    const templates = [{ ...selected, name: "Other", fee_percent: 50 }, selected];
+    const { date: _date, ...missing } = row;
+    for (const input of [row, missing]) {
+      expect(() => localImportSheetDrafts([{ ...input, typeId: "same", typeName: "Matched" }], templates, importId)).toThrow(/Type/);
+    }
   });
 });
 
@@ -70,5 +106,12 @@ describe("final save retry lock", () => {
     payload.note = "Later edit";
     expect(locked.note).toBe(row.note);
     expect(() => lock([payload])).toThrow();
+  });
+  it("refuses an incomplete date before locking, then allows the same corrected entry", () => {
+    const { date: _date, ...missing } = row;
+    const [draft] = localImportSheetDrafts([missing], [], importId), lock = createLocalImportSaveLock(importId, 1);
+    expect(() => lock([draft.initial as EntryPayload])).toThrow(/invalid entry payload/);
+    const corrected = setLocalImportReviewDate(draft, "2026-10-07").initial as EntryPayload;
+    expect(lock([corrected])[0]).toMatchObject({ ts: Date.UTC(2026, 9, 7), import_message_id: importId });
   });
 });

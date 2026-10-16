@@ -3,6 +3,7 @@ import { readFileSync } from "node:fs";
 import { describe, expect, it, vi } from "vitest";
 import { EntryForm } from "./EntryForm";
 import type { EntryPayload } from "./types";
+import { BatchConfirmModal } from "./BatchConfirmModal";
 
 vi.mock("../settings/usePreferences", () => ({
   usePreferences: () => ({ prefs: { defaultCurrency: "USD" } }),
@@ -19,6 +20,27 @@ const initial: Partial<EntryPayload> = {
 };
 
 describe("entry conversion UI", () => {
+  it("keeps missing imported transaction and due dates blank, with a correction hint", () => {
+    const html = renderToStaticMarkup(<EntryForm myPrincipal="author" partnerPrincipal="partner"
+      initial={{ amount_minor: 1290000, currency: "EGP", txn_type: "iou" }} reviewDate={{}}
+      onCancel={() => {}} onSubmit={async () => {}} />);
+    expect(html.match(/type="date"[^>]*value=""/g)).toHaveLength(2);
+    expect(html).toContain("A date was not supplied. Choose the date here before saving");
+  });
+  it("keeps a normal manual entry's existing date defaults", () => {
+    const html = renderToStaticMarkup(<EntryForm myPrincipal="author" partnerPrincipal="partner"
+      onCancel={() => {}} onSubmit={async () => {}} />);
+    expect(html).not.toContain('type="date" required="" value=""');
+    expect(html).not.toContain("A date was not supplied");
+  });
+  it("shows missing-date batch controls and disables confirmation without dropping any row", () => {
+    const html = renderToStaticMarkup(<BatchConfirmModal busy={false} onCancel={() => {}} onConfirm={() => {}}
+      drafts={[{ initial: {}, draftId: "one", summary: "First", reviewDate: {} },
+        { initial: { ts: 1700000000000 }, draftId: "two", summary: "Second" }]} />);
+    expect(html).toContain("First"); expect(html).toContain("Second");
+    expect(html).toContain("Date for entry 1");
+    expect(html).toContain('disabled="">Add all 2 entries');
+  });
   it("restores original amount/currency and saved conversion for an edit", () => {
     const html = renderToStaticMarkup(<EntryForm myPrincipal="author" partnerPrincipal="partner"
       initial={initial} isEdit onCancel={() => {}} onSubmit={async () => {}} />);

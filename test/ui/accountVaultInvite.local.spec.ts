@@ -13,9 +13,39 @@ const NAME = "Synthetic shared vault sheet";
 const NOTE = "Synthetic shared vault invitation entry";
 const NEXT_NOTE = "Synthetic second shared vault sheet entry";
 const PAID = new Set(["acquire_account_root", "vetkd_wrap_consumer_key", "vetkd_wrap_sheet_key", "openchat_card_context", "openchat_private_match_context"]);
+const CONTROL = new URL(process.env.IOU_TEST_POCKETIC_CONTROL_URL ?? "");
+const INSTANCE = process.env.IOU_TEST_POCKETIC_INSTANCE ?? "";
+if (CONTROL.protocol !== "http:" || CONTROL.hostname !== "127.0.0.1" || !CONTROL.port || CONTROL.pathname !== "/" ||
+  CONTROL.search || CONTROL.hash || CONTROL.username || CONTROL.password || !/^(0|[1-9][0-9]{0,5})$/.test(INSTANCE)) {
+  throw new Error("Choose an explicit owned loopback PocketIC control URL and instance number");
+}
+async function alignIsolatedPageClock(page: Page) {
+  // Read-only alignment permits this owned fixture to follow a cooldown test.
+  // The browser's synthetic page changes; host and canister clocks do not.
+  for (let attempt = 0; attempt < 20; attempt++) {
+    const response = await fetch(CONTROL.origin + "/instances/" + INSTANCE + "/read/get_time");
+    if (response.status === 409) { await new Promise(resolve => setTimeout(resolve, 75 + attempt * 17)); continue; }
+    if (!response.ok) throw new Error("Isolated clock HTTP " + response.status);
+    const current = await response.json() as { nanos_since_epoch: number };
+    const offset = Math.floor(current.nanos_since_epoch / 1_000_000) - Date.now();
+    await page.addInitScript((delta) => {
+      // Preserve native resource timing so active Vite imports stay observable.
+      const NativeDate = Date;
+      globalThis.Date = new Proxy(NativeDate, {
+        construct(target, args, newTarget) { return Reflect.construct(target, args.length ? args : [target.now() + delta], newTarget); },
+        apply(target) { return new target(target.now() + delta).toString(); },
+        get(target, key, receiver) { return key === "now" ? () => target.now() + delta : Reflect.get(target, key, receiver); },
+      });
+    }, offset);
+    return;
+  }
+  throw new Error("The isolated PocketIC clock remained busy");
+}
 
 async function monitor(context: BrowserContext) {
   const paid: string[] = [], methods: string[] = [], blocked: string[] = [];
+  const runtimeErrors: string[] = [];
+  context.on("page", page => page.on("pageerror", () => runtimeErrors.push("Unhandled browser runtime error")));
   await context.addInitScript(() => performance.setResourceTimingBufferSize(3000));
   await context.route("**/*", async route => {
     const url = new URL(route.request().url());
@@ -32,20 +62,35 @@ async function monitor(context: BrowserContext) {
       if (method) { methods.push(method); if (PAID.has(method)) paid.push(method); }
     } catch { /* Not a canister method call. */ }
   });
-  return { paid, methods, blocked };
+  return { paid, methods, blocked, runtimeErrors };
 }
 
 async function bootstrap(page: Page) {
+  await alignIsolatedPageClock(page);
   await page.goto(ORIGIN + "/sign-in");
   expect(await page.evaluate(async ({ host, canister }) => {
     const path = "/src/features/auth/config.ts"; const config = await import(/* @vite-ignore */ path);
     return config.host === host && config.canisterId === canister;
   }, { host: HOST, canister: CANISTER })).toBe(true);
   await page.getByRole("button", { name: /Sign in \(dev/ }).click();
-  await expect(page.getByRole("heading", { name: "Account encryption", exact: true })).toBeVisible();
-  await page.getByRole("button", { name: "Set up account encryption", exact: true }).click();
-  await expect(page.getByRole("heading", { name: "Protect access on other devices" })).toBeVisible();
-  await page.getByRole("button", { name: "Continue to IOU", exact: true }).click();
+  await expect(page.getByRole("heading", { name: "Save your recovery entry", exact: true })).toBeVisible();
+  await expect(page.getByRole("button", { name: /Continue to IOU|Create recovery code|Set up account encryption/ })).toHaveCount(0);
+  await expect(page.getByRole("button", { name: /encryption passkey|Check saved passkey/i })).toHaveCount(0);
+  // Initial preparation is automatic on this unlocked account.
+  const saveForm = page.locator("details").filter({ has: page.locator("summary", { hasText: /^Save using the password form$/ }) });
+  if (await saveForm.getAttribute("open") === null) await saveForm.locator("summary").click();
+  const generated = page.getByLabel("Generated recovery password", { exact: true });
+  await expect(generated).toHaveAttribute("type", "password");
+  let recoverySecret = await generated.inputValue();
+  try {
+    expect(/^IOU1-[A-Za-z0-9_-]{43}$/.test(recoverySecret)).toBe(true);
+    await page.getByRole("button", { name: "I saved the entry; verify it", exact: true }).click();
+    await expect(generated).toHaveCount(0);
+    expect(await page.getByLabel("Recovery password", { exact: true }).inputValue() === "").toBe(true);
+    try { await page.getByLabel("Recovery password", { exact: true }).fill(recoverySecret); }
+    catch { throw new Error("Synthetic manager autofill failed"); }
+    await page.getByRole("button", { name: "Verify autofilled entry", exact: true }).click();
+  } finally { recoverySecret = ""; }
   await expect(page.getByRole("heading", { name: "Your accounts" })).toBeVisible();
 }
 
@@ -155,5 +200,6 @@ test("encrypted invite joins a second vault account and both recipients read the
     expect(creatorCalls.paid).toEqual(["acquire_account_root"]);
     expect(recipientCalls.paid).toEqual(["acquire_account_root"]);
     expect([...creatorCalls.blocked, ...recipientCalls.blocked]).toEqual([]);
+    expect([...creatorCalls.runtimeErrors, ...recipientCalls.runtimeErrors], "Invitation recovery must have no uncaught browser runtime errors").toEqual([]);
   } finally { await creatorContext.close(); await recipientContext.close(); }
 });

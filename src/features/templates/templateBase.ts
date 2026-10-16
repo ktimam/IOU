@@ -4,7 +4,18 @@
 // "+ Add" form).
 
 import type { EntryPayload } from "../entries/types";
-import type { TxnTemplate } from "./TemplatesContext";
+import type { TemplatePortion, TxnTemplate } from "./TemplatesContext";
+
+/** Resolve relative Type dates only after an actual date has been supplied. */
+export function resolveTemplateSchedule(portions: readonly TemplatePortion[], anchorTs: number): NonNullable<EntryPayload["schedule"]> {
+  const anchor = new Date(anchorTs);
+  const y = anchor.getUTCFullYear(), m = anchor.getUTCMonth();
+  const base = Date.UTC(y, m, anchor.getUTCDate());
+  return portions.map((p) => ({
+    due_ts: p.anchor === "start_of_next_month" ? Date.UTC(y, m + 1, 1) : base + p.offset_days * 86_400_000,
+    percent: p.percent,
+  }));
+}
 
 /**
  * Convert a template to EntryForm defaults. The template's schedule is RELATIVE (offset days from an
@@ -21,17 +32,7 @@ export function templateToInitial(t: TxnTemplate, anchorTs?: number): Partial<En
 
   let schedule: EntryPayload["schedule"];
   if (t.txn_type === "iou" && t.schedule && t.schedule.length) {
-    const anchor = new Date(anchorTs ?? Date.now());
-    const y = anchor.getUTCFullYear();
-    const m = anchor.getUTCMonth();
-    const base = Date.UTC(y, m, anchor.getUTCDate());
-    schedule = t.schedule.map((p) => ({
-      due_ts:
-        p.anchor === "start_of_next_month"
-          ? Date.UTC(y, m + 1, 1) // rolls over in December correctly
-          : base + p.offset_days * 86_400_000,
-      percent: p.percent,
-    }));
+    schedule = resolveTemplateSchedule(t.schedule, anchorTs ?? Date.now());
   }
 
   return {

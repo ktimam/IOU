@@ -4,8 +4,21 @@ import { describe, expect, it } from "vitest";
 const page = readFileSync(new URL("./LocalImportPage.tsx", import.meta.url), "utf8");
 const routes = readFileSync(new URL("../../app/App.tsx", import.meta.url), "utf8");
 const sheet = readFileSync(new URL("../entries/SheetPage.tsx", import.meta.url), "utf8");
+const connect = readFileSync(new URL("./LocalConnectPage.tsx", import.meta.url), "utf8");
 
 describe("private import route wiring", () => {
+  it("keeps each live transport outside an unconditional recovery gate, including empty states", () => {
+    for (const source of [page, connect]) {
+      const gate = source.indexOf("return <AccountVaultGate>");
+      expect(gate).toBeGreaterThan(source.indexOf('window.addEventListener("message", receive)'));
+      expect((source.match(/<AccountVaultGate>/g) ?? []).length).toBe(1);
+      expect(source).not.toMatch(/&&\s*<AccountVaultGate>/);
+    }
+    expect(page).toContain("<AuthProvider><LocalImportSession /></AuthProvider>");
+    expect(connect).toContain("<LocalDeliveryKeyProvider><ConnectSession opener={opener} /></LocalDeliveryKeyProvider>");
+    expect(page).toContain("const transport = useRef<ImportTransport>");
+    expect(connect).toContain("const consentRef = useRef<Consent>");
+  });
   it("is a separate encrypted route without legacy OpenChat registration/inbox/capability providers", () => {
     expect(routes).toContain('<Route path="/openchat/import" element={<LocalImportPage />} />');
     expect(page).not.toMatch(/ConsumerKeypairSync|ManifestTypesSync|DefaultCurrencySync|openchat_card|cardPrivateContext|chatSheetLinks/);

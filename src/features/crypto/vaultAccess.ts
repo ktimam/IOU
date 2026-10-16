@@ -45,7 +45,8 @@ async function clearCompletedAttempts(scope: ReturnType<typeof accountVaultScope
   }
 }
 
-/** Only explicit setup/emergency-recovery buttons may call this. Never on mount. */
+/** Initial sign-in setup may call with emergency=false after confirming no vault.
+ * Existing-account recovery and starting a new request always require an explicit action. */
 export async function recoverAccountVaultPaid(actor: any, principal: string, emergency: boolean, newAttempt = false): Promise<void> {
   if (newAttempt && !emergency) throw new Error("A new paid recovery requires explicit emergency consent.");
   const operationKey = JSON.stringify(accountVaultScope(principal));
@@ -67,7 +68,12 @@ async function recover(actor: any, principal: string, emergency: boolean, newAtt
   catch (cause) { if (!(cause instanceof VaultUnlockRequiredError)) throw cause; }
   try {
     current();
-    if (local) { await clearCompletedAttempts(scope, current); notifyVaultChanged(); return; }
+    if (local) {
+      // An explicit recovery may resume after its root was saved but publication
+      // failed. Keep replacement enrollment mandatory without deriving again.
+      if (emergency) await restoreAccountVaultWithRoot(actor, scope, local, true);
+      current(); await clearCompletedAttempts(scope, current); notifyVaultChanged(); return;
+    }
   }
   finally { local?.fill(0); }
   const record = await actor.get_account_vault();
@@ -136,7 +142,7 @@ async function recover(actor: any, principal: string, emergency: boolean, newAtt
     current();
     const existing = await actor.get_account_vault();
     current();
-    if (existing.length) await restoreAccountVaultWithRoot(actor, scope, root);
+    if (existing.length) await restoreAccountVaultWithRoot(actor, scope, root, emergency);
     else await initializeAccountVault(actor, scope, root);
     current();
     // Delete the only durable decryptor only AFTER the root and canonical

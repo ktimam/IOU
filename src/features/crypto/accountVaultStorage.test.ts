@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { deletePendingAccountRootRequest, deleteVaultDeviceRoots, readPendingAccountRootRequest, readVaultDeviceRoot, VaultStorageUnavailableError, writePendingAccountRootRequest, writeVaultDeviceRoot } from "./accountVaultStorage";
+import { clearVaultPasskeyEnrollmentRequired, deletePendingAccountRootRequest, deleteVaultDeviceRoots, readPendingAccountRootRequest, readVaultDeviceRoot, readVaultPasskeyEnrollmentRequired, VaultStorageUnavailableError, writePendingAccountRootRequest, writeVaultDeviceRoot } from "./accountVaultStorage";
 import { accountRootFingerprint, vaultB64, type AccountVaultScope } from "./accountVaultCrypto";
 
 const scope: AccountVaultScope = { principal: "alice", canisterId: "canister-a", host: "https://icp-api.io" };
@@ -72,6 +72,48 @@ describe("account vault durable browser storage", () => {
     expect(await readPendingAccountRootRequest({ ...scope, principal: "bob" }, false)).toBeNull();
     await deletePendingAccountRootRequest(scope, false);
     expect(await readPendingAccountRootRequest(scope, false)).toBeNull();
+  });
+  it("atomically stores the emergency enrollment marker with its protected root and preserves it on ordinary writes", async () => {
+    const records = installIDB(), root = new Uint8Array(32).fill(12);
+    const fingerprint = await accountRootFingerprint(root, scope);
+    expect(await readVaultPasskeyEnrollmentRequired(scope)).toBe(false);
+    await writeVaultDeviceRoot(scope, root, fingerprint, () => true, true);
+    expect(records.size).toBe(1); // No additional store or independent marker record.
+    const stored = [...records.values()][0];
+    expect(stored.passkeyEnrollmentRequired).toBe(true);
+    expect(stored.protector.extractable).toBe(false);
+    expect(JSON.stringify(stored)).not.toContain(vaultB64(root));
+    installIDB(records);
+    expect(await readVaultPasskeyEnrollmentRequired(scope)).toBe(true);
+    await writeVaultDeviceRoot(scope, root, fingerprint, () => true);
+    expect(await readVaultPasskeyEnrollmentRequired(scope)).toBe(true);
+    expect(await readVaultDeviceRoot(scope, fingerprint)).toEqual(root);
+    expect(await readVaultPasskeyEnrollmentRequired({ ...scope, principal: "bob" })).toBe(false);
+    await clearVaultPasskeyEnrollmentRequired(scope, fingerprint, () => true);
+    expect(await readVaultPasskeyEnrollmentRequired(scope)).toBe(false);
+    expect(await readVaultDeviceRoot(scope, fingerprint)).toEqual(root);
+  });
+  it("does not clear an enrollment marker for another root or a stale account session", async () => {
+    const records = installIDB(), root = new Uint8Array(32).fill(15);
+    const fingerprint = await accountRootFingerprint(root, scope);
+    await writeVaultDeviceRoot(scope, root, fingerprint, () => true, true);
+    await expect(clearVaultPasskeyEnrollmentRequired(scope, "other-root", () => true)).rejects.toThrow(/encryption changed/);
+    await expect(clearVaultPasskeyEnrollmentRequired(scope, fingerprint, () => false)).rejects.toThrow(/session changed/);
+    let checks = 0;
+    await expect(clearVaultPasskeyEnrollmentRequired(scope, fingerprint, () => ++checks === 1)).rejects.toThrow(/session changed/);
+    expect(await readVaultPasskeyEnrollmentRequired(scope)).toBe(true);
+    expect(records.size).toBe(1);
+    await deleteVaultDeviceRoots(scope.principal);
+    expect(records.size).toBe(0);
+    await expect(clearVaultPasskeyEnrollmentRequired(scope, fingerprint, () => true)).rejects.toThrow(/encryption changed/);
+    expect(records.size).toBe(0); // A late completion cannot recreate logout-deleted keys.
+  });
+  it("does not write a recovered root or marker when logout wins before the atomic transaction", async () => {
+    const records = installIDB(), root = new Uint8Array(32).fill(15);
+    const fingerprint = await accountRootFingerprint(root, scope);
+    let checks = 0;
+    await expect(writeVaultDeviceRoot(scope, root, fingerprint, () => ++checks === 1, true)).rejects.toThrow(/session changed/);
+    expect(records.size).toBe(0);
   });
   it("fails before a paid request can start when storage is unavailable, stale or already reserved", async () => {
     const request = { id: "request", secretKey: new Uint8Array(32).fill(7), publicKey: new Uint8Array(48).fill(4) };

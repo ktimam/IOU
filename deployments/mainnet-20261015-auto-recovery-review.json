@@ -1,0 +1,71 @@
+{
+  "schemaVersion": 1,
+  "recordedAt": "2026-10-15T15:51:00Z",
+  "network": "ic",
+  "stage": "published-and-live-bytes-verified",
+  "scope": "Automatic password-manager recovery preparation and editable missing-date pending review; IOU frontend only",
+  "origin": "https://ouvuc-3iaaa-aaaag-azekq-cai.icp0.io",
+  "source": {
+    "publishedBase": "0c870fab1c529d246b09fe3eb50a78593114522d",
+    "frontendSnapshot": "1babcfb4b8666c2e02fea73287a5b5b781f80e77",
+    "overlayFiles": 20,
+    "assetInventorySha256": "00deaaf824f42d030f1c0b6818ccf7f706f4d0a2b3f47a6f5c31d090c5ed4cd9",
+    "canonicalBranchCommittedOrPushed": false
+  },
+  "changes": [
+    "Automatically prepare a missing or unverified manager recovery entry on an unlocked account",
+    "Keep saving and verification explicit; reuse the same candidate on retry and cancel stale session results",
+    "Open the existing pending-entry review with a blank missing date and require correction before saving",
+    "Preserve pending receipts across cancel/reload and acknowledge only the actual successful save"
+  ],
+  "canisters": {
+    "iou_assets": {
+      "id": "ouvuc-3iaaa-aaaag-azekq-cai",
+      "moduleHash": "04e565b3425fe7510ee16b02adcfe3f01abc9a2725c82a21cb08969241debd62",
+      "status": "Running",
+      "assetsSynced": 28,
+      "publicFilesHashVerified": 28
+    },
+    "iou_backend": {
+      "id": "otusw-wqaaa-aaaag-azeka-cai",
+      "moduleHash": "8dcd4f887ffc5c37ac30927173b6b35e6449fcf3362a1e59b01a3d28e33cd5ce",
+      "status": "Running",
+      "moduleAndPublicConfigurationUnchanged": true
+    }
+  },
+  "checks": {
+    "canonicalUnitTestsPassed": 4141,
+    "canonicalUnitTestsFailed": 0,
+    "productionCandidateDiagnosticUnitTestsPassed": 4141,
+    "productionCandidateInheritedModelProfileFailures": 3,
+    "initialCandidateAdditionalFailure": "Existing randomized encrypted-wire substring assertion failed once; its actual matching bytes were not retained. Unchanged focused 22-test and full diagnostic reruns passed that assertion. Original failure receipt retained; encryption source/test hashes match published baseline.",
+    "bothTypechecksPassed": true,
+    "productionBuildPassed": true,
+    "deploymentGuardsPassed": 27,
+    "isolatedBrowserJourneysPassed": 6,
+    "uncaughtBrowserErrors": 0,
+    "externalFixtureRequests": 0,
+    "localAndTailscaleUpdatedModulesVerified": true,
+    "liveMainnetBytesVerified": true,
+    "liveSignedOutEdgeSmokePassed": true
+  },
+  "localActivation": {
+    "receipt": "F:/Temp/OpenChat-IOU/local-env-20261014/auto-recovery-review-activation.json",
+    "backup": "F:/Temp/OpenChat-IOU/local-env-20261014/auto-recovery-review-before",
+    "localSourceManifestSha256": "cc0cf4e45346e0bfaf6d292eab785787040fe8216429aae22e41b1f5fcb3fe27",
+    "tailscaleSourceManifestSha256": "faecb78d8d35c8de20befb0c7ff9b6d6938311bf0d8b7f3147320097a8813b16",
+    "backendUnchanged": true
+  },
+  "evidence": {
+    "publication": "F:/Temp/OpenChat-IOU/auto-recovery-review-mainnet-20261015/receipts",
+    "browser": "F:/Temp/OpenChat-IOU/auto-recovery-review-20261015",
+    "realRecoveryCapture": "F:/Temp/OpenChat-IOU/recovery-capture-20261015",
+    "realRecoveryStatus": "Prepared; awaiting user sign-in to existing account and subsequent measured unlock"
+  },
+  "notPerformed": [
+    "Backend upgrade, new canister or funding",
+    "OpenChat, registry, model or APK change",
+    "User key rotation, backup deletion or saving a real pending entry",
+    "Paid mainnet recovery or claimed Microsoft cloud-sync verification"
+  ]
+}

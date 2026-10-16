@@ -2,12 +2,14 @@ import {
   accountRootFingerprint, accountVaultScopeId, createAccountRecoveryCode,
   createAccountVaultPayload, createRecoveryBackup, decodeAccountVault, encodeAccountVault,
   openAccountVaultKeypair, openRecoveryBackup, requireAccountRoot, vaultUnb64,
-  type AccountVaultPayload, type AccountVaultScope,
+  createManagedRecovery, openManagedRecoveryBackup, openManagedRecoverySecret,
+  managedRecoveryCredentialId, validateManagedRecoveryOrigin,
+  type AccountVaultPayload, type AccountVaultScope, type VaultManagedRecovery,
 } from "./accountVaultCrypto";
-import { deleteVaultDeviceRoots, readVaultDeviceRoot, VaultStorageUnavailableError, writeVaultDeviceRoot } from "./accountVaultStorage";
+import { clearVaultPasskeyEnrollmentRequired, deleteVaultDeviceRoots, readVaultDeviceRoot, readVaultPasskeyEnrollmentRequired, VaultStorageUnavailableError, writeVaultDeviceRoot } from "./accountVaultStorage";
 import { enrollVaultPasskey, unlockVaultPasskeys } from "./accountVaultPasskey";
 
-export { accountVaultScopeId, createAccountRecoveryCode, createSheetKeyEnvelope, createSheetKeyId, openSheetKeyEnvelope, accountWrappingKeyId, vaultB64 } from "./accountVaultCrypto";
+export { accountVaultScopeId, createAccountRecoveryCode, createSheetKeyEnvelope, createSheetKeyId, openSheetKeyEnvelope, accountWrappingKeyId, vaultB64, managedRecoveryCredentialId, validateManagedRecoveryOrigin } from "./accountVaultCrypto";
 export type { AccountVaultScope, AccountVaultPayload, SheetKeyEnvelopeContext } from "./accountVaultCrypto";
 export { VaultStorageUnavailableError } from "./accountVaultStorage";
 
@@ -19,7 +21,7 @@ export interface AccountVaultActor {
 export interface AccountVaultRecord { revision: bigint; payload: AccountVaultPayload }
 export class VaultUnlockRequiredError extends Error {
   readonly code = "ACCOUNT_VAULT_LOCKED";
-  constructor() { super("Unlock your IOU account with a passkey, recovery code, or explicit emergency recovery. No paid recovery was started."); this.name = "VaultUnlockRequiredError"; }
+  constructor() { super("Unlock your IOU account with its saved password-manager recovery entry, use a device that remembers its keys, or choose explicit paid emergency recovery. No paid recovery was started."); this.name = "VaultUnlockRequiredError"; }
 }
 export class VaultNotInitializedError extends Error {
   readonly code = "ACCOUNT_VAULT_NOT_INITIALIZED";
@@ -31,10 +33,17 @@ export class VaultConflictError extends Error {
 export class VaultBackupOutcomeUnknownError extends Error {
   constructor() { super("The backup update may have completed; keep the displayed code. The previous code may no longer work. No automatic retry was started."); this.name = "VaultBackupOutcomeUnknownError"; }
 }
+export class VaultPasskeyBackupOutcomeUnknownError extends Error {
+  constructor() { super("The encryption passkey backup may have been saved, but IOU could not verify it. Keep the passkey in your password manager and refresh to check before trying again. No paid recovery was started."); this.name = "VaultPasskeyBackupOutcomeUnknownError"; }
+}
+export class VaultManagedRecoveryOutcomeUnknownError extends Error {
+  constructor() { super("The recovery backup update could not be verified. Refresh before trying again; IOU will reuse a saved candidate, never silently replace it. No paid recovery was started."); this.name = "VaultManagedRecoveryOutcomeUnknownError"; }
+}
 
 let sessionGeneration = 0;
 const memory = new Map<string, { fingerprint: string; root: Uint8Array }>();
 const pending = new Map<string, Promise<Uint8Array | null>>();
+const pendingManagedPreparation = new Map<string, Promise<{ credentialId: string; secret: string; verifiedOrigins: string[] }>>();
 const cleanup = new Set<() => void>();
 export function registerAccountVaultCleanup(callback: () => void): () => void {
   cleanup.add(callback);
@@ -65,7 +74,7 @@ export function clearAccountVaultMemory(): void {
   for (const callback of cleanup) { try { callback(); } catch { /* Always finish wiping the vault. */ } }
   for (const cached of memory.values()) cached.root.fill(0);
   for (const operation of pending.values()) void operation.then((root) => root?.fill(0), () => undefined);
-  memory.clear(); pending.clear();
+  memory.clear(); pending.clear(); pendingManagedPreparation.clear();
 }
 /** Explicit logout/forget; delegation expiry should only clear session memory. */
 export async function clearAccountVaultDevice(principal?: string): Promise<void> {
@@ -121,9 +130,15 @@ export async function loadAccountRoot(actor: AccountVaultActor, scope: AccountVa
   try { const root = await operation; current(generation); return root?.slice() ?? null; }
   finally { if (pending.get(id) === operation) pending.delete(id); }
 }
-async function saveLocal(scope: AccountVaultScope, root: Uint8Array, fingerprint: string, generation: number): Promise<void> {
+export async function isAccountPasskeyEnrollmentRequired(scope: AccountVaultScope): Promise<boolean> {
+  const generation = sessionGeneration;
+  const required = await readVaultPasskeyEnrollmentRequired(scope);
   current(generation);
-  await writeVaultDeviceRoot(scope, root, fingerprint, () => generation === sessionGeneration);
+  return required;
+}
+async function saveLocal(scope: AccountVaultScope, root: Uint8Array, fingerprint: string, generation: number, requirePasskeyEnrollment = false): Promise<void> {
+  current(generation);
+  await writeVaultDeviceRoot(scope, root, fingerprint, () => generation === sessionGeneration, requirePasskeyEnrollment);
   current(generation);
   remember(scope, root, fingerprint, generation);
 }
@@ -175,14 +190,14 @@ export async function initializeAccountVault(actor: AccountVaultActor, scope: Ac
   } finally { root.fill(0); }
 }
 /** Explicit emergency recovery supplies an already-verified K_wrap. No network derivation here. */
-export async function restoreAccountVaultWithRoot(actor: AccountVaultActor, scope: AccountVaultScope, root32: Uint8Array): Promise<void> {
+export async function restoreAccountVaultWithRoot(actor: AccountVaultActor, scope: AccountVaultScope, root32: Uint8Array, requirePasskeyEnrollment = false): Promise<void> {
   const generation = sessionGeneration;
   const root = root32.slice();
   try {
     const record = await readRecord(actor, scope, generation);
     if (!record) throw new VaultNotInitializedError();
     await validateRoot(record, root, scope, generation);
-    await saveLocal(scope, root, record.payload.rootFingerprint, generation);
+    await saveLocal(scope, root, record.payload.rootFingerprint, generation, requirePasskeyEnrollment);
     await publish(actor, record, generation);
   } finally { root.fill(0); }
 }
@@ -256,7 +271,31 @@ export async function addPasskeyBackup(actor: AccountVaultActor, scope: AccountV
     const backup = await enrollVaultPasskey(root, scope, displayName);
     current(generation);
     record.payload.passkeys.push(backup);
-    return { credentialId: backup.credentialId, revision: await replaceBackups(actor, record, generation) };
+    try { await replaceBackups(actor, record, generation); }
+    catch (cause) {
+      current(generation);
+      // A definitive CAS refusal did not enroll this credential. Never overwrite
+      // the other device's backup or automatically create another passkey.
+      if (cause instanceof VaultConflictError) throw cause;
+    }
+    // A provider credential alone is not a usable backup. Verify the exact
+    // encrypted record even if the update acknowledged success; a lost reply
+    // is also reconciled here without repeating the write or provider prompt.
+    try {
+      const latest = await readRecord(actor, scope, generation);
+      if (latest && latest.revision > record.revision &&
+          latest.payload.rootFingerprint === record.payload.rootFingerprint &&
+          latest.payload.sheetKey.keyId === record.payload.sheetKey.keyId &&
+          latest.payload.sheetKey.publicKeyB64 === record.payload.sheetKey.publicKeyB64 &&
+          latest.payload.passkeys.some((saved) => saved.credentialId === backup.credentialId &&
+            saved.rpId === backup.rpId && saved.prfSalt === backup.prfSalt &&
+            saved.iv === backup.iv && saved.ciphertext === backup.ciphertext)) {
+        await clearVaultPasskeyEnrollmentRequired(scope, record.payload.rootFingerprint, () => generation === sessionGeneration);
+        current(generation);
+        return { credentialId: backup.credentialId, revision: latest.revision };
+      }
+    } catch { current(generation); }
+    throw new VaultPasskeyBackupOutcomeUnknownError();
   } finally { root.fill(0); }
 }
 export async function unlockAccountVaultWithRecoveryCode(actor: AccountVaultActor, scope: AccountVaultScope, code: string): Promise<void> {
@@ -284,4 +323,115 @@ export async function unlockAccountVaultWithPasskey(actor: AccountVaultActor, sc
     await saveLocal(scope, root, record.payload.rootFingerprint, generation);
     await publish(actor, record, generation);
   } finally { root.fill(0); }
+}
+
+export interface ManagedRecoveryDescriptor { credentialId: string; verified: boolean }
+async function managedDescriptor(value: VaultManagedRecovery, scope: AccountVaultScope, origin: string, generation: number): Promise<ManagedRecoveryDescriptor> {
+  const credentialId = await managedRecoveryCredentialId(scope, value.id);
+  current(generation);
+  return { credentialId, verified: value.verifiedOrigins.includes(origin) };
+}
+/** Public scoped identifier only: safe for the locked recovery form, with no key derivation. */
+export async function readManagedRecoveryDescriptor(actor: AccountVaultActor, scope: AccountVaultScope, origin: string): Promise<ManagedRecoveryDescriptor | null> {
+  const generation = sessionGeneration;
+  validateManagedRecoveryOrigin(origin);
+  const record = await readRecord(actor, scope, generation);
+  return record?.payload.managedRecovery ? managedDescriptor(record.payload.managedRecovery, scope, origin, generation) : null;
+}
+function sameManagedBackup(a: VaultManagedRecovery | undefined, b: VaultManagedRecovery): boolean {
+  return !!a && a.id === b.id && a.backup.iv === b.backup.iv && a.backup.ciphertext === b.backup.ciphertext &&
+    a.protectedSecret.iv === b.protectedSecret.iv && a.protectedSecret.ciphertext === b.protectedSecret.ciphertext &&
+    b.verifiedOrigins.every(origin => a.verifiedOrigins.includes(origin));
+}
+/** One CAS followed by exact read-back, including acknowledged writes and ambiguous replies. */
+async function commitManagedRecovery(actor: AccountVaultActor, record: AccountVaultRecord, scope: AccountVaultScope, generation: number): Promise<AccountVaultRecord> {
+  const backup = record.payload.managedRecovery!;
+  try { await replaceBackups(actor, record, generation); }
+  catch (error) {
+    current(generation);
+    if (error instanceof VaultConflictError) throw error;
+  }
+  try {
+    const latest = await readRecord(actor, scope, generation);
+    if (latest && latest.revision > record.revision &&
+        latest.payload.rootFingerprint === record.payload.rootFingerprint &&
+        latest.payload.sheetKey.keyId === record.payload.sheetKey.keyId &&
+        latest.payload.sheetKey.publicKeyB64 === record.payload.sheetKey.publicKeyB64 &&
+        latest.payload.sheetKey.privateKey.iv === record.payload.sheetKey.privateKey.iv &&
+        latest.payload.sheetKey.privateKey.ciphertext === record.payload.sheetKey.privateKey.ciphertext &&
+        sameManagedBackup(latest.payload.managedRecovery, backup)) return latest;
+  } catch { current(generation); }
+  throw new VaultManagedRecoveryOutcomeUnknownError();
+}
+/** Requires an already-unlocked account; never derives or replaces its root. */
+export async function prepareManagedRecovery(actor: AccountVaultActor, scope: AccountVaultScope, origin: string): Promise<ManagedRecoveryDescriptor & { secret: string }> {
+  const generation = sessionGeneration;
+  validateManagedRecoveryOrigin(origin);
+  // Duplicate mounted controls share one candidate/CAS, including an ambiguous
+  // failure. A later explicit retry re-reads its saved candidate instead of rotating it.
+  const key = JSON.stringify([accountVaultScopeId(scope), generation]);
+  let operation = pendingManagedPreparation.get(key);
+  if (!operation) {
+    operation = prepareManagedRecoveryCandidate(actor, scope, generation);
+    pendingManagedPreparation.set(key, operation);
+  }
+  try {
+    const candidate = await operation;
+    current(generation);
+    return { credentialId: candidate.credentialId, secret: candidate.secret, verified: candidate.verifiedOrigins.includes(origin) };
+  } finally {
+    if (pendingManagedPreparation.get(key) === operation) pendingManagedPreparation.delete(key);
+  }
+}
+async function prepareManagedRecoveryCandidate(actor: AccountVaultActor, scope: AccountVaultScope, generation: number) {
+  let record = await readRecord(actor, scope, generation);
+  if (!record) throw new VaultNotInitializedError();
+  const root = await rootForRecord(record, scope, generation);
+  try {
+    await validateRoot(record, root, scope, generation);
+    if (!record.payload.managedRecovery) {
+      const candidate = await createManagedRecovery(root, scope);
+      current(generation);
+      record.payload.managedRecovery = candidate.managedRecovery;
+      record = await commitManagedRecovery(actor, record, scope, generation);
+    }
+    // Reopening validates both ciphertexts, including a previously saved candidate.
+    const secret = await openManagedRecoverySecret(record.payload.managedRecovery!, root, scope);
+    current(generation);
+    const credentialId = await managedRecoveryCredentialId(scope, record.payload.managedRecovery!.id);
+    current(generation);
+    return { credentialId, secret, verifiedOrigins: [...record.payload.managedRecovery!.verifiedOrigins] };
+  } finally { root.fill(0); }
+}
+/** Confirm only a credential actually returned by the manager/autofill flow. */
+export async function confirmManagedRecovery(actor: AccountVaultActor, scope: AccountVaultScope, origin: string, credentialId: string, secret: string): Promise<void> {
+  const generation = sessionGeneration;
+  validateManagedRecoveryOrigin(origin);
+  let record = await readRecord(actor, scope, generation);
+  if (!record) throw new VaultNotInitializedError();
+  const backup = record.payload.managedRecovery;
+  if (!backup) throw new Error("No password-manager recovery backup is saved for this account");
+  const descriptor = await managedDescriptor(backup, scope, origin, generation);
+  if (credentialId !== descriptor.credentialId) throw new Error("The selected recovery credential belongs to a different account or backup");
+  const root = await openManagedRecoveryBackup(backup, scope, secret);
+  try {
+    await validateRoot(record, root, scope, generation);
+    // Also verify the encrypted re-save capability before declaring setup complete.
+    const protectedSecret = await openManagedRecoverySecret(backup, root, scope);
+    current(generation);
+    if (protectedSecret !== secret) throw new Error("Recovery credential does not match this account");
+    if (!descriptor.verified) {
+      if (backup.verifiedOrigins.length >= 16) throw new Error("The recovery credential has reached its verified-origin limit");
+      backup.verifiedOrigins.push(origin);
+      record = await commitManagedRecovery(actor, record, scope, generation);
+    }
+    await saveLocal(scope, root, record.payload.rootFingerprint, generation);
+    await clearVaultPasskeyEnrollmentRequired(scope, record.payload.rootFingerprint, () => generation === sessionGeneration);
+    current(generation);
+    await publish(actor, record, generation);
+  } finally { root.fill(0); }
+}
+/** Unlocks the original root with no PRF/provider prompt and no paid actor method. */
+export async function unlockManagedRecovery(actor: AccountVaultActor, scope: AccountVaultScope, origin: string, credentialId: string, secret: string): Promise<void> {
+  await confirmManagedRecovery(actor, scope, origin, credentialId, secret);
 }

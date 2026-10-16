@@ -11,6 +11,12 @@ export interface VaultPasskeyBackup extends VaultCiphertext {
   prfSalt: string;
   rpId: string;
 }
+export interface VaultManagedRecovery {
+  id: string;
+  backup: VaultCiphertext;
+  protectedSecret: VaultCiphertext;
+  verifiedOrigins: string[];
+}
 export interface AccountVaultPayload {
   version: 1;
   scope: string;
@@ -18,6 +24,7 @@ export interface AccountVaultPayload {
   sheetKey: { keyId: string; publicKeyB64: string; privateKey: VaultCiphertext };
   recovery: VaultCiphertext | null;
   passkeys: VaultPasskeyBackup[];
+  managedRecovery?: VaultManagedRecovery;
 }
 export interface SheetKeyEnvelopeContext {
   version: 1;
@@ -141,6 +148,7 @@ export function decodeAccountVault(bytes: ArrayLike<number>, scope: AccountVault
   for (const backup of value.passkeys) {
     if (!backup || typeof backup.credentialId !== "string" || typeof backup.prfSalt !== "string" || typeof backup.rpId !== "string" || typeof backup.iv !== "string" || typeof backup.ciphertext !== "string") throw new Error("Invalid passkey backup");
   }
+  if (value.managedRecovery !== undefined) validateManagedRecovery(value.managedRecovery);
   return value;
 }
 export function createAccountRecoveryCode(): string { return "IOU1-" + vaultB64Url(vaultRandom(32)); }
@@ -148,16 +156,82 @@ function recoveryBytes(code: string): Uint8Array<ArrayBuffer> {
   if (!code.trim().startsWith("IOU1-")) throw new Error("Invalid IOU recovery code");
   return vaultUnb64Url(code.trim().slice(5), 32);
 }
-export async function createRecoveryBackup(root: Uint8Array, scope: AccountVaultScope, code: string): Promise<VaultCiphertext> {
+export async function createRecoveryBackup(root: Uint8Array, scope: AccountVaultScope, code: string, managedIdentity = ""): Promise<VaultCiphertext> {
   requireAccountRoot(root);
+  if (managedIdentity) managedId(managedIdentity);
+  const purpose = managedIdentity ? "managed-recovery-root" : "recovery-code";
   const secret = recoveryBytes(code);
-  try { return await vaultSeal(await vaultAesKey(secret, scope, "recovery-code"), root, vaultAad(scope, "recovery-code")); }
+  try { return await vaultSeal(await vaultAesKey(secret, scope, purpose), root, vaultAad(scope, purpose, managedIdentity)); }
   finally { secret.fill(0); }
 }
-export async function openRecoveryBackup(backup: VaultCiphertext, scope: AccountVaultScope, code: string): Promise<Uint8Array<ArrayBuffer>> {
+export async function openRecoveryBackup(backup: VaultCiphertext, scope: AccountVaultScope, code: string, managedIdentity = ""): Promise<Uint8Array<ArrayBuffer>> {
+  if (managedIdentity) managedId(managedIdentity);
+  const purpose = managedIdentity ? "managed-recovery-root" : "recovery-code";
   const secret = recoveryBytes(code);
-  try { const root = await vaultOpen(await vaultAesKey(secret, scope, "recovery-code"), backup, vaultAad(scope, "recovery-code")); requireAccountRoot(root); return root; }
+  try { const root = await vaultOpen(await vaultAesKey(secret, scope, purpose), backup, vaultAad(scope, purpose, managedIdentity)); requireAccountRoot(root); return root; }
   finally { secret.fill(0); }
+}
+/** Password-manager recovery stays separate from legacy code and PRF backups. */
+export function validateManagedRecoveryOrigin(origin: string): string {
+  if (typeof origin !== "string" || origin.length > 2048) throw new Error("Invalid recovery origin");
+  let url: URL;
+  try { url = new URL(origin); } catch { throw new Error("Invalid recovery origin"); }
+  if (url.origin !== origin || url.username || url.password ||
+      !(url.protocol === "https:" || (url.protocol === "http:" &&
+        (url.hostname === "localhost" || url.hostname === "127.0.0.1" || url.hostname === "[::1]")))) {
+    throw new Error("Recovery requires a secure, exact app origin");
+  }
+  return origin;
+}
+function managedId(id: string): void { vaultUnb64Url(id, 32); }
+function validateManagedRecovery(value: VaultManagedRecovery): void {
+  if (!value || typeof value.id !== "string" || !Array.isArray(value.verifiedOrigins) || value.verifiedOrigins.length > 16) throw new Error("Invalid managed recovery backup");
+  managedId(value.id);
+  for (const sealed of [value.backup, value.protectedSecret]) {
+    if (!sealed || typeof sealed.iv !== "string" || typeof sealed.ciphertext !== "string" ||
+        vaultUnb64(sealed.iv, 12).length !== 12 || vaultUnb64(sealed.ciphertext, 48).length !== 48) throw new Error("Invalid managed recovery ciphertext");
+  }
+  for (const origin of value.verifiedOrigins) validateManagedRecoveryOrigin(origin);
+  if (new Set(value.verifiedOrigins).size !== value.verifiedOrigins.length) throw new Error("Duplicate recovery origin");
+}
+function managedSecretBytes(secret: string): Uint8Array<ArrayBuffer> {
+  if (typeof secret !== "string" || !/^IOU1-[A-Za-z0-9_-]{43}$/.test(secret)) throw new Error("Invalid IOU recovery credential");
+  return recoveryBytes(secret);
+}
+export async function managedRecoveryCredentialId(scope: AccountVaultScope, id: string): Promise<string> {
+  managedId(id);
+  const digest = await crypto.subtle.digest("SHA-256", utf8.encode(JSON.stringify(["iou-password-manager-username-v1", accountVaultScopeId(scope), id])));
+  return "iou-recovery-" + vaultB64Url(new Uint8Array(digest));
+}
+export async function createManagedRecovery(root: Uint8Array, scope: AccountVaultScope): Promise<{ managedRecovery: VaultManagedRecovery; secret: string }> {
+  requireAccountRoot(root);
+  const id = vaultB64Url(vaultRandom(32));
+  const secret = createAccountRecoveryCode();
+  const bytes = managedSecretBytes(secret);
+  try {
+    const protectedSecret = await vaultSeal(await vaultAesKey(root, scope, "managed-recovery-secret"), bytes, vaultAad(scope, "managed-recovery-secret", id));
+    return { secret, managedRecovery: { id, protectedSecret, backup: await createRecoveryBackup(root, scope, secret, id), verifiedOrigins: [] } };
+  } finally { bytes.fill(0); }
+}
+export async function openManagedRecoveryBackup(value: VaultManagedRecovery, scope: AccountVaultScope, secret: string): Promise<Uint8Array<ArrayBuffer>> {
+  validateManagedRecovery(value);
+  const bytes = managedSecretBytes(secret); bytes.fill(0);
+  return openRecoveryBackup(value.backup, scope, secret, value.id);
+}
+/** An unlocked device can re-save the same secret after cancellation, without rotation. */
+export async function openManagedRecoverySecret(value: VaultManagedRecovery, root: Uint8Array, scope: AccountVaultScope): Promise<string> {
+  requireAccountRoot(root); validateManagedRecovery(value);
+  const bytes = await vaultOpen(await vaultAesKey(root, scope, "managed-recovery-secret"), value.protectedSecret, vaultAad(scope, "managed-recovery-secret", value.id));
+  let reopened: Uint8Array | undefined;
+  try {
+    requireAccountRoot(bytes);
+    const secret = "IOU1-" + vaultB64Url(bytes);
+    reopened = await openManagedRecoveryBackup(value, scope, secret);
+    let mismatch = 0;
+    for (let i = 0; i < root.length; i++) mismatch |= reopened[i] ^ root[i];
+    if (mismatch) throw new Error("Recovery credential does not match this account");
+    return secret;
+  } finally { bytes.fill(0); reopened?.fill(0); }
 }
 export function createSheetKeyId(): string { return vaultB64Url(vaultRandom(32)); }
 function sheetAad(context: SheetKeyEnvelopeContext): string {

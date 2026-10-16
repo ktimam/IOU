@@ -2,9 +2,10 @@
 //
 // A single confirmable-action card can carry SEVERAL entries (the confirmPayload was a JSON array).
 // The whole array rides inside ONE card → ONE human confirm → ONE deposit → ONE messageId consumed.
-// This modal lists every parsed entry read-only and offers a single "Add all N entries" button, so
+// This modal lists every parsed entry and offers a single "Add all N entries" button, so
 // the human confirms the batch once. Individual field-editing stays the single-entry EntryForm's job
-// (a batch is confirm-as-extracted); nothing is written until "Add all" is clicked.
+// (a batch is confirm-as-extracted). An absent imported date is explicitly corrected here;
+// nothing is written until every required date is supplied and "Add all" is clicked.
 
 import type { ParsedDraft } from "./draft";
 
@@ -13,6 +14,7 @@ type BatchConfirmModalProps = {
   busy: boolean;
   onCancel: () => void;
   onConfirm: () => void;
+  onDateChange?: (index: number, date: string) => void;
   // Optional "remember this chat → this sheet" checkbox (shown only for a chat with no mapping yet).
   showRemember?: boolean;
   remember?: boolean;
@@ -25,6 +27,7 @@ export function BatchConfirmModal({
   busy,
   onCancel,
   onConfirm,
+  onDateChange,
   showRemember = false,
   remember = true,
   onRememberChange,
@@ -69,6 +72,13 @@ export function BatchConfirmModal({
                 {i + 1}.
               </span>
               <span className="small">{d.summary}</span>
+              {d.reviewDate && <label className="small">
+                <span>Date for entry {i + 1}</span>
+                <input type="date" required disabled={busy}
+                  value={d.initial.ts === undefined ? "" : new Date(d.initial.ts).toISOString().slice(0, 10)}
+                  onChange={(e) => onDateChange?.(i, e.target.value)} />
+                {d.initial.ts === undefined && <span>A date was not supplied. Choose it here before saving.</span>}
+              </label>}
             </li>
           ))}
         </ul>
@@ -76,7 +86,7 @@ export function BatchConfirmModal({
           <button type="button" onClick={onCancel} disabled={busy}>
             Cancel
           </button>
-          <button type="button" onClick={onConfirm} disabled={busy}>
+          <button type="button" onClick={onConfirm} disabled={busy || drafts.some(d => d.reviewDate && d.initial.ts === undefined)}>
             {busy ? "Adding…" : `Add all ${n} entries`}
           </button>
         </div>

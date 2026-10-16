@@ -13,6 +13,7 @@
 // `direction` is only a HINT the user confirms/flips on the form.
 
 import type { Direction, EntryPayload, TxnType, DuePortion } from "./types";
+import type { TemplatePortion } from "../templates/TemplatesContext";
 
 export type DraftSchedulePortion = { due_date: string; percent?: number };
 
@@ -61,6 +62,9 @@ export type ParsedDraft = {
   draftId: string;
   // One-line human summary for the import UI.
   summary: string;
+  // Receiver-only review state, never sent or persisted as an entry. Missing dates
+  // must stay blank, including Type-relative due dates, until the user supplies one.
+  reviewDate?: { schedule?: readonly TemplatePortion[] };
 };
 
 export type ParseResult =

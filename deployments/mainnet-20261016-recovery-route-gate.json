@@ -1,0 +1,53 @@
+{
+  "schemaVersion": 1,
+  "recordedAt": "2026-10-15T21:58:00Z",
+  "localDate": "2026-10-16",
+  "network": "ic",
+  "stage": "tested-local-active-mainnet-awaiting-deployer-reauth",
+  "scope": "Require the existing recovery gate on authenticated standalone connection/import waiting states; frontend only",
+  "origin": "https://ouvuc-3iaaa-aaaag-azekq-cai.icp0.io",
+  "source": {
+    "publishedBase": "1babcfb4b8666c2e02fea73287a5b5b781f80e77",
+    "candidateSnapshot": "9159ed21893abf3f07ff4cb48bed557f8b6349b7",
+    "overlayFiles": 7,
+    "assetInventorySha256": "936550c08aa248ac1aa34fb1950421a3ffa1260df1cc188cdbd6d3c379ebd4d2",
+    "canonicalBranchCommittedOrPushed": false
+  },
+  "checks": {
+    "newRenderRegressionFailuresBeforeFix": 5,
+    "newRenderRegressionPassesAfterFix": 7,
+    "focusedUnitTestsPassed": 58,
+    "canonicalUnitTestsPassed": 4149,
+    "canonicalUnitTestsFailed": 0,
+    "productionCandidateTestsPassed": 4149,
+    "unchangedInheritedModelProfileFailures": 3,
+    "bothTypechecksPassed": true,
+    "deploymentGuardsPassed": 27,
+    "productionBuildPassed": true,
+    "isolatedBrowserJourneysPassed": 2,
+    "extraDerivationsAfterInitialLocalBootstrap": 0,
+    "pendingMetadataRetainedAcrossVerification": true,
+    "automaticSetupSharing": false,
+    "uncaughtBrowserErrors": 0,
+    "externalFixtureRequests": 0,
+    "recoverySecretRequestLeaks": 0,
+    "localAndTailscaleServedSourceVerified": true
+  },
+  "localActivation": {
+    "receipt": "F:/Temp/OpenChat-IOU/local-env-20261014/recovery-route-gate-activation.json",
+    "backup": "F:/Temp/OpenChat-IOU/local-env-20261014/recovery-route-gate-before",
+    "backendUnchanged": true
+  },
+  "evidence": {
+    "candidate": "F:/Temp/OpenChat-IOU/recovery-route-gate-mainnet-20261016/receipts",
+    "browser": "F:/Temp/OpenChat-IOU/recovery-route-gate-20261016",
+    "beforeAfter": "F:/Temp/OpenChat-IOU/standalone-recovery-gate-20261016/receipts"
+  },
+  "limitations": [
+    "The user confirmed direct IOU login; the standalone-route fix does not explain that earlier missing screen",
+    "Synthetic browser authentication/autofill does not prove Microsoft cloud synchronization",
+    "New browser cases cover pending metadata, not new queued-ciphertext/signout/expiry coverage",
+    "No mainnet publication, paid mainnet recovery, user credential read, backend or OpenChat update occurred",
+    "Mainnet recovery-cost measurement remains incomplete"
+  ]
+}

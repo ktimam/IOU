@@ -57,6 +57,7 @@ describe("explicit paid account root acquisition", () => {
     const api = actor([{ revision: 1n }]);
     await recoverAccountVaultPaid(api, "alice", true);
     expect(api.acquire_account_root).not.toHaveBeenCalled();
+    expect(state.restore).toHaveBeenCalledWith(api, expect.objectContaining({ principal: "alice" }), root, true);
     expect(root.every((byte) => byte === 0)).toBe(true);
   });
   it("resumes unpublished protected storage without a second bootstrap fee", async () => {

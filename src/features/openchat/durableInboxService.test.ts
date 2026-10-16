@@ -7,6 +7,7 @@ import { createLocalDeliveryEncryption, localDeliveryAdditionalData, localDelive
   LOCAL_DELIVERY_DOMAIN, LOCAL_DELIVERY_SCHEME, type LocalDeliveryEncryption, type LocalEncryptedRequest } from "./localImportEncryption";
 import type { EntryBatchActor } from "../entries/batchImport";
 import type { EntryPayload } from "../entries/types";
+import { setLocalImportReviewDate } from "./localImportSheet";
 
 const session = vi.hoisted(() => ({ generation: 1, load: vi.fn() }));
 vi.mock("./consumerKeypair", () => ({
@@ -184,9 +185,15 @@ describe("persistent ciphertext listing and local review", () => {
     session.load.mockImplementation(async () => { session.generation++; return { ...keys, publicKeySpkiPem: "synthetic-public-key" }; });
     await expect(load(actor())).rejects.toThrow(/session changed/);
   });
-  it("retains unknown Types and missing dates without guessing", async () => {
+  it("opens a missing-date delivery for correction without guessing, saving or acknowledging", async () => {
     const sealed = await seal({ entries: [{ ...original.entries[0], date: undefined }] }); encrypted = sealed.body; receipt = sealed.proof;
-    expect((await load(actor())).items[0].error).toMatch(/date is missing/);
+    const a = actor(), first = (await load(a)).items[0], reloaded = (await load(a)).items[0];
+    expect(first.error).toBeUndefined();
+    expect(first.drafts).toHaveLength(1);
+    expect(first.drafts![0].initial).not.toHaveProperty("ts");
+    expect(first.drafts![0].reviewDate).toEqual({});
+    expect(reloaded.drafts).toEqual(first.drafts);
+    expect(a.add_entry_batch).not.toHaveBeenCalled(); expect(a.acknowledge_encrypted_inbox).not.toHaveBeenCalled();
   });
   it("filters saved/dismissed tombstones without decrypting", async () => {
     receipt.status = { Saved: null }; expect((await load(actor())).items).toHaveLength(0); expect(session.load).not.toHaveBeenCalled();
@@ -234,6 +241,16 @@ describe("explicit save then durable acknowledgement", () => {
     expect(a.add_entry_batch).toHaveBeenCalledWith(expect.objectContaining({ sheet_id: context.sheetId, import_id: Array.from(localDeliveryDecode(requestId, 32)) }));
     expect(vi.mocked(a.add_entry_batch).mock.invocationCallOrder[0]).toBeLessThan(vi.mocked(a.acknowledge_encrypted_inbox).mock.invocationCallOrder[0]);
     expect(JSON.stringify(vi.mocked(a.add_entry_batch).mock.calls[0])).not.toMatch(/Synthetic receipt|amount_minor/);
+  });
+  it("retains an incomplete delivery until its corrected date is explicitly saved", async () => {
+    const sealed = await seal({ entries: [{ ...original.entries[0], date: undefined }] }); encrypted = sealed.body; receipt = sealed.proof;
+    const a = actor(), item = (await load(a)).items[0];
+    await expect(save(a, item)).rejects.toThrow(/invalid entry payload/);
+    expect(a.add_entry_batch).not.toHaveBeenCalled(); expect(a.acknowledge_encrypted_inbox).not.toHaveBeenCalled();
+    const reloaded = (await load(a)).items[0];
+    const payload = setLocalImportReviewDate(reloaded.drafts![0], "2026-08-15").initial;
+    expect((await save(a, reloaded, { payloads: [payload] })).acknowledged).toBe(true);
+    expect(a.add_entry_batch).toHaveBeenCalledOnce(); expect(a.acknowledge_encrypted_inbox).toHaveBeenCalledOnce();
   });
   it("leaves a failed/unknown save pending without acknowledgement", async () => {
     const a = actor(), item = (await load(a)).items[0]; vi.mocked(a.add_entry_batch).mockRejectedValue(new Error("response lost"));

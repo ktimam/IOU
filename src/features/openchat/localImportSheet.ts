@@ -1,11 +1,12 @@
 import type { EntryPayload } from "../entries/types";
 import { decodeEntry, encodeEntry } from "../entries/types";
-import { formatMinor } from "../entries/balance";
+import { formatMinor, netAfterFee } from "../entries/balance";
 import type { ParsedDraft } from "../entries/draft";
 import type { TxnTemplate } from "../templates/TemplatesContext";
 import { encodeIouDeliveryContext, localDeliveryDecode, type IouDeliveryContext } from "./localImportEncryption";
 import { initializeLocalImportReviewRow, prepareLocalImportReview } from "./localImportReview";
-import type { LocalImportDraft } from "./localImportHandoff";
+import { isLocalImportId, parseLocalImportPayload, type LocalImportDraft } from "./localImportHandoff";
+import { resolveTemplateSchedule, templateToInitial } from "../templates/templateBase";
 
 /** Only these locally-authored correction messages are safe to show verbatim. */
 export class LocalImportReviewError extends Error {}
@@ -27,15 +28,49 @@ export function localImportRecipient(encoded: string, expected: Pick<IouDelivery
 
 /** Feed the existing EntryForm/BatchConfirmModal without reparsing reviewed text or guessing dates. */
 export function localImportSheetDrafts(rows: readonly LocalImportDraft[], templates: readonly TxnTemplate[], importId: string): ParsedDraft[] {
-  const reviewed = rows.map(row => initializeLocalImportReviewRow(row, templates));
-  if (rows.some(row => !row.date)) throw new LocalImportReviewError("A date is missing. Set a date in the OpenChat card and send it again; nothing was saved in IOU.");
+  const checked = parseLocalImportPayload({ entries: rows.map(row => ({ ...row })) });
+  if (!checked || !isLocalImportId(importId)) throw new LocalImportReviewError("The received entries are invalid. Nothing was saved.");
+  const reviewed = checked.entries.map(row => initializeLocalImportReviewRow(row, templates));
   if (reviewed.some(row => row.selectedTypeId === null)) throw new LocalImportReviewError("The card's Type is no longer available in this account. Reconnect IOU in OpenChat and create a new proposal; nothing was saved.");
-  const payloads = prepareLocalImportReview({ rows, selectedTypeIds: reviewed.map(row => row.selectedTypeId), templates, importId });
-  return payloads.map((payload, index) => ({
-    initial: payload,
-    draftId: `local:${importId}:${index}`,
-    summary: `${formatMinor(payload.fee?.gross_amount_minor ?? payload.amount_minor, payload.currency)} · ${payload.direction === "debt" ? "You owe" : "Owed to you"} · ${new Date(payload.ts).toISOString().slice(0, 10)}${payload.note ? ` · ${payload.note}` : ""}`,
-  }));
+  return reviewed.map(({ row, selectedTypeId }, index) => {
+    const draftId = `local:${importId}:${index}`;
+    if (row.date) {
+      const payload = prepareLocalImportReview({ rows: [row], selectedTypeIds: [selectedTypeId], templates, importId })[0];
+      return { initial: { ...payload, draft_id: draftId }, draftId,
+        summary: `${formatMinor(payload.fee?.gross_amount_minor ?? payload.amount_minor, payload.currency)} · ${payload.direction === "debt" ? "You owe" : "Owed to you"} · ${row.date}${payload.note ? ` · ${payload.note}` : ""}` };
+    }
+    const matches = selectedTypeId ? templates.filter(item => item.id === selectedTypeId) : [];
+    if (selectedTypeId && matches.length !== 1) throw new LocalImportReviewError("The selected Type is not available in this IOU account.");
+    const template = matches[0];
+    // Fees do not depend on a date. Do not call the template's default-today schedule
+    // resolver for an incomplete import; keep its relative schedule for explicit review.
+    const defaults = template ? templateToInitial({ ...template, schedule: undefined }) : undefined;
+    const gross = Math.round(row.amount * 100);
+    const fee = row.kind === "iou" && defaults?.fee ? { ...defaults.fee, gross_amount_minor: gross } : undefined;
+    const fixed = fee?.fixed_currency && fee.fixed_currency !== row.currency ? 0 : fee?.fixed_minor ?? 0;
+    return { initial: {
+      kind: row.kind === "iou" ? "expense" : "payment", txn_type: row.kind,
+      currency: row.currency, direction: row.direction, note: row.note ?? "", draft_id: draftId,
+      amount_minor: fee ? netAfterFee(gross, fee.percent, fixed) : gross, ...(fee ? { fee } : {}),
+    }, draftId, reviewDate: { ...(row.kind === "iou" && template?.txn_type === "iou" && template.schedule?.length
+      ? { schedule: template.schedule.map(portion => ({ ...portion })) } : {}) },
+    summary: `${formatMinor(gross, row.currency)} · ${row.direction === "debt" ? "You owe" : "Owed to you"}${row.note ? ` · ${row.note}` : ""}` };
+  });
+}
+
+/** Batch correction preserves every row/ID and never defaults an absent date to today. */
+export function setLocalImportReviewDate(draft: ParsedDraft, date: string): ParsedDraft {
+  if (!draft.reviewDate) throw new Error("This entry does not need a missing-date correction.");
+  const { ts: _ts, schedule: _schedule, ...initial } = draft.initial;
+  if (!date) return { ...draft, initial };
+  const ts = Date.parse(`${date}T00:00:00Z`);
+  if (!/^(?!0000)\d{4}-\d{2}-\d{2}$/.test(date) || !Number.isFinite(ts) || new Date(ts).toISOString().slice(0, 10) !== date) {
+    throw new Error("Choose a valid date for this entry.");
+  }
+  const payload = decodeEntry(encodeEntry({ ...initial, ts, ...(initial.txn_type === "iou" ? {
+    schedule: draft.reviewDate.schedule?.length ? resolveTemplateSchedule(draft.reviewDate.schedule, ts) : [{ due_ts: ts, percent: 100 }],
+  } : {}) } as EntryPayload));
+  return { ...draft, initial: payload };
 }
 
 /** The sheet owns presentation; the authenticated receiver owns transport and exact-ID saving. */

@@ -1,0 +1,74 @@
+{
+  "schemaVersion": 1,
+  "recordedAt": "2026-10-15T14:16:37Z",
+  "network": "ic",
+  "stage": "published-and-live-bytes-verified",
+  "scope": "Remove encryption-passkey UI; retain password-manager recovery and explicit emergency recovery",
+  "origin": "https://ouvuc-3iaaa-aaaag-azekq-cai.icp0.io",
+  "identityName": "iou-production",
+  "source": {
+    "publishedBase": "5f86395a603ea5f775956dd51872eb5f06a63229",
+    "frontendSnapshot": "0c870fab1c529d246b09fe3eb50a78593114522d",
+    "overlayFiles": 12,
+    "assetInventorySha256": "a56b9f2b87ac0c717f16c04012c3333f67dd343c42e7bc68d1d36d30486c84df",
+    "canonicalBranchCommittedOrPushed": false
+  },
+  "changes": [
+    "Removed encryption-passkey save, add, check and unlock controls",
+    "Require verified password-manager recovery for the exact origin before completing setup",
+    "Existing unlocked PRF-only accounts are prompted to save the same-root manager backup without a derivation",
+    "Retained explicit paid emergency recovery when remembered keys and manager entry are unavailable",
+    "Preserved encrypted PRF backups, low-level compatibility, all existing keys and Internet Identity sign-in"
+  ],
+  "canisters": {
+    "iou_assets": {
+      "id": "ouvuc-3iaaa-aaaag-azekq-cai",
+      "moduleHash": "04e565b3425fe7510ee16b02adcfe3f01abc9a2725c82a21cb08969241debd62",
+      "status": "Running",
+      "assetsSynced": 28,
+      "publicFilesHashVerified": 28
+    },
+    "iou_backend": {
+      "id": "otusw-wqaaa-aaaag-azeka-cai",
+      "moduleHash": "8dcd4f887ffc5c37ac30927173b6b35e6449fcf3362a1e59b01a3d28e33cd5ce",
+      "status": "Running",
+      "moduleAndPublicConfigurationUnchanged": true
+    }
+  },
+  "checks": {
+    "canonicalUnitTestsPassed": 4116,
+    "canonicalUnitTestsFailed": 0,
+    "productionCandidateUnitTestsPassed": 4116,
+    "productionCandidateInheritedModelProfileFailures": 3,
+    "inheritedFailureBaseline": "Identical three cases reproduced against the untouched preceding published profile; no models or assertions changed",
+    "focusedUiOnboardingAndCompatibilityTestsPassed": 166,
+    "deploymentGuardsPassed": 27,
+    "bothTypechecksPassed": true,
+    "productionBuildPassed": true,
+    "isolatedBrowserJourneysPassed": 5,
+    "uncaughtBrowserErrors": 0,
+    "externalFixtureRequests": 0,
+    "localAndTailscaleRemovedControlsVerified": true,
+    "liveMainnetBytesVerified": true,
+    "liveSignedOutEdgeSmokePassed": true,
+    "liveDirectConnectionGuardPassed": true,
+    "removedControlLabelsAbsentFromProductionBuild": true
+  },
+  "localActivation": {
+    "receipt": "F:/Temp/OpenChat-IOU/local-env-20261014/manager-only-activation.json",
+    "backup": "F:/Temp/OpenChat-IOU/local-env-20261014/manager-only-before",
+    "localSourceManifestSha256": "0aaf537fba4d2e9a54ff674404dd3c654e39115afeb9a943871ec80ca801235b",
+    "tailscaleSourceManifestSha256": "5d0614635828b5e1a60854a9f679dcb3991bacf3a937eae97ee22c646cbfa88e",
+    "backendUnchanged": true
+  },
+  "evidence": {
+    "publication": "F:/Temp/OpenChat-IOU/manager-only-mainnet-20261015/receipts",
+    "browser": "F:/Temp/OpenChat-IOU/manager-only-recovery-20261015"
+  },
+  "notPerformed": [
+    "Backend upgrade, new canister or funding",
+    "OpenChat, registry, model or APK change",
+    "User key rotation, backup deletion or mainnet user-data mutation",
+    "Real Microsoft cloud-sync or physical-device acceptance"
+  ]
+}

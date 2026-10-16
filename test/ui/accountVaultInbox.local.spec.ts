@@ -1,4 +1,4 @@
-import { test, expect } from "@playwright/test";
+import { test, expect, type Page } from "@playwright/test";
 import { Cbor } from "@dfinity/agent";
 import { Principal } from "@dfinity/principal";
 import { createAccount } from "./flows";
@@ -11,9 +11,41 @@ if (!CANISTER || Principal.fromText(CANISTER).toText() !== CANISTER || CANISTER 
 }
 const NOTE = "Synthetic account-vault inbox acceptance";
 const PAID = new Set(["acquire_account_root", "vetkd_wrap_consumer_key", "vetkd_wrap_sheet_key", "openchat_card_context", "openchat_private_match_context"]);
+const CONTROL = new URL(process.env.IOU_TEST_POCKETIC_CONTROL_URL ?? "");
+const INSTANCE = process.env.IOU_TEST_POCKETIC_INSTANCE ?? "";
+if (CONTROL.protocol !== "http:" || CONTROL.hostname !== "127.0.0.1" || !CONTROL.port || CONTROL.pathname !== "/" ||
+  CONTROL.search || CONTROL.hash || CONTROL.username || CONTROL.password || !/^(0|[1-9][0-9]{0,5})$/.test(INSTANCE)) {
+  throw new Error("Choose an explicit owned loopback PocketIC control URL and instance number");
+}
+async function alignIsolatedPageClock(page: Page) {
+  // Read-only alignment permits this owned fixture to follow a cooldown test.
+  // The browser's synthetic page changes; host and canister clocks do not.
+  for (let attempt = 0; attempt < 20; attempt++) {
+    const response = await fetch(CONTROL.origin + "/instances/" + INSTANCE + "/read/get_time");
+    if (response.status === 409) { await new Promise(resolve => setTimeout(resolve, 75 + attempt * 17)); continue; }
+    if (!response.ok) throw new Error("Isolated clock HTTP " + response.status);
+    const current = await response.json() as { nanos_since_epoch: number };
+    const offset = Math.floor(current.nanos_since_epoch / 1_000_000) - Date.now();
+    await page.addInitScript((delta) => {
+      // Keep native performance/resource timing: it resolves the exact running
+      // Vite module below. Playwright's full clock shim empties those entries.
+      const NativeDate = Date;
+      globalThis.Date = new Proxy(NativeDate, {
+        construct(target, args, newTarget) { return Reflect.construct(target, args.length ? args : [target.now() + delta], newTarget); },
+        apply(target) { return new target(target.now() + delta).toString(); },
+        get(target, key, receiver) { return key === "now" ? () => target.now() + delta : Reflect.get(target, key, receiver); },
+      });
+    }, offset);
+    return;
+  }
+  throw new Error("The isolated PocketIC clock remained busy");
+}
 
-test("vault-backed generic inbox reconnect, encrypted delivery, pending review and persisted UI save do not buy another key", async ({ context, page }) => {
+for (const missingDate of [false, true]) {
+test(`vault-backed generic inbox reconnect, encrypted delivery, ${missingDate ? "missing-date correction" : "dated review"} and persisted UI save do not buy another key`, async ({ context, page }) => {
   const paid: string[] = [], methods: string[] = [], blocked: string[] = [];
+  const runtimeErrors: string[] = [];
+  page.on("pageerror", () => runtimeErrors.push("Unhandled browser runtime error"));
   await page.addInitScript(() => performance.setResourceTimingBufferSize(3000));
   await context.route("**/*", async route => {
     const url = new URL(route.request().url());
@@ -30,22 +62,38 @@ test("vault-backed generic inbox reconnect, encrypted delivery, pending review a
       if (method) { methods.push(method); if (PAID.has(method)) paid.push(method); }
     } catch { /* Non-CBOR transport requests carry no method name. */ }
   });
+  await alignIsolatedPageClock(page);
   await page.goto(ORIGIN + "/sign-in");
   expect(await page.evaluate(async ({ host, canister }) => {
     const path = "/src/features/auth/config.ts"; const config = await import(/* @vite-ignore */ path);
     return config.host === host && config.canisterId === canister;
   }, { host: HOST, canister: CANISTER })).toBe(true);
   await page.getByRole("button", { name: /Sign in \(dev/ }).click();
-  await expect(page.getByRole("heading", { name: "Account encryption", exact: true })).toBeVisible();
-  expect(paid).toEqual([]);
-  await page.getByRole("button", { name: "Set up account encryption", exact: true }).click();
-  await expect(page.getByRole("heading", { name: "Protect access on other devices" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Save your recovery entry", exact: true })).toBeVisible();
   expect(paid).toEqual(["acquire_account_root"]);
-  await page.getByRole("button", { name: "Continue to IOU", exact: true }).click();
+  await expect(page.getByRole("button", { name: /Continue to IOU|Create recovery code|Set up account encryption/ })).toHaveCount(0);
+  await expect(page.getByRole("button", { name: /encryption passkey|Check saved passkey/i })).toHaveCount(0);
+  // Login prepares the manager entry automatically, without another user action.
+  await expect(page.getByLabel("Generated recovery password", { exact: true })).toHaveAttribute("type", "password");
+  const saveForm = page.locator("details").filter({ has: page.locator("summary", { hasText: /^Save using the password form$/ }) });
+  if (await saveForm.getAttribute("open") === null) await saveForm.locator("summary").click();
+  const generated = page.getByLabel("Generated recovery password", { exact: true });
+  await expect(generated).toHaveAttribute("type", "password");
+  let recoverySecret = await generated.inputValue();
+  try {
+    expect(/^IOU1-[A-Za-z0-9_-]{43}$/.test(recoverySecret)).toBe(true);
+    await page.getByRole("button", { name: "I saved the entry; verify it", exact: true }).click();
+    await expect(generated).toHaveCount(0);
+    expect(await page.getByLabel("Recovery password", { exact: true }).inputValue() === "").toBe(true);
+    try { await page.getByLabel("Recovery password", { exact: true }).fill(recoverySecret); }
+    catch { throw new Error("Synthetic manager autofill failed"); }
+    await page.getByRole("button", { name: "Verify autofilled entry", exact: true }).click();
+  } finally { recoverySecret = ""; }
+  await expect(page.getByRole("heading", { name: "Your accounts" })).toBeVisible();
   const sheetId = await createAccount(page, "Synthetic inbox account", "Vault inbox sheet");
   await expect(page.getByRole("heading", { name: "Balances", exact: true })).toBeVisible();
 
-  const delivery = await page.evaluate(async ({ sheetId, note, host, canister }) => {
+  const delivery = await page.evaluate(async ({ sheetId, note, host, canister, missingDate }) => {
     // Reuse the running app's exact HMR module instances: importing the bare
     // path after Vite adds ?t= would otherwise create a second auth/key session.
     const module = (path: string) => {
@@ -67,6 +115,10 @@ test("vault-backed generic inbox reconnect, encrypted delivery, pending review a
     if (await actor.get_vetkd_key_name() !== "dfx_test_key") throw new Error("Synthetic test refuses a production VetKD key");
     const sheet = (await actor.get_sheet(sheetId))[0];
     if (!sheet) throw new Error("Synthetic sheet is unavailable");
+    if (consumer.captureConsumerKeypairSession().principal !== principal) {
+      const modules = performance.getEntriesByType("resource").map(entry => entry.name).filter(name => /consumerKeypair|ConsumerKeypairSync|AuthProvider/.test(new URL(name).pathname));
+      throw new Error("Synthetic harness did not import the active consumer session: " + JSON.stringify(modules));
+    }
     const ticket = consumer.captureConsumerKeypairSession(principal);
     const key = await consumer.loadOrCreateConsumerKeypair(ticket);
     const before = await actor.get_consumer_keypair();
@@ -91,7 +143,7 @@ test("vault-backed generic inbox reconnect, encrypted delivery, pending review a
       envelope: { version: 1, scheme: encryption.LOCAL_DELIVERY_SCHEME, keyId: recipient.keyId, recipientContext: recipient.recipientContext,
         ephemeralPublicKey: encryption.localDeliveryBase64Url(new Uint8Array(await crypto.subtle.exportKey("raw", ephemeral.publicKey))),
         salt: encryption.localDeliveryBase64Url(salt), iv: encryption.localDeliveryBase64Url(iv), ciphertext: "" } };
-    const plaintext = new TextEncoder().encode(JSON.stringify({ entries: [{ amount: 37.25, currency: "USD", kind: "settlement", direction: "credit", date: "2026-10-13", note }] }));
+    const plaintext = new TextEncoder().encode(JSON.stringify({ entries: [{ amount: 37.25, currency: "USD", kind: "settlement", direction: "credit", ...(missingDate ? {} : { date: "2026-10-13" }), note }] }));
     try {
       const cipher = await crypto.subtle.encrypt({ name: "AES-GCM", iv, additionalData: encryption.localDeliveryAdditionalData(request) }, aes, plaintext);
       request.envelope.ciphertext = encryption.localDeliveryBase64Url(new Uint8Array(cipher));
@@ -106,8 +158,9 @@ test("vault-backed generic inbox reconnect, encrypted delivery, pending review a
     const listed = await inbox.loadDurableInbox({ actor, principal, identity, context: deliveryContext, templates: [], assertCurrent: () => {} });
     const pending = listed.items.find((item: { id: string }) => item.id === importId);
     if (listed.errors.length || pending?.error || pending?.drafts?.[0]?.initial?.note !== note) throw new Error("Actual pending inbox did not decrypt the synthetic draft");
+    if (missingDate && (pending.drafts[0].initial.ts !== undefined || !pending.drafts[0].reviewDate)) throw new Error("Missing date did not remain editable and blank");
     return { requestId: importId, inboxId: reconnected.inboxId, bodyHash: Array.from(pending.receipt.body_sha256) as number[], pendingCount: listed.items.length, consumerStable: true };
-  }, { sheetId, note: NOTE, host: HOST, canister: CANISTER });
+  }, { sheetId, note: NOTE, host: HOST, canister: CANISTER, missingDate });
   expect(delivery.pendingCount).toBe(1); expect(delivery.consumerStable).toBe(true);
   expect(paid).toEqual(["acquire_account_root"]);
 
@@ -119,6 +172,21 @@ test("vault-backed generic inbox reconnect, encrypted delivery, pending review a
   await expect(review).toBeEnabled(); await review.click();
   const dialog = page.getByRole("dialog");
   await expect(dialog.locator('input[placeholder="lunch, taxi, etc."]')).toHaveValue(NOTE);
+  if (missingDate) {
+    await expect(dialog.getByLabel("Date", { exact: true })).toHaveValue("");
+    await expect(dialog.getByText(/A date was not supplied/)).toBeVisible();
+    const writesBefore = methods.filter(method => ["add_entry_batch", "acknowledge_encrypted_inbox"].includes(method)).length;
+    await dialog.getByRole("button", { name: "Add entry", exact: true }).click();
+    await expect(dialog).toBeVisible();
+    expect(methods.filter(method => ["add_entry_batch", "acknowledge_encrypted_inbox"].includes(method))).toHaveLength(writesBefore);
+    await dialog.getByRole("button", { name: "Cancel", exact: true }).click();
+    await page.reload();
+    await expect(page.getByRole("heading", { name: /Pending from chat \(1\)/ })).toBeVisible();
+    await expect(review).toBeEnabled(); await review.click();
+    await expect(dialog.getByLabel("Date", { exact: true })).toHaveValue("");
+    expect(methods.filter(method => ["add_entry_batch", "acknowledge_encrypted_inbox"].includes(method))).toHaveLength(writesBefore);
+    await dialog.getByLabel("Date", { exact: true }).fill("2026-10-14");
+  }
   await dialog.getByRole("button", { name: "Add entry", exact: true }).click();
   await expect(dialog).toHaveCount(0);
   await expect(page.getByText(NOTE, { exact: true })).toBeVisible();
@@ -126,7 +194,7 @@ test("vault-backed generic inbox reconnect, encrypted delivery, pending review a
   await expect(page.getByText(NOTE, { exact: true })).toBeVisible();
   await expect(page.getByRole("heading", { name: /Pending from chat/ })).toHaveCount(0);
 
-  const saved = await page.evaluate(async ({ sheetId, inboxId, requestId, bodyHash, note }) => {
+  const saved = await page.evaluate(async ({ sheetId, inboxId, requestId, bodyHash, note, expectedDate }) => {
     const module = (path: string) => {
       const loaded = performance.getEntriesByType("resource").map(entry => entry.name).reverse().find(name => new URL(name).pathname === path);
       return import(/* @vite-ignore */ loaded ?? path);
@@ -153,14 +221,16 @@ test("vault-backed generic inbox reconnect, encrypted delivery, pending review a
         // acknowledgement returns the retained receipt; replayed proves the UI
         // already acknowledged it, rather than this assertion doing the first save.
         const confirmed = await actor.acknowledge_encrypted_inbox({ inbox_id: inboxId, request_id: requestId, body_sha256: bodyHash, disposition: { Saved: null } });
-        return { count: entries.entries.length, contentMatches: payload.note === note && payload.amount_minor === 3725,
+        return { count: entries.entries.length, contentMatches: payload.note === note && payload.amount_minor === 3725 && payload.ts === Date.parse(expectedDate + "T00:00:00Z"),
           savedReceipt: !!confirmed.Ok && confirmed.Ok.replayed && "Saved" in confirmed.Ok.status };
       } finally { plaintext.fill(0); }
     } finally { rootKey.fill(0); }
-  }, { sheetId, inboxId: delivery.inboxId, requestId: delivery.requestId, bodyHash: delivery.bodyHash, note: NOTE });
+  }, { sheetId, inboxId: delivery.inboxId, requestId: delivery.requestId, bodyHash: delivery.bodyHash, note: NOTE, expectedDate: missingDate ? "2026-10-14" : "2026-10-13" });
   expect(saved).toEqual({ count: 1, contentMatches: true, savedReceipt: true });
   expect(methods).toContain("set_consumer_keypair");
   expect(methods.filter(method => method === "create_encrypted_inbox_grant")).toHaveLength(2);
   expect(methods).toContain("deposit_encrypted_inbox"); expect(methods).toContain("add_entry_batch");
   expect(paid).toEqual(["acquire_account_root"]); expect(blocked).toEqual([]);
+  expect(runtimeErrors, "Inbox recovery must have no uncaught browser runtime errors").toEqual([]);
 });
+}
