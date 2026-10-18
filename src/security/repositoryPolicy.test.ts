@@ -256,19 +256,19 @@ describe('repository security policy', () => {
     }
   });
 
-  it('adds the exact APK ancestor only to the physical Connect document, never the main SPA', () => {
+  it('keeps code-based Connect top-level-only without changing the main SPA policy', () => {
     const rules = assetRules();
     const defaults = rules.find(rule => rule.match === '**/*')!;
     const index = rules.find(rule => rule.match === 'index.html')!;
     const connect = rules.find(rule => rule.match === 'openchat/connect.html')!;
     expect(frameAncestors(defaults)).toEqual(["'none'"]);
     expect(frameAncestors(index)).toEqual(['https://oc.app']);
-    expect(frameAncestors(connect)).toEqual(['http://localhost:5193', 'https://oc.app']);
+    expect(frameAncestors(connect)).toEqual(["'none'"]);
     expect(connect.enable_aliasing).toBe(true);
     expect(rules.indexOf(connect)).toBeGreaterThan(rules.indexOf(defaults));
     expect(defaults.headers['X-Frame-Options']).toBe('DENY');
     expect(index.headers['X-Frame-Options']).toBe('');
-    expect(connect.headers).toEqual({ ...index.headers, 'Content-Security-Policy': expect.any(String) });
+    expect(connect.headers).toEqual({ ...index.headers, 'X-Frame-Options': 'DENY', 'Content-Security-Policy': expect.any(String) });
     const withoutFraming = (policy: string) => policy.split(';').map(value => value.trim())
       .filter(value => value && !value.startsWith('frame-ancestors '));
     expect(withoutFraming(connect.headers['Content-Security-Policy']))

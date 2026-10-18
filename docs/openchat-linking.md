@@ -1,6 +1,12 @@
-# Linking IOU to OpenChat (one tap)
+# Historical PR integration: linking IOU to OpenChat (one tap)
 
-## Current local contract — 2026-08-07
+This document records the original registered-app PR integration, including custom
+OpenChat backend methods. It is not the current unofficial client's connection
+procedure. For its app-owned code exchange, account reconnect and per-chat setup,
+see [Private imports from the unofficial OpenChat client](openchat-private-import.md#current-connection-flow-code-entry-2026-10-18).
+The current flow does not require changes to official OpenChat canisters.
+
+## Historical local contract — 2026-08-07
 
 IOU and OpenChat are co-deployed on the **same PocketIC replica** at the configured local IC
 origin. The OpenChat frontend and the IOU frontend are separate web processes, but cross-canister

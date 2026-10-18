@@ -33,6 +33,8 @@ use std::fmt;
 
 mod account_vault;
 mod durable_inbox;
+mod setup_code;
+use setup_code::{CreateSetupCodeRequest, SetupCodeContext, SetupCodeReceipt, SetupCodeStatus, SetupCodeStore};
 use account_vault::{AccountVault, AccountVaultStore, AccountWrappingKey, RootAdmission};
 use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine};
 use durable_inbox::{
@@ -537,6 +539,8 @@ impl Storable for RecoveryKey {
 const SCHEMA_VERSION: u32 = 20;
 
 thread_local! {
+    // Deliberately heap-only: an upgrade invalidates ten-minute setup codes, not durable app state.
+    static APP_SETUP_CODES: RefCell<SetupCodeStore> = RefCell::new(SetupCodeStore::default());
     static MEMORY_MANAGER: RefCell<MemoryManager<DefaultMemoryImpl>> =
         RefCell::new(MemoryManager::init(DefaultMemoryImpl::default()));
     static ACCOUNT_VAULTS: RefCell<AccountVaultStore<Memory>> = RefCell::new(
@@ -1298,6 +1302,11 @@ fn inspect_message() {
         "deposit_encrypted_inbox",
         "list_encrypted_inbox",
         "acknowledge_encrypted_inbox",
+        "create_app_setup_code",
+        "claim_app_setup_code",
+        "complete_app_setup_code",
+        "poll_app_setup_code",
+        "cancel_app_setup_code",
     ];
     if !allowed.contains(&method_name.as_str()) {
         ic_cdk::trap(format!(
@@ -1372,6 +1381,11 @@ fn inspect_message() {
         "revoke_encrypted_inbox_grant",
         "list_encrypted_inbox",
         "acknowledge_encrypted_inbox",
+        "create_app_setup_code",
+        "claim_app_setup_code",
+        "complete_app_setup_code",
+        "poll_app_setup_code",
+        "cancel_app_setup_code",
     ];
     if require_auth_methods.contains(&method_name.as_str())
         && caller == candid::Principal::anonymous()
@@ -1492,6 +1506,45 @@ async fn acquire_account_root(
             Err("account root derivation failed; this request will not dispatch again".into())
         }
     }
+}
+
+// Generic encrypted setup transport. All reads are replicated updates, authenticated by the
+// store itself as well as inspect_message. Creating/polling uses the client's ephemeral identity;
+// claiming/completing uses the app's normal signed-in identity plus the derived claim secret.
+// No stable schema change, app field parsing, key recovery or OpenChat backend call occurs here.
+#[ic_cdk::update]
+fn create_app_setup_code(request: CreateSetupCodeRequest) -> Result<SetupCodeReceipt, String> {
+    APP_SETUP_CODES.with(|store| store.borrow_mut().create(
+        ic_cdk::api::msg_caller(), request, ic_cdk::api::time() / 1_000_000,
+    ))
+}
+
+#[ic_cdk::update]
+fn claim_app_setup_code(request_id: String, claim_secret: Vec<u8>) -> Result<SetupCodeContext, String> {
+    APP_SETUP_CODES.with(|store| store.borrow_mut().claim(
+        ic_cdk::api::msg_caller(), &request_id, &claim_secret, ic_cdk::api::time() / 1_000_000,
+    ))
+}
+
+#[ic_cdk::update]
+fn complete_app_setup_code(request_id: String, claim_secret: Vec<u8>, encrypted_result: Vec<u8>) -> Result<SetupCodeReceipt, String> {
+    APP_SETUP_CODES.with(|store| store.borrow_mut().complete(
+        ic_cdk::api::msg_caller(), &request_id, &claim_secret, encrypted_result, ic_cdk::api::time() / 1_000_000,
+    ))
+}
+
+#[ic_cdk::update]
+fn poll_app_setup_code(request_id: String) -> Result<SetupCodeStatus, String> {
+    APP_SETUP_CODES.with(|store| store.borrow_mut().poll(
+        ic_cdk::api::msg_caller(), &request_id, ic_cdk::api::time() / 1_000_000,
+    ))
+}
+
+#[ic_cdk::update]
+fn cancel_app_setup_code(request_id: String) -> Result<bool, String> {
+    APP_SETUP_CODES.with(|store| store.borrow_mut().cancel(
+        ic_cdk::api::msg_caller(), &request_id, ic_cdk::api::time() / 1_000_000,
+    ))
 }
 
 // Owner-scoped replicated reads are deliberate: pending membership and exact acknowledgement
@@ -8413,6 +8466,23 @@ mod tests {
             validate < scan,
             "cheap new-row validation owns the lazy scan closure"
         );
+    }
+
+    #[test]
+    fn setup_code_endpoints_are_authenticated_updates_without_stable_schema_changes() {
+        let source = include_str!("lib.rs");
+        let inspect = source.split("fn inspect_message() {").nth(1).unwrap()
+            .split("// ───────────────────────── Phase 1 endpoints").next().unwrap();
+        let (allowed, authenticated) = inspect.split_once("let require_auth_methods").unwrap();
+        for name in ["create_app_setup_code", "claim_app_setup_code", "complete_app_setup_code",
+            "poll_app_setup_code", "cancel_app_setup_code"] {
+            assert_eq!(allowed.matches(&format!("\"{name}\"")).count(), 1);
+            assert_eq!(authenticated.matches(&format!("\"{name}\"")).count(), 1);
+            assert!(source.contains(&format!("#[ic_cdk::update]\nfn {name}(")));
+        }
+        let declaration = source.split("static APP_SETUP_CODES:").nth(1).unwrap().split(';').next().unwrap();
+        assert!(declaration.contains("SetupCodeStore::default()"));
+        assert!(!declaration.contains("MemoryId"));
     }
 
     #[test]

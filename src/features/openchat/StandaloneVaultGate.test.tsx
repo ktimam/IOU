@@ -100,7 +100,7 @@ describe("standalone authenticated routes use the account recovery gate", () => 
     session.ready = true;
     const html = renderToStaticMarkup(<LocalConnectPage />);
     expect(html).toContain("Signed in to IOU.");
-    expect(html).toContain("Waiting for a setup request.");
+    expect(html).toContain("Connection code");
     expect(session.gate).toHaveBeenCalledOnce();
   });
   it("keeps the normal draft waiting screen after recovery is ready", () => {

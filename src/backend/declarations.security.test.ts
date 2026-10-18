@@ -4,6 +4,29 @@ import { describe, expect, it } from "vitest";
 import { idlFactory } from "./declarations";
 
 describe("security-sensitive Candid bindings", () => {
+  it("round-trips the encrypted setup-code contract with replicated authenticated-method bindings", () => {
+    const service = idlFactory({ IDL }) as any;
+    const method = (name: string) => service._fields.find(([n]: [string]) => n === name)[1];
+    const round = (name: string, args: unknown[]) => IDL.decode(method(name).argTypes, IDL.encode(method(name).argTypes, args)) as any[];
+    const requestId = "ab".repeat(32);
+    const request = { request_id: requestId, claim_hash: new Uint8Array(32).fill(4),
+      encrypted_context: new Uint8Array(40).fill(5), expires_at_ms: 123456n };
+    expect(round("create_app_setup_code", [request])).toEqual([request]);
+    expect(round("claim_app_setup_code", [requestId, new Uint8Array(32).fill(6)])[0]).toBe(requestId);
+    expect(round("complete_app_setup_code", [requestId, new Uint8Array(32).fill(6), new Uint8Array(40).fill(7)])[2]).toHaveLength(40);
+    for (const name of ["create_app_setup_code", "claim_app_setup_code", "complete_app_setup_code", "poll_app_setup_code", "cancel_app_setup_code"]) {
+      expect(method(name).annotations).toEqual([]);
+      expect(IDL.decode(method(name).retTypes, IDL.encode(method(name).retTypes, [{ Err: "setup code not authorized" }]))[0]).toEqual({ Err: "setup code not authorized" });
+    }
+    for (const status of [{ Waiting: { expires_at_ms: 123456n } }, { Claimed: { expires_at_ms: 123456n } },
+      { Completed: { expires_at_ms: 123456n, encrypted_result: new Uint8Array(40).fill(7) } }]) {
+      const poll = method("poll_app_setup_code");
+      expect(IDL.decode(poll.retTypes, IDL.encode(poll.retTypes, [{ Ok: status }]))[0]).toEqual({ Ok: status });
+    }
+    const fields = method("create_app_setup_code").argTypes[0]._fields.map(([name]: [string]) => name);
+    expect(fields.sort()).toEqual(["claim_hash", "encrypted_context", "expires_at_ms", "request_id"]);
+  });
+
   it("round-trips vault CAS, explicit paid recovery, and immutable random-sheet key coordinates", () => {
     const service = idlFactory({ IDL }) as any;
     const method = (name: string) => service._fields.find(([n]: [string]) => n === name)[1];

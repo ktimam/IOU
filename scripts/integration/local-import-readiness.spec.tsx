@@ -240,10 +240,26 @@ describe("normal IOU sheet receiver and form", () => {
     await submit(); await waitText("Saved in IOU.");
     expect(plaintexts()[0].note).toBe("User reviewed note");
   });
-  it.each(["missing-date", "stale-type"])("blocks %s with a precise correction, then accepts a corrected fresh handoff", async reason => {
-    const rows = reason === "missing-date" ? [{ ...entry, date: undefined }] : [{ ...entry, typeId: "old", typeName: "Old" }];
-    await render(); await offerRows(rows);
-    await waitText(reason === "missing-date" ? "Set a date in the OpenChat card" : "Reconnect IOU in OpenChat and create a new proposal");
+  it("allows missing-date review in IOU but writes nothing until the user supplies a date and saves", async () => {
+    await review([{ ...entry, date: undefined }]);
+    const dateInput = container.querySelector('.entry-form input[type="date"]') as HTMLInputElement;
+    expect(dateInput).not.toBeNull(); expect(dateInput.value).toBe("");
+    expect(fixture.actor.add_entry_batch).not.toHaveBeenCalled(); expect(committed()).toHaveLength(0);
+    await submit(); await waitText("Choose a date before saving; nothing was added.");
+    expect(fixture.encrypt).not.toHaveBeenCalled(); expect(fixture.actor.add_entry_batch).not.toHaveBeenCalled();
+    await act(async () => {
+      Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")!.set!.call(dateInput, "2026-08-14");
+      dateInput.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+    expect(fixture.actor.add_entry_batch).not.toHaveBeenCalled();
+    await submit(); await waitText("Saved in IOU.");
+    expect(fixture.actor.add_entry_batch).toHaveBeenCalledOnce();
+    expect(plaintexts()[0].ts).toBe(Date.UTC(2026, 7, 14));
+    expect(committed()).toHaveLength(1);
+  });
+  it("blocks stale-type with a precise correction, then accepts a corrected fresh handoff", async () => {
+    await render(); await offerRows([{ ...entry, typeId: "old", typeName: "Old" }]);
+    await waitText("Reconnect IOU in OpenChat and create a new proposal");
     expect(button("Review & add")).toBeUndefined(); expect(fixture.actor.add_entry_batch).not.toHaveBeenCalled();
     // A corrected card is a fresh user-initiated handoff; never overwrite a received request.
     await act(async () => { root.unmount(); }); root = createRoot(container);

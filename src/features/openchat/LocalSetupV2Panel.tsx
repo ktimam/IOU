@@ -8,34 +8,35 @@ import { decryptName } from "../crypto/devVetkd";
 import { useLocalDeliveryKey } from "./LocalDeliveryKeyProvider";
 import { verifiedLocalSetupProcessor } from "./LocalSetupDownloads";
 import { localConnectionLabel, localConnectionLabels } from "./localConnectionLabels";
-import { createLocalAppSetupConsent, type LocalAppSetupState } from "./localAppSetupConsent";
+import type { LocalSetupCodeSession } from "./localSetupCode";
 import { localSetupAccountId } from "./localAppSetupV2";
 import { LocalSetupV2Error, prepareLocalSetupV2, readLocalChatRoutes, type LocalSetupSheet, type LocalSetupV2Actor } from "./localSetupV2Service";
 import { loadLocalSetupSheet } from "./localSetupSheet";
 import { LocalSetupTypesPreview } from "./LocalSetupTypesPreview";
 
-type Props = { principal: string; opener: Window; consent: ReturnType<typeof createLocalAppSetupConsent>;
-  state: Extract<LocalAppSetupState, { kind: "pending" }>; close: (message: string) => void; onShared: () => void };
+type Props = { principal: string; session: LocalSetupCodeSession; close: (message: string) => void; onShared: () => void };
 type Choice = { sheetId: string; label: string };
-export function LocalSetupV2Panel({ principal, opener, consent, state, close, onShared }: Props) {
-  const context = state.binding.setupContext!;
+export function LocalSetupV2Panel({ principal, session, close, onShared }: Props) {
+  const context = session.context;
   const { actor, err } = useActor(), { identity } = useAuth(), keys = useLocalDeliveryKey(), keyring = useSheetKey();
   const [loaded, setLoaded] = useState<{ actor: unknown; identity: unknown; currency: string; choices: Choice[] }>();
   const [selected, setSelected] = useState("");
   const [notice, setNotice] = useState("");
   const [busy, setBusy] = useState(false);
+  const [prepared, setPrepared] = useState(false);
+  const preparedJson = useRef<string>();
   const [preview, setPreview] = useState<{ actor: unknown; identity: unknown; sheet: LocalSetupSheet }>();
   const [previewError, setPreviewError] = useState(false);
   const mounted = useRef(true), pending = useRef(false);
-  const live = useRef({ actor, identity, principal, selected, binding: state.binding, keyring, preview });
-  live.current = { actor, identity, principal, selected, binding: state.binding, keyring, preview };
+  const live = useRef({ actor, identity, principal, selected, session, keyring, preview });
+  live.current = { actor, identity, principal, selected, session, keyring, preview };
   useEffect(() => { mounted.current = true; return () => { mounted.current = false; }; }, []);
   useEffect(() => {
     let cancelled = false;
     setLoaded(undefined); setSelected(""); setNotice("");
     if (!actor || !identity) return;
     const check = () => { if (cancelled || !mounted.current || live.current.actor !== actor || live.current.identity !== identity ||
-      live.current.principal !== principal || !consent.isCurrent(state.binding)) throw new Error("Setup session changed"); };
+      live.current.principal !== principal || !session.isCurrent()) throw new Error("Setup session changed"); };
     void (async () => {
       const accountId = await localSetupAccountId({ principal, backendHost, backendCanisterId }); check();
       if (context.accountId && context.accountId !== accountId) throw new LocalSetupV2Error("Sign in to the IOU account already connected in OpenChat. No key or chat route was changed.");
@@ -64,14 +65,14 @@ export function LocalSetupV2Panel({ principal, opener, consent, state, close, on
       setSelected(current && choices.some(choice => choice.sheetId === current) ? current : "");
     })().catch(error => { if (!cancelled) setNotice(error instanceof LocalSetupV2Error ? error.message : "IOU could not load this setup. Nothing was shared."); });
     return () => { cancelled = true; };
-  }, [actor, identity, principal, context, consent, state.binding]);
+  }, [actor, identity, principal, context, session]);
 
   useEffect(() => {
     let cancelled = false;
     setPreview(undefined); setPreviewError(false);
     if (context.scope !== "chat" || !selected || !loaded || loaded.actor !== actor || loaded.identity !== identity) return;
     const check = () => {
-      if (cancelled || !mounted.current || !consent.isCurrent(state.binding) || live.current.actor !== actor ||
+      if (cancelled || !mounted.current || !session.isCurrent() || live.current.actor !== actor ||
         live.current.identity !== identity || live.current.principal !== principal || live.current.selected !== selected) throw new Error("Setup preview changed");
     };
     void loadLocalSetupSheet({ actor, principal, sheetId: selected, defaultCurrency: loaded.currency,
@@ -79,7 +80,7 @@ export function LocalSetupV2Panel({ principal, opener, consent, state, close, on
       check(); setPreview({ actor, identity, sheet });
     }).catch(() => { if (!cancelled) setPreviewError(true); });
     return () => { cancelled = true; };
-  }, [actor, identity, principal, context.scope, selected, loaded, consent, state.binding]);
+  }, [actor, identity, principal, context.scope, selected, loaded, session]);
 
   const previewReady = !!preview && preview.actor === actor && preview.identity === identity && preview.sheet.sheetId === selected;
 
@@ -88,14 +89,14 @@ export function LocalSetupV2Panel({ principal, opener, consent, state, close, on
       (context.scope === "chat" && (!selected || !previewReady))) return;
     const captured = live.current;
     const check = () => {
-      if (!mounted.current || opener.closed || !consent.isCurrent(state.binding) || live.current.actor !== captured.actor ||
+      if (!mounted.current || !session.isCurrent() || live.current.actor !== captured.actor ||
         live.current.identity !== captured.identity || live.current.principal !== captured.principal || live.current.selected !== captured.selected ||
-        live.current.binding !== captured.binding || (context.scope === "chat" && live.current.preview !== captured.preview)) throw new Error("Setup session changed");
+        live.current.session !== captured.session || (context.scope === "chat" && live.current.preview !== captured.preview)) throw new Error("Setup session changed");
     };
     pending.current = true; setBusy(true); setNotice("");
     try {
       let currency = loaded.currency;
-      const json = await prepareLocalSetupV2({ context, actor: actor as LocalSetupV2Actor,
+      const json = preparedJson.current ?? await prepareLocalSetupV2({ context, actor: actor as LocalSetupV2Actor,
         identity: { principal, backendHost, backendCanisterId }, destination: `${location.origin}/openchat/import`,
         selectedSheetId: context.scope === "chat" ? selected : undefined, assertCurrent: check,
         loadKey: () => keys.load(true), loadProcessor: verifiedLocalSetupProcessor,
@@ -110,18 +111,23 @@ export function LocalSetupV2Panel({ principal, opener, consent, state, close, on
           return sheet;
         },
       }); check();
-      opener.postMessage(consent.approve(state.binding, json), state.binding.senderOrigin); onShared();
+      // A lost completion response retries only this exact prepared setup/ciphertext. Never mint
+      // another grant or rewrite the chat route merely because the transport response was lost.
+      preparedJson.current = json; setPrepared(true);
+      await session.sendResult(json); onShared();
     } catch (error) {
       if (mounted.current) {
-        if (consent.state().kind === "shared") close("The setup delivery outcome is unknown. Check OpenChat before starting another connection.");
-        else setNotice(error instanceof LocalSetupV2Error ? error.message : "IOU could not finish this setup. No entries were sent or saved. Check the current chat mapping before trying again.");
+        if (!session.isCurrent()) close("The connection closed or expired. Check OpenChat before starting another connection.");
+        else setNotice(error instanceof LocalSetupV2Error ? error.message : preparedJson.current
+          ? "The connection response was not confirmed. Retry sending the same setup, or check the connection in OpenChat. No entry was saved."
+          : "IOU could not finish this setup. No entries were sent or saved. Check the current chat mapping before trying again.");
       }
     } finally { pending.current = false; if (mounted.current) setBusy(false); }
   }
   const ready = !!loaded && loaded.actor === actor && loaded.identity === identity;
   return <section aria-label={context.scope === "account" ? "IOU account connection" : "IOU chat setup"}>
     <h2>{context.scope === "account" ? "Connect your IOU account" : "Choose this chat's account and sheet"}</h2>
-    {context.scope === "account" ? <p>Reconnect your account without changing any chat's sheet. Choose or change a sheet through Open setup in that chat.</p> : <label>Sheet <select value={selected} disabled={!ready || busy} onChange={event => setSelected(event.target.value)}>
+    {context.scope === "account" ? <p>Reconnect your account without changing any chat's sheet. Choose or change a sheet through Open setup in that chat.</p> : <label>Sheet <select value={selected} disabled={!ready || busy || prepared} onChange={event => setSelected(event.target.value)}>
       <option value="">Choose a sheet…</option>{loaded?.choices.map(choice => <option key={choice.sheetId} value={choice.sheetId}>{choice.label}</option>)}
     </select></label>}
     {context.scope === "chat" && selected && <LocalSetupTypesPreview defaultCurrency={loaded?.currency ?? ""}
@@ -129,6 +135,6 @@ export function LocalSetupV2Panel({ principal, opener, consent, state, close, on
     {!ready && !notice && !err && <p>Checking the connected IOU account…</p>}
     {(notice || err) && <p role="status">{notice || "IOU could not prepare the connection."}</p>}
     <p>OpenChat will remember this connection on this device. It may deliver encrypted drafts for 90 days; pending drafts stay in IOU for up to 30 days and still need your review and Save.</p>
-    <button disabled={!ready || !keys.ready || busy || (context.scope === "chat" && (!selected || !previewReady))} onClick={() => void share()}>{busy ? "Connecting…" : context.scope === "account" ? "Connect" : "Save setup"}</button>
+    <button disabled={!ready || !keys.ready || busy || (context.scope === "chat" && (!selected || !previewReady))} onClick={() => void share()}>{busy ? "Connecting…" : prepared ? "Retry same connection" : context.scope === "account" ? "Connect" : "Save setup"}</button>
   </section>;
 }

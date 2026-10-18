@@ -4,6 +4,8 @@ This additional suite checks IOU's app-owned setup export against a compatible O
 
 Install each repository's normal dependencies separately before running. The runner never downloads packages, starts servers, or silently skips absent dependencies. Supply both paths explicitly (including a project-specific directory within your chosen temporary storage):
 
+The runner uses the upstream-consolidated `frontend/vitest.config.ts` when present, or the older PR's `frontend/app/vitest.config.ts`. It imports that real configuration unchanged; missing configuration fails closed. Configuration resolution has a focused regression command: `node --test scripts/integration/openchat-test-config.test.mjs`.
+
 ```sh
 node scripts/integration/run-openchat-private-handoff.mjs --openchat-checkout /path/to/open-chat-fork --work-dir /path/to/project-temp
 ```

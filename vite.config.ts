@@ -55,7 +55,8 @@ function devFramingHeaders(frameAncestors: readonly string[], localAppOrigins: r
       server.middlewares.use((req, res, next) => {
         const isDocument = (req.headers.accept ?? "").includes("text/html");
         const allowed = localAppOrigins.length > 0 && isLocalAppFrameRoute(req.url) ? localAppOrigins : frameAncestors;
-        const ancestors = isDocument ? allowed.join(" ") : "'none'";
+        const codeSetup = /^\/openchat\/connect(?:\.html)?(?:[/?#]|$)/.test(req.url ?? "");
+        const ancestors = isDocument && !codeSetup ? allowed.join(" ") : "'none'";
         res.setHeader(
           "Content-Security-Policy",
           `frame-ancestors ${ancestors}`,

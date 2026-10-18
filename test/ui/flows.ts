@@ -13,8 +13,9 @@ import type { Page } from "@playwright/test";
 const T = 45_000;
 
 /** Land on the accounts list (safe: a bounce from a guarded page settles here; data is fresh). */
-export async function gotoHome(page: Page): Promise<void> {
-  await page.goto("/pairs", { waitUntil: "domcontentloaded" });
+export async function gotoHome(page: Page, explicitOrigin?: string): Promise<void> {
+  // Attached Android CDP contexts do not inherit Playwright's configured baseURL.
+  await page.goto(explicitOrigin ? new URL("/pairs", explicitOrigin).href : "/pairs", { waitUntil: "domcontentloaded" });
   await page.getByRole("heading", { name: "Your accounts" }).waitFor({ timeout: T });
 }
 
@@ -40,8 +41,8 @@ async function openAccount(page: Page, name?: string): Promise<void> {
 }
 
 /** Create a new account (pair + auto first sheet). Returns the new sheet id (lands on /sheet/<id>). */
-export async function createAccount(page: Page, accountName: string, sheetName: string): Promise<string> {
-  await gotoHome(page);
+export async function createAccount(page: Page, accountName: string, sheetName: string, explicitOrigin?: string): Promise<string> {
+  await gotoHome(page, explicitOrigin);
   await page.getByRole("button", { name: "+ New account" }).click();
   await page.getByRole("heading", { name: "New account" }).waitFor({ timeout: T });
   await page.locator("#accountName").fill(accountName);

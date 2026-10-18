@@ -33,6 +33,13 @@ const DEFAULT_CANISTER_ID =
 type IDL = any;
 
 export const idlFactory = ({ IDL: idl }: { IDL: IDL }) => {
+  const CreateSetupCodeRequest = idl.Record({ request_id: idl.Text, claim_hash: idl.Vec(idl.Nat8),
+    encrypted_context: idl.Vec(idl.Nat8), expires_at_ms: idl.Nat64 });
+  const SetupCodeReceipt = idl.Record({ expires_at_ms: idl.Nat64 });
+  const SetupCodeContext = idl.Record({ encrypted_context: idl.Vec(idl.Nat8), expires_at_ms: idl.Nat64 });
+  const SetupCodeCompletion = idl.Record({ encrypted_result: idl.Vec(idl.Nat8), expires_at_ms: idl.Nat64 });
+  const SetupCodeStatus = idl.Variant({ Waiting: SetupCodeReceipt, Claimed: SetupCodeReceipt, Completed: SetupCodeCompletion });
+  const SetupCodeResult = (value: IDL) => idl.Variant({ Ok: value, Err: idl.Text });
   const EncryptedInboxError = idl.Variant({
     NotAuthorized: idl.Null, InvalidRequest: idl.Null, NotFound: idl.Null, Expired: idl.Null,
     Revoked: idl.Null, Conflict: idl.Null, Capacity: idl.Null, CounterExhausted: idl.Null,
@@ -436,6 +443,11 @@ export const idlFactory = ({ IDL: idl }: { IDL: IDL }) => {
     KeyUnavailable: idl.Null,
   });
   return idl.Service({
+    create_app_setup_code: idl.Func([CreateSetupCodeRequest], [SetupCodeResult(SetupCodeReceipt)], []),
+    claim_app_setup_code: idl.Func([idl.Text, idl.Vec(idl.Nat8)], [SetupCodeResult(SetupCodeContext)], []),
+    complete_app_setup_code: idl.Func([idl.Text, idl.Vec(idl.Nat8), idl.Vec(idl.Nat8)], [SetupCodeResult(SetupCodeReceipt)], []),
+    poll_app_setup_code: idl.Func([idl.Text], [SetupCodeResult(SetupCodeStatus)], []),
+    cancel_app_setup_code: idl.Func([idl.Text], [SetupCodeResult(idl.Bool)], []),
     // Phase 1
     whoami: idl.Func([], [idl.Opt(idl.Text)], ["query"]),
     get_my_user: idl.Func([], [idl.Opt(UserRecord)], ["query"]),

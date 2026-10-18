@@ -546,6 +546,9 @@ the compatible client, never by weakening validation or emitting a fake option.
    catalog digest covers every view node. No extra view download/URL is needed.
 3. The ordinary `/openchat/connect` page uses that same package producer after
    the existing explicit account/sheet setup consent and processor verification.
+   It opens at the app's own top-level origin and accepts OpenChat's expiring
+   connection code. The app-owned encrypted setup exchange replaces the localhost
+   iframe transport; see `openchat-private-import.md` for the protocol and retry rules.
    Its static view must exactly match the advertised public view; private
    account setup cannot add, remove or substitute another tree.
 4. A compatible client can receive later bounded visual updates through its

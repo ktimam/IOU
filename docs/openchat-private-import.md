@@ -8,7 +8,57 @@ draft received by IOU is not saved until its final review is confirmed.
 encryption at Save. The September 26 plaintext transport is obsolete. Source changes
 and passing tests do not update previously installed APKs or served bundles automatically.
 
-## Normal user flow (UI repair, 2026-10-06)
+## Current connection flow: code entry (2026-10-18)
+
+Connect/Reconnect uses the original OpenChat code/copy/open/check UI. OpenChat opens
+IOU's published `/openchat/connect` address as a top-level page, not inside
+`localhost:5193` or a client-owned iframe. IOU therefore uses its ordinary origin's
+sign-in, device storage and password-manager recovery entry. An account which is
+not already unlocked still requires normal IOU sign-in/recovery; connecting never
+bypasses it or invokes paid recovery automatically.
+
+1. In OpenChat, choose **Connect** or **Reconnect** and copy its connection code.
+2. Choose **Open IOU**, sign in/unlock on IOU's own address if needed, and paste the code.
+3. Review and confirm the account connection. For a chat's **Open setup**, choose
+   its sheet and confirm **Save setup** instead.
+4. Return to OpenChat and choose **Check connection**. Existing chat assignments
+   survive account reconnect; only an explicit chat setup changes its sheet.
+
+The high-entropy code expires at OpenChat's displayed deadline (normally nine minutes,
+with a hard ten-minute server maximum). The shorter client deadline leaves headroom
+for small device/replica clock differences. It is a setup capability, not an
+Internet Identity login or a recovery password. Do not share it with anyone. It is
+never placed in a URL, local storage or logs. The generic `setupCode` route is pinned
+by the verified public app catalog. The app's existing canister hosts the exchange;
+no official OpenChat canister changes or separate relay server are required.
+
+OpenChat uses a fresh ephemeral identity to create and check a request. A code-derived
+proof binds its first authenticated app claimant. Context and response are encrypted
+client-side with separate HKDF/AES-GCM keys; the canister sees only ciphertext,
+principals, sizes and timing, never the code or encryption keys. Expiry, creator-only
+poll/cancel, claimant-only completion and exact idempotent retries are server-enforced.
+The bounded temporary exchange is lost on upgrade; saved keys, routes and inbox entries
+are not. Capacity limits bound memory but do not eliminate availability attacks by
+many independently created identities.
+
+If completion's response is lost, retrying sends the same prepared ciphertext,
+without minting another grant or repeating route preparation. Cancelling/expiry does
+not undo a grant or mapping already written during explicit approval. It never saves
+a financial entry. Encrypted inbox delivery and final IOU review/Save are unchanged.
+Re-entering a completed code is rejected before a new setup session can prepare
+grants or routes; the original result remains available to OpenChat's check. Exact
+completion retries apply to the same live attempt. Setup is not an atomic transaction
+across independently opened app pages: do not approve concurrent setup changes for
+the same chat. Existing mapping-change checks remain in force.
+
+This change requires the updated app backend/frontend, public catalog and compatible
+OpenChat web/APK build. Older APKs do not gain it from an IOU page refresh. Mainnet
+publication and physical-phone acceptance must be recorded separately from source tests.
+
+## Historical user-flow and verification notes (superseded connection transport)
+
+The framing/loopback setup transport below describes older builds; it is not the
+current connection method. The durable inbox and account/chat isolation remain in use.
 
 ### Connection-only document and APK framing
 
@@ -406,8 +456,10 @@ existing components, in order, without rebuilding or reinstalling anything:
    mention OpenChat. Do not substitute `dfx start`, reset, deploy or automatic repair.
    An incomplete checkpoint requires separate backup-first recovery approval.
 2. Start only the known verified IOU frontend snapshot, not a dirty development
-   checkout containing unaccepted model/processor experiments. The UI-repair source
-   activated on 2026-10-06 is
+   checkout containing unaccepted model/processor experiments. Use its latest
+   activation receipt: the October 18 connection-code overlay supersedes the
+   historical connection-frame files described below, while retaining the tested
+   model prompts and processor. The UI-repair source originally activated on 2026-10-06 is
    `F:/Temp/OpenChat-IOU/pr-flow-repair-20261006/iou-r4/source`; its `source.json`
    receipt is SHA-256 `bc0779909901f43369a64a8ff385058eff081aae8c8cda748f4e722cba523ff2`.
    This supersedes the initial repair snapshot `iou/source` (receipt SHA-256
@@ -418,9 +470,10 @@ existing components, in order, without rebuilding or reinstalling anything:
    `node node_modules/vite/bin/vite.js --host 127.0.0.1 --port 3000 --strictPort`.
    The launcher must pass an explicitly present empty `VITE_IC_URL` in the child
    environment, plus `VITE_LOCAL_IMPORT_SENDER_ORIGIN=http://localhost:5190` for
-   this browser origin. Also preserve the exact local framing configuration described
-   below: browser `http://localhost:5190`, native handoff `http://localhost:5192`,
-   and native setup `http://localhost:5193`. Keep the existing local network, port and canister settings;
+   this browser origin. Preserve the exact local delivery framing configuration
+   described below: browser `http://localhost:5190` and native handoff
+   `http://localhost:5192`. Connection is now a top-level IOU page; do not add
+   `http://localhost:5193` to enable it. Keep the existing local network, port and canister settings;
    do not let a stale LAN override replace the preserved local gateway. Use the
    existing IOU-only launcher that supplies these values, not the general launcher.
 3. From the fork checkout, reuse the selected, already verified frozen web artifact:
@@ -461,16 +514,19 @@ invalid or outdated origin, as well as whether the nonce or exact parent-window
 binding was lost. Setup-file preparation is historical recovery, not a current
 connection step.
 
-The native flow uses dedicated local-test transport origins, not arbitrary local
+The native delivery flow uses dedicated local-test transport origins, not arbitrary local
 ports. Its one-use launch capability is erased before IOU loads. The receiver binds
 the exact parent, origin and nonce and accepts ciphertext only; recipient decryption
-and the ordinary IOU review/Save remain required. Setup sharing still requires the
-user's explicit **Connect**. None of this proves official OpenChat provenance.
+and the ordinary IOU review/Save remain required. This is the separate compatibility
+delivery transport, not the account/chat connection flow. None of this proves
+official OpenChat provenance.
 
 For the local development frontend only, pass `IOU_LOCAL_APP_FRAME_ORIGINS` as a
-JSON array of exact loopback origins for the browser relay and native setup/handoff
-listeners. No wildcard is allowed. This opt-in affects only `/openchat/connect` and
-`/openchat/import`, and is ignored by production builds and non-local networks.
+JSON array of exact loopback origins for the browser relay and native delivery
+listener. No wildcard is allowed. This opt-in affects only `/openchat/import`;
+`/openchat/connect` remains unframeable: local Vite sends `frame-ancestors 'none'`,
+and the deployed asset policy also sends `X-Frame-Options: DENY`. The opt-in is
+ignored by production builds and non-local networks.
 
 ## Connect IOU
 
@@ -479,32 +535,39 @@ or processor file downloads or uploads are required.
 
 1. In OpenChat, open **Apps**. IOU appears automatically when it is listed
    in the operator-configured directory.
-2. Choose **Connect** for IOU. The IOU connection screen opens directly in the
-   client; opening `/openchat/connect` directly does not create a setup request.
-3. Check the exact **Requesting client** address. Continue only if you recognize
-   it and just started this request. Sign in to IOU separately if needed and verify
-   the account. Choose **Connect**, then return to OpenChat and check that it accepted
-   the account connection. Account Connect/Reconnect has no sheet picker.
+2. Choose **Connect** for IOU, copy the displayed connection code, then choose
+   **Open IOU**. The published `/openchat/connect` address opens as a top-level IOU
+   page in the browser, using IOU's own sign-in, storage and password manager.
+3. Sign in/unlock IOU if needed, paste the code and choose **Continue**. Verify the
+   IOU account and continue only if you just started this connection. The displayed
+   client address is supplied by the request, not proof of its origin. Choose
+   **Connect**, return to OpenChat and choose **Check connection**. Account
+   Connect/Reconnect has no sheet picker and preserves existing chat assignments.
 4. Enable IOU in the intended chat and choose **Open setup** in that chat's app
-   settings. Choose the intended named **Sheet**; an existing mapping is preselected.
+   settings. Copy that setup code, open IOU, and paste it there in the same way.
+   Choose the intended named **Sheet**; an existing mapping is preselected.
    Wait for its private Types to load. Review the account/sheet reminder, currency,
    Type names, keywords and **Owed to you** / **You owe** directions.
    IOU also recovers the signed-in user's delivery keypair and shares ONLY its public
    key/fingerprint and bound recipient context. The private key and separate sheet key,
    fees, schedules, entries and sign-in credentials remain in IOU. No message/image/draft
    is exchanged during setup. Missing or changed delivery keys require reconnection.
-5. Choose **Save setup**, then return to OpenChat and check that it accepted this
+5. Choose **Save setup**, then return to OpenChat and choose **Check connection** for this
    chat's setup. Connection does not automatically enable other chats or save entries.
 
-Setup-v1 compatibility clients combine account connection and sheet selection in
+Historical setup-v1 compatibility clients combine account connection and sheet selection in
 one **Connect** screen. That older flow does not implement the separate scoped
 account/chat setup above.
 
-The setup request expires after ten minutes. If the requester closes, the page
+The setup request expires at the displayed code deadline. If the requester closes, the page
 reloads, or the identity/destination changes during setup, start a fresh **Connect**
-request. If sharing has an unknown outcome, check OpenChat first; IOU does not
-automatically retry. The APK uses its separate local setup bridge, not a browser
-login bridge; this procedure is not a claim of native runtime acceptance.
+request. If sharing has an unknown outcome, choose **Check connection** in OpenChat
+first. Retrying completion in the same live IOU page reuses its already-prepared
+ciphertext and does not create another grant or repeat route preparation; there is
+no automatic retry or polling loop. Closing or expiring the transport does not undo
+an already-approved grant or mapping. The current browser and APK flows use this
+same code exchange, not the old local setup bridge. Source tests alone are not a
+claim of native runtime acceptance.
 
 ## Setup updates and local storage
 

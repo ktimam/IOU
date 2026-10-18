@@ -535,7 +535,24 @@ type EncryptedInboxAcknowledge = record {
     inbox_id : text; request_id : text; body_sha256 : blob; disposition : EncryptedInboxDisposition;
 };
 
+// App-owned ten-minute encrypted setup rendezvous. All methods are authenticated updates.
+// Heap-only: upgrades invalidate codes; cancellation does not undo app-side setup effects.
+type CreateSetupCodeRequest = record {
+    request_id : text; claim_hash : blob; encrypted_context : blob; expires_at_ms : nat64;
+};
+type SetupCodeReceipt = record { expires_at_ms : nat64 };
+type SetupCodeContext = record { encrypted_context : blob; expires_at_ms : nat64 };
+type SetupCodeCompletion = record { encrypted_result : blob; expires_at_ms : nat64 };
+type SetupCodeStatus = variant {
+    Waiting : SetupCodeReceipt; Claimed : SetupCodeReceipt; Completed : SetupCodeCompletion;
+};
+
 service : {
+    create_app_setup_code : (CreateSetupCodeRequest) -> (variant { Ok : SetupCodeReceipt; Err : text });
+    claim_app_setup_code : (text, blob) -> (variant { Ok : SetupCodeContext; Err : text });
+    complete_app_setup_code : (text, blob, blob) -> (variant { Ok : SetupCodeReceipt; Err : text });
+    poll_app_setup_code : (text) -> (variant { Ok : SetupCodeStatus; Err : text });
+    cancel_app_setup_code : (text) -> (variant { Ok : bool; Err : text });
     create_encrypted_inbox_grant : (EncryptedInboxCreateGrant) -> (variant { Ok : EncryptedInboxGrant; Err : EncryptedInboxError });
     list_encrypted_inbox_grants : (opt text) -> (variant { Ok : EncryptedInboxGrantPage; Err : EncryptedInboxError });
     revoke_encrypted_inbox_grant : (text) -> (variant { Ok : bool; Err : EncryptedInboxError });

@@ -57,6 +57,7 @@ test("stages exact reviewed processor and actions, changing only public destinat
   const expected = structuredClone(original);
   expected.apps[0].destination = `${origin}/openchat/import`;
   expected.apps[0].deliveryInbox = { version: 1, kind: "ic-canister", host: "https://icp-api.io", canisterId };
+  expected.apps[0].setupCode = { ...expected.apps[0].deliveryInbox };
   assert.deepEqual(json(path.join(staged, "local-app-v1.json")), expected);
   assert.equal(json(path.join(staged, "apps-v1.json")).apps[0].setupUrl, "/openchat/connect");
   const processor = verifyCatalogOnlyProcessor({
@@ -163,6 +164,7 @@ test("never publishes private recipient setup, capabilities or saved-Type matchi
     app => { app.actions[0].processorContext = { types: [{ name: "Private saved Type" }] }; },
     app => { app.actions[0].draftEditor = { choices: [{ label: "Private Type" }] }; },
     app => { app.deliveryInbox = { version: 1, kind: "ic-canister", host: "https://icp-api.io", canisterId, writeCapability: "private" }; },
+    app => { app.setupCode = { version: 1, kind: "ic-canister", host: "https://icp-api.io", canisterId, grant: "private" }; },
     app => { app.actions[0].definition.rules.push({ field: "typeId", map: [{ value: "private" }] }); },
   ]) {
     const f = fixture(); replaceCatalog(f, mutate);
@@ -197,7 +199,7 @@ test("fails closed when an explicit asset CSP/connect policy is absent or ambigu
   }
 });
 
-test("stages the dedicated Connect framing exception without relaxing index or local network access", () => {
+test("stages top-level-only code entry without relaxing index or local network access", () => {
   const f = fixture(), before = sourceHashes(f);
   const parsePolicy = file => JSON.parse(readFileSync(file, "utf8").replace(/^\s*\/\/.*$/gm, ""));
   const original = parsePolicy(path.join(f.root, "public", ".ic-assets.json5"));
@@ -211,7 +213,7 @@ test("stages the dedicated Connect framing exception without relaxing index or l
   };
   const ancestors = new Map([
     ["**/*", ["'none'"]], ["index.html", ["https://oc.app"]],
-    ["openchat/connect.html", ["http://localhost:5193", "https://oc.app"]],
+    ["openchat/connect.html", ["'none'"]],
   ]);
   for (const [match, expected] of ancestors) {
     const matches = staged.filter(rule => rule.match === match);

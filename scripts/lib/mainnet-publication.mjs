@@ -80,7 +80,7 @@ function requireOutput(root, outputDirectory) {
 function requirePublicCatalog(catalog) {
   const app = catalog.apps[0]; // verifyCatalogOnlyProcessor already checked the one-app shape.
   if (Object.keys(catalog).some(key => !["version", "apps"].includes(key)) ||
-    Object.keys(app).some(key => !["id", "revision", "name", "description", "destination", "processor", "actions", "setupScopes", "deliveryInbox"].includes(key)) ||
+    Object.keys(app).some(key => !["id", "revision", "name", "description", "destination", "processor", "actions", "setupScopes", "deliveryInbox", "setupCode"].includes(key)) ||
     !Array.isArray(app.actions) || !app.actions.length || app.actions.some(action => !plain(action) ||
       Object.keys(action).some(key => !["definition", "draftSchema", "handoff", "draftView", "draftPresentation"].includes(key)))) {
     throw new Error("Mainnet publication accepts only the public app catalog, never private account setup");
@@ -88,6 +88,10 @@ function requirePublicCatalog(catalog) {
   if (app.deliveryInbox && (!plain(app.deliveryInbox) ||
     Object.keys(app.deliveryInbox).sort().join(",") !== "canisterId,host,kind,version")) {
     throw new Error("Private inbox capabilities must never enter public publication");
+  }
+  if (app.setupCode && (!plain(app.setupCode) ||
+    Object.keys(app.setupCode).sort().join(",") !== "canisterId,host,kind,version")) {
+    throw new Error("Private setup capabilities must never enter public publication");
   }
   for (const action of app.actions) {
     if (!plain(action.definition) || !Array.isArray(action.definition.rules) ||
@@ -145,6 +149,7 @@ export function stageMainnetPublication({ root, outputDirectory, publicOrigin, b
   const destination = `${origin}/openchat/import`;
   catalog.apps[0].destination = destination;
   catalog.apps[0].deliveryInbox = { version: 1, kind: "ic-canister", host: "https://icp-api.io", canisterId };
+  catalog.apps[0].setupCode = { ...catalog.apps[0].deliveryInbox };
   const catalogBytes = Buffer.from(JSON.stringify(catalog, null, 2) + "\n");
   const directoryBytes = Buffer.from(JSON.stringify(createLocalAppPublicDirectory(catalog, catalogBytes, processor), null, 2) + "\n");
   // Check the complete staged chain before writing any output.

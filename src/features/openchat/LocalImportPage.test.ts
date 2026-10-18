@@ -8,16 +8,18 @@ const connect = readFileSync(new URL("./LocalConnectPage.tsx", import.meta.url),
 
 describe("private import route wiring", () => {
   it("keeps each live transport outside an unconditional recovery gate, including empty states", () => {
-    for (const source of [page, connect]) {
+    for (const source of [page]) {
       const gate = source.indexOf("return <AccountVaultGate>");
       expect(gate).toBeGreaterThan(source.indexOf('window.addEventListener("message", receive)'));
       expect((source.match(/<AccountVaultGate>/g) ?? []).length).toBe(1);
       expect(source).not.toMatch(/&&\s*<AccountVaultGate>/);
     }
     expect(page).toContain("<AuthProvider><LocalImportSession /></AuthProvider>");
-    expect(connect).toContain("<LocalDeliveryKeyProvider><ConnectSession opener={opener} /></LocalDeliveryKeyProvider>");
+    expect(connect).toContain("<LocalDeliveryKeyProvider><AccountVaultGate><ConnectSession /></AccountVaultGate></LocalDeliveryKeyProvider>");
     expect(page).toContain("const transport = useRef<ImportTransport>");
-    expect(connect).toContain("const consentRef = useRef<Consent>");
+    expect(connect).toContain("claimLocalSetupCode");
+    expect(connect).toContain("window.parent !== window");
+    expect(connect).not.toMatch(/postMessage|localAppSenderWindow|<iframe|window.addEventListener\("message"/);
   });
   it("is a separate encrypted route without legacy OpenChat registration/inbox/capability providers", () => {
     expect(routes).toContain('<Route path="/openchat/import" element={<LocalImportPage />} />');

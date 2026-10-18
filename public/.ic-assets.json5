@@ -13,9 +13,9 @@
 //   a route-only rule would not isolate a framing permission from the rest of the SPA.
 //   openchat/connect.html is therefore a separate physical document, with a connection-only
 //   bootstrap. Its extensionless /openchat/connect alias preserves the installed publisher URL.
-//   Only this document additionally allows the APK helper at http://localhost:5193. That origin
-//   is not proof of an APK identity; setup still requires bound requests and explicit consent.
-//   Do not assume cross-origin frames are signed out: this setup page uses normal IOU auth.
+//   This document is top-level-only: normal IOU authentication and password-manager recovery
+//   stay at the real IOU origin. Connection codes replace the former APK iframe helper.
+//   Setup still requires an expiring encrypted exchange and explicit consent.
 //   Every other asset (JS/CSS/fonts/…) stays 'none'/DENY.
 [
   {
@@ -62,14 +62,14 @@
   {
     // The stable /openchat/connect alias resolves to this physical connection document, not index.html.
     // Retain that publisher URL for installed clients; do not replace it with the .html spelling.
-    // Keep the existing official web origin; add only the exact native Connect helper origin.
+    // Code entry is never embedded, including by the former localhost helper.
     "match": "openchat/connect.html",
     "enable_aliasing": true,
     "headers": {
-      "Content-Security-Policy": "default-src 'self'; connect-src 'self' http://127.0.0.1:40436 https://icp-api.io https://*.icp0.io https://*.ic0.app https://api.frankfurter.dev; script-src 'self' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self'; object-src 'none'; base-uri 'self'; form-action 'self'; frame-ancestors https://oc.app http://localhost:5193;",
+      "Content-Security-Policy": "default-src 'self'; connect-src 'self' http://127.0.0.1:40436 https://icp-api.io https://*.icp0.io https://*.ic0.app https://api.frankfurter.dev; script-src 'self' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self'; object-src 'none'; base-uri 'self'; form-action 'self'; frame-ancestors 'none';",
       "X-Content-Type-Options": "nosniff",
       "Access-Control-Allow-Origin": "*",
-      "X-Frame-Options": "",
+      "X-Frame-Options": "DENY",
       "Referrer-Policy": "same-origin",
       "Permissions-Policy": "geolocation=(), microphone=(), camera=(), payment=()"
     },

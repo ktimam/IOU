@@ -26,6 +26,7 @@ const presentation = { version: 1, enumLabels: [
 describe("durable encrypted inbox setup separation", () => {
   it("publishes only operator routing, with no grant, recipient or private capability", () => {
     const app = createIouLocalAppPackage(destination, processor, undefined, inboxRoute).apps[0];
+    expect(app.setupCode).toEqual(inboxRoute);
     expect(app.deliveryInbox).toEqual(inboxRoute);
     expect(Object.keys(app.deliveryInbox!)).toHaveLength(4);
     expect(JSON.stringify(app)).not.toMatch(/writeCapability|inboxId|recipientContext|recipientKeyId/);

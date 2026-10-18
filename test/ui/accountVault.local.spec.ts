@@ -681,7 +681,7 @@ test("automatic test-key setup, mandatory manager recovery, fresh app storage, r
       await expect(mobile.getByRole("heading", { name: "Save your recovery entry" })).toBeVisible();
       await expect(mobile.getByRole("button", { name: /Continue to IOU|Create recovery code/ })).toHaveCount(0);
       mobileRecoverySecret = await enrollManagedRecovery(mobile);
-      const mobileSheet = await createAccount(mobile, "Mobile vault acceptance", "Mobile manager sheet");
+      const mobileSheet = await createAccount(mobile, "Mobile vault acceptance", "Mobile manager sheet", ORIGIN);
       await expect(mobile.getByRole("heading", { name: "Balances", exact: true })).toBeVisible();
       await mobile.getByRole("button", { name: "+ Add entry" }).click();
       const mobileEntry = mobile.getByRole("dialog");

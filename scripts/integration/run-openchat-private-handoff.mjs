@@ -4,6 +4,7 @@ import { existsSync, mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { spawnSync } from "node:child_process";
+import { resolveOpenChatTestConfig } from "./openchat-test-config.mjs";
 
 const usage = "node scripts/integration/run-openchat-private-handoff.mjs --openchat-checkout <checkout> --work-dir <project-temp-directory>";
 const argv = process.argv.slice(2);
@@ -28,8 +29,9 @@ const iouRoot = resolve(scriptDir, "../..");
 const ocRoot = resolve(args.get("--openchat-checkout"));
 const frontend = join(ocRoot, "frontend");
 const modules = join(frontend, "node_modules");
+const baseConfig = resolveOpenChatTestConfig(frontend);
 const required = [
-  join(frontend, "app/vitest.config.ts"),
+  baseConfig,
   join(frontend, "app/src/utils/aiActionRunner.ts"),
   join(frontend, "app/src/utils/localAppCatalog.ts"),
   join(frontend, "tauri-plugin-oc/guest-js/index.ts"),
@@ -47,7 +49,7 @@ const runDir = mkdtempSync(join(workRoot, "iou-openchat-private-"));
 const slash = (value) => value.replaceAll("\\", "/");
 const quoted = (value) => JSON.stringify(slash(value));
 const config = `
-import base from ${quoted(join(frontend, "app/vitest.config.ts"))};
+import base from ${quoted(baseConfig)};
 import { mergeConfig } from ${quoted(join(modules, "vite/dist/node/index.js"))};
 import { readFileSync } from "node:fs";
 const svelteRoot = ${quoted(join(modules, "svelte"))};
