@@ -1,0 +1,129 @@
+{
+  "schemaVersion": 1,
+  "kind": "sanitized-retained-visible-chat-export",
+  "status": "reviewed-sanitized-public-export",
+  "independentReview": {
+    "date": "2026-10-19",
+    "result": "No remaining blocking findings in the bounded review of sanitized output and selection/redaction rules.",
+    "reviewedStagedManifestSha256": "06845c29936186281cc497f75d6669632b577ad15e6e287e3f1cbd2b4ed13375",
+    "monthlyFilesUnchangedAfterReview": true,
+    "checks": "All monthly hashes; metadata/tag inventory; credential, identity, financial-holding and private-property patterns; URL queries/fragments; 77 self-test cases.",
+    "limit": "This is not proof of perfect anonymity or complete original-chat preservation."
+  },
+  "sourceSnapshot": {
+    "label": "current chat only; raw source retained privately and unchanged",
+    "byteEndExclusive": 2498812095,
+    "timestampCutoff": "2026-10-18T21:06:26.133Z"
+  },
+  "selection": {
+    "recordType": "response_item",
+    "payloadType": "message",
+    "roles": {
+      "user": "visible text after injected metadata removal",
+      "assistant": [
+        "commentary",
+        "final_answer"
+      ]
+    },
+    "excluded": [
+      "reasoning/analysis",
+      "compacted summaries",
+      "system/developer instructions",
+      "tools and outputs",
+      "agent messages",
+      "environment metadata",
+      "binary attachments",
+      "code/log/HTML blocks",
+      "personal/financial identifiers",
+      "credentials/one-time codes",
+      "private hosts/IPs/local paths",
+      "URL queries/fragments"
+    ]
+  },
+  "firstExportTime": "2026-08-01T04:21:53.479Z",
+  "lastExportTime": "2026-10-18T21:04:37.547Z",
+  "stats": {
+    "parsedRecords": 482369,
+    "malformedRecords": 0,
+    "candidateVisibleMessages": 10826,
+    "exportedMessages": 10357,
+    "omittedInjectedMessages": 469,
+    "omittedEmptyMessages": 0,
+    "omittedAfterCutoff": 0,
+    "user": 757,
+    "assistantCommentary": 8767,
+    "assistantFinal": 833
+  },
+  "redactions": {
+    "privateFinancialReports": 166,
+    "opaqueTokenCandidates": 308,
+    "windowsPaths": 180,
+    "possibleNumericIdentifiers": 71,
+    "inlineCodes": 74,
+    "urlsReviewed": 298,
+    "localFileLinks": 191,
+    "ipAddresses": 47,
+    "opaqueHex": 113,
+    "credentialPhrases": 34,
+    "knownNames": 86,
+    "longNumbers": 8,
+    "principals": 8,
+    "labelledValues": 13,
+    "unixPaths": 5,
+    "imageTags": 22,
+    "uuids": 1,
+    "attachmentMetadata": 17,
+    "attachmentFilenames": 4,
+    "markdownImages": 61,
+    "personalFinancialFields": 6,
+    "fencedCode": 10,
+    "privateHosts": 6,
+    "deviceIds": 12,
+    "ipv6": 5,
+    "privatePropertyFixture": 2,
+    "questionReplies": 74,
+    "labelledNextLine": 6,
+    "knownPinAnchor": 21,
+    "uncPaths": 1,
+    "identityLabels": 31,
+    "privateLegacyProjects": 21,
+    "verticalCodes": 2
+  },
+  "selftests": {
+    "passed": true,
+    "redactionCases": 53,
+    "preservationCases": 5,
+    "selectionCases": 19
+  },
+  "patternScan": {
+    "passed": true,
+    "scope": "all monthly Markdown; patterns do not prove complete anonymization"
+  },
+  "files": [
+    {
+      "file": "visible-chat-2026-08.md",
+      "messages": 4257,
+      "bytes": 1824736,
+      "sha256": "0d1a209058a4fbeff6791073ede7642755a5b28d522fd80dcecc0723eedb89d0"
+    },
+    {
+      "file": "visible-chat-2026-09.md",
+      "messages": 3273,
+      "bytes": 1202222,
+      "sha256": "874a9dd40029899ca2456b351cba18807bb82e94faa1cbd4f2751a83bb0db0db"
+    },
+    {
+      "file": "visible-chat-2026-10.md",
+      "messages": 2827,
+      "bytes": 997904,
+      "sha256": "f6b62ac4d9916439023cc7db34b4ea9e091042c9bac6d7e3c987d9ca3aaed02e"
+    }
+  ],
+  "limitations": [
+    "Only retained visible messages are exported; missing turns are not reconstructed.",
+    "Progress/final messages may contain superseded claims.",
+    "Redaction favors privacy over technical fidelity.",
+    "Automated patterns and bounded independent review do not establish perfect anonymization.",
+    "The export does not establish deployment, publishing or security acceptance."
+  ]
+}

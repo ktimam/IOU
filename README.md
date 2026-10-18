@@ -9,6 +9,18 @@
 
 Current production key handling is documented in [Account keys and recovery](docs/account-vault.md): one normal account-root bootstrap, locally generated sheet keys, encrypted online backups, remembered device keys, and explicit paid emergency/legacy recovery. This supersedes the per-sheet derivation descriptions in historical release notes.
 
+## Current integration and project history — 19 October 2026
+
+[OpenChat Private 0.1.0](https://github.com/ktimam/open-chat/releases/tag/openchat-private-v0.1.0) is published. The unofficial fork uses official OpenChat chat/identity canisters unchanged. IOU connects through the [code connection flow](docs/openchat-private-import.md#current-connection-flow-code-entry-2026-10-18), receives encrypted proposals in its durable Pending inbox, and requires normal IOU review/Save before creating ledger entries.
+
+- [Detailed retrospective: attempts, failures, working paths and future plan](docs/reports/openchat-iou-retrospective-2026-10-19.md)
+- [Chronological summary tables](docs/reports/openchat-iou-summary-2026-10-19.md)
+- [Sanitized chat export and coverage notes](chats/2026-10-19-openchat-iou/README.md)
+
+The release retains disclosed advisory and model/audio limitations. Prior live phone acceptance and verification of the freshly published APK are separate evidence; see the reports before treating historical passes as current-device qualification.
+
+## Historical v1.3.1 status
+
 > **Status (v1.3.1):** prod-vetkd IBE round-trip works on the
 > local replica. The canister's `inspect_message` hook is on by
 > default — same build works on PocketIC and IC mainnet, no cargo
@@ -48,7 +60,10 @@ Crypto is end-to-end:
   one account root with VetKD. New sheets use random local keys
   wrapped to each member's account key. Reloads use protected
   device storage; another device unlocks the encrypted backup with
-  an IOU encryption passkey/code or explicit paid emergency recovery.
+  the saved ordinary password-manager recovery entry, or explicit paid
+  emergency recovery if free access is unavailable. Encryption-passkey/PRF
+  controls are no longer the normal recovery UI. Internet Identity sign-in
+  authenticates the account; it does not supply the recovery secret.
 
 ## Architecture
 
@@ -108,8 +123,8 @@ scripts/                         # build, deploy, smoke helpers
 docs/                            # specs, architecture, plan, etc.
 ```
 
-Known-but-unfixed things live in [docs/open-items.md](docs/open-items.md) — each with how to
-reproduce it and what "done" means, so they stop living in chat history.
+Current follow-up gates are in the [dated retrospective](docs/reports/openchat-iou-retrospective-2026-10-19.md#11-future-plan-bounded-follow-up-not-redesign).
+[docs/open-items.md](docs/open-items.md) retains the earlier PR-era backlog and regression history; its old rollout statuses are not the current release state.
 
 ## Prerequisites
 

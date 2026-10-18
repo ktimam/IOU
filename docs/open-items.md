@@ -3,9 +3,11 @@
 Known-but-unfixed things, so they stop living in chat history. Each entry says what it is, how to
 see it, and what "done" means — enough to pick up cold.
 
-Last updated: 2026-08-09.
+Current-status pointer added: 2026-10-19. The backlog and rollout narrative below were last updated in the original PR period (2026-08-09); they are retained as historical evidence, not as the current unofficial-client architecture or release qualification.
 
-## Current card rollout — deployed and signed-in acceptance green
+For the published release, current code connection/encrypted inbox, accepted limitations and remaining verification gates, use the [detailed retrospective](reports/openchat-iou-retrospective-2026-10-19.md), [summary tables](reports/openchat-iou-summary-2026-10-19.md) and [current connection guide](openchat-private-import.md). This documentation update does not close old items merely because they appear below.
+
+## Historical August card rollout — deployed and signed-in acceptance green at that checkpoint
 
 This section supersedes older entries below that call **Load app card**, **Share private context**,
 an in-frame Add button, or a second approval screen mandatory for an exact trusted card viewed by an

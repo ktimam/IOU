@@ -1,5 +1,15 @@
 # Unofficial OpenChat client: consolidation and release plan
 
+## Published checkpoint — 19 October 2026
+
+[OpenChat Private 0.1.0](https://github.com/ktimam/open-chat/releases/tag/openchat-private-v0.1.0) was published at 2026-10-18 21:02:02 UTC (19 October in Cairo), from OpenChat `8946db226f3de1d947cf09542733da9596f1c8ab`. IOU's completed code-flow checkpoint is `8fd11a320c6ffb2591e759e184c34868a66648d9`. The subsequent OpenChat `1fc6860b6` commit records the finding-specific advisory decision; it is not the APK build source.
+
+The ARM64 APK, checksum and source/signing metadata are attached to that release. Prior physical-phone code connection and the 12,900 EGP proposal → live Pending acceptance were on functional source `54f3307`; the newly signed release artifact was independently verified but not freshly inference-tested on a device. The dependency-advisory job remains failed under explicit deferral; functional check success is not a clean advisory scan.
+
+The assessment and blockers below remain historical evidence. Current behavior is in [private imports/code connection](openchat-private-import.md). The [detailed retrospective](reports/openchat-iou-retrospective-2026-10-19.md) and [summary tables](reports/openchat-iou-summary-2026-10-19.md) reconcile attempts, superseded designs, the completed release and bounded follow-up. This checkpoint authorizes no new runtime or deployment work.
+
+## Historical assessment
+
 Historical assessment date: 2026-09-21. This is the original plan; implementation is now active.
 The September 26 implementation checkpoint is historical. For the current encrypted
 delivery, persistent sender cards and verified browser workflow, see

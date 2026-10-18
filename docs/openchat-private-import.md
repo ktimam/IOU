@@ -1,8 +1,14 @@
 # Private imports from the unofficial OpenChat client
 
-This is the local-test workflow, not the legacy registered-app/card integration.
+This is the unofficial-client workflow for local testing and the published
+OpenChat Private client, not the legacy registered-app/card integration.
 IOU and OpenChat have separate sign-ins. Setup does not create an IOU entry, and a
 draft received by IOU is not saved until its final review is confirmed.
+
+For the 19 October 2026 release checkpoint, exact build/device evidence and
+remaining follow-up gates, see the [retrospective](reports/openchat-iou-retrospective-2026-10-19.md)
+and [summary tables](reports/openchat-iou-summary-2026-10-19.md). Historical local
+checkpoints below do not qualify every subsequent APK or provider.
 
 **2026-10-01 correction:** encrypted delivery from OpenChat is mandatory, not just
 encryption at Save. The September 26 plaintext transport is obsolete. Source changes
